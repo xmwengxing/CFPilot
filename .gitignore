@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+.wrangler/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+*.log
+npm-debug.log*
+coverage/
+.DS_Store
+.idea/
+.vscode/
+*.tsbuildinfo
+packages/deploy-wizard/assets/*.map
+packages/worker-core/src/ui/panel.generated.ts
+.freebuff/

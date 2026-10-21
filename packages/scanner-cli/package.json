@@ -1,0 +1,41 @@
+{
+  "name": "cfpilot-scanner",
+  "version": "0.1.0",
+  "description": "CFPilot 本地真连接优选器：用你自己的 Worker 域名做 SNI/Host 完成 WebSocket 101 真连接校验，彻底消灭 -1 节点",
+  "license": "MIT",
+  "author": "CFPilot Contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xmwengxing/CFPilot.git"
+  },
+  "keywords": [
+    "cloudflare",
+    "ip",
+    "optimize",
+    "scanner",
+    "vless",
+    "websocket",
+    "cfpilot"
+  ],
+  "type": "module",
+  "bin": {
+    "cfpilot-scanner": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3"
+  }
+}

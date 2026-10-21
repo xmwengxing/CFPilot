@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CFPilot 管理面板</title>
+<style>
+  :root {
+    --bg: #0b1020;
+    --bg-soft: #121a33;
+    --card: #161f3d;
+    --card-2: #1c2750;
+    --line: #27325c;
+    --text: #e8ecff;
+    --muted: #93a0cc;
+    --brand: #4f8cff;
+    --brand-2: #7b5cff;
+    --ok: #34d399;
+    --warn: #fbbf24;
+    --err: #f87171;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: radial-gradient(1200px 600px at 20% -10%, #1b2a55 0%, var(--bg) 55%);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    min-height: 100vh;
+  }
+  a { color: var(--brand); }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 28px 18px 60px; }
+  header.top { display: flex; align-items: center; gap: 14px; margin-bottom: 22px; }
+  .logo {
+    width: 42px; height: 42px; border-radius: 12px; display: grid; place-items: center;
+    background: linear-gradient(135deg, var(--brand), var(--brand-2));
+    font-weight: 700; font-size: 18px; letter-spacing: .5px;
+  }
+  .logo small { font-size: 10px; display: block; opacity: .85; font-weight: 500; }
+  header.top h1 { font-size: 19px; margin: 0; }
+  header.top p { margin: 2px 0 0; color: var(--muted); font-size: 12.5px; }
+  .spacer { flex: 1; }
+  button {
+    cursor: pointer; border: none; border-radius: 10px; padding: 9px 14px;
+    background: var(--card-2); color: var(--text); font-size: 13.5px; font-weight: 500;
+    transition: .15s transform, .15s opacity;
+  }
+  button:hover { transform: translateY(-1px); }
+  button.primary { background: linear-gradient(135deg, var(--brand), var(--brand-2)); }
+  button.ghost { background: transparent; border: 1px solid var(--line); }
+  button.danger { background: rgba(248, 113, 113, .15); color: #fca5a5; }
+  input, select, textarea {
+    width: 100%; background: #0e1730; color: var(--text); border: 1px solid var(--line);
+    border-radius: 10px; padding: 9px 11px; font-size: 13.5px; font-family: inherit; outline: none;
+  }
+  input:focus, select:focus, textarea:focus { border-color: var(--brand); }
+  textarea { resize: vertical; min-height: 96px; line-height: 1.6; }
+  label { display: block; font-size: 12.5px; color: var(--muted); margin: 0 0 6px; }
+  .field { margin-bottom: 14px; }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  .card {
+    background: linear-gradient(180deg, var(--card), var(--bg-soft));
+    border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; margin-bottom: 16px;
+  }
+  .card h2 { margin: 0 0 14px; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+  .card h2 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--brand); }
+  .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; }
+  .tabs button { background: transparent; border: 1px solid var(--line); }
+  .tabs button.active { background: linear-gradient(135deg, var(--brand), var(--brand-2)); border-color: transparent; }
+  .stat { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .stat .item { background: rgba(255,255,255,.03); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+  .stat .k { color: var(--muted); font-size: 12px; }
+  .stat .v { font-size: 18px; font-weight: 600; margin-top: 4px; word-break: break-all; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .row.end { justify-content: flex-end; }
+  .muted { color: var(--muted); font-size: 12.5px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+  pre.cmd {
+    background: #08101f; border: 1px dashed var(--line); border-radius: 10px; padding: 12px;
+    overflow-x: auto; white-space: pre-wrap; word-break: break-all; color: #b9c8ff; margin: 0 0 12px;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--line); }
+  .tag.local { color: var(--ok); border-color: rgba(52,211,153,.4); }
+  .tag.add { color: var(--brand); border-color: rgba(79,140,255,.4); }
+  .tag.addapi { color: var(--warn); border-color: rgba(251,191,36,.4); }
+  .tag.addcsv { color: var(--brand-2); border-color: rgba(123,92,255,.4); }
+  .progress { height: 8px; background: #0e1730; border-radius: 999px; overflow: hidden; border: 1px solid var(--line); }
+  .progress > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--brand), var(--brand-2)); transition: width .3s; }
+  .log { max-height: 240px; overflow-y: auto; background: #08101f; border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-size: 12px; line-height: 1.7; }
+  .log div { color: #9fb0e0; }
+  .log .ok { color: var(--ok); }
+  .log .err { color: var(--err); }
+  .toast {
+    position: fixed; right: 18px; bottom: 18px; background: var(--card-2); border: 1px solid var(--line);
+    border-left: 3px solid var(--brand); padding: 11px 15px; border-radius: 10px; font-size: 13px;
+    opacity: 0; transform: translateY(8px); transition: .2s; pointer-events: none; z-index: 50;
+  }
+  .toast.show { opacity: 1; transform: none; }
+  .toast.err { border-left-color: var(--err); }
+  .hidden { display: none !important; }
+  .login-wrap { max-width: 380px; margin: 12vh auto; }
+  code.inline { background: #0e1730; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--line); }
+</style>
+</head>
+<body>
+<div id="app" class="wrap hidden">
+  <header class="top">
+    <div class="logo">CF<small>PILOT</small></div>
+    <div>
+      <h1>CFPilot 管理面板</h1>
+      <p>Cloudflare 边缘代理微内核 · 真连接优选</p>
+    </div>
+    <div class="spacer"></div>
+    <button class="ghost" id="btnRefresh">刷新</button>
+    <button class="ghost" id="btnLogout">退出登录</button>
+  </header>
+
+  <nav class="tabs" id="tabs">
+    <button data-tab="overview" class="active">概览</button>
+    <button data-tab="inbound">入站配置</button>
+    <button data-tab="pool">优选池</button>
+    <button data-tab="scan">一键优选</button>
+    <button data-tab="sub">订阅</button>
+    <button data-tab="advanced">高级</button>
+  </nav>
+
+  <section class="tab-page" id="tab-overview">
+    <div class="card">
+      <h2><span class="dot"></span>运行状态</h2>
+      <div class="stat" id="statusBox"></div>
+    </div>
+    <div class="card">
+      <h2><span class="dot"></span>使用说明</h2>
+      <p class="muted" style="line-height:1.9">
+        1. 在「入站配置」确认 UUID / Trojan 密码与路径；<br>
+        2. 在「优选池」填入 ADD / ADDAPI / ADDCSV，或用「一键优选」跑一次本地真连接扫描；<br>
+        3. 在「订阅」复制 Clash / Sing-box / Base64 订阅链接导入客户端；<br>
+        4. 客户端节点里的 <code class="inline">server</code> 是优选 IP，<code class="inline">sni / Host</code> 固定为你的 Worker 域名 —— 这正是避免 <code class="inline">-1</code> 超时的关键。
+      </p>
+    </div>
+  </section>
+
+  <section class="tab-page hidden" id="tab-inbound">
+    <div class="card">
+      <h2><span class="dot"></span>入站参数</h2>
+      <div class="grid">
+        <div class="field">
+          <label>VLESS UUID</label>
+          <input id="cfgUuid" placeholder="留空自动生成" />
+        </div>
+        <div class="field">
+          <label>Trojan 密码</label>
+          <input id="cfgTrojan" placeholder="留空自动生成" />
+        </div>
+        <div class="field">
+          <label>VLESS-WS 路径</label>
+          <input id="cfgWsPath" placeholder="/vless" />
+        </div>
+        <div class="field">
+          <label>Trojan-WS 路径</label>
+          <input id="cfgTrojanPath" placeholder="/trojan" />
+        </div>
+        <div class="field">
+          <label>XHTTP 路径</label>
+          <input id="cfgXhttpPath" placeholder="/xhttp" />
+        </div>
+        <div class="field">
+          <label>订阅域名（留空 = 当前 Worker 域名）</label>
+          <input id="cfgSubDomain" placeholder="例如 cfpilot.example.com" />
+        </div>
+        <div class="field">
+          <label>订阅协议</label>
+          <select id="cfgSubProtocol">
+            <option value="both">VLESS + Trojan</option>
+            <option value="vless">仅 VLESS</option>
+            <option value="trojan">仅 Trojan</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>订阅传输</label>
+          <select id="cfgSubTransport">
+            <option value="both">WS + XHTTP</option>
+            <option value="ws">仅 WebSocket</option>
+            <option value="xhttp">仅 XHTTP</option>
+          </select>
+        </div>
+      </div>
+      <div class="row end"><button class="primary" id="btnSaveInbound">保存入站配置</button></div>
+    </div>
+  </section>
+
+  <section class="tab-page hidden" id="tab-pool">
+    <div class="card">
+      <h2><span class="dot"></span>L2 手动优选池（ADD）</h2>
+      <label>每行一条，支持 <code class="inline">IP</code> / <code class="inline">IP:端口</code> / <code class="inline">IP:端口#备注</code> / <code class="inline">[IPv6]:端口#备注</code></label>
+      <textarea id="cfgAdd" placeholder="1.2.3.4:443#SJC&#10;[2606:4700::1]:443#LAX"></textarea>
+    </div>
+    <div class="card">
+      <h2><span class="dot"></span>L3 远程 TXT 接口（ADDAPI）</h2>
+      <label>每行一个 https:// 地址，拉取订阅时实时并发获取</label>
+      <textarea id="cfgAddApi" placeholder="https://example.com/ips.txt"></textarea>
+    </div>
+    <div class="card">
+      <h2><span class="dot"></span>L4 远程 CSV（ADDCSV）</h2>
+      <label>每行一个 result.csv 地址，配合下方阈值过滤</label>
+      <textarea id="cfgAddCsv" placeholder="https://example.com/result.csv"></textarea>
+      <div class="grid" style="margin-top:12px">
+        <div class="field">
+          <label>最低下载速度 DLS（MB/s，0 = 不限）</label>
+          <input id="cfgDls" type="number" min="0" step="1" />
+        </div>
+        <div class="field">
+          <label>最高延迟 MAX_LATENCY（ms，0 = 不限）</label>
+          <input id="cfgMaxLatency" type="number" min="0" step="1" />
+        </div>
+        <div class="field">
+          <label>节点数量上限（0 = 不限）</label>
+          <input id="cfgMaxNodes" type="number" min="0" step="1" />
+        </div>
+      </div>
+      <div class="row end"><button class="primary" id="btnSavePool">保存优选池配置</button></div>
+    </div>
+    <div class="card">
+      <h2><span class="dot"></span>L1 本地真连接优选池</h2>
+      <div class="row" style="margin-bottom:10px">
+        <span class="muted" id="ipsCount">本地优选 IP：0 条</span>
+        <div class="spacer"></div>
+        <button class="ghost" id="btnClearIps">清空</button>
+      </div>
+      <div style="max-height:260px;overflow:auto">
+        <table id="ipsTable"><thead><tr><th>IP:端口</th><th>机房</th><th>延迟</th><th>速度</th></tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+  </section>
+
+  <section class="tab-page hidden" id="tab-scan">
+    <div class="card">
+      <h2><span class="dot"></span>⚡ 一键本地真连接优选</h2>
+      <p class="muted" style="line-height:1.8">
+        本地优选器会在你的电脑上，用 <b>你自己的 Worker 域名</b> 作为 TLS SNI 与 HTTP Host，
+        直连候选 IP 并完成 WebSocket 101 握手校验 —— 只有真正可用的 IP 才会回填到 KV。
+      </p>
+      <div class="row" style="margin:14px 0">
+        <button class="primary" id="btnScan">开始优选</button>
+        <button class="ghost" id="btnCopyCmd">复制命令</button>
+        <span class="muted" id="bridgeState">未检测到本地桥接服务</span>
+      </div>
+      <pre class="cmd" id="scanCmd">正在生成命令…</pre>
+      <div class="progress" style="margin-bottom:10px"><i id="scanBar"></i></div>
+      <div class="log" id="scanLog"></div>
+    </div>
+  </section>
+
+  <section class="tab-page hidden" id="tab-sub">
+    <div class="card">
+      <h2><span class="dot"></span>订阅链接</h2>
+      <div class="field">
+        <label>Base64（v2ray / v2rayNG / Nekoray）</label>
+        <div class="row"><input class="mono" id="subBase64" readonly /><button class="ghost" data-copy="subBase64">复制</button></div>
+      </div>
+      <div class="field">
+        <label>Clash / Mihomo（YAML）</label>
+        <div class="row"><input class="mono" id="subClash" readonly /><button class="ghost" data-copy="subClash">复制</button></div>
+      </div>
+      <div class="field">
+        <label>Sing-box（JSON 1.12+）</label>
+        <div class="row"><input class="mono" id="subSingbox" readonly /><button class="ghost" data-copy="subSingbox">复制</button></div>
+      </div>
+      <div class="row end"><button class="primary" id="btnRefreshSub">刷新订阅链接</button></div>
+    </div>
+    <div class="card">
+      <h2><span class="dot"></span>节点预览（前 50 条）</h2>
+      <div style="max-height:360px;overflow:auto">
+        <table id="nodeTable"><thead><tr><th>#</th><th>地址</th><th>机房</th><th>延迟</th><th>速度</th><th>来源</th></tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+  </section>
+
+  <section class="tab-page hidden" id="tab-advanced">
+    <div class="card">
+      <h2><span class="dot"></span>出站与抗封锁</h2>
+      <div class="grid">
+        <div class="field">
+          <label>ProxyIP 池（每行 host:port，默认 SOCKS5）</label>
+          <textarea id="cfgProxyIp" placeholder="1.2.3.4:1080&#10;5.6.7.8:8080"></textarea>
+        </div>
+        <div class="field">
+          <label>SOCKS5 代理（host:port）</label>
+          <input id="cfgSocks5" placeholder="1.2.3.4:1080" />
+        </div>
+        <div class="field">
+          <label>HTTP 代理（host:port）</label>
+          <input id="cfgHttpProxy" placeholder="1.2.3.4:8080" />
+        </div>
+        <div class="field">
+          <label>NAT64 前缀</label>
+          <input id="cfgNat64" placeholder="64:ff9b::" />
+        </div>
+        <div class="field">
+          <label>客户端指纹</label>
+          <input id="cfgFingerprint" placeholder="chrome" />
+        </div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <label style="display:flex;align-items:center;gap:8px;margin:0">
+          <input type="checkbox" id="cfgConcurrent" style="width:auto" />
+          <span>开启 TCP 并发竞速拨号（TCP_CONCURRENT_DIAL）</span>
+        </label>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <label style="display:flex;align-items:center;gap:8px;margin:0">
+          <input type="checkbox" id="cfgTrojanOn" style="width:auto" />
+          <span>启用 Trojan 入站</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;margin:0">
+          <input type="checkbox" id="cfgXhttpOn" style="width:auto" />
+          <span>启用 XHTTP 入站</span>
+        </label>
+      </div>
+      <div class="row end" style="margin-top:16px"><button class="primary" id="btnSaveAdvanced">保存高级配置</button></div>
+    </div>
+  </section>
+</div>
+
+<div id="login" class="login-wrap hidden">
+  <div class="card">
+    <h2><span class="dot"></span>CFPilot 面板登录</h2>
+    <div class="field">
+      <label>管理密码</label>
+      <input id="loginPassword" type="password" placeholder="请输入管理密码" />
+    </div>
+    <div class="row end">
+      <button class="primary" id="btnLogin">登录</button>
+    </div>
+    <p class="muted" id="loginHint" style="margin-bottom:0"></p>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  var state = { config: null, status: null, token: null, cmd: '' };
+
+  function $(id) { return document.getElementById(id); }
+  function toast(msg, isErr) {
+    var t = $('toast');
+    t.textContent = msg;
+    t.className = 'toast show' + (isErr ? ' err' : '');
+    setTimeout(function () { t.className = 'toast'; }, 2600);
+  }
+  function api(path, options) {
+    options = options || {};
+    options.credentials = 'same-origin';
+    options.headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {});
+    return fetch(path, options).then(function (r) {
+      if (r.status === 401) { showLogin(); throw new Error('未登录'); }
+      return r.json().then(function (data) {
+        if (!r.ok || data.ok === false) throw new Error(data.error || ('请求失败 ' + r.status));
+        return data;
+      });
+    });
+  }
+  function log(text, cls) {
+    var box = $('scanLog');
+    var line = document.createElement('div');
+    if (cls) line.className = cls;
+    line.textContent = text;
+    box.appendChild(line);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  /* ---------- 登录 ---------- */
+  function showLogin() {
+    $('app').classList.add('hidden');
+    $('login').classList.remove('hidden');
+    $('loginPassword').focus();
+  }
+  function showApp() {
+    $('login').classList.add('hidden');
+    $('app').classList.remove('hidden');
+  }
+  function doLogin() {
+    var pwd = $('loginPassword').value;
+    if (!pwd) { toast('请输入密码', true); return; }
+    api('/api/v1/login', { method: 'POST', body: JSON.stringify({ password: pwd }) })
+      .then(function () { showApp(); boot(); toast('登录成功'); })
+      .catch(function (e) { toast(e.message, true); });
+  }
+
+  /* ---------- 启动 ---------- */
+  function boot() {
+    api('/api/v1/session').then(function (s) {
+      if (!s.authenticated) { showLogin(); return; }
+      showApp();
+      loadAll();
+    }).catch(function () { showLogin(); });
+  }
+
+  function loadAll() {
+    api('/api/v1/status').then(function (s) {
+      state.status = s;
+      renderStatus(s);
+    }).catch(function (e) { toast(e.message, true); });
+    api('/api/v1/config').then(function (r) {
+      state.config = r.config;
+      fillConfig(r.config);
+    }).catch(function (e) { toast(e.message, true); });
+    loadIps();
+    loadNodes();
+    refreshSubLinks();
+    checkBridge();
+  }
+
+  function renderStatus(s) {
+    var items = [
+      ['Worker 域名', location.hostname],
+      ['边缘机房', s.colo || 'UNK'],
+      ['面板路径', s.panelPath],
+      ['本地优选 IP', s.localIps + ' 条'],
+      ['CFPilot 版本', s.version]
+    ];
+    if (s.generatedPassword) {
+      items.push(['首次生成的密码', s.generatedPassword]);
+    }
+    $('statusBox').innerHTML = items.map(function (it) {
+      return '<div class="item"><div class="k">' + it[0] + '</div><div class="v">' +
+        String(it[1]).replace(/</g, '&lt;') + '</div></div>';
+    }).join('');
+    if (s.generatedPassword) {
+      toast('首次访问：面板密码为 ' + s.generatedPassword + '，请尽快在部署向导中固定');
+    }
+  }
+
+  function fillConfig(c) {
+    $('cfgUuid').value = c.uuid || '';
+    $('cfgTrojan').value = c.trojanPassword || '';
+    $('cfgWsPath').value = c.wsPath || '';
+    $('cfgTrojanPath').value = c.trojanPath || '';
+    $('cfgXhttpPath').value = c.xhttpPath || '';
+    $('cfgSubDomain').value = c.subDomain || '';
+    $('cfgSubProtocol').value = c.subProtocol || 'both';
+    $('cfgSubTransport').value = c.subTransport || 'both';
+    $('cfgAdd').value = c.add || '';
+    $('cfgAddApi').value = c.addApi || '';
+    $('cfgAddCsv').value = c.addCsv || '';
+    $('cfgDls').value = c.dls || 0;
+    $('cfgMaxLatency').value = c.maxLatency || 0;
+    $('cfgMaxNodes').value = c.maxNodes || 0;
+    $('cfgProxyIp').value = c.proxyIp || '';
+    $('cfgSocks5').value = c.socks5 || '';
+    $('cfgHttpProxy').value = c.httpProxy || '';
+    $('cfgNat64').value = c.nat64 || '';
+    $('cfgFingerprint').value = c.clientFingerprint || 'chrome';
+    $('cfgConcurrent').checked = !!c.concurrentDial;
+    $('cfgTrojanOn').checked = !!c.enableTrojan;
+    $('cfgXhttpOn').checked = !!c.enableXhttp;
+  }
+
+  function saveConfig(patch, okMsg) {
+    return api('/api/v1/config', { method: 'PUT', body: JSON.stringify({ config: patch }) })
+      .then(function (r) {
+        state.config = r.config;
+        fillConfig(r.config);
+        toast(okMsg || '已保存');
+        loadNodes();
+        refreshSubLinks();
+      })
+      .catch(function (e) { toast(e.message, true); });
+  }
+
+  /* ---------- 优选池 ---------- */
+  function loadIps() {
+    api('/api/v1/ips').then(function (r) {
+      $('ipsCount').textContent = '本地优选 IP：' + r.count + ' 条';
+      var tbody = $('ipsTable').querySelector('tbody');
+      tbody.innerHTML = (r.entries || []).map(function (e) {
+        return '<tr><td class="mono">' + e.ip + ':' + e.port + '</td><td>' + (e.colo || '-') +
+          '</td><td>' + (e.latency || '-') + '</td><td>' + (e.speed || '-') + '</td></tr>';
+      }).join('') || '<tr><td colspan="4" class="muted">暂无数据</td></tr>';
+    }).catch(function () {});
+  }
+
+  function loadNodes() {
+    api('/api/v1/nodes').then(function (r) {
+      var tbody = $('nodeTable').querySelector('tbody');
+      tbody.innerHTML = (r.nodes || []).slice(0, 50).map(function (n, i) {
+        return '<tr><td>' + (i + 1) + '</td><td class="mono">' + n.ip + ':' + n.port +
+          '</td><td>' + (n.colo || '-') + '</td><td>' + (n.latency || '-') + '</td><td>' +
+          (n.speed || '-') + '</td><td><span class="tag ' + n.source + '">' + n.source +
+          '</span></td></tr>';
+      }).join('') || '<tr><td colspan="6" class="muted">暂无节点</td></tr>';
+    }).catch(function () {});
+  }
+
+  /* ---------- 订阅 ---------- */
+  function refreshSubLinks() {
+    var base = location.origin + '/sub/' + encodeURIComponent($('cfgUuid').value || '');
+    $('subBase64').value = base + '?target=base64';
+    $('subClash').value = base + '?target=clash';
+    $('subSingbox').value = base + '?target=singbox';
+  }
+
+  /* ---------- 一键优选 ---------- */
+  var BRIDGE = 'http://127.0.0.1:19527';
+  var es = null;
+
+  function checkBridge() {
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { ctrl.abort(); }, 1800);
+    fetch(BRIDGE + '/status', { signal: ctrl.signal })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        clearTimeout(timer);
+        $('bridgeState').textContent = '本地桥接在线 v' + (j.version || '?');
+        $('bridgeState').style.color = 'var(--ok)';
+      })
+      .catch(function () {
+        clearTimeout(timer);
+        $('bridgeState').textContent = '未检测到本地桥接服务（可一键安装运行）';
+        $('bridgeState').style.color = 'var(--muted)';
+      });
+  }
+
+  function buildCmd(token) {
+    var host = location.hostname;
+    var callback = location.origin + '/api/v1/preferred-ips';
+    return 'npx -y cfpilot-scanner@latest --host "' + host + '" --token "' + token +
+      '" --callback "' + callback + '" --top 15';
+  }
+
+  function prepareScan() {
+    return api('/api/v1/scanner-token', { method: 'POST' }).then(function (r) {
+      state.token = r.token;
+      state.cmd = buildCmd(r.token);
+      $('scanCmd').textContent = state.cmd;
+      return r.token;
+    });
+  }
+
+  function startScan() {
+    $('scanLog').innerHTML = '';
+    prepareScan().then(function (token) {
+      var payload = {
+        host: location.hostname,
+        port: 443,
+        token: token,
+        callback: location.origin + '/api/v1/preferred-ips',
+        top: 15
+      };
+      return fetch(BRIDGE + '/start-scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }).then(function (r) { return r.json(); });
+    }).then(function (r) {
+      if (!r || !r.ok) throw new Error((r && r.error) || '本地桥接未响应');
+      log('已唤醒本地优选器，任务 ' + (r.jobId || '-'), 'ok');
+      listenEvents(r.jobId);
+    }).catch(function (e) {
+      log('本地桥接不可用：' + e.message, 'err');
+      log('请复制上方命令在本地终端执行（需 Node.js 18+）：');
+      $('scanBar').style.width = '0%';
+    });
+  }
+
+  function listenEvents(jobId) {
+    if (es) { es.close(); es = null; }
+    es = new EventSource(BRIDGE + '/events?jobId=' + encodeURIComponent(jobId || ''));
+    es.addEventListener('progress', function (ev) {
+      var d = JSON.parse(ev.data);
+      log(d.message || JSON.stringify(d));
+      if (typeof d.percent === 'number') $('scanBar').style.width = d.percent + '%';
+    });
+    es.addEventListener('result', function (ev) {
+      var d = JSON.parse(ev.data);
+      log('优选完成，共 ' + (d.count || 0) + ' 条，已回填面板', 'ok');
+      $('scanBar').style.width = '100%';
+      loadIps();
+    });
+    es.addEventListener('error', function (ev) {
+      try {
+        var d = JSON.parse(ev.data);
+        log('扫描出错：' + (d.message || '未知错误'), 'err');
+      } catch (e) {
+        log('扫描连接中断', 'err');
+      }
+    });
+    es.onerror = function () { /* EventSource 会自动重连 */ };
+  }
+
+  /* ---------- 事件绑定 ---------- */
+  function bind() {
+    $('btnLogin').addEventListener('click', doLogin);
+    $('loginPassword').addEventListener('keydown', function (e) { if (e.key === 'Enter') doLogin(); });
+
+    $('tabs').addEventListener('click', function (e) {
+      var btn = e.target.closest('button[data-tab]');
+      if (!btn) return;
+      var tab = btn.getAttribute('data-tab');
+      Array.prototype.forEach.call($('tabs').children, function (b) {
+        b.classList.toggle('active', b === btn);
+      });
+      Array.prototype.forEach.call(document.querySelectorAll('.tab-page'), function (p) {
+        p.classList.toggle('hidden', p.id !== 'tab-' + tab);
+      });
+    });
+
+    $('btnRefresh').addEventListener('click', loadAll);
+    $('btnLogout').addEventListener('click', function () {
+      api('/api/v1/logout', { method: 'POST' }).finally(function () { showLogin(); });
+    });
+
+    $('btnSaveInbound').addEventListener('click', function () {
+      saveConfig({
+        uuid: $('cfgUuid').value.trim(),
+        trojanPassword: $('cfgTrojan').value.trim(),
+        wsPath: $('cfgWsPath').value.trim(),
+        trojanPath: $('cfgTrojanPath').value.trim(),
+        xhttpPath: $('cfgXhttpPath').value.trim(),
+        subDomain: $('cfgSubDomain').value.trim(),
+        subProtocol: $('cfgSubProtocol').value,
+        subTransport: $('cfgSubTransport').value
+      }, '入站配置已保存');
+    });
+
+    $('btnSavePool').addEventListener('click', function () {
+      saveConfig({
+        add: $('cfgAdd').value,
+        addApi: $('cfgAddApi').value,
+        addCsv: $('cfgAddCsv').value,
+        dls: Number($('cfgDls').value || 0),
+        maxLatency: Number($('cfgMaxLatency').value || 0),
+        maxNodes: Number($('cfgMaxNodes').value || 0)
+      }, '优选池配置已保存');
+    });
+
+    $('btnSaveAdvanced').addEventListener('click', function () {
+      saveConfig({
+        proxyIp: $('cfgProxyIp').value,
+        socks5: $('cfgSocks5').value.trim(),
+        httpProxy: $('cfgHttpProxy').value.trim(),
+        nat64: $('cfgNat64').value.trim(),
+        clientFingerprint: $('cfgFingerprint').value.trim() || 'chrome',
+        concurrentDial: $('cfgConcurrent').checked,
+        enableTrojan: $('cfgTrojanOn').checked,
+        enableXhttp: $('cfgXhttpOn').checked
+      }, '高级配置已保存');
+    });
+
+    $('btnClearIps').addEventListener('click', function () {
+      if (!confirm('确定清空本地真连接优选池？')) return;
+      api('/api/v1/ips', { method: 'DELETE' }).then(function () { loadIps(); toast('已清空'); })
+        .catch(function (e) { toast(e.message, true); });
+    });
+
+    $('btnScan').addEventListener('click', startScan);
+    $('btnCopyCmd').addEventListener('click', function () {
+      var cmd = state.cmd || '';
+      if (!cmd) { prepareScan().then(function () { copy(state.cmd); }); return; }
+      copy(cmd);
+    });
+    $('btnRefreshSub').addEventListener('click', refreshSubLinks);
+
+    Array.prototype.forEach.call(document.querySelectorAll('[data-copy]'), function (btn) {
+      btn.addEventListener('click', function () { copy($(btn.getAttribute('data-copy')).value); });
+    });
+  }
+
+  function copy(text) {
+    if (!text) { toast('没有可复制的内容', true); return; }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { toast('已复制到剪贴板'); })
+        .catch(function () { fallbackCopy(text); });
+    } else {
+      fallbackCopy(text);
+    }
+  }
+  function fallbackCopy(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); toast('已复制到剪贴板'); }
+    catch (e) { toast('复制失败，请手动选择', true); }
+    document.body.removeChild(ta);
+  }
+
+  bind();
+  boot();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+# 统一行尾为 LF：保证 CI 中「构建产物与仓库一致」的校验不会因平台差异误报
+* text=auto eol=lf
+
+# 锁文件交给 npm 自行处理
+package-lock.json -diff
+
+# 二进制资源
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

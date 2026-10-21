@@ -1,0 +1,22 @@
+{
+  "name": "@cfpilot/worker-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "CFPilot 边缘内核：VLESS/Trojan/XHTTP 入站 + 优选订阅引擎 + 真连接探针 + 中文面板",
+  "license": "MIT",
+  "main": "src/index.ts",
+  "scripts": {
+    "gen:panel": "node scripts/gen-panel.mjs",
+    "build": "node scripts/gen-panel.mjs && node scripts/build.mjs",
+    "dev": "node scripts/gen-panel.mjs && wrangler dev --local",
+    "deploy": "node scripts/gen-panel.mjs && wrangler deploy",
+    "typecheck": "node scripts/gen-panel.mjs && tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261021.1",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.151.3"
+  }
+}

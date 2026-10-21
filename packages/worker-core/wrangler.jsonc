@@ -1,0 +1,20 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "cfpilot-worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-01-01",
+  "workers_dev": true,
+  "observability": {
+    "enabled": true
+  },
+  "kv_namespaces": [
+    {
+      // 本地占位：真实 KV ID 由 cfpilot-deploy 自动创建并回写
+      "binding": "KV",
+      "id": "0000000000000000000000000000000f"
+    }
+  ],
+  "vars": {
+    "PANEL_PASSWORD": ""
+  }
+}

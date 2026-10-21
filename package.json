@@ -1,0 +1,49 @@
+{
+  "name": "cfpilot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "CFPilot — Cloudflare Workers 代理微内核 + 真连接优选面板 + 本地优选器 + 中文部署向导",
+  "license": "MIT",
+  "author": "CFPilot Contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xmwengxing/CFPilot.git"
+  },
+  "keywords": [
+    "cloudflare",
+    "workers",
+    "vless",
+    "trojan",
+    "xhttp",
+    "proxy",
+    "subscription",
+    "ip-optimization"
+  ],
+  "workspaces": [
+    "packages/worker-core",
+    "packages/scanner-cli",
+    "packages/deploy-wizard"
+  ],
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "build:worker": "npm run build -w @cfpilot/worker-core",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "npm run dev -w @cfpilot/worker-core",
+    "verify": "npm run build && npm run typecheck && npm run test",
+    "clean": "node scripts/clean.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261021.1",
+    "@types/node": "^26.6.5",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.5",
+    "wrangler": "^4.151.3"
+  }
+}

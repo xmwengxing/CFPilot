@@ -35,6 +35,15 @@ export interface ApiErrorBody {
   messages?: unknown[]
 }
 
+export interface TokenVerifyResult {
+  id: string
+  status: string
+  /** 旧字段名（user-owned Token） */
+  notBefore?: string
+  /** 到期时间（account-owned Token 会返回） */
+  expiresOn?: string
+}
+
 export class CloudflareError extends Error {
   constructor(
     message: string,
@@ -93,9 +102,32 @@ export class CloudflareClient {
     return (parsed as { result: T }).result
   }
 
-  /** 校验 Token 是否有效 */
-  async verifyToken(): Promise<{ id: string; status: string; notBefore?: string }> {
-    return await this.request('GET', '/user/tokens/verify')
+  /**
+   * 校验 Token 是否有效。
+   *
+   * Cloudflare 有两种 Token：
+   *   - user-owned（传统 40 位字符串）→ 走 /user/tokens/verify
+   *   - account-owned（cfat_ 前缀）→ 只能走 /accounts/{id}/tokens/verify，
+   *     对 /user/tokens/verify 一律返回 401 Invalid API Token。
+   *
+   * 因此这里先试用户维度，失败且在已知账号时回退到账号维度。
+   * 拿不到 token 元信息并不代表 Token 不可用，调用方不应据此阻断部署。
+   */
+  async verifyToken(accountId?: string): Promise<TokenVerifyResult> {
+    try {
+      const result = await this.request<TokenVerifyResult & { not_before?: string }>(
+        'GET',
+        '/user/tokens/verify'
+      )
+      return { ...result, notBefore: result.notBefore ?? result.not_before }
+    } catch (err) {
+      if (!accountId) throw err
+      const result = await this.request<TokenVerifyResult & { expires_on?: string }>(
+        'GET',
+        `/accounts/${accountId}/tokens/verify`
+      )
+      return { ...result, expiresOn: result.expiresOn ?? result.expires_on }
+    }
   }
 
   /** 列出账号 */

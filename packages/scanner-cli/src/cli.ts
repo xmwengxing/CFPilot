@@ -1,6 +1,9 @@
-#!/usr/bin/env node
 /**
  * cfpilot-scanner —— CFPilot 本地真连接优选器
+ *
+ * 注意：不要在这里手写 shebang。
+ * 构建脚本（scripts/build.mjs）会通过 esbuild banner 注入，
+ * 两处都写会导致产物出现两行 #!，Node 只认第一行，直接语法报错。
  *
  * 用法：
  *   cfpilot-scanner scan --host <你的Worker域名> [--token <令牌>] [--callback <回填地址>]

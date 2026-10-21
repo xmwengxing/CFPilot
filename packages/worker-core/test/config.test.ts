@@ -17,6 +17,16 @@ describe('configFromEnv', () => {
     expect(config.wsPath).toBe(DEFAULT_CONFIG.wsPath)
     expect(config.concurrentDial).toBe(true)
   })
+
+  it('未设置环境变量时，优选数量必须是默认值而不是 0', () => {
+    // 回归测试：早期 num() 用 Number('') 得到 0，使 officialCount/domainCount 变 0，
+    // 订阅里一个节点都不生成（线上事故：三个订阅地址全部"不可用"）。
+    const config = configFromEnv({} as Env)
+    expect(config.officialCount).toBe(DEFAULT_CONFIG.officialCount)
+    expect(config.domainCount).toBe(DEFAULT_CONFIG.domainCount)
+    expect(config.poolOfficial).toBe(true)
+    expect(config.poolDomain).toBe(true)
+  })
 })
 
 describe('mergeConfig', () => {
@@ -58,5 +68,14 @@ describe('loadConfig', () => {
     await saveConfig(store, { ...base, uuid: 'saved-uuid' })
     const loaded = await loadConfig(store, {} as Env)
     expect(loaded.uuid).toBe('saved-uuid')
+  })
+
+  it('自愈：KV 里 0 的优选数量会被修正回默认值', async () => {
+    const store = new MemoryStore()
+    const base = await loadConfig(store, {} as Env)
+    await saveConfig(store, { ...base, officialCount: 0, domainCount: 0 })
+    const loaded = await loadConfig(store, {} as Env)
+    expect(loaded.officialCount).toBe(DEFAULT_CONFIG.officialCount)
+    expect(loaded.domainCount).toBe(DEFAULT_CONFIG.domainCount)
   })
 })

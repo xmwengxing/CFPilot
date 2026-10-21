@@ -2,6 +2,13 @@
  * Cloudflare API 客户端
  *
  * 仅使用 API Token（Bearer）鉴权，不接触 Global API Key。
+ *
+ * 几个容易踩坑的接口约定（已实测确认，不要凭记忆改）：
+ *   1. 脚本上传成功后，workers.dev 子域路由**默认是关闭的**，
+ *      必须调用 POST .../scripts/{name}/subdomain 且 body 为 {"enabled":true}。
+ *   2. PATCH .../scripts/{name}/settings **只接受 multipart/form-data**，
+ *      JSON body 会返回 415；表单字段名为 settings，值是 JSON 字符串。
+ *   3. PUT .../workers/domains 返回 200 不代表域名真的可访问，必须另做连通性校验。
  */
 
 export const DEFAULT_API_BASE = 'https://api.cloudflare.com/client/v4'
@@ -27,6 +34,42 @@ export interface ScriptBinding {
   name: string
   namespace_id?: string
   text?: string
+}
+
+/** workers.dev 子域路由的开关状态 */
+export interface ScriptSubdomain {
+  enabled: boolean
+}
+
+/** 脚本设置（observability / bindings / compatibility_date 等） */
+export interface ScriptSettings {
+  [key: string]: unknown
+}
+
+export interface DnsRecord {
+  id: string
+  type: string
+  name: string
+  content: string
+  proxied?: boolean
+  ttl?: number
+}
+
+export interface WorkerRoute {
+  id: string
+  pattern: string
+  script?: string
+}
+
+/** Worker 自定义域名绑定 */
+export interface WorkerDomain {
+  id: string
+  hostname: string
+  service: string
+  zone_id?: string
+  zone_name?: string
+  environment?: string
+  enabled?: boolean
 }
 
 export interface ApiErrorBody {
@@ -61,6 +104,48 @@ export interface ClientOptions {
   timeoutMs?: number
 }
 
+/** 把 Cloudflare 的错误响应体解析成带 code 的异常 */
+function parseApiError(status: number, text: string): CloudflareError {
+  let message = `HTTP ${status}`
+  let code: number | undefined
+  if (text) {
+    try {
+      const parsed = JSON.parse(text) as Partial<ApiErrorBody>
+      const errors = Array.isArray(parsed.errors) ? parsed.errors : []
+      if (errors.length > 0) {
+        message = errors.map((item) => item.message).join('; ')
+        code = errors[0]?.code
+      } else {
+        message = `${message} ${text.slice(0, 300)}`
+      }
+    } catch {
+      message = `${message} ${text.slice(0, 300)}`
+    }
+  }
+  return new CloudflareError(message, status, code)
+}
+
+/** 同时校验 HTTP 状态与 Cloudflare 响应信封，避免误报部署成功。 */
+async function readApiResponse<T>(response: Response): Promise<T> {
+  const text = await response.text()
+  if (!response.ok) throw parseApiError(response.status, text)
+  // DELETE 等接口可能使用无响应体的成功状态。
+  if (!text) return undefined as T
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new CloudflareError(`响应不是合法 JSON：${text.slice(0, 200)}`, response.status)
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new CloudflareError('Cloudflare 响应格式无效', response.status)
+  }
+  if ('success' in parsed && parsed.success === false) {
+    throw parseApiError(response.status, text)
+  }
+  return ('result' in parsed ? parsed.result : undefined) as T
+}
+
 export class CloudflareClient {
   private readonly token: string
   private readonly apiBase: string
@@ -72,6 +157,7 @@ export class CloudflareClient {
     this.timeoutMs = options.timeoutMs ?? 30000
   }
 
+  /** 发送 JSON 请求并解出 result 字段 */
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const response = await fetch(`${this.apiBase}${path}`, {
       method,
@@ -82,24 +168,23 @@ export class CloudflareClient {
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(this.timeoutMs),
     })
-    const text = await response.text()
-    let parsed: unknown = null
-    if (text) {
-      try {
-        parsed = JSON.parse(text)
-      } catch {
-        parsed = null
-      }
-    }
-    if (!response.ok) {
-      const errorBody = parsed as ApiErrorBody | null
-      const message =
-        errorBody?.errors?.map((e) => e.message).join('; ') ||
-        (text ? text.slice(0, 300) : `HTTP ${response.status}`)
-      const code = errorBody?.errors?.[0]?.code
-      throw new CloudflareError(message, response.status, code)
-    }
-    return (parsed as { result: T }).result
+    return await readApiResponse<T>(response)
+  }
+
+  /**
+   * 发送 multipart/form-data 请求。
+   *
+   * 注意：这里绝不能手动设置 Content-Type，
+   * 必须让 fetch 自己带 boundary，否则 Cloudflare 会解析失败。
+   */
+  private async requestForm(method: string, path: string, form: FormData): Promise<void> {
+    const response = await fetch(`${this.apiBase}${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${this.token}` },
+      body: form,
+      signal: AbortSignal.timeout(this.timeoutMs),
+    })
+    await readApiResponse<unknown>(response)
   }
 
   /**
@@ -191,41 +276,102 @@ export class CloudflareClient {
       }
     )
 
-    if (!response.ok) {
-      const text = await response.text().catch(() => '')
-      let message = `上传失败 HTTP ${response.status}`
-      try {
-        const parsed = JSON.parse(text) as ApiErrorBody
-        if (parsed?.errors?.length) message = parsed.errors.map((e) => e.message).join('; ')
-      } catch {
-        if (text) message = `${message} ${text.slice(0, 200)}`
-      }
-      throw new CloudflareError(message, response.status)
-    }
+    await readApiResponse<unknown>(response)
   }
 
-  /** 绑定自定义域名 */
-  async attachCustomDomain(
+  /**
+   * 查询脚本的 workers.dev 子域开关。
+   *
+   * 脚本不存在时返回 404（错误码 10007），而不是 403；
+   * 权限预检正是利用这一点区分「没有权限」和「资源不存在」。
+   */
+  async getScriptSubdomain(accountId: string, scriptName: string): Promise<ScriptSubdomain> {
+    return await this.request(
+      'GET',
+      `/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(scriptName)}/subdomain`
+    )
+  }
+
+  /**
+   * 开启 / 关闭脚本的 workers.dev 子域路由。
+   *
+   * 注意：Worker 上传成功后该路由默认是关闭的，必须显式传 enabled: true，
+   * 否则 https://<name>.<sub>.workers.dev/ 会一直返回「There is nothing here yet」。
+   */
+  async putScriptSubdomain(
     accountId: string,
-    options: { hostname: string; service: string; zoneId: string; environment?: string }
+    scriptName: string,
+    enabled = true
+  ): Promise<ScriptSubdomain> {
+    return await this.request(
+      'POST',
+      `/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(scriptName)}/subdomain`,
+      { enabled }
+    )
+  }
+
+  /**
+   * 更新脚本设置（开启 Workers Logs 等）。
+   *
+   * Cloudflare 对 PATCH .../settings 只接受 multipart/form-data，
+   * JSON body 会返回 415；字段名固定为 settings，值是 JSON 字符串。
+   */
+  async patchScriptSettings(
+    accountId: string,
+    scriptName: string,
+    settings: ScriptSettings
   ): Promise<void> {
-    await this.request('PUT', `/accounts/${accountId}/workers/domains`, {
-      hostname: options.hostname,
-      service: options.service,
-      zone_id: options.zoneId,
-      environment: options.environment ?? 'production',
-    })
+    const form = new FormData()
+    // 这里用字符串字段而不是 Blob：与 curl --form 'settings=...' 的编码完全一致，
+    // 带 filename 的文件段会被 Cloudflare 当成文件处理，存在解析风险。
+    form.set('settings', JSON.stringify(settings))
+    await this.requestForm(
+      'PATCH',
+      `/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(scriptName)}/settings`,
+      form
+    )
+  }
+
+  /** 列出 zone 下的 DNS 记录；name 为完整主机名时按名称精确过滤 */
+  async getDnsRecords(zoneId: string, name?: string): Promise<DnsRecord[]> {
+    const query = new URLSearchParams({ per_page: '100' })
+    if (name) query.set('name', name)
+    return await this.request(
+      'GET',
+      `/zones/${encodeURIComponent(zoneId)}/dns_records?${query.toString()}`
+    )
+  }
+
+  /** 删除 DNS 记录（需要 Zone → DNS → Edit） */
+  async deleteDnsRecord(zoneId: string, recordId: string): Promise<void> {
+    await this.request(
+      'DELETE',
+      `/zones/${encodeURIComponent(zoneId)}/dns_records/${encodeURIComponent(recordId)}`
+    )
+  }
+
+  /** 列出 zone 下的 Worker 路由 */
+  async listRoutes(zoneId: string): Promise<WorkerRoute[]> {
+    return await this.request('GET', `/zones/${encodeURIComponent(zoneId)}/workers/routes`)
   }
 
   /** 创建 Worker 路由 */
   async createRoute(
     zoneId: string,
     options: { pattern: string; script: string }
-  ): Promise<void> {
-    await this.request('POST', `/zones/${zoneId}/workers/routes`, {
+  ): Promise<WorkerRoute> {
+    return await this.request('POST', `/zones/${encodeURIComponent(zoneId)}/workers/routes`, {
       pattern: options.pattern,
       script: options.script,
     })
+  }
+
+  /** 删除 Worker 路由 */
+  async deleteRoute(zoneId: string, routeId: string): Promise<void> {
+    await this.request(
+      'DELETE',
+      `/zones/${encodeURIComponent(zoneId)}/workers/routes/${encodeURIComponent(routeId)}`
+    )
   }
 
   /** 创建 DNS 记录 */
@@ -238,14 +384,48 @@ export class CloudflareClient {
       proxied?: boolean
       ttl?: number
     }
-  ): Promise<void> {
-    await this.request('POST', `/zones/${zoneId}/dns_records`, {
+  ): Promise<DnsRecord> {
+    return await this.request('POST', `/zones/${encodeURIComponent(zoneId)}/dns_records`, {
       type: options.type,
       name: options.name,
       content: options.content,
       ttl: options.ttl ?? 1,
       proxied: options.proxied ?? true,
     })
+  }
+
+  /**
+   * 绑定自定义域名。
+   *
+   * 返回 200 且 enabled: true 只代表「绑定已受理」，不代表真实可访问
+   * （本账号实测：接口成功但访问仍是 522），调用方必须再校验一次。
+   */
+  async attachCustomDomain(
+    accountId: string,
+    options: { hostname: string; service: string; zoneId: string; environment?: string }
+  ): Promise<WorkerDomain> {
+    return await this.request('PUT', `/accounts/${accountId}/workers/domains`, {
+      hostname: options.hostname,
+      service: options.service,
+      zone_id: options.zoneId,
+      environment: options.environment ?? 'production',
+    })
+  }
+
+  /** 按 ID 查询 Worker 自定义域名绑定 */
+  async getWorkerDomainById(accountId: string, domainId: string): Promise<WorkerDomain> {
+    return await this.request(
+      'GET',
+      `/accounts/${encodeURIComponent(accountId)}/workers/domains/${encodeURIComponent(domainId)}`
+    )
+  }
+
+  /** 解除 Worker 自定义域名绑定（降级到 Route + CNAME 前清理用） */
+  async deleteWorkerDomain(accountId: string, domainId: string): Promise<void> {
+    await this.request(
+      'DELETE',
+      `/accounts/${encodeURIComponent(accountId)}/workers/domains/${encodeURIComponent(domainId)}`
+    )
   }
 
   /** 查询脚本的绑定与设置 */

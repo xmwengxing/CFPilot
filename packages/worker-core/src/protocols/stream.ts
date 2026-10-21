@@ -142,6 +142,52 @@ export class ByteStream {
 /** 将 WebSocket 消息转换为字节流 */
 export function wsToByteStream(ws: WebSocket): ReadableStream<Uint8Array> {
   let controller: ReadableStreamDefaultController<Uint8Array> | null = null
+  let closed = false
+  // 串行化：Blob 的读取是异步的，必须保证入队顺序
+  let chain: Promise<void> = Promise.resolve()
+
+  const enqueue = (bytes: Uint8Array): void => {
+    if (closed || bytes.byteLength === 0) return
+    try {
+      controller?.enqueue(bytes)
+    } catch {
+      /* 客户端可能已断开 */
+    }
+  }
+
+  /**
+   * 把任意形态的消息体归一成 Uint8Array。
+   *
+   * 真机实测：Cloudflare 运行时下 `event.data` **不一定是 ArrayBuffer**，
+   * 也可能是 Blob（只有 `.arrayBuffer()`）。早期实现只处理了 ArrayBuffer，
+   * 结果每条消息都被静默丢弃，表现为「101 成功但永远收不到数据」，客户端全部 -1。
+   */
+  const normalize = (data: unknown): Uint8Array | Promise<Uint8Array> | null => {
+    if (data === null || data === undefined) return null
+    if (typeof data === 'string') return new TextEncoder().encode(data)
+    if (data instanceof ArrayBuffer) return new Uint8Array(data)
+    if (ArrayBuffer.isView(data)) {
+      const view = data as ArrayBufferView
+      return new Uint8Array(view.buffer, view.byteOffset, view.byteLength)
+    }
+    const maybeBlob = data as { arrayBuffer?: () => Promise<ArrayBuffer> }
+    if (typeof maybeBlob.arrayBuffer === 'function') {
+      return maybeBlob.arrayBuffer().then((buf) => new Uint8Array(buf))
+    }
+    return null
+  }
+
+  const flush = (data: unknown): void => {
+    const result = normalize(data)
+    if (result === null) return
+    chain = chain
+      .then(() => (result instanceof Promise ? result : result))
+      .then((bytes) => enqueue(bytes))
+      .catch(() => {
+        /* 忽略单条消息错误 */
+      })
+  }
+
   const stream = new ReadableStream<Uint8Array>({
     start(c) {
       controller = c
@@ -149,29 +195,22 @@ export function wsToByteStream(ws: WebSocket): ReadableStream<Uint8Array> {
   })
 
   ws.addEventListener('message', (event: MessageEvent) => {
-    const data = event.data
-    try {
-      if (typeof data === 'string') {
-        controller?.enqueue(new TextEncoder().encode(data))
-      } else if (data instanceof ArrayBuffer) {
-        controller?.enqueue(new Uint8Array(data))
-      } else if (ArrayBuffer.isView(data)) {
-        controller?.enqueue(new Uint8Array(data.buffer, data.byteOffset, data.byteLength))
-      }
-    } catch {
-      /* 客户端可能已断开 */
-    }
+    flush(event.data)
   })
 
   ws.addEventListener('close', () => {
-    try {
-      controller?.close()
-    } catch {
-      /* 已关闭 */
-    }
+    closed = true
+    void chain.then(() => {
+      try {
+        controller?.close()
+      } catch {
+        /* 已关闭 */
+      }
+    })
   })
 
   ws.addEventListener('error', () => {
+    closed = true
     try {
       controller?.close()
     } catch {

@@ -6,7 +6,7 @@
   "author": "CFPilot Contributors",
   "repository": {
     "type": "git",
-    "url": "https://github.com/xmwengxing/CFPilot.git"
+    "url": "git+https://github.com/xmwengxing/CFPilot.git"
   },
   "keywords": [
     "cloudflare",
@@ -17,7 +17,7 @@
   ],
   "type": "module",
   "bin": {
-    "cfpilot-deploy": "./dist/cli.js"
+    "cfpilot-deploy": "dist/cli.js"
   },
   "files": [
     "dist",

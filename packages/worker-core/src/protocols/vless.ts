@@ -94,3 +94,68 @@ export async function parseVless(
     payload: stream.release(),
   }
 }
+
+export interface VlessBufferResult {
+  header: VlessHeader
+  /** 协议头占用的字节数，其后即为负载 */
+  consumed: number
+}
+
+/**
+ * 同步解析（用于 WebSocket 消息处理器内部）。
+ *
+ * 返回 null 表示「字节还不够」或校验失败；调用方应继续攒包。
+ * 之所以需要同步版本：`connect()` 必须在 message 事件里同步调用，
+ * 见 protocols/websocket.ts 顶部说明。
+ */
+export function parseVlessBuffer(bytes: Uint8Array, expectedUuid: string): VlessBufferResult | null {
+  if (bytes.byteLength < 18) return null
+  const expected = uuidToBytes(expectedUuid)
+  if (!expected) return null
+  for (let i = 0; i < 16; i++) {
+    if (bytes[1 + i] !== expected[i]) return null
+  }
+  const addonsLen = bytes[17]!
+  let offset = 18 + addonsLen
+  if (bytes.byteLength < offset + 4) return null
+  const command = bytes[offset]!
+  offset += 1
+  const port = (bytes[offset]! << 8) | bytes[offset + 1]!
+  offset += 2
+  const addressType = bytes[offset]!
+  offset += 1
+
+  let hostname = ''
+  if (addressType === 1) {
+    if (bytes.byteLength < offset + 4) return null
+    hostname = `${bytes[offset]}.${bytes[offset + 1]}.${bytes[offset + 2]}.${bytes[offset + 3]}`
+    offset += 4
+  } else if (addressType === 2) {
+    if (bytes.byteLength < offset + 1) return null
+    const len = bytes[offset]!
+    offset += 1
+    if (bytes.byteLength < offset + len) return null
+    hostname = new TextDecoder().decode(bytes.subarray(offset, offset + len))
+    offset += len
+  } else if (addressType === 3) {
+    if (bytes.byteLength < offset + 16) return null
+    const parts: string[] = []
+    for (let i = 0; i < 8; i++) parts.push(((bytes[offset + i * 2]! << 8) | bytes[offset + i * 2 + 1]!).toString(16))
+    hostname = parts.join(':')
+    offset += 16
+  } else {
+    return null
+  }
+
+  return {
+    header: {
+      version: bytes[0]!,
+      command,
+      port,
+      hostname,
+      addressType,
+      addons: bytes.subarray(18, 18 + addonsLen),
+    },
+    consumed: offset,
+  }
+}

@@ -27,9 +27,22 @@ export function randomPassword(): string {
   return `cfp-${randomAlnum(14)}`
 }
 
-/** 生成一个不易撞名的 Worker 名（借鉴 BPB-Wizard 的随机化思路） */
-export function randomWorkerName(prefix = 'cfpilot'): string {
-  return `${prefix}-${randomAlnum(6)}`
+/**
+ * 生成纯随机的 Worker 名称。
+ *
+ * 借鉴 BPB-Wizard 的防风控建议：名称里不要带任何项目特征
+ * （例如 cfpilot / vless / proxy 之类），否则同一账号下批量部署时更容易被识别。
+ * 规则：首字符为小写字母，其余为小写字母或数字，总长度 8~10 位。
+ */
+export function randomWorkerName(): string {
+  const length = 8 + (randomBytes(1)[0]! % 3)
+  const first = 'abcdefghijklmnopqrstuvwxyz'[randomBytes(1)[0]! % 26]!
+  return `${first}${randomAlnum(length - 1)}`
+}
+
+/** 生成权限预检用的探测脚本名（纯随机，避免与真实脚本撞名） */
+export function randomProbeScriptName(): string {
+  return `probe${randomAlnum(10)}`
 }
 
 /** 人类可读的随机面板路径 */

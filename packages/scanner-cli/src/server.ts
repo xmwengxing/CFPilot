@@ -12,17 +12,100 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { formatEntries, runScan, type ScanEvent, type ScanEntry } from './scan'
 import { postResults } from './callback'
+import {
+  DEFAULT_BRIDGE_SAMPLE,
+  DEFAULT_CANDIDATE_SAMPLE,
+  normalizeCandidateList,
+  resolveCandidates,
+  type IpFamily,
+} from './candidates'
 
-export const BRIDGE_VERSION = '0.1.0'
+export const BRIDGE_VERSION = '0.2.0'
 export const DEFAULT_BRIDGE_PORT = 19527
 
+/**
+ * POST /start-scan 请求体（面板「一键优选」与命令行手写请求共用）
+ *
+ * 候选来源优先级：manual > candidates > 自动生成（sample / cidr / seed）。
+ * 面板当前不传 candidates，因此服务端必须能自行生成，否则一键优选必然失败。
+ */
 export interface StartScanRequest {
+  /** Worker 自定义域名（TLS SNI 与 HTTP Host） */
   host: string
+  /** 端口，默认 443 */
   port?: number
+  /** 回填一次性令牌 */
   token?: string
+  /** 回填地址，默认同 host 的 /api/v1/preferred-ips */
   callback?: string
+  /** 最终返回条数，默认 15 */
   top?: number
+  /** 面板手动优选 IP（优先于 candidates 与自动生成），支持 IP / IP:Port / IP:Port#备注 */
+  manual?: string[]
+  /** 显式候选 IP 列表；为空时由服务端自动生成 */
   candidates?: string[]
+  /** 自动生成候选时的采样数，默认 300 */
+  sample?: number
+  /** 自动生成候选时使用的自定义网段（字符串或数组，逗号分隔亦可） */
+  cidr?: string | string[]
+  /** 自动生成候选时的随机种子，默认 24301（相同种子结果可复现） */
+  seed?: number
+  /** 自动生成候选时的地址族，默认 both */
+  family?: IpFamily
+}
+
+/** 候选来源：手动指定 / 请求显式携带 / 服务端自动生成 */
+export type CandidateSource = 'manual' | 'request' | 'generated'
+
+export interface CandidatePlan {
+  candidates: string[]
+  source: CandidateSource
+}
+
+/** 采样数兜底：非正数或非法值回落到默认值，并限制上限避免一次拉爆候选量 */
+function normalizeSample(value: number | undefined): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return Math.min(Math.floor(value), DEFAULT_CANDIDATE_SAMPLE)
+  }
+  return DEFAULT_BRIDGE_SAMPLE
+}
+
+/** 规范化种子：非法值交给候选模块使用默认种子 */
+function normalizeSeed(value: number | undefined): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.trunc(value)
+  return undefined
+}
+
+function normalizeFamily(value: IpFamily | undefined): IpFamily | undefined {
+  return value === 'v4' || value === 'v6' || value === 'both' ? value : undefined
+}
+
+/**
+ * 解析候选来源：manual > candidates > 自动生成。
+ *
+ * 自动生成复用 candidates.ts（与 CLI 同一套逻辑），因此面板不传 candidates 也能扫。
+ */
+export async function resolveScanCandidates(body: StartScanRequest): Promise<CandidatePlan> {
+  const manual = normalizeCandidateList(body.manual)
+  if (manual.length > 0) return { candidates: manual, source: 'manual' }
+
+  const requested = normalizeCandidateList(body.candidates)
+  if (requested.length > 0) return { candidates: requested, source: 'request' }
+
+  const candidates = await resolveCandidates({
+    sample: normalizeSample(body.sample),
+    cidr: body.cidr,
+    seed: normalizeSeed(body.seed),
+    family: normalizeFamily(body.family),
+  })
+  return { candidates, source: 'generated' }
+}
+
+/** 生成进度文案（面板会把 message 打到扫描日志里） */
+function describePlan(plan: CandidatePlan): string {
+  if (plan.source === 'manual') return `使用面板手动指定的 ${plan.candidates.length} 个候选 IP`
+  if (plan.source === 'request') return `使用请求携带的 ${plan.candidates.length} 个候选 IP`
+  return `已自动生成 ${plan.candidates.length} 个候选 IP`
 }
 
 interface Job {
@@ -66,6 +149,17 @@ async function readBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = []
   for await (const chunk of req) chunks.push(chunk as Buffer)
   return Buffer.concat(chunks).toString('utf8')
+}
+
+/** 解析 /start-scan 请求体：必须是 JSON 对象 */
+function parseStartScanRequest(text: string): StartScanRequest | null {
+  try {
+    const raw: unknown = JSON.parse(text || '{}')
+    if (typeof raw !== 'object' || raw === null) return null
+    return raw as StartScanRequest
+  } catch {
+    return null
+  }
 }
 
 function eventToSse(event: ScanEvent): string {
@@ -116,9 +210,12 @@ export function startBridge(options: { port?: number; host?: string } = {}): Pro
   return new Promise((resolve, reject) => {
     server.once('error', reject)
     server.listen(port, host, () => {
+      // port 传 0 时由系统分配：返回实际端口，方便测试与提示
+      const address = server.address()
+      const boundPort = typeof address === 'object' && address !== null ? address.port : port
       resolve({
         server,
-        port,
+        port: boundPort,
         close: () =>
           new Promise<void>((done) => {
             for (const job of jobs.values()) {
@@ -155,14 +252,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   }
 
   if (url.pathname === '/start-scan' && req.method === 'POST') {
-    let body: StartScanRequest
-    try {
-      body = JSON.parse((await readBody(req)) || '{}') as StartScanRequest
-    } catch {
-      sendJson(res, 400, { ok: false, error: '请求体解析失败' })
+    const body = parseStartScanRequest(await readBody(req))
+    if (!body) {
+      sendJson(res, 400, { ok: false, error: '请求体解析失败（需要 JSON 对象）' })
       return
     }
-    if (!body.host) {
+    if (typeof body.host !== 'string' || body.host.trim() === '') {
       sendJson(res, 400, { ok: false, error: '缺少 host 参数' })
       return
     }
@@ -179,16 +274,28 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
     void (async () => {
       try {
-        const candidates = body.candidates ?? []
-        if (candidates.length === 0) {
-          broadcast(job, { type: 'error', message: '没有候选 IP，请先运行一次完整扫描' })
+        // 面板只发 host/token/callback/top，候选在这里自动生成；manual 优先级最高
+        const plan = await resolveScanCandidates(body)
+        if (plan.candidates.length === 0) {
+          broadcast(job, {
+            type: 'error',
+            message: '没有可用的候选 IP：请检查 candidates / manual / cidr 参数',
+          })
           job.finished = true
           return
         }
+        // stage 0：把候选来源告知面板（一键优选时会显示「已自动生成 N 个候选 IP」）
+        broadcast(job, {
+          type: 'progress',
+          stage: 0,
+          done: 0,
+          total: plan.candidates.length,
+          message: describePlan(plan),
+        })
         const summary = await runScan({
-          host: body.host,
+          host: body.host.trim(),
           port: body.port ?? 443,
-          candidates,
+          candidates: plan.candidates,
           top: body.top ?? 15,
           onProgress: (event) => broadcast(job, event),
         })

@@ -1,12 +1,12 @@
 {
   "name": "cfpilot-scanner",
-  "version": "0.1.0",
-  "description": "CFPilot 本地真连接优选器：用你自己的 Worker 域名做 SNI/Host 完成 WebSocket 101 真连接校验，彻底消灭 -1 节点",
+  "version": "0.2.0",
+  "description": "CFPilot 优选器：用你自己的域名做 WebSocket 101 真连接校验，只保留真正可用的 Cloudflare IP；兼容任意 VLESS-WS 项目",
   "license": "MIT",
   "author": "CFPilot Contributors",
   "repository": {
     "type": "git",
-    "url": "https://github.com/xmwengxing/CFPilot.git"
+    "url": "git+https://github.com/xmwengxing/CFPilot.git"
   },
   "keywords": [
     "cloudflare",
@@ -19,7 +19,7 @@
   ],
   "type": "module",
   "bin": {
-    "cfpilot-scanner": "./dist/cli.js"
+    "cfpilot-scanner": "dist/cli.js"
   },
   "files": [
     "dist",

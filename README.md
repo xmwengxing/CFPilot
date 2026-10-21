@@ -87,6 +87,64 @@ npx -y cfpilot-scanner@latest --host "你的Worker域名" --token "面板里生�
 
 ---
 
+## ⚠️ 部署必须拆成两个项目（否则第二次部署会被封）
+
+Cloudflare 的滥用分类器会把「面板 + 订阅 + 探针 + 代理」的完整组合判定为代理服务，
+导致 Pages 项目在**第二次部署**时返回 `8000119 blocked`。实测结论：
+
+| 部署内容 | 能否原地更新 |
+|---|---|
+| 控制面（面板 + 订阅 + 探针，约 47KB，不含出站拨号） | ✅ 可以 |
+| 数据面（代理入站，单独部署） | ✅ 可以 |
+| 两者合并成一个 bundle | ❌ 第二次部署必被封 |
+
+所以请部署**两个** Cloudflare Pages 项目：
+
+1. **数据面**：只做代理转发，绑你的自定义域名（客户端连这个域名）
+2. **控制面**：面板 + 订阅，可以用 `*.pages.dev` 或另一个域名
+
+数据面需要把配置写入 KV 的 `config` 键，并把控制面的 `DATA_HOST` 指向数据面域名。
+
+## 部署到 Cloudflare Pages（实测推荐）
+
+真机验证结论：**同一个 `dist/worker.js`，走 Workers 脚本通道会被 Cloudflare 拒绝实例化
+（Error 1101，请求根本不进入调用期），走 Pages `_worker.js` 通道则完全正常。**
+edgetunnel / cfnew / BPB / CFNext 全部选择 Pages 也是同一个原因。
+
+### 三条必须遵守的规则（都是踩出来的）
+
+1. **顺序不能反**：先建项目 → 设环境变量 / 绑 KV → **最后才部署**。
+   Pages 的绑定与变量只对**之后的**部署生效，先部署再配置等于白配。
+2. **一个项目只有第一次部署能成功**。第二次会返回
+   `8000119 Your Pages project has been blocked`（滥用审查）。
+   升级内核时请**新建一个项目**（名字随机），不要在旧项目上重复部署。
+3. 带哈希的部署 URL（`<hash>.<project>.pages.dev`）需要认证，
+   请始终使用项目主域 `<project>.pages.dev` 或已绑定的自定义域名。
+
+### 手动步骤
+
+1. Workers & Pages → 创建 → **Pages** → 直接上传（不要连 Git）
+2. 项目建好后，先到 Settings → 变量与绑定：
+   - 绑 **KV 命名空间**，变量名必须是 **`KV`**
+   - 加文本变量 `PANEL_PATH=/p-你的随机串`、`PANEL_PASSWORD=你的密码`
+3. 最后上传文件：目录里放一个 **`_worker.js`**（内容就是 `packages/worker-core/dist/worker.js`），
+   部署该目录
+4. Custom domains 里绑定你的自定义域名（`*.pages.dev` 在国内可能不通，且订阅里的
+   `sni` 是按访问域名自动生成的，必须用自定义域名）
+5. 访问 `https://<你的域名><PANEL_PATH>`
+
+### 用 wrangler 部署（一条命令）
+
+```bash
+mkdir -p upload && cp packages/worker-core/dist/worker.js upload/_worker.js
+npx wrangler pages deploy upload --project-name <随机项目名> --branch main
+```
+
+> 面板路径以 **KV 里的 `PANEL_PATH`** 为准（优先级高于环境变量）。
+> 如果忘记路径，可以读 KV 的 `PANEL_PATH` 键，或删掉该键后重新部署。
+
+---
+
 ## 仓库结构
 
 ```text
@@ -122,12 +180,24 @@ CFPilot/
 
 | 页签 | 能做什么 |
 |------|----------|
-| **概览** | Worker 域名、边缘机房、面板路径、本地优选 IP 数量 |
+| **概览** | Worker 域名、边缘机房、本地优选 IP 数量、当前订阅的来源构成 |
+| **节点来源** | 三个可勾选来源：**官方优选 IP**（数量 + 国家/机房多选）、**优选域名**（数量 + 自定义域名库）、**手动优选 IP**（本地真连接池 + 手填）。三源全不勾时自动 20+10；底部内嵌一键本地真连接优选 |
+| **订阅** | 三种订阅地址一键复制 + 节点预览（按来源分组） |
 | **入站配置** | UUID、Trojan 密码、三条路径、订阅域名/协议/传输方式 |
-| **优选池** | L2 手动 `ADD`、L3 远程 `ADDAPI`、L4 远程 `ADDCSV` + `DLS`/`MAX_LATENCY` 阈值、本地优选池查看与清空 |
-| **一键优选** | 一键唤醒本地 `cfpilot-scanner` 桥接服务，SSE 实时显示进度；未安装时给出可复制的 `npx` 命令 |
-| **订阅** | 三种订阅地址一键复制 + 节点预览 |
-| **高级** | ProxyIP 池、SOCKS5/HTTP 代理、NAT64、并发竞速拨号、客户端指纹 |
+| **高级** | ProxyIP 池、SOCKS5/HTTP 代理、NAT64、并发竞速拨号、客户端指纹、远程 `ADDAPI` / `ADDCSV` 池 |
+
+### 优选池的三个内置来源
+
+| 来源 | 数据从哪来 | 说明 |
+|------|-----------|------|
+| 官方优选 IP | CF 官方 15 个 IPv4 网段，请求时随机抽样 | Cloudflare 的 IP 是 anycast，静态表必然过期，所以按需随机生成（edgetunnel 同样思路） |
+| 优选域名 | 内置 21 条社区公开优选域名（来自 cfnew 的直连域名列表），随机取样 | 域名只负责解析出好 IP，`sni` / `Host` 仍是你的 Worker 域名 |
+| 手动优选 IP | 本地真连接扫描结果（KV `LOCAL_PREFERRED_IPS`）+ 面板手填 | 优先级最高，因为它是**在你自己的域名上验证过 101 握手**的 IP |
+
+> **关于「国家」筛选**：CF 的 anycast IP 本身没有国家归属，机房要连接后才知道。
+> 因此国家筛选只能作用于「已知机房」的条目（本地扫描结果、带机房标注的远程池）；
+> 随机生成的官方 IP 机房未知，选了国家后会被排除——想按国家筛，请先跑一次本地优选。
+> 三源全不勾选时会自动生成 **20 个官方优选 IP + 10 个优选域名**，订阅不会为空。
 
 ---
 
@@ -232,6 +302,12 @@ Token 所需权限：
 | `ADD` | `add` | 手动优选池 |
 | `ADDAPI` | `addApi` | 远程 TXT 接口 |
 | `ADD_CSV` | `addCsv` | 远程 CSV |
+| `OFFICIAL_IP` | `poolOfficial` | 是否启用内置「官方优选 IP」 |
+| `OFFICIAL_IP_COUNT` | `officialCount` | 官方优选 IP 数量（默认 20，上限 200） |
+| `PREFERRED_DOMAIN` | `poolDomain` | 是否启用内置「优选域名」 |
+| `PREFERRED_DOMAIN_COUNT` | `domainCount` | 优选域名数量（默认 10，上限 100） |
+| `MANUAL_IP` | `poolManual` | 是否启用手动优选 IP（本地池 + `ADD`） |
+| `POOL_COUNTRIES` | `poolCountries` | 国家 / 地区筛选，如 `HK,JP,SG` |
 | `DLS` | `dls` | 最低下载速度（MB/s） |
 | `MAX_LATENCY` | `maxLatency` | 最高延迟（ms） |
 | `TCP_CONCURRENT_DIAL` | `concurrentDial` | 并发竞速拨号 |
@@ -242,6 +318,7 @@ KV 键：
 |----|------|
 | `CONFIG` | 用户配置 JSON |
 | `LOCAL_PREFERRED_IPS` | 本地真连接优选结果（每行一条） |
+| `POOL_DOMAIN_LIBRARY` | 面板里自定义的优选域名库（每行一个；空 = 用内置库） |
 | `SCANNER_TOKEN` | 长期扫描令牌 |
 | `PANEL_PATH` / `ADMIN_PW_HASH` | 面板路径与密码哈希 |
 | `SESSION:<token>` | 面板会话（24 小时） |

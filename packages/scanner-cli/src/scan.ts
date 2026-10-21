@@ -35,6 +35,12 @@ export interface ScanOptions {
   speedTimeoutMs?: number
   /** 测速字节数 */
   speedBytes?: number
+  /** 阶段二校验的 WebSocket 路径（默认 /__edge_probe；对接其它项目时填它的 WS 路径） */
+  wsPath?: string
+  /** 阶段三测速路径（默认 /__edge_probe） */
+  probePath?: string
+  /** 跳过测速，只按延迟排序 */
+  skipSpeed?: boolean
   /** 最终返回条数 */
   top?: number
   /** 进度回调 */
@@ -157,7 +163,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   report({ type: 'stage', stage: 2, name: 'WebSocket 101 真连接校验', total: stage1.length })
   let probeDone = 0
   const probeResults = await pool(stage1, probeConcurrency, async (item) => {
-    const result: WsProbeResult = await probeWs101(item.ip, options.port, options.host, probeTimeoutMs)
+    const result: WsProbeResult = await probeWs101(item.ip, options.port, options.host, probeTimeoutMs, options.wsPath ?? '/__edge_probe')
     probeDone++
     report({
       type: 'progress',
@@ -172,38 +178,46 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   const wsOk = probeResults.filter((r) => r.probe.ok)
   const stage2 = wsOk.sort((a, b) => a.latency - b.latency).slice(0, speedLimit)
 
-  // ---- 阶段三：真实下行测速 ----
-  report({ type: 'stage', stage: 3, name: '真实下行速度测试', total: stage2.length })
-  let speedDone = 0
-  const speedResults = await pool(stage2, speedConcurrency, async (item) => {
-    const result: DownloadResult = await measureDownload(
-      item.ip,
-      options.port,
-      options.host,
-      speedBytes,
-      speedTimeoutMs
-    )
-    speedDone++
-    report({
-      type: 'progress',
-      stage: 3,
-      done: speedDone,
-      total: stage2.length,
-      message: `测速 ${speedDone}/${stage2.length} ${result.speedMBps.toFixed(1)} MB/s`,
+  // ---- 阶段三：真实下行测速（可用 --no-speed 跳过） ----
+  let speedResults: Array<{ ip: string; ok: boolean; latency: number; probe: WsProbeResult; download?: DownloadResult }>
+
+  if (options.skipSpeed) {
+    report({ type: 'stage', stage: 3, name: '跳过测速（按延迟排序）', total: stage2.length })
+    speedResults = stage2.map((r) => ({ ...r }))
+  } else {
+    report({ type: 'stage', stage: 3, name: '真实下行速度测试', total: stage2.length })
+    let speedDone = 0
+    speedResults = await pool(stage2, speedConcurrency, async (item) => {
+      const result: DownloadResult = await measureDownload(
+        item.ip,
+        options.port,
+        options.host,
+        speedBytes,
+        speedTimeoutMs,
+        options.probePath ?? '/__edge_probe'
+      )
+      speedDone++
+      report({
+        type: 'progress',
+        stage: 3,
+        done: speedDone,
+        total: stage2.length,
+        message: `测速 ${speedDone}/${stage2.length} ${result.speedMBps.toFixed(1)} MB/s`,
+      })
+      return { ...item, download: result }
     })
-    return { ...item, download: result }
-  })
+  }
 
   const entries: ScanEntry[] = speedResults
-    .filter((r) => r.download.ok && r.download.speedMBps > 0)
+    .filter((r) => (options.skipSpeed ? true : Boolean(r.download && r.download.ok && r.download.speedMBps > 0)))
     .map((r) => ({
       ip: r.ip,
       port: options.port,
       colo: r.probe.colo || 'UNK',
       latency: r.latency,
-      speed: Number(r.download.speedMBps.toFixed(1)),
+      speed: r.download ? Number(r.download.speedMBps.toFixed(2)) : 0,
     }))
-    .sort((a, b) => b.speed - a.speed || a.latency - b.latency)
+    .sort((a, b) => (options.skipSpeed ? a.latency - b.latency : b.speed - a.speed || a.latency - b.latency))
     .slice(0, top)
 
   for (const entry of entries) {
@@ -222,6 +236,14 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   }
   report({ type: 'done', count: entries.length })
   return summary
+}
+
+/**
+ * 可直接复制粘贴到同类项目「自定义 IP / 优选 IP」输入框的格式：
+ *   `1.2.3.4:443#NRT`  一行一个
+ */
+export function formatCopyable(entries: ScanEntry[]): string {
+  return entries.map((e) => `${e.ip}:${e.port}#${e.colo}`).join('\n')
 }
 
 /** 转换为面板回填格式：IP:Port#机房_延迟_速度 */

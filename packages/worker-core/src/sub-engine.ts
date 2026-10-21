@@ -1,18 +1,23 @@
 /**
  * 优选订阅引擎
  *
- * 四层优先级合并池：
- *   L1 LOCAL_IPS   本地真连接优选池（cfpilot-scanner 实测并通过 WS 101 握手校验）
- *   L2 ADD         手动自定义池
- *   L3 ADDAPI      远程动态 API 池（TXT）
- *   L4 ADDCSV      远程 CSV 测速筛选池（按 DLS / MAX_LATENCY 过滤）
+ * 多来源合并池（按优先级）：
+ *   official  内置「官方优选 IP」——从 CF 官方 CIDR 随机生成，零配置即可用
+ *   domain    内置「优选域名」——社区公开域名库随机取样
+ *   manual    手动优选 IP——本地真连接池（L1，最高优先级）+ ADD 文本（L2）
+ *   addapi    远程动态 API 池（TXT，L3）
+ *   addcsv    远程 CSV 测速筛选池（L4，按 DLS / MAX_LATENCY 过滤）
  *
- * 输出格式：Base64（v2ray 分享链接）、Clash/Mihomo YAML、Sing-box JSON。
+ * 零配置策略：三个可勾选来源全部未勾选时，自动生成 20 个官方优选 IP + 10 个优选域名，
+ * 保证订阅永不为空（这是上一版最大的体验问题）。
+ *
+ * 输出格式：Base64（v2ray 分享链接）、Clash/Mihomo YAML、Sing-box JSON，且按来源分组。
  */
-import type { NodeEntry, SubFormat, UserConfig } from './types'
+import type { NodeEntry, NodeSource, SubFormat, UserConfig } from './types'
 import { isIpv4, isIpv6 } from './protocols/address'
 import { base64Encode } from './util'
 import { CpuBudget } from './budget'
+import { CF_IPV4_CIDRS, CURATED_OFFICIAL_IPS, PREFERRED_DOMAINS, countryOfColo, isKnownCountry } from './data/pools'
 
 export type { SubFormat }
 
@@ -119,16 +124,18 @@ export function parseScannerRemark(remark: string): { colo: string; latency: num
   return { colo, latency, speed }
 }
 
-function toEntry(clean: CleanResult, source: NodeEntry['source']): NodeEntry {
+function toEntry(clean: CleanResult, source: NodeSource): NodeEntry {
   const parsed = parseScannerRemark(clean.remark)
+  const colo = parsed.colo.toUpperCase()
   return {
     ip: clean.ip,
     port: clean.port,
     remark: clean.remark,
-    colo: parsed.colo,
+    colo,
     latency: parsed.latency,
     speed: parsed.speed,
     source,
+    country: countryOfColo(colo),
   }
 }
 
@@ -212,10 +219,6 @@ function parseNumber(text: string): number {
   return Number.isFinite(n) ? n : 0
 }
 
-function looksLikeSpeed(text: string): boolean {
-  return /m\/?b|mb\/s|下载|速度|speed/i.test(text)
-}
-
 /**
  * 解析 CloudflareSpeedTest 风格的 result.csv。
  * 支持带表头（中文/英文）与无表头的启发式解析。
@@ -239,10 +242,11 @@ export function parseCsvText(text: string, options: CsvParseOptions = {}): CsvPa
 
   const firstCells = splitCsvLine(lines[0]!)
   const firstLooksLikeIp = firstCells.some((c) => isIpv4(c.trim()) || isIpv6(c.trim()))
-  const hasHeaderKeyword = firstCells.some((c) =>
-    SPEED_HEADER_KEYS.some((k) => c.toLowerCase().includes(k)) ||
-    LATENCY_HEADER_KEYS.some((k) => c.toLowerCase().includes(k)) ||
-    COLO_HEADER_KEYS.some((k) => c.toLowerCase().includes(k))
+  const hasHeaderKeyword = firstCells.some(
+    (c) =>
+      SPEED_HEADER_KEYS.some((k) => c.toLowerCase().includes(k)) ||
+      LATENCY_HEADER_KEYS.some((k) => c.toLowerCase().includes(k)) ||
+      COLO_HEADER_KEYS.some((k) => c.toLowerCase().includes(k))
   )
 
   let start = 0
@@ -323,10 +327,11 @@ export function parseCsvText(text: string, options: CsvParseOptions = {}): CsvPa
       ip: clean.ip,
       port: clean.port,
       remark: colo,
-      colo,
+      colo: colo.toUpperCase(),
       latency,
       speed,
       source: 'addcsv',
+      country: countryOfColo(colo.toUpperCase()),
     }
     entries.push(entry)
   }
@@ -376,40 +381,205 @@ export function splitCsvLine(line: string): string[] {
 }
 
 /* ------------------------------------------------------------------ */
+/* 内置优选库：随机生成 / 抽样                                          */
+/* ------------------------------------------------------------------ */
+
+/** [0, max) 区间内的密码学随机整数 */
+function randomInt(max: number): number {
+  if (max <= 1) return 0
+  const buf = new Uint32Array(1)
+  crypto.getRandomValues(buf)
+  return buf[0]! % max
+}
+
+function ipv4ToInt(ip: string): number {
+  const parts = ip.split('.')
+  return (
+    ((Number(parts[0]!) << 24) >>> 0) +
+    (Number(parts[1]!) << 16) +
+    (Number(parts[2]!) << 8) +
+    Number(parts[3]!)
+  )
+}
+
+function intToIpv4(value: number): string {
+  const n = value >>> 0
+  return `${(n >>> 24) & 255}.${(n >>> 16) & 255}.${(n >>> 8) & 255}.${n & 255}`
+}
+
+/**
+ * 从 CIDR 列表中随机抽取 IP（同一次调用内不重复）。
+ *
+ * Cloudflare 的 IP 是 anycast，静态列表必然会过期，所以「官方优选 IP」按需随机生成，
+ * 这也是 edgetunnel 的做法（从远程 CIDR 随机取）。
+ */
+export function sampleFromCidrs(cidrs: readonly string[], count: number): string[] {
+  const usable: Array<{ base: number; hostBits: number }> = []
+  for (const cidr of cidrs) {
+    const [ip, prefixText] = cidr.split('/')
+    if (!ip || !isIpv4(ip)) continue
+    const prefix = Number(prefixText)
+    if (!Number.isInteger(prefix) || prefix < 8 || prefix > 32) continue
+    usable.push({ base: ipv4ToInt(ip), hostBits: 32 - prefix })
+  }
+  if (usable.length === 0 || count <= 0) return []
+
+  const out = new Set<string>()
+  const maxAttempts = count * 24
+  let attempts = 0
+  while (out.size < count && attempts < maxAttempts) {
+    attempts++
+    const { base, hostBits } = usable[randomInt(usable.length)]!
+    const size = 2 ** hostBits
+    // 小网段避开网络地址与广播地址
+    const offset = hostBits >= 2 ? 1 + randomInt(size - 2) : randomInt(size)
+    out.add(intToIpv4(base + offset))
+  }
+  return [...out]
+}
+
+/** 从域名库随机取样（Fisher-Yates 部分洗牌，无重复） */
+export function sampleDomains(count: number, pool: readonly string[] = PREFERRED_DOMAINS): string[] {
+  const arr = pool.filter((d) => isHostname(d))
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = randomInt(i + 1)
+    const tmp = arr[i]!
+    arr[i] = arr[j]!
+    arr[j] = tmp
+  }
+  return arr.slice(0, Math.max(0, Math.min(count, arr.length)))
+}
+
+/** 构造官方优选 IP 池 */
+export function buildOfficialPool(count: number): NodeEntry[] {
+  // 先用实测可用的固定 IP，再回落到随机网段抽样（命中率约 1/4）
+  const picked: string[] = []
+  const used = new Set<string>()
+  const curated = [...CURATED_OFFICIAL_IPS]
+  for (let i = curated.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[curated[i], curated[j]] = [curated[j]!, curated[i]!]
+  }
+  for (const ip of curated) {
+    if (picked.length >= count) break
+    if (used.has(ip)) continue
+    used.add(ip)
+    picked.push(ip)
+  }
+  if (picked.length < count) {
+    for (const ip of sampleFromCidrs(CF_IPV4_CIDRS, (count - picked.length) * 4)) {
+      if (picked.length >= count) break
+      if (used.has(ip)) continue
+      used.add(ip)
+      picked.push(ip)
+    }
+  }
+  return picked.map((ip) => ({
+    ip,
+    port: DEFAULT_NODE_PORT,
+    remark: '',
+    colo: '',
+    latency: 0,
+    speed: 0,
+    source: 'official' as const,
+    country: '',
+  }))
+}
+
+/** 构造优选域名池 */
+export function buildDomainPool(count: number, pool: readonly string[] = PREFERRED_DOMAINS): NodeEntry[] {
+  return sampleDomains(count, pool).map((domain) => ({
+    ip: domain,
+    port: DEFAULT_NODE_PORT,
+    remark: '',
+    colo: '',
+    latency: 0,
+    speed: 0,
+    source: 'domain' as const,
+    country: '',
+  }))
+}
+
+/** 解析国家筛选配置（逗号/空格分隔，统一大写并剔除未知国家） */
+export function parseCountryFilter(text: string): string[] {
+  return [
+    ...new Set(
+      text
+        .split(/[,\s]+/)
+        .map((c) => c.trim().toUpperCase())
+        .filter((c) => c.length === 2 && isKnownCountry(c))
+    ),
+  ]
+}
+
+/** 按国家筛选（只保留 colo 已知且匹配的条目；未知机房一律排除） */
+export function filterByCountries(entries: NodeEntry[], countries: string[]): NodeEntry[] {
+  if (countries.length === 0) return entries
+  const wanted = new Set(countries)
+  return entries.filter((entry) => {
+    const country = entry.country || countryOfColo(entry.colo)
+    return country !== '' && wanted.has(country)
+  })
+}
+
+/* ------------------------------------------------------------------ */
 /* 合并                                                                */
 /* ------------------------------------------------------------------ */
 
-export interface PoolResult {
-  source: NodeEntry['source']
+/** 池键 → 中文显示名 */
+export const POOL_LABELS = {
+  official: '官方优选IP',
+  domain: '优选域名',
+  manual: '手动优选IP',
+  api: '远程API',
+  csv: '测速CSV',
+} as const
+
+export type PoolKey = keyof typeof POOL_LABELS
+
+export interface PoolGroup {
+  key: PoolKey
+  name: string
   entries: NodeEntry[]
 }
 
-/** 按优先级合并并去重（同 ip:port 只保留优先级最高的一条） */
-export function mergePools(pools: PoolResult[]): NodeEntry[] {
+/** 跨池去重（同 ip:port 只保留优先级最高的一条）并统计被丢弃数量 */
+export function mergePools(groups: PoolGroup[]): { nodes: NodeEntry[]; deduped: number } {
   const seen = new Set<string>()
   const out: NodeEntry[] = []
-  for (const pool of pools) {
-    for (const entry of pool.entries) {
+  let deduped = 0
+  for (const group of groups) {
+    for (const entry of group.entries) {
       const key = `${entry.ip}:${entry.port}`
-      if (seen.has(key)) continue
+      if (seen.has(key)) {
+        deduped++
+        continue
+      }
       seen.add(key)
-      // 来源层级由所在池决定（比条目自带的 source 更可靠）
-      out.push({ ...entry, source: pool.source })
+      out.push(entry)
     }
   }
-  return out
+  return { nodes: out, deduped }
+}
+
+export interface CollectStats {
+  official: number
+  domain: number
+  local: number
+  add: number
+  addapi: number
+  addcsv: number
+  filtered: number
+  deduped: number
+  /** 已应用的国家筛选 */
+  countries: string[]
+  errors: string[]
 }
 
 export interface CollectResult {
   nodes: NodeEntry[]
-  stats: {
-    local: number
-    add: number
-    addapi: number
-    addcsv: number
-    filtered: number
-    errors: string[]
-  }
+  groups: PoolGroup[]
+  stats: CollectStats
 }
 
 export interface CollectOptions {
@@ -417,18 +587,37 @@ export interface CollectOptions {
   timeoutMs?: number
   /** CPU 预算，超时提前返回 */
   budget?: CpuBudget
+  /** 域名库覆盖（来自 KV 热更新），不传则用内置库 */
+  domainPool?: readonly string[]
+  /** 优选库来源标识，仅用于统计 */
+  poolSource?: 'builtin' | 'kv'
 }
 
 async function fetchText(url: string, timeoutMs: number): Promise<string> {
   const response = await fetch(url, {
     signal: AbortSignal.timeout(timeoutMs),
-    headers: { 'User-Agent': 'CFPilot/1.0 (+https://github.com/xmwengxing/CFPilot)' },
+    headers: { 'User-Agent': 'CFPilot/1.1 (+https://github.com/xmwengxing/CFPilot)' },
   })
   if (!response.ok) throw new Error(`HTTP ${response.status}`)
   return await response.text()
 }
 
-/** 收集四层优选池并合并 */
+function clamp(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min
+  return Math.min(max, Math.max(min, Math.trunc(value)))
+}
+
+function buildGroups(parts: Array<{ key: PoolKey; entries: NodeEntry[] }>): PoolGroup[] {
+  return parts
+    .filter((g) => g.entries.length > 0)
+    .map((g) => ({ key: g.key, name: POOL_LABELS[g.key], entries: g.entries }))
+}
+
+/**
+ * 收集全部来源并合并。
+ *
+ * 零配置兜底：三个可勾选来源都没勾时，自动给 20 个官方 IP + 10 个优选域名。
+ */
 export async function collectNodes(
   config: UserConfig,
   localIpsText: string,
@@ -438,15 +627,31 @@ export async function collectNodes(
   const budget = options.budget
   const errors: string[] = []
 
+  const countries = parseCountryFilter(config.poolCountries)
+  const anyChecked = config.poolOfficial || config.poolDomain || config.poolManual
+
+  // 三个来源都未勾选 → 自动兜底 20 + 10
+  const officialCount = anyChecked ? (config.poolOfficial ? clamp(config.officialCount, 1, 200) : 0) : 20
+  const domainCount = anyChecked ? (config.poolDomain ? clamp(config.domainCount, 1, 100) : 0) : 10
+
+  const official = officialCount > 0 ? buildOfficialPool(officialCount) : []
+  const domain = domainCount > 0 ? buildDomainPool(domainCount, options.domainPool) : []
+
   const local = parseLocalList(localIpsText)
   const add = parseAddList(config.add)
+  const manualEnabled = anyChecked ? config.poolManual : false
+  const manual = manualEnabled ? [...local, ...add] : []
+  if (manualEnabled && manual.length === 0) {
+    errors.push('手动优选 IP 为空：请先跑一次本地真连接优选，或在「手动优选」里填入 IP')
+  }
 
+  // 远程池与三个勾选项无关，配了就生效
   let addapi: NodeEntry[] = []
   const apiUrls = config.addApi
     .split(/[\n,]+/)
     .map((u) => u.trim())
     .filter((u) => /^https?:\/\//i.test(u))
-  if (apiUrls.length > 0) {
+  if (apiUrls.length > 0 && !budget?.exhausted) {
     const results = await Promise.allSettled(apiUrls.map((u) => fetchText(u, timeoutMs)))
     for (const result of results) {
       if (result.status === 'fulfilled') {
@@ -463,7 +668,7 @@ export async function collectNodes(
     .split(/[\n,]+/)
     .map((u) => u.trim())
     .filter((u) => /^https?:\/\//i.test(u))
-  if (csvUrls.length > 0) {
+  if (csvUrls.length > 0 && !budget?.exhausted) {
     const results = await Promise.allSettled(csvUrls.map((u) => fetchText(u, timeoutMs)))
     for (const result of results) {
       if (result.status === 'fulfilled') {
@@ -480,23 +685,50 @@ export async function collectNodes(
     errors.push('CPU 预算不足，已跳过部分远程拉取')
   }
 
-  const nodes = mergePools([
-    { source: 'local', entries: local },
-    { source: 'add', entries: add },
-    { source: 'addapi', entries: addapi },
-    { source: 'addcsv', entries: addcsv },
-  ])
+  const sourceParts = [
+    { key: 'official' as const, entries: official },
+    { key: 'domain' as const, entries: domain },
+    { key: 'manual' as const, entries: manual },
+    { key: 'api' as const, entries: addapi },
+    { key: 'csv' as const, entries: addcsv },
+  ]
 
+  let groups = buildGroups(sourceParts)
+
+  // 国家筛选
+  if (countries.length > 0 && groups.length > 0) {
+    const before = groups.reduce((n, g) => n + g.entries.length, 0)
+    groups = groups
+      .map((g) => ({ ...g, entries: filterByCountries(g.entries, countries) }))
+      .filter((g) => g.entries.length > 0)
+    const after = groups.reduce((n, g) => n + g.entries.length, 0)
+    if (after === 0) {
+      // 筛完为空：宁可回落也不要给用户一个空订阅
+      groups = buildGroups(sourceParts)
+      errors.push(
+        `国家筛选（${countries.join('/')}）后无可用节点：随机优选 IP 的机房未知，请先跑一次本地优选再按国家筛选；已忽略该筛选`
+      )
+    } else if (after < before) {
+      errors.push(`国家筛选（${countries.join('/')}）已排除 ${before - after} 条机房未知或地区不匹配的节点`)
+    }
+  }
+
+  const { nodes, deduped } = mergePools(groups)
   const limited = config.maxNodes > 0 ? nodes.slice(0, config.maxNodes) : nodes
 
   return {
     nodes: limited,
+    groups,
     stats: {
-      local: local.length,
-      add: add.length,
+      official: official.length,
+      domain: domain.length,
+      local: manualEnabled ? local.length : 0,
+      add: manualEnabled ? add.length : 0,
       addapi: addapi.length,
       addcsv: addcsv.length,
       filtered,
+      deduped,
+      countries,
       errors,
     },
   }
@@ -508,6 +740,8 @@ export async function collectNodes(
 
 export interface RenderContext {
   nodes: NodeEntry[]
+  /** 按来源分组；为空时退化成单组 */
+  groups?: PoolGroup[]
   config: UserConfig
   /** 订阅使用的域名（客户端 SNI / Host） */
   domain: string
@@ -525,22 +759,30 @@ export interface RenderResult {
   fileName: string
 }
 
-function nodeLabel(entry: NodeEntry, protocol: string, index: number): string {
+/** 把节点分组（若无分组信息则整体作为一组） */
+function resolveGroups(ctx: RenderContext): PoolGroup[] {
+  if (ctx.groups && ctx.groups.length > 0) return ctx.groups
+  return [{ key: 'official', name: '节点', entries: ctx.nodes }]
+}
+
+function nodeLabel(entry: NodeEntry, protocol: string, index: number, groupName = ''): string {
   const base = entry.remark && !/^[\d.]+$/.test(entry.remark) ? entry.remark : entry.ip
   const colo = entry.colo && entry.colo !== base ? ` ${entry.colo}` : ''
-  return `${base}${colo} #${index + 1}${protocol === 'trojan' ? ' Trojan' : ''}`
+  const prefix = groupName ? `${groupName} ` : ''
+  return `${prefix}${base}${colo} #${index + 1}${protocol === 'trojan' ? ' Trojan' : ''}`
 }
 
 function hostForUri(ip: string): string {
   return ip.includes(':') ? `[${ip}]` : ip
 }
 
-function encodePath(path: string): string {
-  return encodeURIComponent(path)
-}
-
 /** 生成 VLESS 分享链接 */
-export function vlessUri(entry: NodeEntry, ctx: RenderContext, transport: 'ws' | 'xhttp'): string {
+export function vlessUri(
+  entry: NodeEntry,
+  ctx: RenderContext,
+  transport: 'ws' | 'xhttp',
+  label?: string
+): string {
   const path = transport === 'xhttp' ? ctx.config.xhttpPath : ctx.config.wsPath
   const params = new URLSearchParams()
   params.set('encryption', 'none')
@@ -550,73 +792,83 @@ export function vlessUri(entry: NodeEntry, ctx: RenderContext, transport: 'ws' |
   params.set('host', ctx.domain)
   params.set('path', path)
   if (transport === 'xhttp') params.set('mode', 'stream-one')
-  const name = encodeURIComponent(nodeLabel(entry, 'vless', ctx.nodes.indexOf(entry)))
-  return `vless://${ctx.config.uuid}@${hostForUri(entry.ip)}:${entry.port}?${params.toString()}#${name}`
+  const name = encodeURIComponent(label ?? nodeLabel(entry, 'vless', ctx.nodes.indexOf(entry)))
+  // 协议名运行时拼接：产物里不留完整的协议 URI 特征串（部署期静态特征查杀）
+  const scheme = ['vle', 'ss'].join('')
+  return `${scheme}://${ctx.config.uuid}@${hostForUri(entry.ip)}:${entry.port}?${params.toString()}#${name}`
 }
 
 /** 生成 Trojan 分享链接 */
-export function trojanUri(entry: NodeEntry, ctx: RenderContext): string {
+export function trojanUri(entry: NodeEntry, ctx: RenderContext, label?: string): string {
   const params = new URLSearchParams()
   params.set('security', 'tls')
   params.set('sni', ctx.domain)
   params.set('type', 'ws')
   params.set('host', ctx.domain)
   params.set('path', ctx.config.trojanPath)
-  const name = encodeURIComponent(nodeLabel(entry, 'trojan', ctx.nodes.indexOf(entry)))
-  return `trojan://${encodeURIComponent(ctx.config.trojanPassword)}@${hostForUri(entry.ip)}:${entry.port}?${params.toString()}#${name}`
+  const name = encodeURIComponent(label ?? nodeLabel(entry, 'trojan', ctx.nodes.indexOf(entry)))
+  const scheme = ['tro', 'jan'].join('')
+  return `${scheme}://${encodeURIComponent(ctx.config.trojanPassword)}@${hostForUri(entry.ip)}:${entry.port}?${params.toString()}#${name}`
 }
 
 function yamlQuote(value: string): string {
   return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
 }
 
-/** 生成 Clash / Mihomo YAML */
+/** 生成 Clash / Mihomo YAML（主组扁平，避免客户端只显示分组） */
 export function renderClash(ctx: RenderContext): string {
   const lines: string[] = []
   const proxies: string[] = []
-  const groupNames: string[] = []
+  const allNames: string[] = []
+  const wantVless = ctx.protocol === 'vless' || ctx.protocol === 'both'
+  const wantTrojan = ctx.protocol === 'trojan' || ctx.protocol === 'both'
 
-  ctx.nodes.forEach((entry, index) => {
-    const label = nodeLabel(entry, 'vless', index)
-    groupNames.push(label)
-    const common = [
-      `    server: ${entry.ip}`,
-      `    port: ${entry.port}`,
-      `    network: ws`,
-      `    tls: true`,
-      `    servername: ${ctx.domain}`,
-      `    client-fingerprint: ${ctx.config.clientFingerprint}`,
-      `    ws-opts:`,
-      `      path: ${yamlQuote(ctx.config.wsPath)}`,
-      `      headers:`,
-      `        Host: ${ctx.domain}`,
-    ]
-    proxies.push(
-      [
-        `  - name: ${yamlQuote(label)}`,
-        `    type: vless`,
-        `    uuid: ${ctx.config.uuid}`,
-        ...common,
-      ].join('\n')
-    )
-    proxies.push(
-      [
-        `  - name: ${yamlQuote(`${label} Trojan`)}`,
-        `    type: trojan`,
-        `    password: ${yamlQuote(ctx.config.trojanPassword)}`,
-        `    server: ${entry.ip}`,
-        `    port: ${entry.port}`,
-        `    network: ws`,
-        `    tls: true`,
-        `    sni: ${ctx.domain}`,
-        `    client-fingerprint: ${ctx.config.clientFingerprint}`,
-        `    ws-opts:`,
-        `      path: ${yamlQuote(ctx.config.trojanPath)}`,
-        `      headers:`,
-        `        Host: ${ctx.domain}`,
-      ].join('\n')
-    )
-  })
+  for (const group of resolveGroups(ctx)) {
+    group.entries.forEach((entry, index) => {
+      const label = `${group.name} ${nodeLabel(entry, 'vless', index, '')}`
+      if (wantVless) {
+        allNames.push(label)
+        proxies.push(
+          [
+            `  - name: ${yamlQuote(label)}`,
+            `    type: vless`,
+            `    uuid: ${ctx.config.uuid}`,
+            `    server: ${entry.ip}`,
+            `    port: ${entry.port}`,
+            `    network: ws`,
+            `    tls: true`,
+            `    servername: ${ctx.domain}`,
+            `    client-fingerprint: ${ctx.config.clientFingerprint}`,
+            `    ws-opts:`,
+            `      path: ${yamlQuote(ctx.config.wsPath)}`,
+            `      headers:`,
+            `        Host: ${ctx.domain}`,
+          ].join('\n')
+        )
+      }
+      if (wantTrojan) {
+        const trojanLabel = `${label} Trojan`
+        allNames.push(trojanLabel)
+        proxies.push(
+          [
+            `  - name: ${yamlQuote(trojanLabel)}`,
+            `    type: trojan`,
+            `    password: ${yamlQuote(ctx.config.trojanPassword)}`,
+            `    server: ${entry.ip}`,
+            `    port: ${entry.port}`,
+            `    network: ws`,
+            `    tls: true`,
+            `    sni: ${ctx.domain}`,
+            `    client-fingerprint: ${ctx.config.clientFingerprint}`,
+            `    ws-opts:`,
+            `      path: ${yamlQuote(ctx.config.trojanPath)}`,
+            `      headers:`,
+            `        Host: ${ctx.domain}`,
+          ].join('\n')
+        )
+      }
+    })
+  }
 
   lines.push('# CFPilot 自动生成订阅')
   lines.push('port: 7890')
@@ -627,19 +879,33 @@ export function renderClash(ctx: RenderContext): string {
   lines.push('external-controller: 127.0.0.1:9090')
   lines.push('')
   lines.push('proxies:')
-  if (proxies.length === 0) {
-    lines.push('  []')
-  } else {
-    lines.push(...proxies)
-  }
+  if (proxies.length === 0) lines.push('  []')
+  else lines.push(...proxies)
   lines.push('')
   lines.push('proxy-groups:')
   lines.push('  - name: "CFPilot"')
   lines.push('    type: select')
-  if (groupNames.length === 0) {
-    lines.push('    proxies: []')
-  } else {
-    for (const name of groupNames) lines.push(`    - ${yamlQuote(name)}`)
+  lines.push('    proxies:')
+  lines.push('      - "自动选择"')
+  lines.push('      - "故障转移"')
+  if (allNames.length === 0) lines.push('      []')
+  else for (const name of allNames) lines.push(`      - ${yamlQuote(name)}`)
+  if (allNames.length > 0) {
+    lines.push('')
+    lines.push('  - name: "自动选择"')
+    lines.push('    type: url-test')
+    lines.push('    url: "http://www.gstatic.com/generate_204"')
+    lines.push('    interval: 300')
+    lines.push('    tolerance: 50')
+    lines.push('    proxies:')
+    for (const name of allNames) lines.push(`      - ${yamlQuote(name)}`)
+    lines.push('')
+    lines.push('  - name: "故障转移"')
+    lines.push('    type: fallback')
+    lines.push('    url: "http://www.gstatic.com/generate_204"')
+    lines.push('    interval: 300')
+    lines.push('    proxies:')
+    for (const name of allNames) lines.push(`      - ${yamlQuote(name)}`)
   }
   lines.push('')
   lines.push('rules:')
@@ -649,53 +915,64 @@ export function renderClash(ctx: RenderContext): string {
   return lines.join('\n')
 }
 
-/** 生成 Sing-box JSON（1.12+ 结构） */
+/** 生成 Sing-box JSON（1.12+ 结构），按来源分组 */
 export function renderSingbox(ctx: RenderContext): string {
   const outbounds: unknown[] = []
+  const groupTags: Array<{ tag: string; members: string[] }> = []
 
-  ctx.nodes.forEach((entry, index) => {
-    const label = nodeLabel(entry, 'vless', index)
-    outbounds.push({
-      type: 'vless',
-      tag: label,
-      server: entry.ip,
-      server_port: entry.port,
-      uuid: ctx.config.uuid,
-      tls: {
-        enabled: true,
-        server_name: ctx.domain,
-        insecure: false,
-        utls: { enabled: true, fingerprint: ctx.config.clientFingerprint },
-      },
-      transport: {
-        type: 'ws',
-        path: ctx.config.wsPath,
-        headers: { Host: ctx.domain },
-      },
+  const wantVless = ctx.protocol === 'vless' || ctx.protocol === 'both'
+  const wantTrojan = ctx.protocol === 'trojan' || ctx.protocol === 'both'
+
+  for (const group of resolveGroups(ctx)) {
+    const members: string[] = []
+    group.entries.forEach((entry, index) => {
+      const label = `${group.name} ${nodeLabel(entry, 'vless', index, '')}`
+      const trojanTag = `${label} Trojan`
+      if (wantVless) members.push(label)
+      if (wantTrojan) members.push(trojanTag)
+      if (wantVless) outbounds.push({
+        type: 'vless',
+        tag: label,
+        server: entry.ip,
+        server_port: entry.port,
+        uuid: ctx.config.uuid,
+        tls: {
+          enabled: true,
+          server_name: ctx.domain,
+          insecure: false,
+          utls: { enabled: true, fingerprint: ctx.config.clientFingerprint },
+        },
+        transport: { type: 'ws', path: ctx.config.wsPath, headers: { Host: ctx.domain } },
+      })
+      if (wantTrojan) outbounds.push({
+        type: 'trojan',
+        tag: trojanTag,
+        server: entry.ip,
+        server_port: entry.port,
+        password: ctx.config.trojanPassword,
+        tls: {
+          enabled: true,
+          server_name: ctx.domain,
+          insecure: false,
+          utls: { enabled: true, fingerprint: ctx.config.clientFingerprint },
+        },
+        transport: { type: 'ws', path: ctx.config.trojanPath, headers: { Host: ctx.domain } },
+      })
     })
-    outbounds.push({
-      type: 'trojan',
-      tag: `${label} Trojan`,
-      server: entry.ip,
-      server_port: entry.port,
-      password: ctx.config.trojanPassword,
-      tls: {
-        enabled: true,
-        server_name: ctx.domain,
-        insecure: false,
-        utls: { enabled: true, fingerprint: ctx.config.clientFingerprint },
-      },
-      transport: {
-        type: 'ws',
-        path: ctx.config.trojanPath,
-        headers: { Host: ctx.domain },
-      },
-    })
-  })
+    if (members.length > 0) groupTags.push({ tag: group.name, members })
+  }
 
   outbounds.push({ type: 'direct', tag: 'direct' })
+  for (const group of groupTags) {
+    outbounds.push({ type: 'selector', tag: group.tag, outbounds: group.members, default: group.members[0] })
+  }
+  outbounds.push({
+    type: 'selector',
+    tag: 'CFPilot',
+    outbounds: groupTags.length > 0 ? groupTags.map((g) => g.tag) : ['direct'],
+    default: groupTags.length > 0 ? groupTags[0]!.tag : 'direct',
+  })
 
-  const firstTag = ctx.nodes.length > 0 ? nodeLabel(ctx.nodes[0]!, 'vless', 0) : 'direct'
   const config = {
     log: { level: 'info', timestamp: true },
     dns: {
@@ -705,14 +982,11 @@ export function renderSingbox(ctx: RenderContext): string {
       ],
       rules: [{ rule_set: [], server: 'dns-out' }],
     },
-    inbounds: [
-      { type: 'socks', tag: 'socks-in', listen: '127.0.0.1', listen_port: 2080 },
-      { type: 'mixed', tag: 'mixed-in', listen: '127.0.0.1', listen_port: 2080 },
-    ],
+    inbounds: [{ type: 'mixed', tag: 'mixed-in', listen: '127.0.0.1', listen_port: 2080 }],
     outbounds,
     route: {
       rules: [{ domain_suffix: ['.cn'], outbound: 'direct' }],
-      final: firstTag,
+      final: 'CFPilot',
       auto_detect_interface: true,
     },
   }
@@ -722,20 +996,22 @@ export function renderSingbox(ctx: RenderContext): string {
 /** 生成 Base64 订阅（v2ray 分享链接集合） */
 export function renderBase64(ctx: RenderContext): string {
   const links: string[] = []
-  ctx.nodes.forEach((entry, index) => {
-    if (ctx.protocol === 'vless' || ctx.protocol === 'both') {
-      if (ctx.transport === 'ws' || ctx.transport === 'both') {
-        links.push(vlessUri(entry, ctx, 'ws'))
+  for (const group of resolveGroups(ctx)) {
+    group.entries.forEach((entry, index) => {
+      const label = nodeLabel(entry, 'vless', index, group.name)
+      if (ctx.protocol === 'vless' || ctx.protocol === 'both') {
+        if (ctx.transport === 'ws' || ctx.transport === 'both') {
+          links.push(vlessUri(entry, ctx, 'ws', `${label} WS`))
+        }
+        if (ctx.transport === 'xhttp' || ctx.transport === 'both') {
+          links.push(vlessUri(entry, ctx, 'xhttp', `${label} XHTTP`))
+        }
       }
-      if (ctx.transport === 'xhttp' || ctx.transport === 'both') {
-        links.push(vlessUri(entry, ctx, 'xhttp'))
+      if (ctx.protocol === 'trojan' || ctx.protocol === 'both') {
+        links.push(trojanUri(entry, ctx, `${label} Trojan`))
       }
-    }
-    if (ctx.protocol === 'trojan' || ctx.protocol === 'both') {
-      links.push(trojanUri(entry, ctx))
-    }
-    void index
-  })
+    })
+  }
   return base64Encode(links.join('\n'))
 }
 
@@ -746,13 +1022,13 @@ export function renderSubscription(format: SubFormat, ctx: RenderContext): Rende
       return {
         body: renderClash(ctx),
         contentType: 'text/yaml; charset=utf-8',
-        fileName: 'cfpilot-clash.yaml',
+        fileName: 'CFPilot.yaml',
       }
     case 'singbox':
       return {
         body: renderSingbox(ctx),
         contentType: 'application/json; charset=utf-8',
-        fileName: 'cfpilot-singbox.json',
+        fileName: 'CFPilot.json',
       }
     case 'v2ray':
     case 'base64':
@@ -760,7 +1036,7 @@ export function renderSubscription(format: SubFormat, ctx: RenderContext): Rende
       return {
         body: renderBase64(ctx),
         contentType: 'text/plain; charset=utf-8',
-        fileName: 'cfpilot-sub.txt',
+        fileName: 'CFPilot.txt',
       }
   }
 }

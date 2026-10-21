@@ -1,7 +1,7 @@
 // 生成内嵌中文面板的 TypeScript 模块。
 //
 // Worker 运行时无法读取外部文件，因此面板 HTML 必须编译进内核。
-// 为了守住 worker-core 的 50KB 体积预算，这里做三步处理：
+// 为了守住 worker-core 的 80KB 体积预算，这里做三步处理：
 //   1. 用 esbuild 压缩内联的 <script> 与 <style>
 //   2. 去掉 HTML 注释与多余空白
 //   3. gzip 后以 Base64 嵌入（运行时用 DecompressionStream 解压，只做一次）

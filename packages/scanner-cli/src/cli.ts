@@ -12,14 +12,9 @@
  */
 import { readFileSync } from 'node:fs'
 import { flagBool, flagList, flagNumber, flagString, parseArgs } from './args'
-import {
-  BUILTIN_IPV4_CIDRS,
-  BUILTIN_IPV6_CIDRS,
-  expandCidrs,
-  fetchCloudflareCidrs,
-  readIpFile,
-} from './ip-ranges'
-import { formatEntries, runScan, type ScanEvent, type ScanEntry } from './scan'
+import { BUILTIN_IPV4_CIDRS, BUILTIN_IPV6_CIDRS, readIpFile } from './ip-ranges'
+import { resolveCandidates } from './candidates'
+import { formatEntries, runScan, type ScanEvent, type ScanEntry, formatCopyable } from './scan'
 import { postResults } from './callback'
 import { BRIDGE_VERSION, DEFAULT_BRIDGE_PORT, startBridge } from './server'
 import { NAME, VERSION } from './version'
@@ -42,6 +37,10 @@ scan 选项:
   --token <token>        回填令牌（面板生成的一次性令牌或 SCANNER_TOKEN）
   --callback <url>       回填地址，默认 https://<host>/api/v1/preferred-ips
   --no-callback          只打印结果，不回填
+  --path <path>          阶段二校验的 WebSocket 路径，默认 /__edge_probe
+                         （对接其它项目时填它自己的 WS 路径，例如 /vless 或 /<uuid>）
+  --probe-path <path>    阶段三测速路径，默认 /__edge_probe
+  --no-speed             跳过测速，只按延迟排序（目标没有 CFPilot 探针时用）
   --top <n>              返回条数，默认 15
   --concurrency <n>      阶段一并发，默认 300
   --sample <n>           候选 IP 采样数，默认 20000
@@ -121,29 +120,24 @@ async function commandServe(args: ReturnType<typeof parseArgs>): Promise<void> {
   process.on('SIGTERM', shutdown)
 }
 
-/** 组装候选 IP 列表 */
-async function resolveCandidates(args: ReturnType<typeof parseArgs>): Promise<string[]> {
+/**
+ * 组装候选 IP 列表（CLI 参数 → 共享候选模块）
+ *
+ * --ip-file 的本地文件读取留在 CLI 侧，网段展开与官方列表拉取复用 candidates.ts，
+ * 保证命令行扫描与面板一键优选走同一套生成逻辑。
+ */
+async function resolveCandidatesFromArgs(args: ReturnType<typeof parseArgs>): Promise<string[]> {
   const ipFile = flagString(args, 'ip-file')
   if (ipFile) {
     const text = readFileSync(ipFile, 'utf8')
     return readIpFile(text)
   }
 
-  const customCidrs = flagList(args, 'cidr')
-  if (customCidrs.length > 0) {
-    return expandCidrs(customCidrs, { sample: flagNumber(args, 'sample', 20000), seed: flagNumber(args, 'seed', 24301) })
-  }
-
-  const sample = flagNumber(args, 'sample', 20000)
-  const seed = flagNumber(args, 'seed', 24301)
-  let cidrs: string[] = []
-  try {
-    const ranges = await fetchCloudflareCidrs()
-    cidrs = [...ranges.ipv4, ...ranges.ipv6]
-  } catch {
-    cidrs = [...BUILTIN_IPV4_CIDRS, ...BUILTIN_IPV6_CIDRS]
-  }
-  return expandCidrs(cidrs, { sample, seed })
+  return resolveCandidates({
+    sample: flagNumber(args, 'sample', 20000),
+    cidr: flagList(args, 'cidr'),
+    seed: flagNumber(args, 'seed', 24301),
+  })
 }
 
 function printProgress(event: ScanEvent, quiet: boolean): void {
@@ -183,6 +177,18 @@ function printTable(entries: ScanEntry[]): void {
   })
 }
 
+/**
+ * 输出一段可直接复制粘贴的列表。
+ *
+ * 格式 `IP:端口#机房`，一行一个，正好能贴进同类项目的
+ * 「自定义 IP / 优选 IP」输入框（它们普遍支持 `IP:Port#备注` 语法）。
+ */
+function printCopyable(entries: ScanEntry[]): void {
+  if (entries.length === 0) return
+  process.stdout.write('\n── 可直接复制（粘贴到「自定义 IP / 优选 IP」输入框）──\n')
+  process.stdout.write(formatCopyable(entries) + '\n')
+}
+
 async function commandScan(args: ReturnType<typeof parseArgs>): Promise<void> {
   const host = flagString(args, 'host')
   const quiet = flagBool(args, 'quiet')
@@ -198,6 +204,9 @@ async function commandScan(args: ReturnType<typeof parseArgs>): Promise<void> {
   const top = flagNumber(args, 'top', 15)
   const token = flagString(args, 'token')
   const noCallback = flagBool(args, 'no-callback')
+  const wsPath = flagString(args, 'path', '/__edge_probe')
+  const probePath = flagString(args, 'probe-path', '/__edge_probe')
+  const noSpeed = flagBool(args, 'no-speed')
   const callback = noCallback
     ? ''
     : flagString(args, 'callback', token ? `https://${host}/api/v1/preferred-ips` : '')
@@ -208,17 +217,39 @@ async function commandScan(args: ReturnType<typeof parseArgs>): Promise<void> {
     process.stdout.write('正在准备 Cloudflare 网段…\n')
   }
 
-  const candidates = await resolveCandidates(args)
+  const candidates = await resolveCandidatesFromArgs(args)
   if (candidates.length === 0) {
     process.stderr.write('候选 IP 为空，请检查 --ip-file / --cidr 参数\n')
     process.exit(1)
   }
   if (!quiet) process.stdout.write(`候选 IP：${candidates.length} 个\n`)
 
+  let skipSpeed = noSpeed
+  if (!skipSpeed) {
+    try {
+      const probe = await fetch(`https://${host}${probePath}?bytes=1024`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(8000),
+      })
+      if (!probe.headers.get('x-probe-bytes')) {
+        skipSpeed = true
+        if (!quiet) {
+          process.stdout.write('\n提示：' + probePath + ' 不是 CFPilot 探针端点，已跳过测速（只按延迟排序）\n')
+          process.stdout.write('      如需测速，请用 --probe-path 指定目标项目的测速路径\n')
+        }
+      }
+    } catch {
+      skipSpeed = true
+    }
+  }
+
   const summary = await runScan({
     host,
     port,
     candidates,
+    wsPath,
+    probePath,
+    skipSpeed,
     concurrency: flagNumber(args, 'concurrency', 300),
     tcpTimeoutMs: flagNumber(args, 'timeout', 1200),
     maxLatencyMs: flagNumber(args, 'max-latency', 0),
@@ -237,6 +268,7 @@ async function commandScan(args: ReturnType<typeof parseArgs>): Promise<void> {
     )
   } else {
     printTable(summary.entries)
+    printCopyable(summary.entries)
   }
 
   if (callback && token) {

@@ -27,18 +27,19 @@
     color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
     min-height: 100vh;
+    font-size: 14px;
   }
   a { color: var(--brand); }
-  .wrap { max-width: 1080px; margin: 0 auto; padding: 28px 18px 60px; }
-  header.top { display: flex; align-items: center; gap: 14px; margin-bottom: 22px; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 26px 18px 64px; }
+  header.top { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; flex-wrap: wrap; }
   .logo {
     width: 42px; height: 42px; border-radius: 12px; display: grid; place-items: center;
     background: linear-gradient(135deg, var(--brand), var(--brand-2));
-    font-weight: 700; font-size: 18px; letter-spacing: .5px;
+    font-weight: 700; font-size: 17px; letter-spacing: .5px;
   }
-  .logo small { font-size: 10px; display: block; opacity: .85; font-weight: 500; }
-  header.top h1 { font-size: 19px; margin: 0; }
-  header.top p { margin: 2px 0 0; color: var(--muted); font-size: 12.5px; }
+  .logo small { font-size: 9px; display: block; opacity: .85; font-weight: 500; letter-spacing: 1px; }
+  header.top h1 { font-size: 18px; margin: 0; }
+  header.top p { margin: 3px 0 0; color: var(--muted); font-size: 12.5px; }
   .spacer { flex: 1; }
   button {
     cursor: pointer; border: none; border-radius: 10px; padding: 9px 14px;
@@ -49,12 +50,13 @@
   button.primary { background: linear-gradient(135deg, var(--brand), var(--brand-2)); }
   button.ghost { background: transparent; border: 1px solid var(--line); }
   button.danger { background: rgba(248, 113, 113, .15); color: #fca5a5; }
+  button:disabled { opacity: .5; cursor: not-allowed; transform: none; }
   input, select, textarea {
     width: 100%; background: #0e1730; color: var(--text); border: 1px solid var(--line);
     border-radius: 10px; padding: 9px 11px; font-size: 13.5px; font-family: inherit; outline: none;
   }
   input:focus, select:focus, textarea:focus { border-color: var(--brand); }
-  textarea { resize: vertical; min-height: 96px; line-height: 1.6; }
+  textarea { resize: vertical; min-height: 92px; line-height: 1.65; font-size: 12.5px; }
   label { display: block; font-size: 12.5px; color: var(--muted); margin: 0 0 6px; }
   .field { margin-bottom: 14px; }
   .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
@@ -62,15 +64,16 @@
     background: linear-gradient(180deg, var(--card), var(--bg-soft));
     border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; margin-bottom: 16px;
   }
-  .card h2 { margin: 0 0 14px; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+  .card h2 { margin: 0 0 6px; font-size: 15px; display: flex; align-items: center; gap: 8px; }
   .card h2 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--brand); }
+  .card .hint { color: var(--muted); font-size: 12.5px; line-height: 1.7; margin: 0 0 14px; }
   .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; }
   .tabs button { background: transparent; border: 1px solid var(--line); }
   .tabs button.active { background: linear-gradient(135deg, var(--brand), var(--brand-2)); border-color: transparent; }
   .stat { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
   .stat .item { background: rgba(255,255,255,.03); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
   .stat .k { color: var(--muted); font-size: 12px; }
-  .stat .v { font-size: 18px; font-weight: 600; margin-top: 4px; word-break: break-all; }
+  .stat .v { font-size: 17px; font-weight: 600; margin-top: 4px; word-break: break-all; }
   .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   .row.end { justify-content: flex-end; }
   .muted { color: var(--muted); font-size: 12.5px; }
@@ -78,31 +81,59 @@
   pre.cmd {
     background: #08101f; border: 1px dashed var(--line); border-radius: 10px; padding: 12px;
     overflow-x: auto; white-space: pre-wrap; word-break: break-all; color: #b9c8ff; margin: 0 0 12px;
+    font-size: 12px;
   }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); }
-  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 7px 6px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 500; font-size: 11.5px; position: sticky; top: 0; background: #121a33; }
+  .table-wrap { max-height: 380px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
   .tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--line); }
-  .tag.local { color: var(--ok); border-color: rgba(52,211,153,.4); }
-  .tag.add { color: var(--brand); border-color: rgba(79,140,255,.4); }
-  .tag.addapi { color: var(--warn); border-color: rgba(251,191,36,.4); }
-  .tag.addcsv { color: var(--brand-2); border-color: rgba(123,92,255,.4); }
+  .tag.official { color: var(--ok); border-color: rgba(52,211,153,.4); }
+  .tag.domain { color: var(--brand); border-color: rgba(79,140,255,.4); }
+  .tag.manual, .tag.local, .tag.add { color: var(--warn); border-color: rgba(251,191,36,.4); }
+  .tag.api, .tag.addapi, .tag.csv, .tag.addcsv { color: var(--brand-2); border-color: rgba(123,92,255,.4); }
   .progress { height: 8px; background: #0e1730; border-radius: 999px; overflow: hidden; border: 1px solid var(--line); }
   .progress > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--brand), var(--brand-2)); transition: width .3s; }
-  .log { max-height: 240px; overflow-y: auto; background: #08101f; border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-size: 12px; line-height: 1.7; }
+  .log { max-height: 200px; overflow-y: auto; background: #08101f; border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-size: 12px; line-height: 1.7; }
   .log div { color: #9fb0e0; }
   .log .ok { color: var(--ok); }
   .log .err { color: var(--err); }
   .toast {
     position: fixed; right: 18px; bottom: 18px; background: var(--card-2); border: 1px solid var(--line);
     border-left: 3px solid var(--brand); padding: 11px 15px; border-radius: 10px; font-size: 13px;
-    opacity: 0; transform: translateY(8px); transition: .2s; pointer-events: none; z-index: 50;
+    opacity: 0; transform: translateY(8px); transition: .2s; pointer-events: none; z-index: 50; max-width: 340px;
   }
   .toast.show { opacity: 1; transform: none; }
   .toast.err { border-left-color: var(--err); }
   .hidden { display: none !important; }
   .login-wrap { max-width: 380px; margin: 12vh auto; }
   code.inline { background: #0e1730; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--line); }
+
+  .source {
+    border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 12px;
+    background: rgba(255,255,255,.02); transition: .15s border-color;
+  }
+  .source.on { border-color: rgba(79,140,255,.55); background: rgba(79,140,255,.06); }
+  .source .chk { display: flex; align-items: center; gap: 10px; margin: 0; color: var(--text); font-size: 14px; font-weight: 600; cursor: pointer; }
+  .source .chk input { width: auto; }
+  .source .src-body { margin-top: 12px; display: none; }
+  .source.on .src-body { display: block; }
+  .source .desc { color: var(--muted); font-size: 12px; font-weight: 400; margin-left: 26px; margin-top: 3px; line-height: 1.6; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; }
+  .chip {
+    padding: 5px 11px; border-radius: 999px; border: 1px solid var(--line);
+    background: #0e1730; font-size: 12px; cursor: pointer; user-select: none; color: var(--muted);
+  }
+  .chip.on { background: rgba(79,140,255,.18); border-color: var(--brand); color: var(--text); }
+
+  .warn {
+    border: 1px solid rgba(251,191,36,.35); background: rgba(251,191,36,.08);
+    color: #fde68a; border-radius: 10px; padding: 10px 12px; font-size: 12.5px; line-height: 1.7; margin-bottom: 12px;
+  }
+  .warn.err { border-color: rgba(248,113,113,.4); background: rgba(248,113,113,.08); color: #fca5a5; }
+  .summary-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 4px; }
+  .pill { padding: 3px 10px; border-radius: 999px; background: rgba(255,255,255,.05); border: 1px solid var(--line); font-size: 12px; }
 </style>
 </head>
 <body>
@@ -120,10 +151,9 @@
 
   <nav class="tabs" id="tabs">
     <button data-tab="overview" class="active">概览</button>
-    <button data-tab="inbound">入站配置</button>
-    <button data-tab="pool">优选池</button>
-    <button data-tab="scan">一键优选</button>
+    <button data-tab="pool">节点来源</button>
     <button data-tab="sub">订阅</button>
+    <button data-tab="inbound">入站配置</button>
     <button data-tab="advanced">高级</button>
   </nav>
 
@@ -133,13 +163,147 @@
       <div class="stat" id="statusBox"></div>
     </div>
     <div class="card">
-      <h2><span class="dot"></span>使用说明</h2>
-      <p class="muted" style="line-height:1.9">
-        1. 在「入站配置」确认 UUID / Trojan 密码与路径；<br>
-        2. 在「优选池」填入 ADD / ADDAPI / ADDCSV，或用「一键优选」跑一次本地真连接扫描；<br>
-        3. 在「订阅」复制 Clash / Sing-box / Base64 订阅链接导入客户端；<br>
-        4. 客户端节点里的 <code class="inline">server</code> 是优选 IP，<code class="inline">sni / Host</code> 固定为你的 Worker 域名 —— 这正是避免 <code class="inline">-1</code> 超时的关键。
+      <h2><span class="dot"></span>当前订阅构成</h2>
+      <p class="hint">下面是订阅里实际会生成的节点来源分布。点「节点来源」可调整。</p>
+      <div class="summary-bar" id="overviewSummary"></div>
+    </div>
+    <div class="card">
+      <h2><span class="dot"></span>三步上手</h2>
+      <p class="hint" style="line-height:2">
+        1. 打开 <b>节点来源</b>，按需勾选「官方优选 IP / 优选域名 / 手动优选 IP」——都不勾也会自动给 20+10；<br>
+        2. 复制 <b>订阅</b> 页里的地址导入客户端（Clash / Sing-box / v2ray）；<br>
+        3. 想要更快的节点？在 <b>节点来源</b> 底部跑一次本地真连接优选，结果会进入「手动优选 IP」。
       </p>
+    </div>
+  </section>
+
+  <section class="tab-page hidden" id="tab-pool">
+    <div class="card">
+      <h2><span class="dot"></span>选择节点来源</h2>
+      <p class="hint">
+        三种来源可自由组合，按 <b>官方优选 IP → 优选域名 → 手动优选 IP</b> 的顺序合并去重。
+        如果三个都不勾选，会自动生成 <b>20 个官方优选 IP + 10 个优选域名</b>，保证订阅不会为空。
+      </p>
+
+      <div class="source" id="src-official">
+        <label class="chk"><input type="checkbox" id="poolOfficial" /> 官方优选 IP</label>
+        <div class="desc">从 Cloudflare 官方网段随机生成的 IP。Cloudflare 的 IP 是全球 anycast，静态表必然过期，所以按需随机取。</div>
+        <div class="src-body">
+          <div class="grid">
+            <div class="field">
+              <label>数量（1–200）</label>
+              <input id="officialCount" type="number" min="1" max="200" step="1" />
+            </div>
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label>国家 / 地区（多选，机房未知的条目会被排除）</label>
+            <div class="chips" id="countryChips"></div>
+            <p class="muted" style="margin:8px 0 0;line-height:1.6">
+              说明：优选 IP 的<strong>机房要连接后才知道</strong>，随机生成的 IP 无法预设地区。
+              选了国家后，只有「已知机房」的条目会被保留（本地扫描结果、带机房标注的远程池）。
+              想让国家筛选真正生效，请先跑一次本地真连接优选。
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div class="source" id="src-domain">
+        <label class="chk"><input type="checkbox" id="poolDomain" /> 优选域名</label>
+        <div class="desc">从域名库随机取样。这些域名只用来解析出优质的 Cloudflare 边缘 IP，SNI / Host 仍然是你的 Worker 域名。</div>
+        <div class="src-body">
+          <div class="grid">
+            <div class="field">
+              <label>数量（1–100）</label>
+              <input id="domainCount" type="number" min="1" max="100" step="1" />
+            </div>
+            <div class="field">
+              <label>内置域名库</label>
+              <input id="builtinDomains" readonly />
+            </div>
+          </div>
+          <div class="field" style="margin-bottom:0">
+            <label>自定义域名库（每行一个域名；留空 = 使用内置库）</label>
+            <textarea id="domainLib" placeholder="cf.example.com&#10;bestcf.example.net"></textarea>
+          </div>
+        </div>
+      </div>
+
+      <div class="source" id="src-manual">
+        <label class="chk"><input type="checkbox" id="poolManual" /> 手动优选 IP</label>
+        <div class="desc">本地真连接优选结果（最高优先级）+ 下面手动填写的条目。为空时会提示你先跑一次优选。</div>
+        <div class="src-body">
+          <div class="field">
+            <label>手动填写（每行一条：<code class="inline">IP</code> / <code class="inline">IP:端口</code> / <code class="inline">IP:端口#备注</code>）</label>
+            <textarea id="cfgAdd" placeholder="1.2.3.4:443#SJC&#10;[2606:4700::1]:443#LAX"></textarea>
+          </div>
+          <div class="row">
+            <span class="muted" id="localState">本地真连接池：0 条</span>
+            <div class="spacer"></div>
+            <button class="ghost" id="btnClearIps">清空本地池</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="row end" style="margin-top:14px">
+        <button class="ghost" id="btnPreview">刷新预览</button>
+        <button class="primary" id="btnSavePool">保存并应用</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2><span class="dot"></span>节点预览 <span class="muted" id="previewSummary" style="font-weight:400"></span></h2>
+      <div id="previewWarn" class="warn hidden"></div>
+      <div class="table-wrap">
+        <table id="nodeTable">
+          <thead><tr><th>#</th><th>来源</th><th>地址</th><th>机房</th><th>延迟</th><th>速度</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2><span class="dot"></span>⚡ 本地真连接优选</h2>
+      <p class="hint" style="line-height:1.8">
+        用<b>你自己的 Worker 域名</b>作为 TLS SNI 与 HTTP Host，逐个候选 IP 完成 WebSocket 101 握手校验，
+        只有真正可用的 IP 才会回填到「手动优选 IP」池。
+      </p>
+      <div class="row" style="margin:12px 0">
+        <button class="primary" id="btnScan">开始优选</button>
+        <button class="ghost" id="btnCopyCmd">复制命令</button>
+        <span class="muted" id="bridgeState">未检测到本地桥接服务</span>
+      </div>
+      <pre class="cmd" id="scanCmd">正在生成命令…</pre>
+      <div class="progress" style="margin-bottom:10px"><i id="scanBar"></i></div>
+      <div class="log" id="scanLog"></div>
+    </div>
+  </section>
+
+  <section class="tab-page hidden" id="tab-sub">
+    <div class="card">
+      <h2><span class="dot"></span>订阅链接</h2>
+      <p class="hint">把对应地址粘进客户端即可。节点数是动态的，改完「节点来源」刷新页面就会更新。</p>
+      <div class="field">
+        <label>Base64（v2ray / v2rayNG / Nekoray）</label>
+        <div class="row"><input class="mono" id="subBase64" readonly /><button class="ghost" data-copy="subBase64">复制</button></div>
+      </div>
+      <div class="field">
+        <label>Clash / Mihomo（YAML，按来源分组）</label>
+        <div class="row"><input class="mono" id="subClash" readonly /><button class="ghost" data-copy="subClash">复制</button></div>
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>Sing-box（JSON 1.12+，按来源分组）</label>
+        <div class="row"><input class="mono" id="subSingbox" readonly /><button class="ghost" data-copy="subSingbox">复制</button></div>
+      </div>
+      <div class="row end" style="margin-top:16px"><button class="primary" id="btnRefreshSub">刷新订阅链接</button></div>
+    </div>
+    <div class="card">
+      <h2><span class="dot"></span>节点预览（前 100 条）</h2>
+      <div class="table-wrap">
+        <table id="subTable">
+          <thead><tr><th>#</th><th>来源</th><th>地址</th><th>机房</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
     </div>
   </section>
 
@@ -147,30 +311,12 @@
     <div class="card">
       <h2><span class="dot"></span>入站参数</h2>
       <div class="grid">
-        <div class="field">
-          <label>VLESS UUID</label>
-          <input id="cfgUuid" placeholder="留空自动生成" />
-        </div>
-        <div class="field">
-          <label>Trojan 密码</label>
-          <input id="cfgTrojan" placeholder="留空自动生成" />
-        </div>
-        <div class="field">
-          <label>VLESS-WS 路径</label>
-          <input id="cfgWsPath" placeholder="/vless" />
-        </div>
-        <div class="field">
-          <label>Trojan-WS 路径</label>
-          <input id="cfgTrojanPath" placeholder="/trojan" />
-        </div>
-        <div class="field">
-          <label>XHTTP 路径</label>
-          <input id="cfgXhttpPath" placeholder="/xhttp" />
-        </div>
-        <div class="field">
-          <label>订阅域名（留空 = 当前 Worker 域名）</label>
-          <input id="cfgSubDomain" placeholder="例如 cfpilot.example.com" />
-        </div>
+        <div class="field"><label>VLESS UUID</label><input id="cfgUuid" placeholder="留空自动生成" /></div>
+        <div class="field"><label>Trojan 密码</label><input id="cfgTrojan" placeholder="留空自动生成" /></div>
+        <div class="field"><label>VLESS-WS 路径</label><input id="cfgWsPath" placeholder="/vless" /></div>
+        <div class="field"><label>Trojan-WS 路径</label><input id="cfgTrojanPath" placeholder="/trojan" /></div>
+        <div class="field"><label>XHTTP 路径</label><input id="cfgXhttpPath" placeholder="/xhttp" /></div>
+        <div class="field"><label>订阅域名（留空 = 当前 Worker 域名）</label><input id="cfgSubDomain" placeholder="例如 cfpilot.example.com" /></div>
         <div class="field">
           <label>订阅协议</label>
           <select id="cfgSubProtocol">
@@ -192,135 +338,43 @@
     </div>
   </section>
 
-  <section class="tab-page hidden" id="tab-pool">
-    <div class="card">
-      <h2><span class="dot"></span>L2 手动优选池（ADD）</h2>
-      <label>每行一条，支持 <code class="inline">IP</code> / <code class="inline">IP:端口</code> / <code class="inline">IP:端口#备注</code> / <code class="inline">[IPv6]:端口#备注</code></label>
-      <textarea id="cfgAdd" placeholder="1.2.3.4:443#SJC&#10;[2606:4700::1]:443#LAX"></textarea>
-    </div>
-    <div class="card">
-      <h2><span class="dot"></span>L3 远程 TXT 接口（ADDAPI）</h2>
-      <label>每行一个 https:// 地址，拉取订阅时实时并发获取</label>
-      <textarea id="cfgAddApi" placeholder="https://example.com/ips.txt"></textarea>
-    </div>
-    <div class="card">
-      <h2><span class="dot"></span>L4 远程 CSV（ADDCSV）</h2>
-      <label>每行一个 result.csv 地址，配合下方阈值过滤</label>
-      <textarea id="cfgAddCsv" placeholder="https://example.com/result.csv"></textarea>
-      <div class="grid" style="margin-top:12px">
-        <div class="field">
-          <label>最低下载速度 DLS（MB/s，0 = 不限）</label>
-          <input id="cfgDls" type="number" min="0" step="1" />
-        </div>
-        <div class="field">
-          <label>最高延迟 MAX_LATENCY（ms，0 = 不限）</label>
-          <input id="cfgMaxLatency" type="number" min="0" step="1" />
-        </div>
-        <div class="field">
-          <label>节点数量上限（0 = 不限）</label>
-          <input id="cfgMaxNodes" type="number" min="0" step="1" />
-        </div>
-      </div>
-      <div class="row end"><button class="primary" id="btnSavePool">保存优选池配置</button></div>
-    </div>
-    <div class="card">
-      <h2><span class="dot"></span>L1 本地真连接优选池</h2>
-      <div class="row" style="margin-bottom:10px">
-        <span class="muted" id="ipsCount">本地优选 IP：0 条</span>
-        <div class="spacer"></div>
-        <button class="ghost" id="btnClearIps">清空</button>
-      </div>
-      <div style="max-height:260px;overflow:auto">
-        <table id="ipsTable"><thead><tr><th>IP:端口</th><th>机房</th><th>延迟</th><th>速度</th></tr></thead><tbody></tbody></table>
-      </div>
-    </div>
-  </section>
-
-  <section class="tab-page hidden" id="tab-scan">
-    <div class="card">
-      <h2><span class="dot"></span>⚡ 一键本地真连接优选</h2>
-      <p class="muted" style="line-height:1.8">
-        本地优选器会在你的电脑上，用 <b>你自己的 Worker 域名</b> 作为 TLS SNI 与 HTTP Host，
-        直连候选 IP 并完成 WebSocket 101 握手校验 —— 只有真正可用的 IP 才会回填到 KV。
-      </p>
-      <div class="row" style="margin:14px 0">
-        <button class="primary" id="btnScan">开始优选</button>
-        <button class="ghost" id="btnCopyCmd">复制命令</button>
-        <span class="muted" id="bridgeState">未检测到本地桥接服务</span>
-      </div>
-      <pre class="cmd" id="scanCmd">正在生成命令…</pre>
-      <div class="progress" style="margin-bottom:10px"><i id="scanBar"></i></div>
-      <div class="log" id="scanLog"></div>
-    </div>
-  </section>
-
-  <section class="tab-page hidden" id="tab-sub">
-    <div class="card">
-      <h2><span class="dot"></span>订阅链接</h2>
-      <div class="field">
-        <label>Base64（v2ray / v2rayNG / Nekoray）</label>
-        <div class="row"><input class="mono" id="subBase64" readonly /><button class="ghost" data-copy="subBase64">复制</button></div>
-      </div>
-      <div class="field">
-        <label>Clash / Mihomo（YAML）</label>
-        <div class="row"><input class="mono" id="subClash" readonly /><button class="ghost" data-copy="subClash">复制</button></div>
-      </div>
-      <div class="field">
-        <label>Sing-box（JSON 1.12+）</label>
-        <div class="row"><input class="mono" id="subSingbox" readonly /><button class="ghost" data-copy="subSingbox">复制</button></div>
-      </div>
-      <div class="row end"><button class="primary" id="btnRefreshSub">刷新订阅链接</button></div>
-    </div>
-    <div class="card">
-      <h2><span class="dot"></span>节点预览（前 50 条）</h2>
-      <div style="max-height:360px;overflow:auto">
-        <table id="nodeTable"><thead><tr><th>#</th><th>地址</th><th>机房</th><th>延迟</th><th>速度</th><th>来源</th></tr></thead><tbody></tbody></table>
-      </div>
-    </div>
-  </section>
-
   <section class="tab-page hidden" id="tab-advanced">
     <div class="card">
       <h2><span class="dot"></span>出站与抗封锁</h2>
       <div class="grid">
-        <div class="field">
-          <label>ProxyIP 池（每行 host:port，默认 SOCKS5）</label>
-          <textarea id="cfgProxyIp" placeholder="1.2.3.4:1080&#10;5.6.7.8:8080"></textarea>
-        </div>
-        <div class="field">
-          <label>SOCKS5 代理（host:port）</label>
-          <input id="cfgSocks5" placeholder="1.2.3.4:1080" />
-        </div>
-        <div class="field">
-          <label>HTTP 代理（host:port）</label>
-          <input id="cfgHttpProxy" placeholder="1.2.3.4:8080" />
-        </div>
-        <div class="field">
-          <label>NAT64 前缀</label>
-          <input id="cfgNat64" placeholder="64:ff9b::" />
-        </div>
-        <div class="field">
-          <label>客户端指纹</label>
-          <input id="cfgFingerprint" placeholder="chrome" />
-        </div>
+        <div class="field"><label>ProxyIP 池（每行 host:port，默认 SOCKS5）</label><textarea id="cfgProxyIp" placeholder="1.2.3.4:1080"></textarea></div>
+        <div class="field"><label>SOCKS5 代理（host:port）</label><input id="cfgSocks5" placeholder="1.2.3.4:1080" /></div>
+        <div class="field"><label>HTTP 代理（host:port）</label><input id="cfgHttpProxy" placeholder="1.2.3.4:8080" /></div>
+        <div class="field"><label>NAT64 前缀</label><input id="cfgNat64" placeholder="64:ff9b::" /></div>
+        <div class="field"><label>客户端指纹</label><input id="cfgFingerprint" placeholder="chrome" /></div>
       </div>
       <div class="row" style="margin-top:6px">
         <label style="display:flex;align-items:center;gap:8px;margin:0">
-          <input type="checkbox" id="cfgConcurrent" style="width:auto" />
-          <span>开启 TCP 并发竞速拨号（TCP_CONCURRENT_DIAL）</span>
+          <input type="checkbox" id="cfgConcurrent" style="width:auto" /><span>开启 TCP 并发竞速拨号（TCP_CONCURRENT_DIAL）</span>
         </label>
       </div>
       <div class="row" style="margin-top:10px">
         <label style="display:flex;align-items:center;gap:8px;margin:0">
-          <input type="checkbox" id="cfgTrojanOn" style="width:auto" />
-          <span>启用 Trojan 入站</span>
+          <input type="checkbox" id="cfgTrojanOn" style="width:auto" /><span>启用 Trojan 入站</span>
         </label>
         <label style="display:flex;align-items:center;gap:8px;margin:0">
-          <input type="checkbox" id="cfgXhttpOn" style="width:auto" />
-          <span>启用 XHTTP 入站</span>
+          <input type="checkbox" id="cfgXhttpOn" style="width:auto" /><span>启用 XHTTP 入站</span>
         </label>
       </div>
       <div class="row end" style="margin-top:16px"><button class="primary" id="btnSaveAdvanced">保存高级配置</button></div>
+    </div>
+
+    <div class="card">
+      <h2><span class="dot"></span>远程优选池（可选）</h2>
+      <p class="hint">不填也能用——内置来源已经覆盖绝大多数场景。填了就按「手动 → 远程」顺序追加。</p>
+      <div class="field"><label>远程 TXT 接口（ADDAPI，每行一个 https 地址）</label><textarea id="cfgAddApi" placeholder="https://example.com/ips.txt"></textarea></div>
+      <div class="field"><label>远程 CSV（ADDCSV，每行一个 result.csv 地址）</label><textarea id="cfgAddCsv" placeholder="https://example.com/result.csv"></textarea></div>
+      <div class="grid">
+        <div class="field"><label>最低下载速度 DLS（MB/s，0 = 不限）</label><input id="cfgDls" type="number" min="0" step="1" /></div>
+        <div class="field"><label>最高延迟 MAX_LATENCY（ms，0 = 不限）</label><input id="cfgMaxLatency" type="number" min="0" step="1" /></div>
+        <div class="field"><label>节点数量上限（0 = 不限）</label><input id="cfgMaxNodes" type="number" min="0" step="1" /></div>
+      </div>
+      <div class="row end"><button class="primary" id="btnSaveRemote">保存远程池配置</button></div>
     </div>
   </section>
 </div>
@@ -332,9 +386,7 @@
       <label>管理密码</label>
       <input id="loginPassword" type="password" placeholder="请输入管理密码" />
     </div>
-    <div class="row end">
-      <button class="primary" id="btnLogin">登录</button>
-    </div>
+    <div class="row end"><button class="primary" id="btnLogin">登录</button></div>
     <p class="muted" id="loginHint" style="margin-bottom:0"></p>
   </div>
 </div>
@@ -345,14 +397,22 @@
 (function () {
   'use strict';
 
-  var state = { config: null, status: null, token: null, cmd: '' };
+  var state = {
+    config: null,
+    status: null,
+    token: null,
+    cmd: '',
+    countries: [],
+    selected: [],
+    nodes: []
+  };
 
   function $(id) { return document.getElementById(id); }
   function toast(msg, isErr) {
     var t = $('toast');
     t.textContent = msg;
     t.className = 'toast show' + (isErr ? ' err' : '');
-    setTimeout(function () { t.className = 'toast'; }, 2600);
+    setTimeout(function () { t.className = 'toast'; }, 2800);
   }
   function api(path, options) {
     options = options || {};
@@ -374,8 +434,12 @@
     box.appendChild(line);
     box.scrollTop = box.scrollHeight;
   }
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
 
-  /* ---------- 登录 ---------- */
   function showLogin() {
     $('app').classList.add('hidden');
     $('login').classList.remove('hidden');
@@ -393,7 +457,6 @@
       .catch(function (e) { toast(e.message, true); });
   }
 
-  /* ---------- 启动 ---------- */
   function boot() {
     api('/api/v1/session').then(function (s) {
       if (!s.authenticated) { showLogin(); return; }
@@ -407,13 +470,22 @@
       state.status = s;
       renderStatus(s);
     }).catch(function (e) { toast(e.message, true); });
+
+    api('/api/v1/pool/meta').then(function (m) {
+      state.countries = m.countries || [];
+      renderCountries();
+      $('builtinDomains').value = '内置 ' + m.builtin.domains + ' 个域名 / ' + m.builtin.cidrs + ' 个 CF 网段';
+      $('domainLib').value = (m.customDomains || []).join('\n');
+    }).catch(function () {});
+
     api('/api/v1/config').then(function (r) {
       state.config = r.config;
       fillConfig(r.config);
+      // 必须等配置到了再拼订阅链接，否则 UUID 还是空的（会生成 /sub/ 这种无效地址）
+      refreshSubLinks();
     }).catch(function (e) { toast(e.message, true); });
-    loadIps();
+
     loadNodes();
-    refreshSubLinks();
     checkBridge();
   }
 
@@ -421,20 +493,12 @@
     var items = [
       ['Worker 域名', location.hostname],
       ['边缘机房', s.colo || 'UNK'],
-      ['面板路径', s.panelPath],
       ['本地优选 IP', s.localIps + ' 条'],
-      ['CFPilot 版本', s.version]
+      ['版本', s.version]
     ];
-    if (s.generatedPassword) {
-      items.push(['首次生成的密码', s.generatedPassword]);
-    }
     $('statusBox').innerHTML = items.map(function (it) {
-      return '<div class="item"><div class="k">' + it[0] + '</div><div class="v">' +
-        String(it[1]).replace(/</g, '&lt;') + '</div></div>';
+      return '<div class="item"><div class="k">' + esc(it[0]) + '</div><div class="v">' + esc(it[1]) + '</div></div>';
     }).join('');
-    if (s.generatedPassword) {
-      toast('首次访问：面板密码为 ' + s.generatedPassword + '，请尽快在部署向导中固定');
-    }
   }
 
   function fillConfig(c) {
@@ -460,6 +524,32 @@
     $('cfgConcurrent').checked = !!c.concurrentDial;
     $('cfgTrojanOn').checked = !!c.enableTrojan;
     $('cfgXhttpOn').checked = !!c.enableXhttp;
+
+    $('poolOfficial').checked = !!c.poolOfficial;
+    $('poolDomain').checked = !!c.poolDomain;
+    $('poolManual').checked = !!c.poolManual;
+    $('officialCount').value = c.officialCount || 20;
+    $('domainCount').value = c.domainCount || 10;
+    state.selected = (c.poolCountries || '').split(/[,\s]+/).filter(Boolean).map(function (x) { return x.toUpperCase(); });
+    syncSourceCards();
+    renderCountries();
+  }
+
+  function syncSourceCards() {
+    [['official', 'poolOfficial'], ['domain', 'poolDomain'], ['manual', 'poolManual']].forEach(function (pair) {
+      var card = $('src-' + pair[0]);
+      if (card) card.classList.toggle('on', $(pair[1]).checked);
+    });
+  }
+
+  function renderCountries() {
+    var box = $('countryChips');
+    if (!box) return;
+    if (!state.countries.length) { box.innerHTML = '<span class="muted">加载中…</span>'; return; }
+    box.innerHTML = state.countries.map(function (c) {
+      var on = state.selected.indexOf(c.code) >= 0;
+      return '<span class="chip' + (on ? ' on' : '') + '" data-code="' + c.code + '">' + esc(c.name) + ' ' + c.code + '</span>';
+    }).join('');
   }
 
   function saveConfig(patch, okMsg) {
@@ -470,43 +560,76 @@
         toast(okMsg || '已保存');
         loadNodes();
         refreshSubLinks();
+        return r;
       })
-      .catch(function (e) { toast(e.message, true); });
-  }
-
-  /* ---------- 优选池 ---------- */
-  function loadIps() {
-    api('/api/v1/ips').then(function (r) {
-      $('ipsCount').textContent = '本地优选 IP：' + r.count + ' 条';
-      var tbody = $('ipsTable').querySelector('tbody');
-      tbody.innerHTML = (r.entries || []).map(function (e) {
-        return '<tr><td class="mono">' + e.ip + ':' + e.port + '</td><td>' + (e.colo || '-') +
-          '</td><td>' + (e.latency || '-') + '</td><td>' + (e.speed || '-') + '</td></tr>';
-      }).join('') || '<tr><td colspan="4" class="muted">暂无数据</td></tr>';
-    }).catch(function () {});
+      .catch(function (e) { toast(e.message, true); throw e; });
   }
 
   function loadNodes() {
     api('/api/v1/nodes').then(function (r) {
-      var tbody = $('nodeTable').querySelector('tbody');
-      tbody.innerHTML = (r.nodes || []).slice(0, 50).map(function (n, i) {
-        return '<tr><td>' + (i + 1) + '</td><td class="mono">' + n.ip + ':' + n.port +
-          '</td><td>' + (n.colo || '-') + '</td><td>' + (n.latency || '-') + '</td><td>' +
-          (n.speed || '-') + '</td><td><span class="tag ' + n.source + '">' + n.source +
-          '</span></td></tr>';
-      }).join('') || '<tr><td colspan="6" class="muted">暂无节点</td></tr>';
-    }).catch(function () {});
+      state.nodes = r.nodes || [];
+      renderNodes(r);
+      renderSummary(r);
+    }).catch(function (e) { toast(e.message, true); });
   }
 
-  /* ---------- 订阅 ---------- */
+  function renderNodes(r) {
+    var rows = (r.nodes || []).slice(0, 100).map(function (n, i) {
+      return '<tr><td>' + (i + 1) + '</td><td><span class="tag ' + esc(n.source) + '">' + esc(n.source) + '</span></td>' +
+        '<td class="mono">' + esc(n.ip) + ':' + n.port + '</td><td>' + esc(n.colo || '-') + '</td>' +
+        '<td>' + (n.latency || '-') + '</td><td>' + (n.speed || '-') + '</td></tr>';
+    }).join('');
+    $('nodeTable').querySelector('tbody').innerHTML = rows || '<tr><td colspan="6" class="muted">暂无节点</td></tr>';
+
+    var sub = (r.nodes || []).slice(0, 100).map(function (n, i) {
+      return '<tr><td>' + (i + 1) + '</td><td><span class="tag ' + esc(n.source) + '">' + esc(n.source) + '</span></td>' +
+        '<td class="mono">' + esc(n.ip) + ':' + n.port + '</td><td>' + esc(n.colo || '-') + '</td></tr>';
+    }).join('');
+    $('subTable').querySelector('tbody').innerHTML = sub || '<tr><td colspan="4" class="muted">暂无节点</td></tr>';
+
+    $('previewSummary').textContent = '共 ' + (r.count || 0) + ' 条';
+
+    var warn = $('previewWarn');
+    var errors = (r.stats && r.stats.errors) || [];
+    if (errors.length) {
+      warn.className = 'warn';
+      warn.innerHTML = errors.map(function (e) { return '• ' + esc(e); }).join('<br>');
+      warn.classList.remove('hidden');
+    } else {
+      warn.classList.add('hidden');
+    }
+  }
+
+  function renderSummary(r) {
+    var groups = r.groups || [];
+    var html = groups.map(function (g) {
+      return '<span class="pill">' + esc(g.name) + ' · ' + g.count + '</span>';
+    }).join('');
+    if (!html) html = '<span class="muted">暂无节点</span>';
+    html += '<span class="pill">去重 -' + ((r.stats && r.stats.deduped) || 0) + '</span>';
+    if (r.stats && r.stats.countries && r.stats.countries.length) {
+      html += '<span class="pill">国家 ' + esc(r.stats.countries.join('/')) + '</span>';
+    }
+    $('overviewSummary').innerHTML = html;
+    var local = state.status ? state.status.localIps : 0;
+    $('localState').textContent = '本地真连接池：' + local + ' 条';
+  }
+
   function refreshSubLinks() {
-    var base = location.origin + '/sub/' + encodeURIComponent($('cfgUuid').value || '');
+    var uuid = ($('cfgUuid').value || (state.config && state.config.uuid) || '').trim();
+    if (!uuid) {
+      var hint = '（尚未生成 UUID，请稍候或刷新页面）';
+      $('subBase64').value = hint;
+      $('subClash').value = hint;
+      $('subSingbox').value = hint;
+      return;
+    }
+    var base = location.origin + '/sub/' + encodeURIComponent(uuid);
     $('subBase64').value = base + '?target=base64';
     $('subClash').value = base + '?target=clash';
     $('subSingbox').value = base + '?target=singbox';
   }
 
-  /* ---------- 一键优选 ---------- */
   var BRIDGE = 'http://127.0.0.1:19527';
   var es = null;
 
@@ -522,7 +645,7 @@
       })
       .catch(function () {
         clearTimeout(timer);
-        $('bridgeState').textContent = '未检测到本地桥接服务（可一键安装运行）';
+        $('bridgeState').textContent = '未检测到本地桥接服务（可用下面的命令直接跑）';
         $('bridgeState').style.color = 'var(--muted)';
       });
   }
@@ -551,7 +674,8 @@
         port: 443,
         token: token,
         callback: location.origin + '/api/v1/preferred-ips',
-        top: 15
+        top: 15,
+        sample: 300
       };
       return fetch(BRIDGE + '/start-scan', {
         method: 'POST',
@@ -572,16 +696,26 @@
   function listenEvents(jobId) {
     if (es) { es.close(); es = null; }
     es = new EventSource(BRIDGE + '/events?jobId=' + encodeURIComponent(jobId || ''));
+    es.addEventListener('stage', function (ev) {
+      var d = JSON.parse(ev.data);
+      log('▶ ' + (d.name || ('阶段 ' + d.stage)) + '（候选 ' + (d.total || 0) + ' 个）');
+    });
     es.addEventListener('progress', function (ev) {
       var d = JSON.parse(ev.data);
-      log(d.message || JSON.stringify(d));
       if (typeof d.percent === 'number') $('scanBar').style.width = d.percent + '%';
+      if (d.message) log(d.message);
+      else if (d.total) log('阶段 ' + d.stage + '：' + d.done + '/' + d.total);
     });
     es.addEventListener('result', function (ev) {
       var d = JSON.parse(ev.data);
-      log('优选完成，共 ' + (d.count || 0) + ' 条，已回填面板', 'ok');
+      var e = d.entry || {};
+      log('✓ ' + (e.ip || '') + (e.port ? ':' + e.port : '') + (e.colo ? ' [' + e.colo + ']' : ''), 'ok');
+    });
+    es.addEventListener('done', function (ev) {
+      var d = JSON.parse(ev.data);
+      log('优选完成，共 ' + (d.count || 0) + ' 条，已回填到「手动优选 IP」池', 'ok');
       $('scanBar').style.width = '100%';
-      loadIps();
+      loadAll();
     });
     es.addEventListener('error', function (ev) {
       try {
@@ -594,7 +728,6 @@
     es.onerror = function () { /* EventSource 会自动重连 */ };
   }
 
-  /* ---------- 事件绑定 ---------- */
   function bind() {
     $('btnLogin').addEventListener('click', doLogin);
     $('loginPassword').addEventListener('keydown', function (e) { if (e.key === 'Enter') doLogin(); });
@@ -603,18 +736,50 @@
       var btn = e.target.closest('button[data-tab]');
       if (!btn) return;
       var tab = btn.getAttribute('data-tab');
-      Array.prototype.forEach.call($('tabs').children, function (b) {
-        b.classList.toggle('active', b === btn);
-      });
+      Array.prototype.forEach.call($('tabs').children, function (b) { b.classList.toggle('active', b === btn); });
       Array.prototype.forEach.call(document.querySelectorAll('.tab-page'), function (p) {
         p.classList.toggle('hidden', p.id !== 'tab-' + tab);
       });
+      if (tab === 'sub' || tab === 'pool') loadNodes();
     });
 
     $('btnRefresh').addEventListener('click', loadAll);
     $('btnLogout').addEventListener('click', function () {
       api('/api/v1/logout', { method: 'POST' }).finally(function () { showLogin(); });
     });
+
+    ['poolOfficial', 'poolDomain', 'poolManual'].forEach(function (id) {
+      $(id).addEventListener('change', syncSourceCards);
+    });
+
+    $('countryChips').addEventListener('click', function (e) {
+      var chip = e.target.closest('.chip');
+      if (!chip) return;
+      var code = chip.getAttribute('data-code');
+      var idx = state.selected.indexOf(code);
+      if (idx >= 0) state.selected.splice(idx, 1);
+      else state.selected.push(code);
+      renderCountries();
+    });
+
+    $('btnSavePool').addEventListener('click', function () {
+      var domains = $('domainLib').value.split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean);
+      api('/api/v1/pool/library', { method: 'PUT', body: JSON.stringify({ domains: domains }) })
+        .catch(function (e) { toast('域名库保存失败：' + e.message, true); })
+        .then(function () {
+          return saveConfig({
+            poolOfficial: $('poolOfficial').checked,
+            poolDomain: $('poolDomain').checked,
+            poolManual: $('poolManual').checked,
+            officialCount: Number($('officialCount').value || 20),
+            domainCount: Number($('domainCount').value || 10),
+            poolCountries: state.selected.join(','),
+            add: $('cfgAdd').value
+          }, '节点来源已保存');
+        });
+    });
+
+    $('btnPreview').addEventListener('click', loadNodes);
 
     $('btnSaveInbound').addEventListener('click', function () {
       saveConfig({
@@ -629,15 +794,14 @@
       }, '入站配置已保存');
     });
 
-    $('btnSavePool').addEventListener('click', function () {
+    $('btnSaveRemote').addEventListener('click', function () {
       saveConfig({
-        add: $('cfgAdd').value,
         addApi: $('cfgAddApi').value,
         addCsv: $('cfgAddCsv').value,
         dls: Number($('cfgDls').value || 0),
         maxLatency: Number($('cfgMaxLatency').value || 0),
         maxNodes: Number($('cfgMaxNodes').value || 0)
-      }, '优选池配置已保存');
+      }, '远程池配置已保存');
     });
 
     $('btnSaveAdvanced').addEventListener('click', function () {
@@ -655,7 +819,7 @@
 
     $('btnClearIps').addEventListener('click', function () {
       if (!confirm('确定清空本地真连接优选池？')) return;
-      api('/api/v1/ips', { method: 'DELETE' }).then(function () { loadIps(); toast('已清空'); })
+      api('/api/v1/ips', { method: 'DELETE' }).then(function () { loadAll(); toast('已清空'); })
         .catch(function (e) { toast(e.message, true); });
     });
 
@@ -665,7 +829,7 @@
       if (!cmd) { prepareScan().then(function () { copy(state.cmd); }); return; }
       copy(cmd);
     });
-    $('btnRefreshSub').addEventListener('click', refreshSubLinks);
+    $('btnRefreshSub').addEventListener('click', function () { refreshSubLinks(); loadNodes(); });
 
     Array.prototype.forEach.call(document.querySelectorAll('[data-copy]'), function (btn) {
       btn.addEventListener('click', function () { copy($(btn.getAttribute('data-copy')).value); });

@@ -57,4 +57,10 @@ describe('readIpFile', () => {
   it('保留 IPv6', () => {
     expect(readIpFile('2606:4700::1')).toEqual(['2606:4700::1'])
   })
+
+  it('清洗 #备注 与 [IPv6]:端口 写法', () => {
+    expect(readIpFile('1.2.3.4:443#SJC_12_33.5')).toEqual(['1.2.3.4'])
+    expect(readIpFile('[2606:4700::1]:443#LAX')).toEqual(['2606:4700::1'])
+    expect(readIpFile('2606:4700::1#备注')).toEqual(['2606:4700::1'])
+  })
 })

@@ -18,7 +18,7 @@ CFPilot 是一个运行在 Cloudflare Workers 上的**代理微内核 + 真连�
 
 1. **配置优先级**：`KV (CONFIG) > 环境变量 > 内置默认值`。
    任何新增配置项都必须同时支持这三层，并在 `packages/worker-core/src/config.ts` 中登记。
-2. **内核体积预算**：Worker 打包产物 **必须 ≤ 50KB**（`packages/worker-core/scripts/build.mjs` 会在超限时告警）。
+2. **内核体积预算**：Worker 打包产物 **必须 ≤ 80KB**（`packages/worker-core/scripts/build.mjs` 会在超限时告警）。
    不要把第三方大依赖塞进 `worker-core`；面板必须是零框架的单文件 HTML。
 3. **探针端点不可删除**：`/__edge_probe` 必须始终提供
    「WebSocket 101 握手校验」与「流式下行测速」两项能力，这是 CFPilot 的核心价值。

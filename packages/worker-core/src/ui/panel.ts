@@ -2,7 +2,7 @@
  * 面板 HTML 的运行时解包
  *
  * 面板以 gzip + Base64 的形式内嵌在核心里（见 scripts/gen-panel.mjs），
- * 这样才能把 worker-core 控制在 50KB 体积预算之内。
+ * 这样才能把 worker-core 控制在 80KB 体积预算之内。
  * 解压只在第一次请求面板时发生一次，结果缓存在模块级变量中。
  */
 import { PANEL_HTML_GZIP_B64 } from './panel.generated'

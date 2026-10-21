@@ -15,3 +15,12 @@ coverage/
 packages/deploy-wizard/assets/*.map
 packages/worker-core/src/ui/panel.generated.ts
 .freebuff/
+
+# 本机部署诊断与临时产物
+/tmp/
+/packages/worker-core/.bisect*/
+/packages/worker-core/.pages-*/
+/packages/worker-core/.split-*/
+/packages/worker-core/.merge-single/
+/packages/worker-core/.dev-remote/
+/packages/worker-core/dist-wr/

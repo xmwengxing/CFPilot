@@ -12,6 +12,11 @@ export interface Env {
   PANEL_PATH?: string
   /** 长期扫描回填令牌 */
   SCANNER_TOKEN?: string
+  /**
+   * 数据面域名（拆分部署时使用）。
+   * 控制面生成订阅时用它作为节点地址；不设则回落到 subDomain 或请求域名。
+   */
+  DATA_HOST?: string
   /** VLESS UUID 覆盖值 */
   UUID?: string
   /** 出站代理 IP 池 */
@@ -55,6 +60,23 @@ export interface UserConfig {
   addApi: string
   /** L4 远程 CSV 池 */
   addCsv: string
+  /** 是否启用内置「官方优选 IP」来源 */
+  poolOfficial: boolean
+  /** 官方优选 IP 生成数量 */
+  officialCount: number
+  /** 是否启用内置「优选域名」来源 */
+  poolDomain: boolean
+  /** 优选域名取样数量 */
+  domainCount: number
+  /** 是否启用「手动优选 IP」（本地真连接池 + ADD 文本） */
+  poolManual: boolean
+  /**
+   * 国家 / 地区筛选（逗号分隔的国家代码，如 `HK,JP,SG`；空 = 不限）。
+   *
+   * 只能作用于「已知机房」的条目：Cloudflare 的 anycast IP 本身没有国家归属，
+   * 真正落地到哪个机房由就近路由决定。随机生成的官方 IP 机房未知，会被排除。
+   */
+  poolCountries: string
   /** CSV 最低下载速度阈值（MB/s），0 表示不限制 */
   dls: number
   /** CSV 最高延迟阈值（ms），0 表示不限制 */
@@ -105,9 +127,16 @@ export interface NodeEntry {
   latency: number
   /** 下载速度（MB/s） */
   speed: number
-  /** 来源层级：local > add > addapi > addcsv */
-  source: 'local' | 'add' | 'addapi' | 'addcsv'
+  /**
+   * 来源：manual 侧（local / add）、official（内置随机）、domain（内置域名库）、远程（addapi / addcsv）
+   */
+  source: NodeSource
+  /** 所属国家代码（由 colo 反推；未知为空串） */
+  country?: string
 }
+
+/** 节点来源标识 */
+export type NodeSource = 'local' | 'add' | 'official' | 'domain' | 'addapi' | 'addcsv'
 
 /** 订阅输出格式 */
 export type SubFormat = 'base64' | 'clash' | 'singbox' | 'v2ray'

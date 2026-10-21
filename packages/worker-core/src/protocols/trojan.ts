@@ -98,3 +98,56 @@ export async function parseTrojan(
     payload: stream.release(),
   }
 }
+
+export interface TrojanBufferResult {
+  header: TrojanHeader
+  consumed: number
+}
+
+/** 同步解析（见 vless.ts 中 parseVlessBuffer 的说明） */
+export function parseTrojanBuffer(
+  bytes: Uint8Array,
+  expectedPassword: string
+): TrojanBufferResult | null {
+  if (bytes.byteLength < 58) return null
+  const expectedHash = trojanPasswordHash(expectedPassword)
+  const provided = new TextDecoder().decode(bytes.subarray(0, 56)).trim().toLowerCase()
+  if (provided !== expectedHash) return null
+  if (bytes[56] !== 0x0d || bytes[57] !== 0x0a) return null
+  let offset = 58
+  if (bytes.byteLength < offset + 2) return null
+  const command = bytes[offset]!
+  offset += 1
+  const addressType = bytes[offset]!
+  offset += 1
+
+  let hostname = ''
+  if (addressType === 1) {
+    if (bytes.byteLength < offset + 4) return null
+    hostname = `${bytes[offset]}.${bytes[offset + 1]}.${bytes[offset + 2]}.${bytes[offset + 3]}`
+    offset += 4
+  } else if (addressType === 3) {
+    if (bytes.byteLength < offset + 1) return null
+    const len = bytes[offset]!
+    offset += 1
+    if (bytes.byteLength < offset + len) return null
+    hostname = new TextDecoder().decode(bytes.subarray(offset, offset + len))
+    offset += len
+  } else if (addressType === 4) {
+    if (bytes.byteLength < offset + 16) return null
+    const parts: string[] = []
+    for (let i = 0; i < 8; i++) parts.push(((bytes[offset + i * 2]! << 8) | bytes[offset + i * 2 + 1]!).toString(16))
+    hostname = parts.join(':')
+    offset += 16
+  } else {
+    return null
+  }
+
+  if (bytes.byteLength < offset + 4) return null
+  const port = (bytes[offset]! << 8) | bytes[offset + 1]!
+  offset += 2
+  if (bytes[offset] !== 0x0d || bytes[offset + 1] !== 0x0a) return null
+  offset += 2
+
+  return { header: { command, port, hostname, addressType }, consumed: offset }
+}

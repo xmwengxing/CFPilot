@@ -11,8 +11,10 @@
 import type { UserConfig } from '../types'
 import { ByteStream } from './stream'
 import { parseVless, VLESS_COMMAND_TCP } from './vless'
-import { dial, type DialResult, type ProxyEndpoint } from '../outbound/dial'
+import type { DialResult, ProxyEndpoint } from '../outbound/dial'
 import { relay } from '../budget'
+
+import { dial } from '../outbound/dial'
 
 export interface XhttpResult {
   response: Response

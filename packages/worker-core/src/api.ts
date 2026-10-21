@@ -17,11 +17,14 @@ import {
 import {
   LOCAL_IPS_KEY,
   SCANNER_TOKEN_KEY,
+  loadDomainLibrary,
   loadLocalIps,
   mergeConfig,
   saveConfig,
+  saveDomainLibrary,
 } from './config'
 import { collectNodes, parseLocalList } from './sub-engine'
+import { CF_IPV4_CIDRS, COUNTRY_NAMES, PREFERRED_DOMAINS, SUPPORTED_COUNTRIES } from './data/pools'
 import { randomHex } from './util'
 import { CpuBudget } from './budget'
 
@@ -173,13 +176,45 @@ export async function handleApi(
   if (path === '/nodes' && method === 'GET') {
     const budget = new CpuBudget(8)
     const localIps = await loadLocalIps(store)
-    const result = await collectNodes(config, localIps, { budget })
+    const domainPool = await loadDomainLibrary(store)
+    const result = await collectNodes(config, localIps, {
+      budget,
+      domainPool: domainPool.length > 0 ? domainPool : undefined,
+    })
     return json({
       ok: true,
       count: result.nodes.length,
       nodes: result.nodes.slice(0, 200),
+      groups: result.groups.map((g) => ({ key: g.key, name: g.name, count: g.entries.length })),
       stats: result.stats,
     })
+  }
+
+  // ---- 优选库元信息 / 自定义域名库 ----
+  if (path === '/pool/meta' && method === 'GET') {
+    const custom = await loadDomainLibrary(store)
+    return json({
+      ok: true,
+      countries: SUPPORTED_COUNTRIES.map((code) => ({ code, name: COUNTRY_NAMES[code] ?? code })),
+      limits: { officialCount: 200, domainCount: 100 },
+      builtin: {
+        cidrs: CF_IPV4_CIDRS.length,
+        domains: PREFERRED_DOMAINS.length,
+      },
+      customDomains: custom,
+    })
+  }
+
+  if (path === '/pool/library' && method === 'PUT') {
+    let body: { domains?: unknown }
+    try {
+      body = (await request.json()) as { domains?: unknown }
+    } catch {
+      return error('请求体解析失败', 400)
+    }
+    const list = Array.isArray(body.domains) ? body.domains.map((v) => String(v)) : []
+    await saveDomainLibrary(store, list)
+    return json({ ok: true, count: list.filter((d) => d.trim()).length })
   }
 
   if (path === '/scanner-token' && method === 'POST') {

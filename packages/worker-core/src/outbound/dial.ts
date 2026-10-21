@@ -1,23 +1,17 @@
 /**
- * 出站拨号：
- *  - 直连（可选 NAT64 兜底）
- *  - ProxyIP / SOCKS5 / HTTP 代理池故障转移
- *  - TCP_CONCURRENT_DIAL 并发竞速
+ * 出站拨号：直连（可选 NAT64 兜底）/ ProxyIP / SOCKS5 / HTTP / 并发竞速。
+ *
+ * `cloudflare:sockets` 用**静态 import 且必须落在文件首字节**（见 build.mjs 的 import 归一化）。
+ * 真机实测：非字面量的动态 import 会让边缘 isolate 在实例化阶段失败（1101 且无调用日志）。
  */
 import { connect } from 'cloudflare:sockets'
 import { socks5Connect } from './socks5'
 import { httpConnect } from './http-proxy'
 import { isIpv4 } from '../protocols/address'
+import type { ProxyEndpoint } from './proxy-pool'
 
-export type ProxyKind = 'socks5' | 'http'
-
-export interface ProxyEndpoint {
-  host: string
-  port: number
-  kind: ProxyKind
-  username?: string
-  password?: string
-}
+export type { ProxyKind, ProxyEndpoint } from './proxy-pool'
+export { parseProxyEntry, parseProxyPool } from './proxy-pool'
 
 export interface DialOptions {
   hostname: string
@@ -41,51 +35,6 @@ export interface DialResult {
 }
 
 const DEFAULT_TIMEOUT_MS = 8000
-
-/** 解析代理条目：支持 `socks5://host:port`、`http://host:port`、`host:port` */
-export function parseProxyEntry(entry: string, defaultKind: ProxyKind = 'socks5'): ProxyEndpoint | null {
-  const text = entry.trim()
-  if (!text) return null
-  let kind = defaultKind
-  let rest = text
-  const schemeMatch = /^([a-z0-9+.-]+):\/\//i.exec(text)
-  if (schemeMatch) {
-    const scheme = schemeMatch[1]!.toLowerCase()
-    rest = text.slice(schemeMatch[0].length)
-    if (scheme === 'socks5' || scheme === 'socks' || scheme === 'socks5h') kind = 'socks5'
-    else if (scheme === 'http' || scheme === 'https') kind = 'http'
-  }
-  const at = rest.lastIndexOf('@')
-  let credentials: { username?: string; password?: string } = {}
-  if (at >= 0) {
-    const cred = rest.slice(0, at)
-    rest = rest.slice(at + 1)
-    const idx = cred.indexOf(':')
-    if (idx >= 0) {
-      credentials = { username: cred.slice(0, idx), password: cred.slice(idx + 1) }
-    } else {
-      credentials = { username: cred }
-    }
-  }
-  const portIndex = rest.lastIndexOf(':')
-  if (portIndex < 0) return null
-  const host = rest.slice(0, portIndex).replace(/^\[|\]$/g, '')
-  const port = Number(rest.slice(portIndex + 1))
-  if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) return null
-  return { host, port, kind, ...credentials }
-}
-
-/** 解析代理池文本（换行 / 逗号 / 空格分隔） */
-export function parseProxyPool(text: string, defaultKind: ProxyKind = 'socks5'): ProxyEndpoint[] {
-  const out: ProxyEndpoint[] = []
-  for (const raw of text.split(/[\n,;]+/)) {
-    const entry = raw.trim()
-    if (!entry) continue
-    const parsed = parseProxyEntry(entry, defaultKind)
-    if (parsed) out.push(parsed)
-  }
-  return out
-}
 
 /** IPv4 → NAT64 合成地址 */
 export function nat64Address(ipv4: string, prefix: string): string | null {

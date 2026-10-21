@@ -34,6 +34,50 @@ async function withMockServer(
 }
 
 describe('CloudflareClient', () => {
+  const uploadOptions = {
+    mainModule: 'worker.js',
+    code: 'export default { fetch() { return new Response("ok") } }',
+    compatibilityDate: '2026-01-01',
+    bindings: [],
+  }
+
+  for (const operation of ['json', 'settings', 'upload'] as const) {
+    it(`${operation} 不得把 HTTP 200 的 API 失败当成成功`, async () => {
+      await withMockServer(
+        () => ({
+          status: 200,
+          body: { success: false, errors: [{ code: 8000119, message: 'Project blocked' }] },
+        }),
+        async (base) => {
+          const client = new CloudflareClient({ token: 'abc', apiBase: base })
+          const action = operation === 'json'
+            ? client.listAccounts()
+            : operation === 'settings'
+              ? client.patchScriptSettings('acc', 'demo', { observability: { enabled: true } })
+              : client.uploadScript('acc', 'demo', uploadOptions)
+          await expect(action).rejects.toMatchObject({
+            name: 'CloudflareError', status: 200, code: 8000119, message: 'Project blocked',
+          })
+        }
+      )
+    })
+
+    it(`${operation} 拒绝 HTTP 200 的非 JSON 响应`, async () => {
+      await withMockServer(
+        () => ({ status: 200, body: '<html>upstream error</html>' }),
+        async (base) => {
+          const client = new CloudflareClient({ token: 'abc', apiBase: base })
+          const action = operation === 'json'
+            ? client.listAccounts()
+            : operation === 'settings'
+              ? client.patchScriptSettings('acc', 'demo', {})
+              : client.uploadScript('acc', 'demo', uploadOptions)
+          await expect(action).rejects.toBeInstanceOf(CloudflareError)
+        }
+      )
+    })
+  }
+
   it('解析成功响应中的 result', async () => {
     await withMockServer(
       () => ({ status: 200, body: { success: true, result: { id: 'tok', status: 'active' } } }),

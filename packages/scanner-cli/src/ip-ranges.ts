@@ -216,7 +216,11 @@ export function expandCidrs(cidrs: string[], options: IpRangeOptions = {}): stri
   return out
 }
 
-/** 读取本地 IP 列表文件（每行一个 IP 或 IP:端口） */
+/**
+ * 读取本地 IP 列表文件（每行一个 IP / IP:端口）
+ *
+ * 兼容面板 ADD 池的写法：`IP:Port#备注`、`[IPv6]:Port#备注`、CSV 整行。
+ */
 export function readIpFile(text: string): string[] {
   const out: string[] = []
   for (const raw of text.split(/\r?\n/)) {
@@ -224,6 +228,16 @@ export function readIpFile(text: string): string[] {
     if (!line || line.startsWith('#')) continue
     // 去掉 CSV 行里的其它列
     if (line.includes(',')) line = line.split(',')[0]!.trim()
+    // 去掉 #备注
+    const hash = line.indexOf('#')
+    if (hash >= 0) line = line.slice(0, hash).trim()
+    if (!line) continue
+    // [IPv6]:端口#备注 → IPv6
+    const bracket = /^\[([^\]]+)\](?::\d+)?$/.exec(line)
+    if (bracket) {
+      out.push(bracket[1]!)
+      continue
+    }
     if (line.includes(':') && line.split(':').length > 2) {
       // IPv6
       out.push(line)

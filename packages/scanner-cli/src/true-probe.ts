@@ -38,7 +38,8 @@ export function probeWs101(
   ip: string,
   port: number,
   host: string,
-  timeoutMs = 3000
+  timeoutMs = 3000,
+  path = '/__edge_probe'
 ): Promise<WsProbeResult> {
   return new Promise((resolve) => {
     const started = Date.now()
@@ -59,7 +60,7 @@ export function probeWs101(
     }
 
     const request = [
-      `GET /__edge_probe HTTP/1.1`,
+      `GET ${path} HTTP/1.1`,
       `Host: ${host}`,
       `Upgrade: websocket`,
       `Connection: Upgrade`,
@@ -124,7 +125,8 @@ export function measureDownload(
   port: number,
   host: string,
   bytes: number,
-  timeoutMs = 12000
+  timeoutMs = 12000,
+  path = '/__edge_probe'
 ): Promise<DownloadResult> {
   return new Promise((resolve) => {
     const started = Date.now()
@@ -146,7 +148,7 @@ export function measureDownload(
     }
 
     const request = [
-      `GET /__edge_probe?bytes=${bytes} HTTP/1.1`,
+      `GET ${path}?bytes=${bytes} HTTP/1.1`,
       `Host: ${host}`,
       `User-Agent: ${USER_AGENT}`,
       `Accept: */*`,
@@ -191,6 +193,12 @@ export function measureDownload(
       finish({ ok: false, bytes: received, speedMBps: 0, error: err.message })
     })
 
+    const settle = (): void => {
+      if (settled) return
+      const seconds = Math.max(0.001, (Date.now() - started) / 1000)
+      finish({ ok: received > 0, bytes: received, speedMBps: received / 1024 / 1024 / seconds })
+    }
+
     socket.on('data', (chunk: Buffer) => {
       if (headerEnd < 0) {
         buffer += chunk.toString('latin1')
@@ -203,9 +211,13 @@ export function measureDownload(
         const body = Buffer.from(buffer, 'latin1').subarray(headerEnd)
         received += body.byteLength
         headerEnd = 0
-        return
+      } else {
+        received += chunk.byteLength
       }
-      received += chunk.byteLength
+      if (received >= bytes) settle()
     })
+
+    socket.on('end', settle)
+    socket.on('close', settle)
   })
 }

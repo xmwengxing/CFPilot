@@ -48,7 +48,14 @@ html = html
   .trim()
 
 // 3) gzip + Base64
+//
+// 注意：zlib 写入的 gzip 头里第 10 个字节是「操作系统标识」
+// （Windows 为 0x0a，Linux/macOS 为 0x03）。这个字节与内容无关，
+// 却会让同一份源码在不同平台上构建出字节不同的产物，
+// 导致 CI 里「构建产物与仓库一致」的校验误报。
+// 这里统一改写为 0xff（unknown），让产物跨平台完全一致。
 const compressed = gzipSync(Buffer.from(html, 'utf8'), { level: 9 })
+compressed[9] = 0xff
 const base64 = compressed.toString('base64')
 
 const banner = `// 由 packages/worker-core/scripts/gen-panel.mjs 自动生成，请勿手工编辑。\n`

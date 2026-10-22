@@ -29,6 +29,14 @@ CFPilot 的图形化部署与维护工具。功能与命令行版 `cfpilot-deplo
 
 勾选「强制重新部署」可忽略「版本相同则跳过」。
 
+### 更新本程序
+
+「说明」页有「检查更新」：从 GitHub Releases 查最新版本，
+点「下载并安装」后会下载便携版 exe 并在替换后重启程序。
+
+> Windows 首次运行时 SmartScreen 可能提示「已阻止无法识别的应用」，
+> 点「更多信息」→「仍要运行」即可。安装版**不需要管理员权限**。
+
 ## 安全
 
 API Token 与面板密码只写在本机 `~/.cfpilot-gui/secrets.json`：
@@ -65,6 +73,9 @@ npm run dist
 ```
 
 产物在 `packages/gui/release/`。
+
+> 打包需要 `TEMP` 指向可写目录（NSIS 的 makensis 需要创建临时文件），
+> 且 npm 的 allowScripts 策略需放行 electron-builder 的子进程安装。
 
 ## License
 

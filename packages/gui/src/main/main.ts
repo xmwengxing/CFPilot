@@ -20,6 +20,7 @@ import {
   type DeployParams,
   type ScanParams,
 } from './bridge'
+import { checkForUpdate, downloadUpdate, applyUpdate, cleanupUpdateFiles } from './updater'
 
 // 产物是 CJS，直接用 __dirname（不要用 import.meta.url，esbuild 会告警）
 const here: string = __dirname
@@ -81,6 +82,15 @@ ipcMain.handle('cred:state', () => credentialsState())
 
 ipcMain.handle('scan:run', (_event, params: ScanParams) => runScanJob(mainWindow, params))
 ipcMain.handle('account:detect', () => detectAccount(mainWindow))
+
+ipcMain.handle('update:check', () => checkForUpdate())
+ipcMain.handle('update:download', async (_event, url: string) => {
+  const file = await downloadUpdate(url, mainWindow, (received, total) => {
+    mainWindow?.webContents.send('update-progress', { received, total })
+  })
+  return { ok: true, file }
+})
+ipcMain.handle('update:apply', async (_event, file: string) => applyUpdate(file, mainWindow))
 
 ipcMain.handle('app:openExternal', (_event, url: string) => {
   // 仅放行 https，避免被构造出 file:// / 其他协议

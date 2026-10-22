@@ -463,6 +463,19 @@
           </div>
 
           <div class="card">
+            <h2>⬆️ 检查更新 <span class="badge info" id="updateBadge">未检查</span></h2>
+            <p class="desc">从 GitHub Releases 获取最新版本并就地替换本程序。</p>
+            <div class="btn-row">
+              <button class="btn btn-ghost" id="btnCheckUpdate">检查更新</button>
+              <button class="btn btn-primary" id="btnUpdate" disabled>下载并安装</button>
+            </div>
+            <p class="tip" id="updateHint" style="margin-top:10px">
+              没有新版本时会提示当前版本。更新会在你确认后重启程序完成替换。
+            </p>
+            <div class="progress" id="updateProgressWrap" hidden><i id="updateBar"></i></div>
+          </div>
+
+          <div class="card">
             <h2>🔗 相关链接</h2>
             <div class="links">
               <div><a href="#" data-url="https://dash.cloudflare.com/profile/api-tokens">创建 API Token</a></div>

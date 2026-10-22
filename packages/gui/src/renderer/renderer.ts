@@ -207,6 +207,63 @@
     })
   }
 
+  /* ---------------- 应用内更新 ---------------- */
+  let pendingUpdateUrl = ''
+
+  function bindUpdater(): void {
+    document.getElementById('btnCheckUpdate')!.addEventListener('click', async () => {
+      const badge = document.getElementById('updateBadge')!
+      const hint = document.getElementById('updateHint')!
+      badge.textContent = '检查中…'
+      badge.className = 'badge info'
+      try {
+        const result = await window.cfpilot.checkUpdate()
+        if (result.error) {
+          badge.textContent = '检查失败'
+          badge.className = 'badge err'
+          hint.textContent = '检查失败：' + result.error
+          return
+        }
+        if (!result.hasUpdate) {
+          badge.textContent = '已是最新'
+          badge.className = 'badge ok'
+          hint.textContent = '当前版本 ' + result.current + '，没有新版本。'
+          ;(document.getElementById('btnUpdate') as HTMLButtonElement).disabled = true
+          return
+        }
+        badge.textContent = '有新版 ' + (result.latest ?? '')
+        badge.className = 'badge warn'
+        hint.textContent = '发现新版本 ' + result.latest + '（当前 ' + result.current + '）。点击「下载并安装」。'
+        pendingUpdateUrl = result.downloadUrl ?? ''
+        ;(document.getElementById('btnUpdate') as HTMLButtonElement).disabled = !pendingUpdateUrl
+      } catch (err) {
+        badge.textContent = '检查失败'
+        badge.className = 'badge err'
+        hint.textContent = '检查失败：' + (err instanceof Error ? err.message : String(err))
+      }
+    })
+
+    document.getElementById('btnUpdate')!.addEventListener('click', async () => {
+      if (!pendingUpdateUrl) { log('请先检查更新', 'warn'); return }
+      if (!confirm('将下载新版本并在替换后重启程序，继续？')) return
+      const wrap = document.getElementById('updateProgressWrap')!
+      const bar = document.getElementById('updateBar')!
+      wrap.hidden = false
+      bar.style.width = '0%'
+      log('开始下载新版本…')
+      try {
+        const res = await window.cfpilot.downloadUpdate(pendingUpdateUrl)
+        bar.style.width = '100%'
+        log('下载完成，正在替换并重启…', 'ok')
+        const applied = await window.cfpilot.applyUpdate(res.file)
+        if (!applied.ok) log('替换失败：' + (applied.error ?? ''), 'err')
+      } catch (err) {
+        log('更新失败：' + (err instanceof Error ? err.message : String(err)), 'err')
+        wrap.hidden = true
+      }
+    })
+  }
+
   /* ---------------- 复制 ---------------- */
   function copy(text: string): void {
     if (!text) { log('没有可复制的内容', 'warn'); return }
@@ -253,6 +310,15 @@
     })
 
     window.cfpilot.onScanResult((payload) => renderScanResult(payload))
+
+    window.cfpilot.onUpdateProgress((p) => {
+      const wrap = document.getElementById('updateProgressWrap')
+      const bar = document.getElementById('updateBar')
+      if (!wrap || !bar) return
+      wrap.hidden = false
+      const pct = p.total > 0 ? Math.round((p.received / p.total) * 100) : 0
+      bar.style.width = pct + '%'
+    })
   }
 
   /* ---------------- 启动 ---------------- */
@@ -277,6 +343,7 @@
     bindCredentials()
     bindDeploy()
     bindScan()
+    bindUpdater()
     bindPush()
     await refreshCredState()
     log('CFPilot GUI 已就绪')

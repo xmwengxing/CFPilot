@@ -92,6 +92,17 @@ interface Window {
     onLog(cb: (entry: CFPilotLogEntry) => void): () => void
     onDeployStatus(cb: (status: CFPilotDeployStatus) => void): () => void
     onScanResult(cb: (payload: CFPilotScanResult) => void): () => void
+    onUpdateProgress(cb: (p: { received: number; total: number }) => void): () => void
+    checkUpdate(): Promise<{
+      current: string
+      latest: string | null
+      hasUpdate: boolean
+      downloadUrl: string | null
+      notes: string
+      error?: string
+    }>
+    downloadUpdate(url: string): Promise<{ ok: boolean; file: string }>
+    applyUpdate(file: string): Promise<{ ok: boolean; error?: string }>
   }
 }
 

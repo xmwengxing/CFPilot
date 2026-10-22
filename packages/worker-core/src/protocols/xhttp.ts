@@ -56,7 +56,52 @@ export async function handleXhttp(
   // 下行：出站 → 响应体
   void relay(dialResult.readable, writable)
 
-  return new Response(readable, {
+  // VLESS 响应头：版本(1) + Addons 长度(1) + Addons（原样回显请求里的 Addons）。
+  // Xray 客户端要求先读到这个头才认为入站已建立，缺失时会把后续下行数据当作协议错误丢弃。
+  const addons = parsed.header.addons
+  if (addons.byteLength > 255) {
+    return new Response('Addons 长度超出 VLESS 协议上限', { status: 400 })
+  }
+  const header = new Uint8Array(2 + addons.byteLength)
+  header[0] = parsed.header.version
+  header[1] = addons.byteLength
+  header.set(addons, 2)
+
+  // 把响应头与下行流拼接：头部先行，下行数据随后。
+  const headerStream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(header)
+      controller.close()
+    },
+  })
+
+  const combined = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const headerReader = headerStream.getReader()
+      for (;;) {
+        const { done, value } = await headerReader.read()
+        if (done) break
+        if (value) controller.enqueue(value)
+      }
+      headerReader.releaseLock()
+      const downReader = readable.getReader()
+      try {
+        for (;;) {
+          const { done, value } = await downReader.read()
+          if (done) break
+          if (value) controller.enqueue(value)
+        }
+      } finally {
+        downReader.releaseLock()
+        controller.close()
+      }
+    },
+    cancel(reason) {
+      void readable.cancel(reason)
+    },
+  })
+
+  return new Response(combined, {
     status: 200,
     headers: {
       'Content-Type': 'text/event-stream',

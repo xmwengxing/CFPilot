@@ -120,6 +120,19 @@ async function dialViaProxy(
   proxy: ProxyEndpoint
 ): Promise<DialResult> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+
+  // ProxyIP 语义：连到指定地址，但请求的目标仍是原始 hostname:port。
+  // 这是 BPB / edgetunnel 等项目的通用做法，用于让出站流量落在指定的 Cloudflare 网段。
+  if (proxy.kind === 'direct') {
+    const socket = await connectWithTimeout(proxy.host, proxy.port, timeoutMs)
+    return {
+      readable: socket.readable,
+      writable: socket.writable,
+      via: 'direct',
+      endpoint: `${proxy.host}:${proxy.port}`,
+    }
+  }
+
   const socket = await connectWithTimeout(proxy.host, proxy.port, timeoutMs)
   try {
     if (proxy.kind === 'http') {

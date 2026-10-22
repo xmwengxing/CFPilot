@@ -87,37 +87,51 @@ npx -y cfpilot-scanner@latest --host "你的Worker域名" --token "面板里生�
 
 ---
 
-## ⚠️ 部署必须拆成两个项目（否则第二次部署会被封）
+## ⚠️ 部署现状：单项目更新尚未打通（临时方案：拆成两个项目）
 
-Cloudflare 的滥用分类器会把「面板 + 订阅 + 探针 + 代理」的完整组合判定为代理服务，
-导致 Pages 项目在**第二次部署**时返回 `8000119 blocked`。实测结论：
+**这不是 Cloudflare 的硬性要求，是当前唯一实测可用的安排。**
 
-| 部署内容 | 能否原地更新 |
+2026-10-22 的受控复现结果（独立测试项目，非生产账号）：
+
+| 部署内容 | 结果 |
 |---|---|
-| 控制面（面板 + 订阅 + 探针，约 47KB，不含出站拨号） | ✅ 可以 |
-| 数据面（代理入站，单独部署） | ✅ 可以 |
-| 两者合并成一个 bundle | ❌ 第二次部署必被封 |
+| 合并包 → Pages，第一次部署 | ✅ 成功 |
+| 合并包 → Pages，第二次部署 | ❌ HTTP 400 `8000119` blocked |
+| 控制面 / 数据面分别部署 | ✅ 各自都能原地更新 |
 
-所以请部署**两个** Cloudflare Pages 项目：
+第二次部署返回的原文是 `Your Pages project has been blocked. Contact abusereply@cloudflare.com.`。
+Cloudflare 未说明具体触发原因，因此**不能断定是哪段代码、哪条规则导致的**。
+在官方给出说明前，任何「改打包方式即可恢复单项目」的说法都没有证据支持。
+
+详见 [部署诊断状态](docs/cloudflare-deployment-diagnosis.md)。
+
+### 临时方案：两个 Pages 项目
 
 1. **数据面**：只做代理转发，绑你的自定义域名（客户端连这个域名）
 2. **控制面**：面板 + 订阅，可以用 `*.pages.dev` 或另一个域名
 
 数据面需要把配置写入 KV 的 `config` 键，并把控制面的 `DATA_HOST` 指向数据面域名。
+两边共用同一个 KV，因此面板改配置对数据面立即生效。
 
-## 部署到 Cloudflare Pages（实测推荐）
+> ⚠️ 拆分只是**临时可用**，不是架构结论。等 Cloudflare 说明封禁原因后应重新评估单项目部署。
 
-真机验证结论：**同一个 `dist/worker.js`，走 Workers 脚本通道会被 Cloudflare 拒绝实例化
-（Error 1101，请求根本不进入调用期），走 Pages `_worker.js` 通道则完全正常。**
-edgetunnel / cfnew / BPB / CFNext 全部选择 Pages 也是同一个原因。
+## 部署到 Cloudflare Pages
 
-### 三条必须遵守的规则（都是踩出来的）
+edgetunnel / cfnew / BPB / CFNext 都选择 Pages 作为主通道，本项目同样以 Pages 为推荐通道。
+
+> 关于 Workers 脚本通道：早期曾观察到合并包在 zone 路由上「前几次正常、数分钟后持续 1101」，
+> 而一个 114 字节的静态脚本在 `*.workers.dev` 上也返回 1101、在 zone 路由上却正常。
+> 因此 1101 既可能来自本项目代码，也可能来自平台侧限制，**不能仅凭 1101 断定代码有错**。
+> 该问题尚未定位，详见 [部署诊断状态](docs/cloudflare-deployment-diagnosis.md)。
+
+### 三条实测规则
 
 1. **顺序不能反**：先建项目 → 设环境变量 / 绑 KV → **最后才部署**。
    Pages 的绑定与变量只对**之后的**部署生效，先部署再配置等于白配。
-2. **一个项目只有第一次部署能成功**。第二次会返回
-   `8000119 Your Pages project has been blocked`（滥用审查）。
-   升级内核时请**新建一个项目**（名字随机），不要在旧项目上重复部署。
+2. **合并包在同一个项目上通常只能成功部署一次**，第二次会返回
+   `8000119 Your Pages project has been blocked`。
+   因此升级内核时请**新建一个项目**（名字随机），不要在旧项目上重复部署。
+   这也是上面推荐拆分部署的原因。
 3. 带哈希的部署 URL（`<hash>.<project>.pages.dev`）需要认证，
    请始终使用项目主域 `<project>.pages.dev` 或已绑定的自定义域名。
 

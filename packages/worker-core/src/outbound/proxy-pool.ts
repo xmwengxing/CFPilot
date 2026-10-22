@@ -6,7 +6,7 @@
  * sockets 只在真正建立连接时才被动态加载。
  */
 
-export type ProxyKind = 'socks5' | 'http'
+export type ProxyKind = 'direct' | 'socks5' | 'http'
 
 export interface ProxyEndpoint {
   host: string
@@ -16,8 +16,15 @@ export interface ProxyEndpoint {
   password?: string
 }
 
-/** 解析单条代理条目：支持 `socks5://host:port`、`http://host:port`、`host:port` */
-export function parseProxyEntry(entry: string, defaultKind: ProxyKind = 'socks5'): ProxyEndpoint | null {
+/**
+ * 解析单条代理条目：支持 `socks5://host:port`、`http://host:port`、`host:port`。
+ *
+ * `defaultKind` 决定**没有协议前缀**的裸 `host:port` 怎么解释：
+ *   - 用于 PROXYIP 配置时应传 'direct'（BPB / edgetunnel 的 ProxyIP 语义是
+ *     「连到这个地址并复用其 SNI 落到目标」，不是 SOCKS5 握手）
+ *   - 用于 SOCKS5 配置时应传 'socks5'
+ */
+export function parseProxyEntry(entry: string, defaultKind: ProxyKind = 'direct'): ProxyEndpoint | null {
   const text = entry.trim()
   if (!text) return null
   let kind = defaultKind
@@ -50,7 +57,7 @@ export function parseProxyEntry(entry: string, defaultKind: ProxyKind = 'socks5'
 }
 
 /** 解析代理池文本（换行 / 逗号 / 分号分隔） */
-export function parseProxyPool(text: string, defaultKind: ProxyKind = 'socks5'): ProxyEndpoint[] {
+export function parseProxyPool(text: string, defaultKind: ProxyKind = 'direct'): ProxyEndpoint[] {
   const out: ProxyEndpoint[] = []
   for (const raw of text.split(/[\n,;]+/)) {
     const entry = raw.trim()

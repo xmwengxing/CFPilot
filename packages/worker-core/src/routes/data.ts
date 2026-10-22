@@ -16,7 +16,9 @@ import { loadDataPlaneConfig } from './control'
 /** 汇总出站代理池 */
 export function collectProxies(config: UserConfig): ProxyEndpoint[] {
   const proxies: ProxyEndpoint[] = []
-  proxies.push(...parseProxyPool(config.proxyIp, 'socks5'))
+  // PROXYIP 是「指定落地地址」，不是 SOCKS5 代理；裸 host:port 必须按直连语义解析。
+  // 历史上这里固定传 'socks5'，导致 BPB 风格的 ProxyIP 配置被当成 SOCKS5 握手而全部失败。
+  proxies.push(...parseProxyPool(config.proxyIp, 'direct'))
   proxies.push(...parseProxyPool(config.socks5, 'socks5'))
   proxies.push(...parseProxyPool(config.httpProxy, 'http'))
   return proxies

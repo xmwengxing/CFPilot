@@ -29,9 +29,12 @@ async function startServer(
   return {
     baseUrl: `http://127.0.0.1:${port}`,
     close: async () => {
-      server.closeAllConnections()
+      // 先注册监听再关闭：closeAllConnections() 可能让 'close' 提前触发，
+      // 之后再注册 once('close') 会永远等不到（测试挂起）。
+      const closed = once(server, 'close')
+      server.closeAllConnections?.()
       server.close()
-      await once(server, 'close')
+      await closed
     },
   }
 }

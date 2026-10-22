@@ -144,6 +144,53 @@ async function loadBundle(fileName: string): Promise<string> {
   )
 }
 
+/**
+ * 校验部署参数。
+ *
+ * 重点是路径类参数：MSYS / Git-Bash 会把以 `/` 开头的命令行参数
+ * 转换成 Windows 路径（例如 `--panel-path /p-abc` 变成
+ * `C:/Users/.../bash-win32-x64/p-abc`）。这种值一旦写进 Pages 环境变量，
+ * 面板路径就永久错乱且难以排查。因此这里显式拒绝。
+ */
+function validateOptions(options: PagesSplitDeployOptions): string[] {
+  const problems: string[] = []
+
+  const checkPath = (label: string, value: string): void => {
+    if (!value) return
+    // 合法路径：单个前导斜杠 + 小写字母数字连字符，不含空格与冒号
+    if (!/^\/[a-z0-9][a-z0-9-]{0,63}$/.test(value)) {
+      problems.push(
+        `${label} 含非法字符：${JSON.stringify(value)}。` +
+          '若在 Git-Bash / MSYS 下传参，/ 开头的参数会被转换成 Windows 路径，' +
+          '请改用 --panel-path=p-abc 形式，或设置 MSYS_NO_PATHCONV=1。'
+      )
+    }
+  }
+
+  checkPath('PANEL_PATH', options.panelPath)
+  checkPath('WS 路径', options.wsPath)
+
+  // UUID 与密码同样不该含路径分隔符
+  if (/:/.test(options.uuid)) {
+    problems.push(`UUID 含非法字符：${JSON.stringify(options.uuid)}`)
+  }
+  if (/:/.test(options.trojanPassword)) {
+    problems.push(`Trojan 密码含非法字符：${JSON.stringify(options.trojanPassword)}`)
+  }
+
+  // 项目名只允许小写字母数字与连字符（Pages 要求）
+  for (const [label, name] of [
+    ['控制面项目名', options.controlProject],
+    ['数据面项目名', options.dataProject],
+  ] as const) {
+    if (!/^[a-z0-9][a-z0-9-]{0,57}$/.test(name)) {
+      problems.push(`${label} 含非法字符：${JSON.stringify(name)}（只允许小写字母、数字、连字符）`)
+    }
+  }
+
+  return problems
+}
+
 /** 轮询部署直到终态 */
 async function waitForDeployment(
   client: CloudflareClient,
@@ -180,10 +227,18 @@ async function waitForDeployment(
  *
  * 设计原则与单 Worker 向导一致：**尽力而为，绝不抛出**。
  * 任何一步失败都记录到 warnings，让用户至少拿到已成功的部分。
+ *
+ * 例外：参数非法时直接抛出。这类错误（尤其是被 MSYS 污染的路径）
+ * 会把错误值写进 Pages 环境变量，事后极难清理，必须在写入前拦住。
  */
 export async function deployPagesSplit(
   options: PagesSplitDeployOptions
 ): Promise<PagesSplitDeployResult> {
+  const problems = validateOptions(options)
+  if (problems.length > 0) {
+    throw new Error(`部署参数不合法：\n  - ${problems.join('\n  - ')}`)
+  }
+
   const log = options.log ?? (() => {})
   const warnings: string[] = []
   const client = new CloudflareClient({ token: options.token, apiBase: options.apiBase })

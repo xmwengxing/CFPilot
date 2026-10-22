@@ -40,7 +40,13 @@ jobs:
         run: |
           npm run build -w @cfpilot/worker-core
           npm run build -w cfpilot-deploy
-          git diff --exit-code packages/deploy-wizard/assets/cfpilot-worker.js
+          if ! git diff --exit-code packages/deploy-wizard/assets/cfpilot-worker.js; then
+            echo "::error::内置内核资产与最新构建不一致，差异如下："
+            git diff --stat packages/deploy-wizard/assets/cfpilot-worker.js
+            # 打印第一处差异的上下文，便于定位
+            git diff -U2 packages/deploy-wizard/assets/cfpilot-worker.js | head -40
+            exit 1
+          fi
       - name: 上传内核产物
         uses: actions/upload-artifact@v4
         with:

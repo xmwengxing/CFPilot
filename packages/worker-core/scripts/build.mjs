@@ -28,49 +28,29 @@ const TARGETS = [
 mkdirSync(outDir, { recursive: true })
 
 /**
- * 把 external 的静态 import 提升到文件最顶部。
+ * 校验产物里没有静态的外部 import。
  *
- * esbuild 可能把静态 import 输出到文件中部，这在 ESM 语法上合法。
- * 保留历史归一化以稳定产物布局；对照实验没有证明 import 位置会导致 1101。
- * 不能把这项归一化当作 Cloudflare 运行时限制或线上故障的修复。
+ * `cloudflare:sockets` 已改为运行时拼接的动态 import（见 outbound/dial.ts）：
+ * 真机对照证明静态导入会让 isolate 在启动阶段失败（1101 且无调用日志）。
+ * 因此这里从「提升到首字节」改为「必须不存在静态导入」——
+ * 一旦有人改回静态 import，构建直接失败，避免再把故障带上生产。
  */
-function hoistExternals(outFile) {
-  let bundle = readFileSync(outFile, 'utf8')
-  const hoisted = []
-
+function assertNoStaticExternals(outFile) {
+  const bundle = readFileSync(outFile, 'utf8')
   for (const spec of EXTERNALS) {
     const escaped = spec.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     const pattern = new RegExp(
-      `import\\s*(?:\\{[^{}]*\\}|\\*\\s*as\\s+[A-Za-z_$][\\w$]*|[A-Za-z_$][\\w$]*)\\s*from\\s*["']${escaped}["'];?`,
+      `import\\s*(?:\\{[^{}]*\\}|\\*\\s*as\\s+[A-Za-z_$][\\w$]*|[A-Za-z_$][\\w$]*)\\s*from\\s*["']${escaped}["']`,
       'g'
     )
-    bundle = bundle.replace(pattern, (match) => {
-      hoisted.push(match)
-      return ''
-    })
-  }
-
-  const hoistedText = hoisted.join('')
-  if (hoisted.length > 0) {
-    bundle = hoistedText + bundle
-    writeFileSync(outFile, bundle)
-  }
-
-  for (const spec of EXTERNALS) {
-    const escaped = spec.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const checker = new RegExp(`from\\s*["']${escaped}["']`, 'g')
-    let hit
-    while ((hit = checker.exec(bundle)) !== null) {
-      if (hit.index >= hoistedText.length) {
-        throw new Error(
-          `[worker-core] ${spec} 的 import 不在文件开头（位置 ${hit.index}），` +
-            '构建产物未满足本项目的 import 布局归一化约定。'
-        )
-      }
+    const hit = pattern.exec(bundle)
+    if (hit) {
+      throw new Error(
+        `[worker-core] 产物含静态 import ${spec}（位置 ${hit.index}）。` +
+          '这会让 isolate 启动失败（1101）。请改用 outbound/dial.ts 里的 getConnect() 动态导入。'
+      )
     }
   }
-
-  return hoisted.length
 }
 
 for (const target of TARGETS) {
@@ -89,14 +69,10 @@ for (const target of TARGETS) {
     external: EXTERNALS,
   })
 
-  const hoisted = hoistExternals(outFile)
+  assertNoStaticExternals(outFile)
   const size = readFileSync(outFile).length
   const kb = (size / 1024).toFixed(1)
-  console.log(
-    `[worker-core] ${target.label} → dist/${target.out} (${kb} KB` +
-      (hoisted > 0 ? `，提升 ${hoisted} 条 import` : '') +
-      ')'
-  )
+  console.log(`[worker-core] ${target.label} → dist/${target.out} (${kb} KB，无静态外部导入)`)
   if (target.out !== 'worker.js' && size > 80 * 1024) {
     console.warn(`[worker-core] 警告：${target.label} 超过 80KB 预算上限`)
   }

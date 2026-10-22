@@ -55,6 +55,80 @@ describe('KV 配置冲突检测', () => {
   })
 })
 
+describe('部署参数校验', () => {
+  const baseOptions = {
+    token: 't',
+    accountId: 'acc',
+    kvNamespaceId: 'ns-1',
+    controlProject: 'ctl',
+    dataProject: 'dat',
+    panelPath: '/p-abc12345',
+    panelPassword: 'pw',
+    uuid: '11111111-2222-3333-4444-555555555555',
+    trojanPassword: 'tp',
+    wsPath: '/abc1234567',
+    enableTrojan: true,
+    enableXhttp: false,
+  }
+
+  it('接受合法参数', async () => {
+    const { deployPagesSplit } = await import('../src/pages-deploy')
+    await withMockServer(
+      () => ({ status: 200, body: { success: true, result: [] } }),
+      async (base) => {
+        // 只验证不抛参数错误：用空 mock 让后续步骤全失败但 warnings 收集
+        const result = await deployPagesSplit({
+          ...baseOptions,
+          apiBase: base,
+          bundles: { control: 'x', data: 'x' },
+          wait: { timeoutMs: 500, intervalMs: 10 },
+          log: () => {},
+        })
+        expect(result.warnings.every((w) => !w.includes('不合法'))).toBe(true)
+      }
+    )
+  })
+
+  it('拒绝被 MSYS 转换成的 Windows 路径', async () => {
+    const { deployPagesSplit } = await import('../src/pages-deploy')
+    await expect(
+      deployPagesSplit({
+        ...baseOptions,
+        panelPath: 'C:/Users/wxgo8/.dsh/profiles/web/node_modules/@dsh-ops/bash-win32-x64/p-verify',
+        apiBase: 'http://127.0.0.1:1',
+        log: () => {},
+      })
+    ).rejects.toThrow(/不合法|MSYS/)
+  })
+
+  it('拒绝含冒号的 UUID 与密码', async () => {
+    const { deployPagesSplit } = await import('../src/pages-deploy')
+    await expect(
+      deployPagesSplit({ ...baseOptions, uuid: 'C:/some/path', apiBase: 'http://127.0.0.1:1', log: () => {} })
+    ).rejects.toThrow(/不合法/)
+    await expect(
+      deployPagesSplit({ ...baseOptions, trojanPassword: 'a:b', apiBase: 'http://127.0.0.1:1', log: () => {} })
+    ).rejects.toThrow(/不合法/)
+  })
+
+  it('拒绝非法的 Pages 项目名', async () => {
+    const { deployPagesSplit } = await import('../src/pages-deploy')
+    await expect(
+      deployPagesSplit({ ...baseOptions, controlProject: 'Bad_Name', apiBase: 'http://127.0.0.1:1', log: () => {} })
+    ).rejects.toThrow(/项目名/)
+  })
+
+  it('拒绝非法 WS 路径', async () => {
+    const { deployPagesSplit } = await import('../src/pages-deploy')
+    // 缺前导斜杠、含大写、含空格、只有斜杠都不合法
+    for (const bad of ['vless', '/Vless', '/has space', '/']) {
+      await expect(
+        deployPagesSplit({ ...baseOptions, wsPath: bad, apiBase: 'http://127.0.0.1:1', log: () => {} })
+      ).rejects.toThrow(/不合法/)
+    }
+  })
+})
+
 describe('Pages API 客户端', () => {
   it('创建 Pages 项目提交 name 与 production_branch', async () => {
     await withMockServer(
@@ -202,7 +276,7 @@ describe('Pages 双项目部署流程', () => {
           panelPassword: 'pw',
           uuid: '11111111-2222-3333-4444-555555555555',
           trojanPassword: 'tp',
-          wsPath: 'vless',
+          wsPath: '/testpath12',
           enableTrojan: true,
           enableXhttp: false,
           wait: { timeoutMs: 5000, intervalMs: 10 },
@@ -260,7 +334,7 @@ describe('Pages 双项目部署流程', () => {
           panelPassword: 'pw',
           uuid: 'u',
           trojanPassword: 'tp',
-          wsPath: 'vless',
+          wsPath: '/testpath12',
           enableTrojan: true,
           enableXhttp: false,
           wait: { timeoutMs: 5000, intervalMs: 10 },
@@ -320,7 +394,7 @@ describe('Pages 双项目部署流程', () => {
           panelPassword: 'pw',
           uuid: 'u',
           trojanPassword: 'tp',
-          wsPath: 'vless',
+          wsPath: '/testpath12',
           enableTrojan: true,
           enableXhttp: false,
           wait: { timeoutMs: 3000, intervalMs: 10 },

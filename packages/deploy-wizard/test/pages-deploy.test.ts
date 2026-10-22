@@ -20,6 +20,41 @@ describe('内核产物路径解析', () => {
   })
 })
 
+describe('KV 配置冲突检测', () => {
+  it('KV 为空时提示凭据会生效', async () => {
+    const logs: string[] = []
+    await withMockServer(
+      () => ({ status: 404, body: { success: false, errors: [{ code: 10009, message: 'not found' }] } }),
+      async (base) => {
+        const { detectKvConfigConflictForTest } = await import('../src/pages-deploy')
+        await detectKvConfigConflictForTest(base, logs.push.bind(logs))
+      }
+    )
+    expect(logs.join('\n')).toContain('KV 是空的')
+  })
+
+  it('KV 已有 PANEL_PATH 时提示环境变量不生效', async () => {
+    const logs: string[] = []
+    await withMockServer(
+      (req) => {
+        const key = req.url.split('/values/')[1] ?? ''
+        if (key === 'PANEL_PATH') {
+          return { status: 200, body: '/p-existing', contentType: 'text/plain' }
+        }
+        return { status: 404, body: { success: false, errors: [{ code: 10009, message: 'not found' }] } }
+      },
+      async (base) => {
+        const { detectKvConfigConflictForTest } = await import('../src/pages-deploy')
+        await detectKvConfigConflictForTest(base, logs.push.bind(logs))
+      }
+    )
+    const text = logs.join('\n')
+    expect(text).toContain('PANEL_PATH')
+    expect(text).toContain('不会生效')
+    expect(text).toContain('/p-existing')
+  })
+})
+
 describe('Pages API 客户端', () => {
   it('创建 Pages 项目提交 name 与 production_branch', async () => {
     await withMockServer(

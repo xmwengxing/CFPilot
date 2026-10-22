@@ -77,6 +77,47 @@ export interface PagesSplitDeployResult {
 }
 
 /**
+ * 检测 KV 里是否已有会覆盖环境变量的配置。
+ *
+ * 内核的配置优先级是 **KV(CONFIG) > 环境变量 > 默认值**。
+ * 因此复用已有 KV 时，本次生成的随机路径 / 密码 / UUID / WS 路径都不会生效，
+ * 用户会拿着「新密码」登不进去。这里提前读出来并明确告知。
+ */
+async function detectKvConfigConflict(
+  client: CloudflareClient,
+  accountId: string,
+  namespaceId: string,
+  log: (m: string) => void
+): Promise<void> {
+  const keys = ['PANEL_PATH', 'ADMIN_PW_HASH', 'CONFIG', 'config']
+  const found: string[] = []
+  for (const key of keys) {
+    const value = await client.getKvValue(accountId, namespaceId, key)
+    if (value !== null) found.push(key)
+  }
+  if (found.length === 0) {
+    log('· KV 是空的，本次生成的凭据会生效')
+    return
+  }
+
+  log(`⚠ KV 里已存在配置：${found.join('、')}`)
+  log('  内核优先级为 KV(CONFIG) > 环境变量，因此本次生成的随机凭据不会生效。')
+  log('  请使用首次部署时生成的凭据登录；如需重置，先删除这些 KV 键再重新部署。')
+
+  const panelPath = await client.getKvValue(accountId, namespaceId, 'PANEL_PATH')
+  if (panelPath) log(`  · 实际生效的面板路径：${panelPath}`)
+}
+
+/** 测试专用：用显式 apiBase 跑 KV 冲突检测 */
+export async function detectKvConfigConflictForTest(
+  apiBase: string,
+  log: (m: string) => void
+): Promise<void> {
+  const client = new CloudflareClient({ token: 'test-token', apiBase })
+  await detectKvConfigConflict(client, 'acc', 'ns', log)
+}
+
+/**
  * 读取 worker-core 的构建产物。
  *
  * 打包后 `here` 是 `packages/deploy-wizard/dist`，所以 worker-core 在
@@ -192,6 +233,11 @@ export async function deployPagesSplit(
   }
 
   /* ---------------- 2. 配置环境变量与 KV（必须在部署前） ---------------- */
+
+  // KV 已有配置时，环境变量不生效（优先级 KV > 环境变量）。
+  // 这会让用户拿到「新生成的路径/密码却登不进去」，必须提前告知。
+  const kvConflict = await detectKvConfigConflict(client, options.accountId, options.kvNamespaceId, log)
+
   if (result.control.subdomain) {
     try {
       await client.updatePagesDeploymentConfig(options.accountId, options.controlProject, {

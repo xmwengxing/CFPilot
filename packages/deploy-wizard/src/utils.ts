@@ -49,3 +49,13 @@ export function randomProbeScriptName(): string {
 export function randomPanelPath(): string {
   return `/p-${randomAlnum(8)}`
 }
+
+/**
+ * 生成随机的 WebSocket 代理路径。
+ *
+ * 不要用 `/vless`、`/trojan`、`/proxy` 这类字面量：它们既是强特征文本，
+ * 也会让所有用默认配置的部署完全一致。用一段无意义的随机串更稳妥。
+ */
+export function randomWsPath(): string {
+  return `/${randomAlnum(10)}`
+}

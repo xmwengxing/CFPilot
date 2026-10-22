@@ -10,7 +10,7 @@ import { CloudflareClient } from './cf-api'
 import { checkTokenPermissions, renderTokenCheck } from './token-check'
 import { deploy, printResult } from './wizard'
 import { deployPagesSplit } from './pages-deploy'
-import { randomPanelPath, randomPassword, randomWorkerName } from './utils'
+import { randomPanelPath, randomPassword, randomWorkerName, randomWsPath } from './utils'
 import { randomUUID } from 'node:crypto'
 import { NAME, VERSION } from './version'
 
@@ -173,12 +173,14 @@ async function runPagesSplit(args: ReturnType<typeof parseArgs>): Promise<void> 
   const panelPassword = flagString(args, 'panel-password') || randomPassword()
   const controlName = flagString(args, 'control') || randomWorkerName()
   const dataName = flagString(args, 'data') || randomWorkerName()
-  const wsPath = flagString(args, 'ws-path') || 'vless'
+  // WS 路径默认随机：不用 /vless 这类字面量（强特征文本，且所有默认部署完全一致）
+  const wsPath = flagString(args, 'ws-path') || randomWsPath()
   const uuid = flagString(args, 'uuid') || randomUUID()
   const trojanPassword = flagString(args, 'trojan-password') || randomPassword()
 
   process.stdout.write(`\n面板路径：${panelPath}\n面板密码：${panelPassword}\n`)
   process.stdout.write(`UUID：${uuid}\nTrojan 密码：${trojanPassword}\n`)
+  process.stdout.write(`WS 路径：${wsPath}\n`)
   process.stdout.write(`控制面项目：${controlName}\n数据面项目：${dataName}\n\n`)
 
   const result = await deployPagesSplit({

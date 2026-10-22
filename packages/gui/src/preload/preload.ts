@@ -59,6 +59,21 @@ const api = {
       kvId: string
     }>,
 
+  // 应用内更新
+  checkUpdate: () =>
+    ipcRenderer.invoke('update:check') as Promise<{
+      current: string
+      latest: string | null
+      hasUpdate: boolean
+      downloadUrl: string | null
+      notes: string
+      error?: string
+    }>,
+  downloadUpdate: (url: string) =>
+    ipcRenderer.invoke('update:download', url) as Promise<{ ok: boolean; file: string }>,
+  applyUpdate: (file: string) =>
+    ipcRenderer.invoke('update:apply', file) as Promise<{ ok: boolean; error?: string }>,
+
   // 打开外链
   openExternal: (url: string) => ipcRenderer.invoke('app:openExternal', url),
 
@@ -101,6 +116,13 @@ const api = {
     ipcRenderer.on('scan-result', listener)
     return () => {
       ipcRenderer.off('scan-result', listener)
+    }
+  },
+  onUpdateProgress: (cb: (p: { received: number; total: number }) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, p: { received: number; total: number }): void => cb(p)
+    ipcRenderer.on('update-progress', listener)
+    return () => {
+      ipcRenderer.off('update-progress', listener)
     }
   },
 }

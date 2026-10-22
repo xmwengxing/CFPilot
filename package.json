@@ -49,6 +49,8 @@
   },
   "allowScripts": {
     "electron@33.4.11": true,
+    "esbuild@0.28.2": true,
+    "workerd@1.20261019.1": true,
     "app-builder-bin": true,
     "7zip-bin": true
   }

@@ -60,10 +60,12 @@ jobs:
         env:
           ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
           ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
+          # npm 的 allowScripts 策略会拦 electron-builder 的子进程安装
+          npm_config_allow_scripts: 'true'
         run: |
           cd packages/gui
           npm run build
-          npx electron-builder --win --publish never
+          npx -y electron-builder@25.1.8 --win --publish never
 
       - name: 上传安装包
         uses: actions/upload-artifact@v4

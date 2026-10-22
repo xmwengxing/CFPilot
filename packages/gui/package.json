@@ -79,7 +79,9 @@
       "installerLanguages": [
         "zh_CN"
       ],
-      "language": "2052"
+      "language": "2052",
+      "allowElevation": false,
+      "runAfterFinish": true
     },
     "portable": {
       "artifactName": "CFPilot-${version}-portable.exe"
@@ -88,6 +90,7 @@
       "mirror": "https://npmmirror.com/mirrors/electron/"
     },
     "electronVersion": "33.4.11",
+    "electronDist": "../../node_modules/electron/dist",
     "npmRebuild": false,
     "buildDependenciesFromSource": false,
     "compression": "maximum"  }

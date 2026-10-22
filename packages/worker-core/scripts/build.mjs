@@ -69,21 +69,52 @@ function assertNoStaticExternals(outFile, targetName) {
 /**
  * 构建版本号。
  *
- * 用 git 短 hash + 时间戳，保证每次构建都不同（同版本跳过部署依赖这一点）。
- * 注入了每个产物的 `__CFP_BUILD__` 常量，运行时通过 /__cfp_version 暴露。
+ * 形式：`<git短hash>-<源码内容哈希前8位>`。
+ *
+ * ⚠️ 绝不能加时间戳：产物必须**可复现**，否则 CI 的
+ * 「校验内置内核资产与最新构建一致」会因为每次构建内容不同而失败。
+ *
+ * 源码哈希覆盖 worker-core 的全部源文件，代码一改版本就变；
+ * 代码没改则版本稳定 —— 这正是「同版本跳过部署」需要的行为。
  */
-function buildVersion() {
+async function buildVersion() {
   let git = 'nogit'
   try {
     git = execSync('git rev-parse --short HEAD', { encoding: 'utf8', timeout: 5000 }).trim()
   } catch {
     /* 不在 git 仓库时用 nogit */
   }
-  const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12)
-  return `${git}-${stamp}`
+
+  // 对 worker-core/src 下所有 .ts 与 .html 求内容哈希
+  let hash = 'nohash'
+  try {
+    const { readdirSync, readFileSync, statSync } = await import('node:fs')
+    const { createHash } = await import('node:crypto')
+    const srcDir = resolve(pkgRoot, 'src')
+    const files = []
+    const walk = (dir) => {
+      for (const name of readdirSync(dir)) {
+        const p = resolve(dir, name)
+        if (statSync(p).isDirectory()) walk(p)
+        else if (/\.(ts|html)$/.test(name)) files.push(p)
+      }
+    }
+    walk(srcDir)
+    // 按路径排序保证顺序稳定
+    files.sort()
+    const digest = createHash('sha256')
+    for (const file of files) {
+      digest.update(readFileSync(file))
+    }
+    hash = digest.digest('hex').slice(0, 8)
+  } catch {
+    hash = 'nohash'
+  }
+
+  return `${git}-${hash}`
 }
 
-const BUILD_VERSION = buildVersion()
+const BUILD_VERSION = await buildVersion()
 
 for (const target of TARGETS) {
   const outFile = resolve(outDir, target.out)

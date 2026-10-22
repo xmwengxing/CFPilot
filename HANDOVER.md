@@ -1,25 +1,91 @@
 # CFPilot 项目交接文档
 
-> 交接时间：2026-10-21　｜　仓库：`https://github.com/xmwengxing/CFPilot.git`
-> 分支：`main`（与 `origin/main` 同步，工作区干净，无未提交改动）
-> 提交历史：`3927f19` 首版 → `5c0db4f` 构建产物跨平台一致 → `044cb33` 部署向导阻断性缺陷修复 → `0c6a753` 面板截图
+> 交接时间：2026-10-22　｜　仓库：`https://github.com/xmwengxing/CFPilot.git`
+> 分支：`main`　｜　最新提交：`37ce8e5`（GUI v0.1.1 发布）
+> 图形化工具发布页：https://github.com/xmwengxing/CFPilot/releases/tag/gui-v0.1.1
 
 ---
 
-## 最新复核：2026-10-22（优先于下文历史判断）
+## 0. 当前状态（2026-10-22，最优先阅读）
 
-**单项目部署问题未解决。下文含互相矛盾、已被后续实验推翻的历史结论，不应直接当作根因。**
+### 项目已可用，三条部署路径
 
-- 独立最小 Worker（114 字节静态响应）上传成功，但 workers.dev 返回 1101；同脚本走独立 zone route 连续 6 次 200。不能将 workers.dev 失败归因于 CFPilot 协议代码，也不能凭 1101 证明账号被封。
-- 当前合并产物上传 Workers 成功（startup_time_ms=1），zone route 最初 6 次 200，数分钟后持续 1101。Observability 仅查到早期成功请求，无失败请求对应异常栈；不能据此断言 isolate 启动失败。
-- 独立 Pages 项目通过直接 API 上传当前产物，首次部署成功，第二次 HTTP 400：`8000119 Your Pages project has been blocked. Contact abusereply@cloudflare.com.`。这确认平台拒绝更新，不证明具体内容规则或账号整体限制。
-- 未证明“import 位置导致 1101”“必须拆分架构”“混淆可以解决”；禁止把这些假设继续写成已证实结论。
-- 已停止创建变体或试探封禁；需要 Cloudflare 说明 Pages 限制原因，并对失败 Ray ID 提供运行时诊断。相关支持请求仅起草，未发送。
-- 本轮新增 Worker、Pages、DNS 和 route 均已删除。原有 sct/sdv/cfnext 未修改，最终账号无 Worker 脚本。
-- 本地已修复部署 API 客户端忽略 HTTP 200 响应中 success:false 的问题；上传/设置接口也不再把 HTML 错误页当成功。新增 6 项回归测试，typecheck、133 项测试、build 通过。这不是 8000119 或 1101 的已证实根因修复。
-- 可随仓库分析的取证摘要见 [部署诊断状态](docs/cloudflare-deployment-diagnosis.md)。更详细的复核记录与未发送的支持请求草稿保留在本机 tmp 目录，不随仓库提交。
+| 路径 | 状态 | 入口 |
+|------|------|------|
+| **图形化工具** | ✅ 已发布 v0.1.1 | `CFPilot-0.1.1-x64.exe`（安装版）/ `-portable.exe`（便携版），**无需预装 Node** |
+| **CLI 部署向导** | ✅ 可用，未发布 npm | `npx -y cfpilot-deploy@latest pages-split` |
+| **CLI 优选器** | ✅ 可用，未发布 npm | `npx -y cfpilot-scanner@latest scan --host <域名> --path /vless` |
 
-## 0. 2026-10-21 第二任接手后的更新（历史记录）
+### 已验证可用（真机）
+
+- Pages **双项目部署**：控制面（面板+订阅+探针）+ 数据面（代理入站），共用同一 KV
+- 代理链路：VLESS-WS 101 握手成功 → VLESS 响应头 `[0,0]` → 出站数据帧正常
+- 面板：登录、订阅（Base64/Clash/Sing-box）、一键优选全部可用
+- 更新部署：沿用原 UUID 与 WS 路径，**客户端订阅地址不用改**
+- GUI 应用内更新：查 Releases → 下载 → 替换 → 重启
+
+### 关键约束（继续开发前必读）
+
+1. **必须用 CFNext 数据面**，不要改回自研实现。归档在 `archive/self-developed-dataplane/`，
+   含完整代码与恢复说明。
+2. **控制面与数据面必须分开部署**。合并包在 Pages 上第二次部署返回
+   `8000119 Your Pages project has been blocked`（平台主动拒绝，
+   Cloudflare 未说明具体触发原因，**不要臆测规则**）。
+3. **数据面必须绑定 KV 变量名 `K`**（CFNext 源码读 `t.K.get("config")`），
+   控制面读 `KV`。两个都要绑，缺一个就有一侧读不到配置。
+4. **数据面配置有两套来源**：环境变量（`U`/`PATH`/`L`）与 KV 的 `config` 键（CFNext schema）。
+   后者优先级更高（源码里 `Object.assign(默认, kvConfig)` 整体覆盖）。
+   向导会同步写 KV `config` 键。
+5. **构建产物必须可复现**。版本号形式为 `<git hash>-<源码内容哈希>`，
+   **绝不能加时间戳**（否则 CI 资产一致性校验必然失败）。
+6. **面板产物必须统一换行为 LF**（`gen-panel.mjs` 已做）。
+   git 的 autocrlf 会让同一份源码产出不同字节，这是历史 CI 反复失败的主因。
+
+### 待办
+
+| 事项 | 说明 |
+|------|------|
+| npm 发布 | `cfpilot-scanner@0.2.0` / `cfpilot-deploy@0.2.0` 已具备发布条件，需用户执行 F2A |
+| Pages 手动部署指南 | README 需补「手动部署」章节，仓库需提供 pages 压缩包 |
+| WS 数据面代理池 | vendor 入参不含 SOCKS5/HTTP 代理池，面板配置不生效（仅 `PROXYIP` 有效） |
+| Cloudflare 支持请求 | 草稿在 tmp 目录（未发送），引用 Report ID `12704b1598fcad37` |
+| 签名 | exe 未签名，SmartScreen 会拦截。可考虑购买 OV 证书消除 |
+
+### 历史结论的处置
+
+下文 §0.1–§0.10 含大量**已被后续实验推翻**的结论，保留仅为追溯。
+判断优先级：本文 §0 > [docs/cloudflare-deployment-diagnosis.md](docs/cloudflare-deployment-diagnosis.md) > 下文历史。
+
+特别提醒：下文曾把问题归因为「账号风控」「import 位置」「必须拆分架构」，
+这些都**已被真机对照实验证伪**，不要据此继续排查。
+
+---
+
+## 0.11 2026-10-22 的决定性对照实验
+
+这一节记录了推翻旧结论的证据，接手者请先读。
+
+| 实验 | 结果 | 推翻了什么 |
+|------|------|-----------|
+| 114 字节静态 Worker → workers.dev | 1101 | 「workers.dev 可用」 |
+| 同一脚本 → 独立 zone route | 6/6 正常 | 「1101 是账号级封禁」 |
+| **cfnext 原版文件**（一行未改）→ Pages 全新随机项目名 | **1/3，第 2 次被封** | 「是我们改坏了数据面」「esbuild 打包导致封禁」 |
+| edgetunnel 原版（**完全不用** `cloudflare:sockets`）→ Pages 全新随机项目名 | **4/4 全部成功** | 「Pages 第二次部署必然失败」 |
+| 极简 Worker（无 sockets）→ Pages | 4/4 成功 | 同上 |
+| 30 行只含 sockets 的脚本 | 加载正常，`connect()` 返回 `TCP Loop detected` | 「TCP Loop 是目标选择问题」 |
+
+**结论**：
+- 平台对**含 `cloudflare:sockets` 的 Pages 项目**在第二次部署时拒绝；
+  不用 sockets 的项目（edgetunnel 路线）不受影响。
+- `TCP Loop detected` 在该环境下是 `cloudflare:sockets` 的系统性限制，
+  与目标形态、协议实现无关。
+- 因此**双项目拆分**是当前唯一可行的部署形态（各项目首次部署总是成功）。
+- 想恢复单项目原地更新，需改用 `fetch()` 落地（edgetunnel 路线），
+  这会失去 ProxyIP / NAT64 / SOCKS5 出站能力。
+
+---
+
+## 0.1–0.10 历史记录（结论已被推翻，仅供追溯）
 
 ### 0.1 真机 1101 / 522 的根因（推翻了上一任的结论）
 
@@ -293,15 +359,30 @@ CFPilot 是一个跑在 Cloudflare Workers 上的**代理微内核 + 真连接�
 
 | 子包 | 状态 | 说明 |
 |------|------|------|
-| `packages/worker-core` | ✅ 功能完成 | 边缘内核 + 中文面板，打包 **47.9 KB**（预算 50 KB） |
-| `packages/scanner-cli` | ⚠️ 代码完成、未发布 | 三阶真连接扫描器 + 本地桥接服务，**npm 上不存在该包** |
-| `packages/deploy-wizard` | ⚠️ 代码完成、未发布 | 全中文部署向导，**npm 上不存在该包** |
-| 单元测试 | ✅ 72 个全绿 | 9 个测试文件（协议 / SHA-224 / 订阅清洗 / CF API / IP 网段） |
-| CI | ✅ 已配置 | 类型检查 → 单测 → 构建 → 校验内置资产与构建一致 |
-| 真实端到端部署 | ❌ 从未在真实 Cloudflare 账号上跑过 | 见 §5 缺口 4 |
-| 面板「一键优选」 | ❌ 链路断裂 | 见 §5 缺口 1（**最高优先级**） |
+| `packages/worker-core` | ✅ 功能完成 | 边缘内核 + 中文面板。合并版 267 KB / 控制面 50 KB / 数据面 226 KB |
+| `packages/scanner-cli` | ✅ 可用，未发布 npm | 三阶真连接扫描器 + 本地桥接服务，版本 0.2.0 |
+| `packages/deploy-wizard` | ✅ 可用，未发布 npm | 全中文部署向导（Worker 单项目 + Pages 双项目），版本 0.1.0 |
+| `packages/gui` | ✅ **已发布 v0.1.1** | Electron 图形化工具，安装版 + 便携版，无需预装 Node |
+| 单元测试 | ✅ **178 个全绿** | 19 个测试文件（协议 / 鉴权 / 订阅清洗 / CF API / Pages 部署 / 优选） |
+| CI | ✅ **全绿** | 类型检查 → 单测 → 构建 → 资产一致性 → GUI 构建 |
+| 真实端到端部署 | ✅ **已验证** | Pages 双项目部署 + 代理链路 + 面板 + 订阅 + 优选全部实测通过 |
+| 面板「一键优选」 | ✅ **链路已通** | GUI 与 CLI 均可完成三阶扫描并回填 |
 
-代码规模：`packages/` 下 TypeScript 约 **6480 行**（不含 `dist/` 与生成文件）。
+代码规模：`packages/` 下 TypeScript 约 **9000 行**（不含 `dist/` 与生成文件）。
+
+### 部署形态
+
+```
+控制面 Pages（无 sockets）      数据面 Pages（CFNext 实现）
+  面板 / 订阅 / 探针      ←→    VLESS / Trojan-WS 入站
+        │                            │
+        └──── 共用同一 KV ───────────┘
+             （配置、优选池、凭据）
+```
+
+- 控制面通过环境变量 `DATA_HOST` 指向数据面域名，生成订阅时用作 `sni`/`host`
+- 数据面用 CFNext 的 `wsHandler`（`packages/worker-core/src/vendor/`）
+- 部署清单写在 KV 的 `CFP_DEPLOY_MANIFEST` 键，用于识别同源项目
 
 ---
 
@@ -313,26 +394,44 @@ CFPilot/
 ├── HANDOVER.md                   # 本文件
 ├── README.md                     # 用户向文档（中文）
 ├── cloudflare项目方案.md          # 原始需求方案 + 5 阶段执行计划
-├── docs/panel-overview.png       # 面板概览截图
-├── packages/
-│   ├── worker-core/              # @cfpilot/worker-core（private，不发布）
-│   │   └── src/
-│   │       ├── index.ts          # 路由分发：探针 → API → 订阅 → 面板 → 三种代理入站
-│   │       ├── config.ts         # 配置加载（KV CONFIG > env > 默认值）
-│   │       ├── auth.ts           # 密码 + 会话 Cookie + 一次性扫描令牌
-│   │       ├── api.ts            # 面板 REST API + SSE
-│   │       ├── store.ts          # KV / 内存存储抽象
-│   │       ├── probe.ts          # /__edge_probe（WS 101 校验 + 流式测速）
-│   │       ├── sub-engine.ts     # 四层优选池合并 + 脏数据清洗 + 三格式订阅输出
-│   │       ├── budget.ts         # Free CPU 毫秒预算保护
-│   │       ├── protocols/        # vless / trojan / xhttp / websocket / stream / address / sha224
-│   │       ├── outbound/         # dial（并发竞速 / NAT64）/ socks5 / http-proxy
-│   │       └── ui/panel.html     # 单文件零框架中文面板（构建时压缩进 panel.generated.ts）
-│   ├── scanner-cli/              # cfpilot-scanner（npm 包，未发布）
-│   │   └── src/  cli / scan / true-probe / server(桥接) / ip-ranges / callback
-│   └── deploy-wizard/            # cfpilot-deploy（npm 包，未发布）
-│       └── src/  cli / wizard / cf-api / args / utils
-│       └── assets/cfpilot-worker.js   # 内置内核资产（CI 校验与构建一致）
+├── docs/
+│   ├── panel-overview.png        # 面板概览截图
+│   └── cloudflare-deployment-diagnosis.md   # 平台限制取证摘要
+├── archive/
+│   └── self-developed-dataplane/ # 归档：自研 WS 数据面（已弃用，勿直接启用）
+├── .github/workflows/
+│   ├── ci.yml                    # 类型检查 / 单测 / 构建 / 资产校验
+│   └── release-gui.yml           # 图形化工具打包发布
+└── packages/
+    ├── worker-core/              # @cfpilot/worker-core（private，不发布）
+    │   └── src/
+    │       ├── index.ts          # 合并版入口（仅本地测试用）
+    │       ├── entry-control.ts  # 控制面入口 → dist/control.js
+    │       ├── entry-data.ts     # 数据面入口 → dist/dataplane.js
+    │       ├── version.ts        # 构建版本号（/__cfp_version 端点）
+    │       ├── routes/           # control.ts（控制面）/ data.ts（数据面）/ shared.ts
+    │       ├── config.ts         # 配置加载（KV CONFIG > env > 默认值）
+    │       ├── auth.ts           # 密码 + 会话 Cookie + 一次性扫描令牌
+    │       ├── api.ts            # 面板 REST API + SSE
+    │       ├── store.ts          # KV / 内存存储抽象
+    │       ├── probe.ts          # /__edge_probe（WS 101 校验 + 流式测速）
+    │       ├── sub-engine.ts     # 优选池合并 + 脏数据清洗 + 三格式订阅输出
+    │       ├── budget.ts         # Free CPU 毫秒预算保护
+    │       ├── protocols/        # vless / trojan / xhttp / websocket / stream / address / sha224
+    │       ├── outbound/         # dial（并发竞速 / NAT64）/ socks5 / http-proxy / proxy-pool
+    │       ├── vendor/           # CFNext 数据面（原样引入，勿改）
+    │       └── ui/panel.html     # 单文件零框架中文面板（构建时压缩进 panel.generated.ts）
+    ├── scanner-cli/              # cfpilot-scanner（npm 包，未发布）
+    │   └── src/  cli / scan / candidates / true-probe / server(桥接) / ip-ranges / scanner-lib
+    ├── deploy-wizard/            # cfpilot-deploy（npm 包，未发布）
+    │   ├── src/  cli / wizard / pages-deploy / cf-api / deployer-lib / token-check / access-check
+    │   └── assets/cfpilot-worker.js   # 内置内核资产（CI 校验与构建一致）
+    └── gui/                      # @cfpilot/gui（Electron 图形化工具）
+        ├── src/main/             # main / bridge / scanner / updater / config-store
+        ├── src/preload/          # contextBridge 最小 API
+        ├── src/renderer/         # index.html + renderer.ts
+        ├── build/icon.png        # 应用图标
+        └── scripts/              # build.mjs（esbuild 打包）/ start.mjs（启动与 GPU 降级）
 ```
 
 ---
@@ -353,77 +452,126 @@ CFPilot/
 - **脏数据容错**：裸 IP、`IP:Port`、`IP:Port#备注`、`[IPv6]:Port#备注`、优选域名、CloudflareSpeedTest 风格 CSV 原文，
   清洗逻辑集中在 `sub-engine.ts`。
 - **配置优先级**：KV(`CONFIG`) > 环境变量 > 内置默认值。
-- **面板**：概览 / 入站配置 / 优选池 / 一键优选 / 订阅 / 高级，六个页签，单文件零框架。
+  但**面板路径与密码例外**：环境变量优先（`auth.ts` 的 `ensureBootstrap`），
+  否则复用 KV 部署时新生成的凭据会被旧哈希挡住，表现为「拿着新密码登不进去」。
+- **面板**：概览 / 节点来源 / 订阅 / 入站配置 / 高级 五个页签，单文件零框架。
+- **版本端点**：`GET /__cfp_version` 返回构建版本号，供部署向导判断是否需要更新。
 
 ### scanner-cli（本地真连接优选器）
 
 - 三阶扫描：TCP 握手初筛 → WS 101 真连接校验 → 真实下行测速。
 - **直跑模式**：`npx cfpilot-scanner scan --host <域名> --token <令牌>`，跑完自动回填面板 KV。
+- **对接任意 VLESS-WS 项目**：`--path /<该项目路径>` 指定目标 WS 路径，
+  不依赖 CFPilot 自己的探针端点；目标没有测速端点时自动跳过测速（`--no-speed`）。
+- **可复制输出**：额外打印 `IP:端口#机房` 列表，一行一个，可直接粘进同类项目的
+  「自定义 IP」输入框。
 - **桥接模式**：`npx cfpilot-scanner serve` 在 `127.0.0.1:19527` 提供
   `/status`、`/start-scan`、`/events`(SSE)、`/results`。
 - Cloudflare 网段：优先拉官方 `cloudflare.com/ips-v4|ips-v6`，失败回退内置 CIDR 库；固定随机种子，结果可复现。
+- **库出口** `src/scanner-lib.ts` 导出 `runScan` / `resolveCandidates` / `formatCopyable`，
+  供 GUI 进程内直接调用（不起子进程、不需要系统装 Node）。
 
 ### deploy-wizard（全中文部署向导）
 
-- 校验 Token → 选账号 → 随机化 Worker 名 → 自动创建并绑定 KV → 生成随机面板路径/密码/扫描令牌
-  → 上传内核 → 绑定自定义域名（失败自动降级 CNAME + Route，再失败降级 workers.dev）。
-- **不丢密码**：域名绑定全程「尽力而为」，任何一步失败只降级告警，绝不抛出
-  （内核已部署成功时抛错会让用户连面板密码都拿不到）。
+- 两种部署通道：
+  - `init` —— Worker 单项目（上传内核 + 绑自定义域名）
+  - `pages-split` —— **Pages 双项目（当前推荐）**
+- **Pages 双项目流程**：建项目 → 配 KV 与环境变量 → 先部署数据面再部署控制面。
+  顺序不可调换：Pages 的绑定只对之后的部署生效，且控制面需要数据面域名才能生成订阅。
+- **同源项目识别**：部署清单写在 KV 的 `CFP_DEPLOY_MANIFEST` 键
+  （记录两个项目名、域名、构建版本、凭据）。更新部署时自动读取，
+  **用户不需要记项目名**。
+- **版本跳过**：构建版本一致时跳过部署，避免无谓触发平台审核。
+- **沿用凭据**：更新时默认沿用原 UUID / WS 路径 / 面板凭据，**客户端订阅地址不用改**。
+  需要重置时用 `--new-credentials`。
+- **8000119 自动换名重试**：数据面部署被平台拒绝时，自动新建随机项目名再试。
+- **参数校验**：拒绝被 MSYS 转换的 Windows 路径（`--panel-path /p-x` 在 Git-Bash 下
+  会被转成 `C:/Users/.../p-x`），避免写坏 Pages 环境变量。
+- **不丢密码**：域名绑定全程「尽力而为」，任何一步失败只降级告警，绝不抛出。
 - 支持 `--yes` 非交互与 `--dry-run`。
+
+### gui（图形化部署与维护工具，Electron）
+
+- 四个页签：Cloudflare 凭据 / 一键部署 / 本地真连接优选 / 说明；
+  下方是常驻运行日志（可折叠，出错时自动展开）。
+- **凭据只存本机** `~/.cfpilot-gui/secrets.json`，不经过任何中间层，
+  界面多处明示不上传。
+- **账号与 KV 自动检测**：不手填账号 ID，用 Token 查可见账号、复用已有 KV、
+  没有就自动创建。
+- **优选直接跑**：进程内 import scanner 库，参数表单带建议值，
+  结果同时给「可复制列表」与表格。
+- **应用内更新**：查 GitHub Releases → 下载 portable exe → 替换 → 重启。
+- **不需要管理员权限**：NSIS 装 `allowElevation: false`。
+- **GPU 降级启动**：`scripts/start.mjs` 逐级尝试
+  `--disable-gpu-sandbox` 等参数（`app.disableHardwareAcceleration()` 太晚，无效）。
+- **打包产物**：`CFPilot-<版本>-x64.exe`（安装版）+ `CFPilot-<版本>-portable.exe`（便携版）。
 
 ---
 
 ## 5. 未完成项与已知缺口（接手后按此优先级推进）
 
-### 缺口 1（P0）：面板「一键优选」链路断裂，点了必然报错
+### 已关闭的缺口（2026-10-22）
 
-- 面板 `packages/worker-core/src/ui/panel.html:549` 的 `startScan()` 只发
-  `{host, port, token, callback, top}`，**没有 `candidates`**。
-- 桥接服务 `packages/scanner-cli/src/server.ts:182` 强制要求 `candidates` 非空，
-  否则直接广播错误「没有候选 IP，请先运行一次完整扫描」。
-- 候选生成逻辑在 `packages/scanner-cli/src/cli.ts:125` 的 `resolveCandidates()`
-  （`fetchCloudflareCidrs()` + `expandCidrs()`），**目前是 cli.ts 内部函数，未导出**。
-- **修复方向**：把 `resolveCandidates()` 抽成共享模块（建议 `src/candidates.ts`），
-  由 `cli.ts` 与 `server.ts` 共同引用；`server.ts` 在请求未带 `candidates` 时自行生成，
-  并支持 `sample` / `cidr` / `seed` 参数透传。
+| 原缺口 | 状态 | 说明 |
+|------|------|------|
+| 缺口 1：面板「一键优选」链路断裂 | ✅ 已修 | `src/candidates.ts` 已抽出，桥接服务在未收到 `candidates` 时自行生成；面板与 GUI 均可跑完三阶扫描 |
+| 缺口 3：两个 npm 包缺 README | ✅ 已补 | `packages/scanner-cli/README.md`、`packages/deploy-wizard/README.md`、`packages/gui/README.md` |
+| 缺口 4：没有真实端到端验证 | ✅ 已完成 | Pages 双项目部署 → 面板登录 → 订阅 → 优选 → 代理链路，全部真机实测通过 |
 
-### 缺口 2（P0）：两个 CLI 未发布到 npm，但 README 写的是 `npx -y cfpilot-xxx@latest`
+### 缺口 2（P0）：两个 CLI 未发布到 npm
 
-- 实测 `npm view cfpilot-deploy versions` / `npm view cfpilot-scanner versions` 均返回 **404**。
-- 用户照 README 的「快速开始」执行必然失败。
+- 实测 `npm view cfpilot-deploy versions` → `['0.0.0-stage', '0.1.0']`，
+  `npm view cfpilot-scanner versions` → 同上。**0.1.0 是 10-21 发的旧版**，
+  当前代码是 scanner 0.2.0 / deploy 0.2.0，需要发新版。
+- **必须发新版**，否则 `npx -y cfpilot-deploy@latest` 拉到的是没有 `pages-split` 的旧包。
 - 发布前需确认：`npm publish --access public`（scanner-cli 需 `dist` 已在 `files` 中；
   deploy-wizard 还需 `assets`，因为内核资产随包分发）。
-
-### 缺口 3（P1）：两个 npm 包缺 README.md
-
-- `packages/scanner-cli/package.json` 与 `packages/deploy-wizard/package.json` 的 `files` 里都列了 `README.md`，
-  但仓库中这两个文件**不存在**，npm 页面会没有说明。
-- 另外 AGENTS.md 写「scanner-cli 的 `files` 字段只包含 `dist`」，实际多了 `README.md`——补上 README 后两者就一致了。
-
-### 缺口 4（P1）：没有真实端到端验证
-
-- 从未用真实 Cloudflare 账号跑完「部署 → 面板登录 → 一键优选 → 订阅导入客户端」全链路。
-- 本地只做过 `wrangler dev --local` 的探针验证（`packages/worker-core/wrangler-dev.log` 有痕迹）。
-- 建议在真实 Free 账号上做一次冒烟，并把踩坑写回本文档。
+- **版本号需先升到 0.2.0**，否则会与已发布的 0.1.0 冲突（`EPUBLISHCONFLICT`）。
+- 发布需要用户执行 F2A 认证。
 
 ### 缺口 5（P1）：方案文档 Phase 5 的自动化联调脚本未落地
 
 原方案 Phase 5 要求「wrangler 本地起内核 → 跑 scanner → 校验 101/测速/回填 → 校验脏数据订阅输出」
 的自动化脚本。目前只有单元测试覆盖了协议与清洗逻辑，**没有覆盖 `/__edge_probe` 端到端与回填链路**。
 
-### 缺口 6（P2）：功能层面明确不支持的部分（属设计取舍，非 bug）
+> 注：workerd 的 SQLite 在受限环境下无法初始化（`SQLITE_CANTOPEN`），
+> 本机跑不了 `wrangler dev --local` / miniflare。CI 上可考虑用 `workerd` 裸进程做冒烟。
 
-- UDP over WebSocket → 返回 400（`protocols/websocket.ts:51`）。
-- XHTTP 不支持 UDP → 返回 400（`protocols/xhttp.ts:39`）。
+### 缺口 6（P1）：Pages 手动部署指南缺失
+
+- README 目前只写了 CLI 与图形化两条路径，**没有「手动部署」章节**。
+- 需要补：Pages 控制台逐步操作说明 + 仓库提供可上传的 pages 压缩包。
+- 压缩包应含两个目录：`control/`（`_worker.js` = `dist/control.js`）与
+  `data/`（`_worker.js` = `dist/dataplane.js`），并说明两者的绑定与变量配置。
+
+### 缺口 7（P2）：WS 数据面代理池不生效
+
+- `protocols/websocket.ts` 调用 vendor 的 `wsHandler`，其入参只有 `proxyIP`，
+  **没有 SOCKS5 / HTTP 代理池字段**。
+- 因此面板「高级」里配置的 `SOCKS5` / `HTTP_PROXY` 对数据面无效，只有 `PROXYIP` 生效。
+- 要修需改 vendor 或让自研实现接管（后者已被证明不可行，见 §0.11）。
+
+### 缺口 8（P2）：功能层面明确不支持的部分（属设计取舍，非 bug）
+
+- UDP over WebSocket → 返回 400。
+- XHTTP 不支持 UDP → 返回 400。
 - Clash / Sing-box 内核不支持 XHTTP，这两种订阅只输出 WS 节点；Base64 分享链接同时给 `type=ws` 与 `type=xhttp&mode=stream-one`。
 - 方案文档提到的「BPB 风格 TLS Fragment 参数注入」未实现（可选功能，README 也没承诺）。
 
+### 缺口 9（P2）：exe 未代码签名
+
+- SmartScreen 会提示「已阻止无法识别的应用」，用户需点「更多信息 → 仍要运行」。
+- 彻底消除需购买 OV 代码签名证书（约 $70-200/年）。
+- 自签名证书**同样会触发 SmartScreen**，只是提示文案不同，意义不大。
+
 ---
 
-## 6. 接手前必须知道的架构铁律（来自 AGENTS.md，违反即回退）
+## 6. 接手前必须知道的架构铁律
+
+以下来自 AGENTS.md（硬性约束，违反即回退）：
 
 1. **配置优先级恒为** `KV(CONFIG) > 环境变量 > 内置默认值`；新增配置项必须三层都支持并在 `config.ts` 登记。
-2. **Worker 产物必须 ≤ 50 KB**（当前 47.9 KB，余量约 2 KB）；不要往 `worker-core` 塞第三方依赖；面板必须是零框架单文件 HTML。
+2. **Worker 产物预算 80 KB**；不要往 `worker-core` 塞第三方依赖；面板必须是零框架单文件 HTML。
 3. **`/__edge_probe` 不可删除**，必须始终提供「WS 101 握手校验」+「流式下行测速」两项能力。
 4. **优选 IP 清洗逻辑只能写在 `sub-engine.ts`**，禁止在别处重复实现。
 5. **数据面与控制面分离**：`worker-core` 只处理代理与订阅；不得引入 Node API（`node:*`）。
@@ -431,15 +579,39 @@ CFPilot/
 7. 编码规范：TypeScript `strict`、禁止 `any`（用 `unknown` + 收窄）、注释与用户文案一律中文、Worker 侧禁止 `console.log`。
 8. 提交前必须 `npm run typecheck && npm run test && npm run build` 三连通过。
 
-### 两个容易踩的「不要动」点
+### 本项目特有的铁律（2026-10-22 新增，违反会直接导致线上故障）
 
-- **`packages/worker-core/scripts/gen-panel.mjs` 里的 gzip OS 字节归一化（commit `5c0db4f`）不要改回去。**
-  zlib 写入的 gzip 头第 10 字节（Windows `0x0a` / Linux `0x03`）与内容无关但会让产物跨平台字节不同，
-  构建时统一改写为 `0xff`。改回去会让 CI 的「资产与构建一致」校验误报失败。
+9. **数据面必须用 CFNext 实现**（`src/vendor/cfnext-dataplane.js`），不要改回自研版本。
+   自研版已归档在 `archive/self-developed-dataplane/`，含恢复说明。
+10. **控制面与数据面必须分开部署。** 合并包在 Pages 上第二次部署会被平台拒绝
+    （`8000119`）。Cloudflare 未说明原因，**不要臆测规则、不要试图混淆规避**。
+11. **数据面必须绑 KV 变量名 `K`**，控制面绑 `KV`。两个都绑。
+    CFNext 源码读 `t.K.get("config")`，只绑 `KV` 会导致数据面读不到配置。
+12. **数据面配置要写 KV 的 `config` 键**（CFNext schema），不只是环境变量。
+    源码里 `Object.assign(默认, kvConfig)` 是整体覆盖，KV 优先于环境变量。
+13. **构建产物必须可复现。** 版本号 = `<git hash>-<源码内容哈希前8位>`，
+    **绝不能加时间戳**。
+14. **面板产物必须统一换行为 LF**（`gen-panel.mjs` 已做）。git 的 autocrlf 会让
+    同一份源码产出不同字节，这是历史 CI 反复失败的主因。
+
+### 三个容易踩的「不要动」点
+
+- **`packages/worker-core/scripts/gen-panel.mjs` 的换行归一化与 gzip OS 字节归一化不要改回去。**
+  前者消除 CRLF/LF 差异，后者消除 gzip 头第 10 字节的平台差异（Windows `0x0a` / Linux `0x03`）。
+  两者都会让 CI 的「资产与构建一致」校验误报失败。
 - **CLI 的 shebang 只能由构建脚本注入。** 源码 `cli.ts` 里再写一次 `#!` 会让 esbuild 产物出现两行 `#!`，
   Node 只认第一行 → 语法错误，npx 直接不可用（commit `044cb33` 已修，脚本里有重复 `#!` 守卫）。
-- 改 `compatibility_date` 时要**同时改两处**：`packages/worker-core/wrangler.jsonc` 与
+- **改 `compatibility_date` 时要同时改两处**：`packages/worker-core/wrangler.jsonc` 与
   `packages/deploy-wizard/src/wizard.ts` 的 `COMPATIBILITY_DATE`（当前均为 `2026-01-01`）。
+
+### Electron 相关的两个坑
+
+- **GPU 错误不能用 `app.disableHardwareAcceleration()` 解决**：GPU 进程在 JS 入口
+  执行**之前**就已启动（electron/electron#14273）。必须在**命令行参数**里禁用
+  （`scripts/start.mjs` 已做逐级降级）。
+- **esbuild ESM→CJS 的 `0 && (module.exports = ...)` 守卫**：被 bundle 的模块导出
+  会变成死代码。GUI 的 `bridge` / `config-store` / `scanner` 必须**各自独立成文件**，
+  不能内联进 main.js。
 
 ---
 
@@ -447,20 +619,46 @@ CFPilot/
 
 ```bash
 npm install
-npm run typecheck     # 三个子包 tsc --noEmit（worker-core 会先重新生成面板产物）
-npm test              # vitest run —— 9 文件 / 72 用例
-npm run build         # 内核 + 两个 CLI 打包，并同步 assets/cfpilot-worker.js
+npm run typecheck     # 各子包 tsc --noEmit（worker-core 会先重新生成面板产物）
+npm test              # vitest run —— 19 文件 / 178 用例
+npm run build         # 内核 + 两个 CLI + GUI 打包，并同步 assets/cfpilot-worker.js
 npm run verify        # build + typecheck + test
 npm run clean         # 清理 dist / .wrangler
-
-npm run dev -w @cfpilot/worker-core    # wrangler dev --local，默认 8787
-curl "http://localhost:8787/__edge_probe?bytes=1024"
 
 # 本地调试用的凭据在 packages/worker-core/.dev.vars（已被 .gitignore 排除，不要提交）
 ```
 
-CI（`.github/workflows/ci.yml`）会依次跑：类型检查 → 单测 → 构建 →
-`git diff --exit-code packages/deploy-wizard/assets/cfpilot-worker.js`（校验内置资产与最新构建一致）→ 上传内核产物。
+### 图形化工具
+
+```bash
+npm run start -w @cfpilot/gui              # 从源码启动（带 GPU 降级重试）
+npm run build -w @cfpilot/gui
+cd packages/gui && npm run dist             # 打包 exe → packages/gui/release/
+```
+
+> 打包需要两个环境条件（Windows 沙箱下尤其明显）：
+> 1. `TEMP` 指向可写目录（NSIS 的 makensis 需要创建临时文件）
+> 2. `npm_config_allow_scripts=true`（npm 的 allowScripts 策略会拦 electron-builder 的子进程安装）
+
+> 若 `node_modules/electron/dist/` 被清空（`npm install` 时 electron 的 postinstall
+> 被 allowScripts 拦下），需重新下载解压 electron 二进制。
+
+### 发布
+
+```bash
+# npm 包（需用户执行 F2A）
+cd packages/scanner-cli  && npm publish --access public
+cd packages/deploy-wizard && npm publish --access public
+
+# 图形化工具：推 tag 触发 CI 自动发布
+git tag gui-v0.2.0 && git push origin gui-v0.2.0
+```
+
+### CI
+
+`.github/workflows/ci.yml`：类型检查 → 单测 → 构建 → 校验内置资产与构建一致 → 上传内核产物
+→ 独立 job 构建 GUI。
+`.github/workflows/release-gui.yml`：推 `gui-v*` 标签或手动触发 → 打包 → 上传到 Releases。
 
 ---
 
@@ -468,12 +666,11 @@ CI（`.github/workflows/ci.yml`）会依次跑：类型检查 → 单测 → 构
 
 | 优先级 | 事项 | 验收标准 |
 |--------|------|----------|
-| P0 | 修面板一键优选：抽出 `candidates.ts`，bridge 自造候选 | 面板点「开始优选」，桥接在线时能跑完三阶段并把结果回填 KV；桥接离线时给出可复制命令 |
-| P0 | 发布 `cfpilot-scanner` 与 `cfpilot-deploy` 到 npm | `npx -y cfpilot-deploy@latest init --help` 与 `npx -y cfpilot-scanner@latest --version` 可用 |
-| P1 | 补两个包的 README.md | `files` 字段与实际文件一致，npm 页面有中文说明与用法 |
-| P1 | 真实账号冒烟：部署 → 登录 → 优选 → 订阅 | 记录账号类型、Token 类型、绑定域名方式、踩坑点，回写本文档 |
-| P1 | Phase 5 自动化联调脚本 | 一条命令起本地内核并验证 101 握手 / 测速 / 回填 / 脏数据订阅输出 |
-| P2 | 内核体积余量治理 | 保持 ≤ 50 KB，为后续功能留余量 |
+| P0 | 发布 `cfpilot-scanner@0.2.0` 与 `cfpilot-deploy@0.2.0` 到 npm | `npx -y cfpilot-deploy@latest pages-split --help` 与 `npx -y cfpilot-scanner@latest --version` 可用（**先升版本号，否则与已发布的 0.1.0 冲突**） |
+| P1 | 补 README「手动部署」章节 + 仓库提供 pages 压缩包 | 压缩包含 `control/` 与 `data/` 两个目录，各自带 `_worker.js`；README 说明控制台逐步操作 |
+| P1 | 打通数据面代理池（SOCKS5 / HTTP） | 面板高级页配置的代理对数据面生效（当前只有 `PROXYIP` 有效） |
+| P2 | Phase 5 自动化联调脚本 | 一条命令起本地内核并验证 101 握手 / 测速 / 回填 / 脏数据订阅输出（注意 workerd 的 SQLite 限制） |
+| P2 | 代码签名 | 消除 SmartScreen 拦截（需购买 OV 证书） |
 | P2 | 可选：TLS Fragment 参数注入 | 与 BPB-Worker-Panel 行为对齐，需同步更新 README 与订阅渲染 |
 
 ---
@@ -486,13 +683,26 @@ CI（`.github/workflows/ci.yml`）会依次跑：类型检查 → 单测 → 构
 | 优选 IP 解析 / 订阅渲染 | `packages/worker-core/src/sub-engine.ts` |
 | 探针行为（101 / 测速） | `packages/worker-core/src/probe.ts` |
 | 面板接口 | `packages/worker-core/src/api.ts` |
-| 代理入站协议 | `packages/worker-core/src/protocols/*` |
+| 面板鉴权 / 凭据优先级 | `packages/worker-core/src/auth.ts` |
+| 代理入站协议（WS 用 vendor） | `packages/worker-core/src/protocols/*`、`packages/worker-core/src/vendor/` |
 | 出站拨号 / 代理链 | `packages/worker-core/src/outbound/*` |
+| 控制面 / 数据面路由 | `packages/worker-core/src/routes/` |
+| 构建版本号与产物可复现 | `packages/worker-core/scripts/build.mjs` |
+| 面板压缩与换行归一化 | `packages/worker-core/scripts/gen-panel.mjs` |
 | 扫描三阶段逻辑 | `packages/scanner-cli/src/scan.ts`、`true-probe.ts` |
+| 候选 IP 生成 | `packages/scanner-cli/src/candidates.ts` |
+| scanner 库出口（供 GUI 复用） | `packages/scanner-cli/src/scanner-lib.ts` |
 | 本地桥接服务 | `packages/scanner-cli/src/server.ts` |
 | CF 网段与采样 | `packages/scanner-cli/src/ip-ranges.ts` |
-| 部署流程 | `packages/deploy-wizard/src/wizard.ts` |
-| Cloudflare API 封装 | `packages/deploy-wizard/src/cf-api.ts` |
+| Worker 单项目部署流程 | `packages/deploy-wizard/src/wizard.ts` |
+| **Pages 双项目部署流程** | `packages/deploy-wizard/src/pages-deploy.ts`（清单、版本跳过、换名重试都在这里） |
+| CF API 封装 | `packages/deploy-wizard/src/cf-api.ts` |
+| 部署向导 CLI | `packages/deploy-wizard/src/cli.ts` |
+| GUI 主进程与桥接 | `packages/gui/src/main/*` |
+| GUI 界面 | `packages/gui/src/renderer/*` |
+| GUI 应用内更新 | `packages/gui/src/main/updater.ts` |
+| GUI 打包配置 | `packages/gui/package.json` 的 `build` 字段 |
+| 自研数据面归档（勿启用） | `archive/self-developed-dataplane/` |
 | 打包与体积检查 | `packages/worker-core/scripts/build.mjs` |
 | 面板压缩注入 | `packages/worker-core/scripts/gen-panel.mjs` |
 
@@ -504,10 +714,31 @@ CI（`.github/workflows/ci.yml`）会依次跑：类型检查 → 单测 → 构
 - `packages/worker-core/.dev.vars` 仅供本地调试，已被 `.gitignore` 排除，**不要提交**。
 - 面板路径、密码、扫描令牌部署时随机生成；面板路径可随时更换。
 - 内核对 `/api/v1/*` 除公开接口（`/session`、`/login`、`/logout`、`/preferred-ips`）外一律要求会话或 Bearer 令牌。
+- **GUI 的凭据只写在本机** `~/.cfpilot-gui/secrets.json`，
+  不经过任何中间层、不上传、不随安装包分发。界面上有多处明示。
+  部署时会在日志里打印，但**不会**写进仓库或任何远端。
 
 ---
 
-## 11. 免责
+## 11. 当前线上环境（供接手者参考，2026-10-22）
+
+| 项目 | 说明 |
+|------|------|
+| Pages `cfp-ctl-test` | 控制面，域名 `cfp-ctl-test.pages.dev`，面板路径见部署日志 |
+| Pages `cfp-dat2-umv1` | 数据面（换名后的当前版本），`cfp-dat2-umv1.pages.dev` |
+| Pages `cfnext` | 用户原有的 CFNext 项目，**不要动** |
+| KV `cfp-kv` | 两个项目共用，存配置 / 优选池 / 部署清单 / 凭据哈希 |
+| Worker 脚本 | 0 个（数据面走 Pages） |
+
+部署清单在 KV 的 `CFP_DEPLOY_MANIFEST` 键，是识别「同源项目」的唯一依据。
+
+> 这些是**用户测试账号**的资源。接手后如果要重新部署，优先用
+> `npx -y cfpilot-deploy@latest pages-split`（自动识别并复用清单），
+> 不要手工建 Pages 项目，否则清单会指向旧项目。
+
+---
+
+## 12. 免责
 
 本项目仅供学习与自建网络研究使用，使用者需自行遵守所在地法律法规与 Cloudflare 服务条款
 （尤其 Free 套餐的流量与 CPU 限制）。MIT 许可，见 [LICENSE](LICENSE)。

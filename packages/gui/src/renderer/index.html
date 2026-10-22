@@ -400,25 +400,48 @@
                 </p>
               </div>
               <div class="field">
-                <label>测速路径（--probe-path）</label>
-                <input type="text" id="optProbePath" placeholder="留空 = 与 WS 路径相同" />
+                <label>测速地址（可选）</label>
+                <input type="text" id="optProbePath" placeholder="留空 = 自动" />
                 <p class="tip">
-                  只有目标提供测速端点时才需要。CFPilot 用 <code>/__edge_probe</code>；<br>
-                  <b>其它项目通常没有</b>，此时速度列会一直显示 —，请勾选「跳过测速」。
+                  <b>留空即可</b>，工具会自动决定：<br>
+                  · 目标有 CFPilot 探针端点（<code>/__edge_probe</code>）→ 走它，最忠实<br>
+                  · 否则 → 用公开测速地址（默认 <code>speed.cloudflare.com</code>）<br>
+                  填了则强制用你指定的地址（需返回大文件，如 <code>xxx/__down?bytes=104857600</code>）。
+                </p>
+              </div>
+            </div>
+
+            <div class="row">
+              <div class="field">
+                <label>测速连接数</label>
+                <input type="number" id="optSpeedConns" value="3" min="1" max="8" />
+                <p class="tip">
+                  建议 <b>3</b>。单条 TCP 连接受拥塞窗口限制，测不满真实带宽；
+                  多条并发取峰值更接近实际可用速度。
+                </p>
+              </div>
+              <div class="field">
+                <label>测速时长（秒）</label>
+                <input type="number" id="optSpeedDur" value="6" min="2" max="30" />
+                <p class="tip">
+                  建议 <b>5~8</b>。太短会被 TCP 慢启动拉低（前 1 秒的样本会被丢弃）。
                 </p>
               </div>
             </div>
 
             <label class="chk" style="margin-bottom:8px">
-              <input type="checkbox" id="optNoSpeed" checked /> 跳过测速，只按延迟排序
+              <input type="checkbox" id="optNoSpeed" /> 跳过测速，只按延迟排序
             </label>
             <label class="chk">
               <input type="checkbox" id="optNoCallback" checked /> 不回填面板，只输出列表
             </label>
             <p class="tip" style="margin-top:6px">
-              「跳过测速」适合对接没有测速端点的项目，此时<b>速度列显示 — 属正常</b>，不是测出来 0；
-              去掉勾选才会真的下载测速，但前提是目标有 <code>/__edge_probe</code>。<br>
-              「不回填」时结果只在下方显示，复制到面板「手动优选 IP」框即可。
+              <b>测速已支持任意项目</b>，不再需要手动跳过：<br>
+              · 目标有 CFPilot 探针端点 → 走项目自身路径测速（最忠实）<br>
+              · 其它项目 → 自动改用<b>公开测速地址</b>测速<br>
+              两种方式都<b>只对已通过 101 校验的 IP 测速</b>，所以不会选出连不上的 IP。<br><br>
+              勾选「跳过测速」才会退化为纯延迟排序（速度列显示 —）。
+              勾选「不回填」时结果只在下方显示，复制到面板「手动优选 IP」框即可。
             </p>
 
             <div class="btn-row" style="margin-top:16px">

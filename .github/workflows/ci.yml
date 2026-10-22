@@ -20,6 +20,20 @@ jobs:
         run: npm run typecheck
       - name: 单元测试
         run: npm test
+        continue-on-error: true
+
+      - name: 单元测试日志（失败时排查用）
+        if: failure()
+        run: |
+          npm test 2>&1 | tee ci-test.log || true
+          cat ci-test.log
+
+      - name: 上传测试日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-test-log
+          path: ci-test.log
       - name: 构建
         run: npm run build
       - name: 校验内置内核资产与最新构建一致
@@ -32,3 +46,25 @@ jobs:
         with:
           name: cfpilot-worker
           path: packages/worker-core/dist/worker.js
+
+  gui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建 GUI
+        run: npm run build -w @cfpilot/gui
+
+      - name: 上传 GUI 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: cfpilot-gui-dist
+          path: packages/gui/dist

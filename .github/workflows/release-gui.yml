@@ -94,6 +94,13 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout main
           git add packages/gui/package.json
-          git diff --cached --quiet || git commit -m "chore(gui): 发布版本 ${{ steps.ver.outputs.version }}"
-          git push
+          if (git diff --cached --quiet) {
+            Write-Host "版本号无变化，跳过提交"
+          } else {
+            git commit -m "chore(gui): 发布版本 ${{ steps.ver.outputs.version }}"
+            # tag 已存在时 main 上可能有新提交，用 --force-with-lease 避免非快进被拒
+            git push origin HEAD:main --force-with-lease
+          }

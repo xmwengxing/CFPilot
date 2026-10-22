@@ -44,6 +44,56 @@ Workers Observability 仅返回早期成功请求，未返回失败请求对应�
 
 这两项影响代理可用性，但没有证据表明它们导致 1101 或 8000119。新增 13 项测试，全量 146 项通过。
 
+## 决定性对照实验（2026-10-22，独立 zone 路由）
+
+同一路由主机名 `cfp-selfdp.xmdongyao.de5.net`，同一账号，逐一替换脚本：
+
+| 脚本 | 大小 | 是否用 sockets | 结果 |
+|---|---|---|---|
+| 极简静态响应 | 114 B | 否 | ✅ 6/6 HTTP 200 |
+| CFPilot 控制面 | 46.9 KB | 否 | ✅ 4/4 HTTP 200 |
+| CFPilot 自研数据面 | 29.4 KB | **是（静态 import）** | ❌ 0/4，全部 1101 |
+| 同一数据面，仅删掉 sockets 导入行 | 29.4 KB | 否 | ✅ 4/4 HTTP 200 |
+| edgetunnel 原版 `_worker.js` | 2771 KB | **否** | ✅ 5/5 HTTP 200 |
+
+补充事实：
+- 一个只 `import { connect } from 'cloudflare:sockets'` 并在请求时调用的 30 行脚本，
+  `/` 路径返回 200（模块可加载），`/__dial` 返回 `TCP Loop detected`。
+- edgetunnel 全文 **0 处 `cloudflare:sockets`**，出站靠 `fetch()` + WebSocket 落地到
+  第三方 SOCKS5-over-HTTP 中转，而非 Workers TCP socket。
+
+## 结论
+
+**此前的两个判断都是错的，现予纠正：**
+
+1. **「账号级风控 / workers.dev 子域被封」不成立。** 同一账号、同一 zone 路由上，
+   edgetunnel 原版 5/5 正常，CFPilot 控制面 4/4 正常。账号与通道均无问题。
+2. **「`TCP Loop detected` 是出站目标选择问题」不成立。** 自研数据面在 isolate
+   **启动阶段**就因静态导入 `cloudflare:sockets` 而失败（0/4，且 Observability 无事件），
+   请求从未进入 WebSocket 消息处理。因此「已排除目标形态」「调 `Pt()` 也失败」
+   等历史结论建立在错误前提上——被测模块从未成功启动。
+
+**当前可确认的因果关系：**
+
+| 现象 | 原因 | 状态 |
+|---|---|---|
+| 数据面 1101 | 静态导入 `cloudflare:sockets` 导致 isolate 启动失败 | 已定位 |
+| `connect()` 返回 TCP Loop detected | 本机 30 行 sockets-only 脚本同样复现，**与 CFPilot 代码无关** | 需 Cloudflare 说明 |
+| Pages 8000119 | 平台滥用处置 | 需 Cloudflare 说明 |
+
+**注意**：`TCP Loop detected` 在极简脚本上复现，说明它是该环境下 `cloudflare:sockets`
+的系统性限制（或需要特定配置），不是 CFPilot 的协议缺陷。edgetunnel 绕开该问题的做法是
+**完全不用 TCP socket**，改用 `fetch()` 落地。
+
+## 已采取的措施
+
+- `outbound/dial.ts` 的 sockets 导入改为惰性动态导入（运行时拼接，esbuild 不会折叠），
+  使模块启动不再依赖 sockets；`scripts/build.mjs` 增加断言：产物含静态外部导入即构建失败。
+- 真机复测：动态导入版数据面**仍然 1101**。说明该环境下只要触及 sockets 就无法运行，
+  动态导入不足以规避。
+- 因此 CFPilot 若要在此环境可用，需效仿 edgetunnel 放弃 TCP socket 出站，
+  改用 `fetch()` 落地。这是架构级改动，尚未实施。
+
 ## 对外部「根因分析」的核实结论
 
 外部平台给出的分析中，只有「滥用扫描为部署后异步执行、存在秒级延迟窗口」与实测吻合（完整包初始 6 次 200、数分钟后持续 1101；Pages 首次成功、二次被拒）。

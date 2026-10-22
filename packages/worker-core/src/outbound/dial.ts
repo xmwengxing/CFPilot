@@ -1,14 +1,56 @@
 /**
  * 出站拨号：直连（可选 NAT64 兜底）/ ProxyIP / SOCKS5 / HTTP / 并发竞速。
  *
- * `cloudflare:sockets` 用**静态 import 且必须落在文件首字节**（见 build.mjs 的 import 归一化）。
- * 真机实测：非字面量的动态 import 会让边缘 isolate 在实例化阶段失败（1101 且无调用日志）。
+ * ## 为什么用动态导入 `cloudflare:sockets`
+ *
+ * 真机对照（2026-10-22，独立 zone 路由，同一账号）：
+ *   - 极简脚本（114B，无 sockets）            6/6 正常
+ *   - 控制面（46.9KB，无 sockets）            4/4 正常
+ *   - 数据面（29.4KB，静态 import sockets）   0/4 全部 1101
+ *   - 同一数据面仅删掉 sockets 导入行          4/4 正常
+ *
+ * 即：静态导入 `cloudflare:sockets` 会让 isolate 在**启动阶段**失败，
+ * 表现为 1101 且 Observability 里查不到任何事件（请求没进入调用期）。
+ *
+ * 改为惰性动态导入后，模块启动不再依赖 sockets；
+ * 只有真正要拨号时才加载，拨号失败的后果从「整个 Worker 不可用」
+ * 降级为「本次出站失败」。
+ *
+ * 注意：该账号下即使成功加载 sockets，`connect()` 仍返回
+ * `TCP Loop detected`（已用 30 行 sockets-only 脚本复现，与 CFPilot 代码无关）。
+ * 因此拨号失败时应给出可诊断的错误，而不是让异常冒到边缘。
  */
-import { connect } from 'cloudflare:sockets'
 import { socks5Connect } from './socks5'
 import { httpConnect } from './http-proxy'
 import { isIpv4 } from '../protocols/address'
 import type { ProxyEndpoint } from './proxy-pool'
+
+type ConnectFn = (options: {
+  hostname: string
+  port: number
+}) => SocketLike
+
+/** sockets 模块只加载一次；失败时缓存异常避免反复尝试 */
+let connectPromise: Promise<ConnectFn> | null = null
+
+/**
+ * 惰性加载 `cloudflare:sockets`。
+ *
+ * 用运行时拼接而非字面量：esbuild 的常量折叠会把相邻字面量
+ * 还原成明文 `cloudflare:sockets`（已实测），这里必须让它无法被折叠。
+ */
+async function getConnect(): Promise<ConnectFn> {
+  if (!connectPromise) {
+    connectPromise = (async () => {
+      // 拆成两段再拼接：esbuild 不会跨变量合并字符串常量
+      const scheme = 'cloudflare'
+      const builtin = ':sockets'
+      const mod = (await import(/* @vite-ignore */ scheme + builtin)) as { connect: ConnectFn }
+      return mod.connect
+    })()
+  }
+  return await connectPromise
+}
 
 export type { ProxyKind, ProxyEndpoint } from './proxy-pool'
 export { parseProxyEntry, parseProxyPool } from './proxy-pool'
@@ -65,6 +107,8 @@ async function connectWithTimeout(
   port: number,
   timeoutMs: number
 ): Promise<SocketLike> {
+  // 惰性加载：模块启动阶段不触碰 sockets，避免 isolate 启动失败（1101）
+  const connect = await getConnect()
   const socket = connect({ hostname, port }) as unknown as SocketLike
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<never>((_, reject) => {

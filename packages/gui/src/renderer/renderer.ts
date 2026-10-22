@@ -33,6 +33,15 @@
     line.innerHTML = '<span class="t">' + stamp + '</span>' + escapeHtml(message)
     box.appendChild(line)
     box.scrollTop = box.scrollHeight
+
+    // 折叠状态下收到重要消息时自动展开，避免错过
+    if (level === 'err' || level === 'warn') {
+      const panel = $('logPanel')
+      if (panel.classList.contains('collapsed')) {
+        panel.classList.remove('collapsed')
+        $('logHead').title = '点击折叠日志'
+      }
+    }
   }
 
   function escapeHtml(s: string): string {
@@ -252,8 +261,17 @@
       const btn = (e.target as HTMLElement).closest('button[data-page]') as HTMLElement | null
       if (btn) switchPage(btn.dataset.page!)
     })
-    document.getElementById('btnClearLog')!.addEventListener('click', () => {
+    document.getElementById('btnClearLog')!.addEventListener('click', (e) => {
+      e.stopPropagation()
       $('logBox').innerHTML = ''
+    })
+
+    // 日志栏折叠：点标题条切换
+    const logPanel = $('logPanel')
+    const logHead = $('logHead')
+    logHead.addEventListener('click', () => {
+      const collapsed = logPanel.classList.toggle('collapsed')
+      logHead.title = collapsed ? '点击展开日志' : '点击折叠日志'
     })
 
     bindCredentials()

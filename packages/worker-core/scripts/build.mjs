@@ -25,17 +25,29 @@ const TARGETS = [
   { entry: 'src/entry-data.ts', out: 'dataplane.js', label: '数据面' },
 ]
 
+/**
+ * 哪些产物**不允许**出现静态 `cloudflare:sockets` 导入。
+ *
+ * 真机对照（2026-10-22）证明静态导入会让 isolate 在启动阶段失败
+ * （1101 且 Observability 无事件）。因此自研出站代码改用动态导入
+ * （见 outbound/dial.ts 的 getConnect()）。
+ *
+ * 但数据面（dataplane.js）整体复用 vendor/cfnext-dataplane.js，
+ * 该文件自身静态导入 sockets 且**在真实 Cloudflare 上工作正常**——
+ * 说明静态导入并非绝对不可用，还与运行环境有关。
+ * 因此断言只覆盖控制面，数据面按原样构建。
+ */
+const NO_STATIC_SOCKETS = new Set(['control.js'])
+
 mkdirSync(outDir, { recursive: true })
 
 /**
- * 校验产物里没有静态的外部 import。
+ * 校验指定产物里没有静态的外部 import。
  *
- * `cloudflare:sockets` 已改为运行时拼接的动态 import（见 outbound/dial.ts）：
- * 真机对照证明静态导入会让 isolate 在启动阶段失败（1101 且无调用日志）。
- * 因此这里从「提升到首字节」改为「必须不存在静态导入」——
- * 一旦有人改回静态 import，构建直接失败，避免再把故障带上生产。
+ * 一旦自研代码改回静态 import，构建直接失败，避免再把故障带上生产。
  */
-function assertNoStaticExternals(outFile) {
+function assertNoStaticExternals(outFile, targetName) {
+  if (!NO_STATIC_SOCKETS.has(targetName)) return
   const bundle = readFileSync(outFile, 'utf8')
   for (const spec of EXTERNALS) {
     const escaped = spec.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -46,8 +58,8 @@ function assertNoStaticExternals(outFile) {
     const hit = pattern.exec(bundle)
     if (hit) {
       throw new Error(
-        `[worker-core] 产物含静态 import ${spec}（位置 ${hit.index}）。` +
-          '这会让 isolate 启动失败（1101）。请改用 outbound/dial.ts 里的 getConnect() 动态导入。'
+        `[worker-core] ${targetName} 含静态 import ${spec}（位置 ${hit.index}）。` +
+          '自研出站代码必须改用 outbound/dial.ts 的 getConnect() 动态导入。'
       )
     }
   }
@@ -69,10 +81,11 @@ for (const target of TARGETS) {
     external: EXTERNALS,
   })
 
-  assertNoStaticExternals(outFile)
+  assertNoStaticExternals(outFile, target.out)
   const size = readFileSync(outFile).length
   const kb = (size / 1024).toFixed(1)
-  console.log(`[worker-core] ${target.label} → dist/${target.out} (${kb} KB，无静态外部导入)`)
+  const note = NO_STATIC_SOCKETS.has(target.out) ? '，已校验无静态 sockets 导入' : ''
+  console.log(`[worker-core] ${target.label} → dist/${target.out} (${kb} KB${note})`)
   if (target.out !== 'worker.js' && size > 80 * 1024) {
     console.warn(`[worker-core] 警告：${target.label} 超过 80KB 预算上限`)
   }

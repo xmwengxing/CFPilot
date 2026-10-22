@@ -9,6 +9,9 @@ import { flagBool, flagString, parseArgs } from './args'
 import { CloudflareClient } from './cf-api'
 import { checkTokenPermissions, renderTokenCheck } from './token-check'
 import { deploy, printResult } from './wizard'
+import { deployPagesSplit } from './pages-deploy'
+import { randomPanelPath, randomPassword, randomWorkerName } from './utils'
+import { randomUUID } from 'node:crypto'
 import { NAME, VERSION } from './version'
 
 const TOKEN_HELP = `
@@ -36,11 +39,12 @@ ${NAME} v${VERSION}
 CFPilot 全中文部署向导 —— 自动创建 KV、部署 Worker 内核、绑定自定义域名。
 
 用法:
-  ${NAME} init [选项]       执行部署
-  ${NAME} token [选项]      仅校验 API Token
-  ${NAME} token --check     逐项探测 Token 权限并输出修复建议
-  ${NAME} --help            显示帮助
-  ${NAME} --version         显示版本
+  ${NAME} init [选项]          执行 Worker 部署（单项目）
+  ${NAME} pages-split [选项]   Pages 双项目部署（控制面 + 数据面，推荐）
+  ${NAME} token [选项]        仅校验 API Token
+  ${NAME} token --check       逐项探测 Token 权限并输出修复建议
+  ${NAME} --help              显示帮助
+  ${NAME} --version           显示版本
 
 选项:
   --token <token>        Cloudflare API Token（也可用环境变量 CLOUDFLARE_API_TOKEN）
@@ -60,6 +64,16 @@ CFPilot 全中文部署向导 —— 自动创建 KV、部署 Worker 内核、�
   4. 自动开启 Workers Logs（observability）
   5. 绑定自定义域名，并主动 GET 校验真实可访问性；
      接口成功但访问 522 时自动降级 Route + CNAME，仍失败则降级 workers.dev
+
+   pages-split（Pages 双项目，推荐）
+   真机复现：合并包部署到 Pages，第一次成功、第二次 HTTP 400 / 8000119 blocked；
+   拆成控制面与数据面两个项目后，两边都能原地更新。
+   1. 创建两个 Pages 项目（控制面无 sockets，数据面用 CFNext 实现）
+   2. 配置 KV 绑定与环境变量（Pages 的绑定只对之后的部署生效）
+   3. 先部署数据面，再部署控制面（控制面需要数据面域名生成订阅）
+
+   ⚠️ 双项目是「当前唯一实测可用的安排」，不是 Cloudflare 的硬性要求。
+      平台未说明 8000119 的具体触发原因，详见 docs/cloudflare-deployment-diagnosis.md。
 
 Token 所需权限（Cloudflare 新版权限名）:
   Account / Workers KV Storage / Edit
@@ -87,6 +101,113 @@ Token 有效期说明:
   npx -y cfpilot-deploy token --check --zone example.com
 `
 
+const PAGES_HELP = `
+${NAME} pages-split —— Pages 双项目部署（控制面 + 数据面）
+
+⚠️ 这是**当前唯一实测可用的部署形态**，不是 Cloudflare 的硬性要求。
+   2026-10-22 真机复现：合并包部署到 Pages，第一次成功、第二次
+   HTTP 400 / 8000119 blocked。拆成两个项目后两边都能原地更新。
+   Cloudflare 未说明具体触发原因，详见 docs/cloudflare-deployment-diagnosis.md。
+
+用法:
+  ${NAME} pages-split [选项]
+
+选项:
+  --token <token>        Cloudflare API Token（也可用环境变量 CLOUDFLARE_API_TOKEN）
+  --account <id>         目标账号 ID
+  --kv <id>              KV 命名空间 ID（两个项目共用；缺省则自动创建）
+  --kv-title <title>     自动创建 KV 时使用的标题
+  --control <name>       控制面 Pages 项目名（默认随机）
+  --data <name>          数据面 Pages 项目名（默认随机）
+  --panel-path <path>    面板访问路径（默认随机）
+  --yes                  非交互模式
+
+产物来源:
+  packages/worker-core/dist/control.js  控制面（面板 + 订阅 + 探针，无 sockets）
+  packages/worker-core/dist/dataplane.js 数据面（VLESS/Trojan-WS，CFNext 实现）
+
+部署顺序（不可调换）:
+  1. 创建两个 Pages 项目
+  2. 配置 KV 绑定与环境变量（Pages 的绑定只对之后的部署生效）
+  3. 先部署数据面，再部署控制面（控制面需要数据面域名生成订阅）
+
+Token 所需权限:
+  Account / Pages / Edit              创建项目、配置变量、触发部署
+  Account / Workers KV Storage / Edit 创建 KV（若未提供 --kv）
+`
+
+async function runPagesSplit(args: ReturnType<typeof parseArgs>): Promise<void> {
+  const token = flagString(args, 'token') || process.env.CLOUDFLARE_API_TOKEN || ''
+  if (!token) {
+    process.stderr.write('缺少 --token 参数（或设置 CLOUDFLARE_API_TOKEN）\n')
+    process.exitCode = 1
+    return
+  }
+
+  const client = new CloudflareClient({ token })
+  const accountId = flagString(args, 'account') || ''
+  let kvId = flagString(args, 'kv') || ''
+  let resolvedAccount = accountId
+
+  if (!resolvedAccount) {
+    const accounts = await client.listAccounts()
+    if (accounts.length === 0) {
+      process.stderr.write('✗ 该 Token 没有可访问的账号\n')
+      process.exitCode = 1
+      return
+    }
+    resolvedAccount = accounts[0]!.id
+    process.stdout.write(`使用账号：${accounts[0]!.name}（${accounts[0]!.id}）\n`)
+  }
+
+  // 缺省则自动创建 KV
+  if (!kvId) {
+    const title = flagString(args, 'kv-title') || `cfpilot-kv-${Date.now().toString(36)}`
+    process.stdout.write(`创建 KV 命名空间：${title}\n`)
+    const ns = await client.createKvNamespace(resolvedAccount, title)
+    kvId = ns.id
+    process.stdout.write(`✓ KV 已创建：${ns.id}\n`)
+  }
+
+  const panelPath = flagString(args, 'panel-path') || randomPanelPath()
+  const panelPassword = flagString(args, 'panel-password') || randomPassword()
+  const controlName = flagString(args, 'control') || randomWorkerName()
+  const dataName = flagString(args, 'data') || randomWorkerName()
+  const wsPath = flagString(args, 'ws-path') || 'vless'
+  const uuid = flagString(args, 'uuid') || randomUUID()
+  const trojanPassword = flagString(args, 'trojan-password') || randomPassword()
+
+  process.stdout.write(`\n面板路径：${panelPath}\n面板密码：${panelPassword}\n`)
+  process.stdout.write(`UUID：${uuid}\nTrojan 密码：${trojanPassword}\n`)
+  process.stdout.write(`控制面项目：${controlName}\n数据面项目：${dataName}\n\n`)
+
+  const result = await deployPagesSplit({
+    token,
+    accountId: resolvedAccount,
+    kvNamespaceId: kvId,
+    controlProject: controlName,
+    dataProject: dataName,
+    panelPath,
+    panelPassword,
+    uuid,
+    trojanPassword,
+    wsPath,
+    enableTrojan: true,
+    enableXhttp: false,
+    log: (m) => process.stdout.write(`${m}\n`),
+  })
+
+  process.stdout.write(`\n${'─'.repeat(52)}\n`)
+  process.stdout.write(`控制面：https://${result.control.subdomain}${panelPath}\n`)
+  process.stdout.write(`数据面：https://${result.data.subdomain}\n`)
+  process.stdout.write(`\n⚠️ 请把上面的面板路径与密码保存到安全的地方。\n`)
+
+  if (result.warnings.length > 0) {
+    process.stdout.write(`\n告警（${result.warnings.length} 条）：\n`)
+    for (const w of result.warnings) process.stdout.write(`  ⚠ ${w}\n`)
+  }
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
   const command = args.command && !args.command.startsWith('-') ? args.command : ''
@@ -94,6 +215,10 @@ async function main(): Promise<void> {
 
   if (command === 'token' && wantsHelp) {
     process.stdout.write(TOKEN_HELP)
+    return
+  }
+  if (command === 'pages-split' && wantsHelp) {
+    process.stdout.write(PAGES_HELP)
     return
   }
   if (wantsHelp || command === 'help') {
@@ -149,6 +274,15 @@ async function main(): Promise<void> {
       }
     }
     process.stdout.write('\n提示：加上 --check 可逐项探测 Token 权限并给出缺失后果。\n')
+    return
+  }
+
+  if (command === 'pages-split') {
+    if (flagBool(args, 'dry-run')) {
+      process.stdout.write('（dry-run）将执行 Pages 双项目部署，未实际调用 API\n')
+      return
+    }
+    await runPagesSplit(args)
     return
   }
 

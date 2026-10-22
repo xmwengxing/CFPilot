@@ -1,5 +1,18 @@
 /**
  * 面板鉴权：密码登录 + KV 会话 + 一次性扫描令牌
+ *
+ * ## 凭据的优先级与存储
+ *
+ * 历史实现是「KV 优先，环境变量只在 KV 为空时生效」，这导致复用 KV 重新部署时，
+ * 新注入的 `PANEL_PASSWORD` / `PANEL_PATH` 被静默忽略，用户拿着新密码登不进去。
+ *
+ * 现在的规则：
+ *   - **环境变量优先**：部署时显式注入的凭据应当生效，否则部署向导失去意义。
+ *   - KV 只存**派生值**（salt:hash），绝不存明文密码。
+ *   - 环境变量未提供时才随机生成，并把明文写进 KV 的 `ADMIN_PW_PLAIN`
+ *     （这是用户唯一的取回途径，因为 Worker 无状态）。
+ *
+ * 需要「改回 KV 里的旧密码」时，删掉环境变量即可；需要重置则删 KV 的两个键。
  */
 import type { Store } from './store'
 import {
@@ -29,35 +42,57 @@ async function hashPassword(password: string, salt: string): Promise<string> {
   return await sha256Hex(`${salt}:${password}`)
 }
 
+/** 规范化路径：确保有且仅有一个前导斜杠 */
+function normalizePath(path: string): string {
+  return `/${path.trim().replace(/^\/+/, '')}`
+}
+
 /**
- * 首次启动引导：生成面板路径与管理员密码哈希。
- * 优先使用部署时注入的 PANEL_PASSWORD，否则随机生成并保留明文副本供用户取回。
+ * 首次启动引导：确定面板路径与密码哈希。
+ *
+ * 优先级：**环境变量 > KV**。环境变量变化时会同步刷新 KV，
+ * 这样「重新部署并注入新密码」能立即生效，不会被旧值挡住。
  */
 export async function ensureBootstrap(
   store: Store,
   envPassword?: string,
   envPath?: string
 ): Promise<AuthContext> {
+  /* ---- 面板路径 ---- */
   let panelPath = (await store.get(PANEL_PATH_KEY)) ?? ''
-  if (!panelPath) {
-    panelPath = envPath && envPath.trim()
-      ? `/${envPath.trim().replace(/^\//, '')}`
-      : `/${PANEL_PATH_DEFAULT.replace(/^\//, '')}-${randomAlnum(6)}`
+  const envPathNorm = envPath && envPath.trim() ? normalizePath(envPath) : ''
+  if (envPathNorm) {
+    // 环境变量优先：与 KV 不一致时以环境变量为准并回写
+    if (panelPath !== envPathNorm) {
+      panelPath = envPathNorm
+      await store.put(PANEL_PATH_KEY, panelPath)
+    }
+  } else if (!panelPath) {
+    panelPath = normalizePath(`${PANEL_PATH_DEFAULT}-${randomAlnum(6)}`)
     await store.put(PANEL_PATH_KEY, panelPath)
   }
 
+  /* ---- 密码 ---- */
   let passwordHash = (await store.get(ADMIN_PW_HASH_KEY)) ?? ''
   let generatedPassword: string | null = null
+  const envPw = envPassword && envPassword.trim() ? envPassword.trim() : ''
 
-  if (!passwordHash) {
-    const password = envPassword && envPassword.trim() ? envPassword.trim() : `cfp-${randomHex(8)}`
+  if (envPw) {
+    // 环境变量优先：每次启动都按当前环境变量重新派生，
+    // 因此改密码只需重新部署，不需要手动清 KV。
+    const salt = randomHex(8)
+    passwordHash = `${salt}:${await hashPassword(envPw, salt)}`
+    await store.put(ADMIN_PW_HASH_KEY, passwordHash)
+    // 环境变量已提供密码，KV 里不应再留明文副本
+    await store.delete(ADMIN_PW_PLAIN_KEY)
+  } else if (!passwordHash) {
+    // 未注入密码：随机生成并保留明文副本供用户取回
+    const password = `cfp-${randomHex(8)}`
     const salt = randomHex(8)
     passwordHash = `${salt}:${await hashPassword(password, salt)}`
     await store.put(ADMIN_PW_HASH_KEY, passwordHash)
-    if (!envPassword || !envPassword.trim()) {
-      generatedPassword = password
-      await store.put(ADMIN_PW_PLAIN_KEY, password)
-    }
+    generatedPassword = password
+    await store.put(ADMIN_PW_PLAIN_KEY, password)
   }
 
   return { panelPath, passwordHash, generatedPassword }

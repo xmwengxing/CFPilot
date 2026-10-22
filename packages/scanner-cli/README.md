@@ -32,6 +32,38 @@ npx -y cfpilot-scanner scan --host cfpilot.example.com --token <令牌>
 npx -y cfpilot-scanner scan --host cfpilot.example.com --no-callback --top 20
 ```
 
+## 运行前必须关闭代理工具
+
+> ⚠️ 这是最容易踩的坑，也是「结果看起来正常但导入客户端全是 -1」的头号原因。
+
+本工具测的是**本机直连某个 IP 的真实质量**。
+只要本机有代理工具在接管流量，测出来的就是**到代理的延迟**，而不是到目标 IP 的延迟：
+
+- Clash / Mihomo（含 TUN 模式、系统代理）
+- v2rayN / v2rayNG
+- sing-box / Nekoray
+- Surge / Quantumult
+
+**症状**：扫描不报错、结果看起来正常，但所有候选 IP 成绩趋于一致
+（常常集中在一个小网段），导入客户端后大量 `-1` —— 因为从未真正直连验证过。
+
+工具会在扫描前自动检测，发现异常会打印提醒：
+
+```
+⚠️  检测到可能干扰优选的因素：
+   本机有代理程序在监听：
+     Clash Verge → 127.0.0.1:7897
+    → 关闭这些代理程序，或在其中把本程序加入直连/绕过名单
+   DNS 把 your-domain.com 解析到 198.18.0.82（198.18/15 保留段），TUN / fake-ip 正在生效
+    → 关闭代理工具的 TUN 模式与 fake-ip DNS
+```
+
+检测到问题**不会阻断扫描**（有些人确实需要走代理，比如域名在本地被污染），
+但结果的可信度由你自己判断。
+
+如果必须开着代理，请把它加入直连/绕过名单，
+并确保**待测的 Cloudflare IP 段**走直连而不是代理节点。
+
 ## 对接任意 VLESS-WS 项目（CFNext / cfnew / BPB / edgetunnel）
 
 不依赖 CFPilot 自己的探针端点，只要知道你项目的 **WebSocket 路径**即可：
@@ -42,11 +74,19 @@ npx -y cfpilot-scanner scan --host your-domain.com --path /<uuid> --no-callback
 
 # 常见约定：/vless
 npx -y cfpilot-scanner scan --host your-domain.com --path /vless --no-callback
+
+# 有些项目把 WebSocket 放在根路径，那就填 /
+npx -y cfpilot-scanner scan --host your-domain.com --path / --no-callback
 ```
+
+**路径必须与目标项目实际的 WebSocket 路径完全一致**，填错一个 IP 都选不出来。
+不知道就分别试 `/` 和 `/vless`，能出结果的那个就是对的。
 
 - 阶段二会对 `<path>` 发起真实的 **TLS + WebSocket 101** 握手，只有 101 才算可用
 - 如果目标没有测速端点，会自动跳过测速、只按延迟排序（不会再干等 12 秒）
 - 想测速可加 `--probe-path <路径>` 与 `--no-speed` 控制行为
+- **测速需要目标提供 `/__edge_probe` 这类端点**；其它项目通常没有，
+  此时速度列会一直是 0，属正常现象
 
 ## 输出：直接可复制的列表
 

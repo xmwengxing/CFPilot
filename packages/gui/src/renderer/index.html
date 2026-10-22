@@ -146,6 +146,13 @@
       border-radius: var(--radius); padding: 14px 16px; font-size: 12.5px; line-height: 1.9;
     }
     .secure b { color: var(--ok); }
+    /* 警示框：用于「先关代理」这类必须看见的提醒 */
+    .warnbox {
+      background: rgba(251,191,36,.07); border: 1px solid rgba(251,191,36,.28);
+      border-radius: var(--radius); padding: 13px 15px; font-size: 12.5px; line-height: 1.85;
+      color: #d8dee9;
+    }
+    .warnbox b { color: var(--warn); }
     code {
       background: var(--bg-input); padding: 1px 6px; border-radius: 4px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px;
@@ -353,10 +360,12 @@
               </div>
               <div class="field">
                 <label>WS 路径</label>
-                <input type="text" id="optPath" placeholder="如 /vless" />
+                <input type="text" id="optPath" placeholder="如 /vless 或 /（根路径）" />
                 <p class="tip">
-                  代理的 WebSocket 路径，必须与客户端里填的一致。
-                  CFNext 常见是 UUID，部分项目是 <code>/vless</code>。
+                  <b>必须与目标项目实际的 WebSocket 路径完全一致</b>，否则一个 IP 都选不出来。<br>
+                  · CFPilot / CFNext：通常是 <code>/vless</code> 或一长串 UUID<br>
+                  · 部分项目直接用根路径，那就填 <code>/</code><br>
+                  · 不知道就分别试 <code>/</code> 和 <code>/vless</code>，能出结果的那个就是对的
                 </p>
               </div>
             </div>
@@ -386,15 +395,16 @@
                 <label>候选采样数（--sample）</label>
                 <input type="number" id="optSample" value="300" min="10" max="20000" />
                 <p class="tip">
-                  建议 <b>200~500</b>。太小可能吃不到好 IP，太大会让第一阶段等很久。
+                  建议 <b>200~500</b>。太小可能吃不到好 IP，太大会让第一阶段等很久。<br>
+                  第一次测新项目建议调到 <b>500~1000</b>，确认路径对了再降回来。
                 </p>
               </div>
               <div class="field">
                 <label>测速路径（--probe-path）</label>
                 <input type="text" id="optProbePath" placeholder="留空 = 与 WS 路径相同" />
                 <p class="tip">
-                  只有目标提供测速端点时才需要。CFPilot 用 <code>/__edge_probe</code>；
-                  其它项目通常没有，此时请勾选「跳过测速」。
+                  只有目标提供测速端点时才需要。CFPilot 用 <code>/__edge_probe</code>；<br>
+                  <b>其它项目通常没有</b>，此时速度列会一直显示 —，请勾选「跳过测速」。
                 </p>
               </div>
             </div>
@@ -406,12 +416,23 @@
               <input type="checkbox" id="optNoCallback" checked /> 不回填面板，只输出列表
             </label>
             <p class="tip" style="margin-top:6px">
-              勾选「跳过测速」适合对接没有测速端点的项目，速度快很多。
-              勾选「不回填」时结果只在下方显示，复制到面板「手动优选 IP」框即可。
+              「跳过测速」适合对接没有测速端点的项目，此时<b>速度列显示 — 属正常</b>，不是测出来 0；
+              去掉勾选才会真的下载测速，但前提是目标有 <code>/__edge_probe</code>。<br>
+              「不回填」时结果只在下方显示，复制到面板「手动优选 IP」框即可。
             </p>
 
             <div class="btn-row" style="margin-top:16px">
               <button class="btn btn-primary" id="btnScan">开始优选</button>
+              <button class="btn btn-ghost" id="btnEnvCheck">检测网络环境</button>
+            </div>
+            <div class="warnbox" style="margin-top:12px">
+              <b>⚠️ 运行前请关闭所有代理工具</b>（Clash / Mihomo / v2rayN / sing-box / Surge 等），
+              包括 <b>TUN 模式</b>与<b>系统代理</b>。<br><br>
+              优选器测的是「<b>本机直连该 IP</b>」的真实质量。流量一旦被代理接管，
+              测出来的就是到代理的延迟而不是到目标 IP 的延迟 ——
+              结果看起来正常，但所有 IP 成绩趋于一致，<b>导入客户端后大量 -1</b>。<br><br>
+              如果必须开着代理，请把本程序加入直连/绕过名单。
+              点「检测网络环境」可以帮你确认当前是否处于干扰状态。
             </div>
           </div>
 

@@ -80,6 +80,7 @@ interface Window {
       top: number
     }): Promise<{ ok: boolean; count?: number; copyable?: string; error?: string }>
     detectAccount(): Promise<{ accountId: string; accountName: string; kvId: string }>
+    checkEnvironment(): Promise<{ clean: boolean; findings: string[] }>
     saveCredentials(input: {
       cfToken?: string
       accountId?: string
@@ -110,4 +111,5 @@ interface CFPilotScanResult {
   entries: Array<{ ip: string; port: number; colo: string; latency: number; speed: number }>
   copyable: string
   stats: Record<string, number>
+  skippedSpeed?: boolean
 }

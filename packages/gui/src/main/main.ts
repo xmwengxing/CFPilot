@@ -17,6 +17,7 @@ import {
   credentialsState,
   runScanJob,
   detectAccount,
+  checkNetworkEnvironment,
   type DeployParams,
   type ScanParams,
 } from './bridge'
@@ -26,16 +27,33 @@ import { checkForUpdate, downloadUpdate, applyUpdate, cleanupUpdateFiles } from 
 const here: string = __dirname
 
 /**
- * 注意：GPU 加速必须通过**命令行参数**禁用，不能在这里调用
- * `app.disableHardwareAcceleration()`。
+ * GPU 相关的启动开关 —— 必须在创建窗口之前设置。
  *
- * 原因：Electron 的 GPU 进程在 JS 入口执行之前就已启动
- * （electron/electron#14273：The first JS entry point is too late），
- * 因此代码内调用无效，仍会抛 `GPU process launch failed: error_code=18`。
+ * ## 为什么必须放在这里
  *
- * 真正的处理在 scripts/start.mjs：它以 `--disable-gpu-sandbox` 等参数
- * 逐级降级重启 Electron。
+ * 部分 Windows 环境（远程桌面 / 虚拟机 / 显卡驱动异常）下 Chromium 的 GPU 进程
+ * 起不来，报：
+ *   `GPU process launch failed: error_code=18`
+ *   `FATAL:gpu_data_manager_impl_private.cc GPU process isn't usable. Goodbye.`
+ * 然后**整个进程直接退出，窗口根本不出现**。
+ * 用户看到的现象是「双击没反应」，很容易误判成缺少管理员权限
+ * （提权后安全上下文变化，GPU 沙箱有时恰好能通过，于是形成「必须管理员」的错觉）。
+ *
+ * ## 为什么不能用 app.disableHardwareAcceleration() 代替
+ *
+ * 那个 API 只关硬件加速，不关 GPU **沙箱**；而 error_code=18 正是沙箱初始化失败。
+ * 两者都要设。
+ *
+ * ## 适用范围
+ *
+ * 本工具的界面是纯 DOM + CSS，不用 WebGL / Canvas / 视频，
+ * 禁用 GPU 没有任何功能损失，因此**无条件启用**，不开可选项。
+ * 这样打包后的 exe 在远程桌面里也能直接双击运行。
  */
+app.commandLine.appendSwitch('disable-gpu-sandbox')
+app.commandLine.appendSwitch('disable-gpu')
+app.commandLine.appendSwitch('disable-software-rasterizer')
+app.disableHardwareAcceleration()
 
 /** 单窗口应用：复用同一个 window */
 let mainWindow: BrowserWindow | null = null
@@ -81,6 +99,7 @@ ipcMain.handle('cred:wipe', () => wipeCredentials())
 ipcMain.handle('cred:state', () => credentialsState())
 
 ipcMain.handle('scan:run', (_event, params: ScanParams) => runScanJob(mainWindow, params))
+ipcMain.handle('env:check', () => checkNetworkEnvironment(mainWindow))
 ipcMain.handle('account:detect', () => detectAccount(mainWindow))
 
 ipcMain.handle('update:check', () => checkForUpdate())

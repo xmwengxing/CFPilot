@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs'
 import { flagBool, flagList, flagNumber, flagString, parseArgs } from './args'
 import { BUILTIN_IPV4_CIDRS, BUILTIN_IPV6_CIDRS, readIpFile } from './ip-ranges'
 import { resolveCandidates } from './candidates'
+import { detectProxyInterference } from './net-env'
 import { formatEntries, runScan, type ScanEvent, type ScanEntry, formatCopyable } from './scan'
 import { postResults } from './callback'
 import { BRIDGE_VERSION, DEFAULT_BRIDGE_PORT, startBridge } from './server'
@@ -63,6 +64,59 @@ serve 选项:
   ${NAME} scan --host cfpilot.example.com --token abc123
   ${NAME} serve
 `
+
+/**
+ * 判断一个 WS 路径参数是否被 MSYS（Git-Bash）污染。
+ *
+ * 抽成纯函数便于测试 —— 这类「静默失败」的坑值得有回归测试守住。
+ */
+export function isMsysPollutedPath(value: string): boolean {
+  const looksWindows = /^[A-Za-z]:[\\/]/.test(value) || value.includes('\\')
+  const hasMsysHint = /node_modules|bash-win32|@dsh-ops|msys/i.test(value)
+  return looksWindows || hasMsysHint
+}
+
+/**
+ * 校验并归一化 WS 路径。
+ *
+ * ## 为什么必须校验
+ *
+ * 在 Git-Bash / MSYS 下执行 `--path /vless` 时，MSYS 会把「看起来像 Unix 绝对
+ * 路径」的参数自动转换成 Windows 路径，实际传入的是：
+ *   `C:/Users/<用户名>/.../node_modules/@dsh-ops/bash-win32-x64/vless`
+ * 结果就是：扫描跑完，一个 IP 都选不出来，而且**完全没有报错**，
+ * 用户只会以为「这个工具不好用」。
+ *
+ * 因此这里直接拦住，并告诉用户怎么绕开（MSYS_NO_PATHCONV=1，或用 = 写法）。
+ */
+function normalizeWsPath(raw: string | undefined, fallback: string): string {
+  const value = (raw ?? fallback).trim()
+  if (!value) return fallback
+
+  if (isMsysPollutedPath(value)) {
+    process.stderr.write(
+      '\n✗ --path 被 MSYS（Git-Bash）转换成了 Windows 路径：\n' +
+        `   收到的是：${value}\n` +
+        '\n' +
+        '  这是 Git-Bash 的自动路径转换行为，不是本工具的问题。\n' +
+        '  三种绕开方式，任选其一：\n' +
+        '    1. 用等号写法：      --path=/vless\n' +
+        '    2. 加环境变量：      MSYS_NO_PATHCONV=1 cfpilot-scanner scan ...\n' +
+        '    3. 换用 PowerShell / CMD 执行\n'
+    )
+    process.exit(1)
+  }
+
+  if (!value.startsWith('/')) {
+    process.stderr.write(
+      `\n✗ --path 必须以 / 开头，收到的是：「${value}」\n` +
+        '  例如：--path /vless 或 --path /（目标项目用根路径时）\n'
+    )
+    process.exit(1)
+  }
+
+  return value
+}
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
@@ -204,8 +258,8 @@ async function commandScan(args: ReturnType<typeof parseArgs>): Promise<void> {
   const top = flagNumber(args, 'top', 15)
   const token = flagString(args, 'token')
   const noCallback = flagBool(args, 'no-callback')
-  const wsPath = flagString(args, 'path', '/__edge_probe')
-  const probePath = flagString(args, 'probe-path', '/__edge_probe')
+  const wsPath = normalizeWsPath(flagString(args, 'path'), '/__edge_probe')
+  const probePath = normalizeWsPath(flagString(args, 'probe-path'), '/__edge_probe')
   const noSpeed = flagBool(args, 'no-speed')
   const callback = noCallback
     ? ''
@@ -214,8 +268,29 @@ async function commandScan(args: ReturnType<typeof parseArgs>): Promise<void> {
   if (!quiet) {
     process.stdout.write(`\n${NAME} v${VERSION}\n`)
     process.stdout.write(`目标域名：${host}:${port}（将作为 TLS SNI 与 HTTP Host）\n`)
-    process.stdout.write('正在准备 Cloudflare 网段…\n')
+    process.stdout.write(`WS 路径：${wsPath}\n`)
   }
+
+  // 代理干扰检测：流量被代理接管时，测出来的是到代理的延迟而不是到目标 IP 的，
+  // 结果会「看起来正常」但导入客户端后大量 -1，因此必须提前提醒。
+  // 只提醒不阻断 —— 用户可能确实需要走代理（例如域名在本地被污染）。
+  if (!quiet) {
+    const env = await detectProxyInterference(host)
+    if (!env.clean) {
+      process.stdout.write('\n⚠️  检测到可能干扰优选的因素：\n')
+      for (const f of env.findings) {
+        process.stdout.write(`   ${f.message}\n`)
+        process.stdout.write(`   → ${f.advice}\n`)
+      }
+      process.stdout.write('\n   优选测的是「本机直连该 IP」的真实质量。\n')
+      process.stdout.write('   流量被代理接管时，结果看起来正常，但所有 IP 成绩趋于一致，\n')
+      process.stdout.write('   导入客户端后大量 -1（因为从未真正直连验证过）。\n')
+      process.stdout.write('   → 建议关闭代理工具（含 TUN 模式与系统代理）后重跑。\n')
+      process.stdout.write('   → 或把本程序与待测 IP 段设为直连。\n\n')
+    }
+  }
+
+  if (!quiet) process.stdout.write('正在准备 Cloudflare 网段…\n')
 
   const candidates = await resolveCandidatesFromArgs(args)
   if (candidates.length === 0) {

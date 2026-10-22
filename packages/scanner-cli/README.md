@@ -45,8 +45,8 @@ npx -y cfpilot-scanner scan --host your-domain.com --path /vless --no-callback
 ```
 
 - 阶段二会对 `<path>` 发起真实的 **TLS + WebSocket 101** 握手，只有 101 才算可用
-- 如果目标没有 CFPilot 探针，会自动跳过测速、只按延迟排序（不会再干等 12 秒）
-- 想测速可加 `--probe-path <路径>`
+- 如果目标没有测速端点，会自动跳过测速、只按延迟排序（不会再干等 12 秒）
+- 想测速可加 `--probe-path <路径>` 与 `--no-speed` 控制行为
 
 ## 输出：直接可复制的列表
 

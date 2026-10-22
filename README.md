@@ -1,9 +1,9 @@
 # CFPilot
 
 > Cloudflare Workers 代理微内核 · 真连接优选面板 · 一键部署
-> MIT License · 架构源自 [edgetunnel](https://github.com/cmliu/edgetunnel)、[cfnew](https://github.com/byJoey/cfnew)、[BPB-Worker-Panel](https://github.com/bia-pain-bache/BPB-Worker-Panel)、[CloudflareScanner](https://github.com/Ptechgithub/CloudflareScanner) 的公开设计
+> MIT License · 架构设计参考 [edgetunnel](https://github.com/cmliu/edgetunnel)、[cfnew](https://github.com/byJoey/cfnew)、[BPB-Worker-Panel](https://github.com/bia-pain-bache/BPB-Worker-Panel) 等公开项目
 
-CFPilot 把「代理内核 + 优选订阅 + 本地真连接优选 + 中文部署向导」整合成一套可一键落地的方案，
+CFPilot 把「代理内核 + 优选订阅 + 本地真连接优选 + 中文部署向导」整合成一套方案，
 核心目标是解决 Cloudflare 代理最常见的那类故障：**本地优选测速几百兆，客户端却全是 `-1`**。
 
 ---
@@ -12,13 +12,13 @@ CFPilot 把「代理内核 + 优选订阅 + 本地真连接优选 + 中文部署
 
 - [它解决什么问题](#它解决什么问题)
 - [快速开始](#快速开始)
+- [技术约束](#技术约束)
 - [仓库结构](#仓库结构)
 - [面板说明](#面板说明)
 - [cfpilot-scanner：本地真连接优选器](#cfpilot-scanner本地真连接优选器)
 - [cfpilot-deploy：全中文部署向导](#cfpilot-deploy全中文部署向导)
 - [订阅接入](#订阅接入)
 - [配置项与环境变量](#配置项与环境变量)
-- [开发与测试](#开发与测试)
 - [常见问题](#常见问题)
 - [免责声明](#免责声明)
 
@@ -69,7 +69,7 @@ npx -y cfpilot-scanner@latest --host "你的Worker域名" --token "面板里生�
 
 - 校验 API Token 权限
 - 选择账号
-- 生成随机化 Worker 名称（降低特征风控）
+- 生成随机化 Worker 名称
 - **自动创建并绑定 KV 命名空间**（不用手动点控制台）
 - 生成随机面板路径、管理密码、扫描令牌
 - 上传内核并绑定自定义域名（失败时自动回退到 Route 方式）
@@ -87,75 +87,52 @@ npx -y cfpilot-scanner@latest --host "你的Worker域名" --token "面板里生�
 
 ---
 
-## ⚠️ 部署现状：单项目更新尚未打通（临时方案：拆成两个项目）
+## 技术约束
 
-**这不是 Cloudflare 的硬性要求，是当前唯一实测可用的安排。**
+部署前请了解以下平台限制，它们决定了本项目的部署形态与能力边界。
 
-2026-10-22 的受控复现结果（独立测试项目，非生产账号）：
+### 部署形态：控制面与数据面分离
 
-| 部署内容 | 结果 |
-|---|---|
-| 合并包 → Pages，第一次部署 | ✅ 成功 |
-| 合并包 → Pages，第二次部署 | ❌ HTTP 400 `8000119` blocked |
-| 控制面 / 数据面分别部署 | ✅ 各自都能原地更新 |
+内核拆成两个可独立部署的产物：
 
-第二次部署返回的原文是 `Your Pages project has been blocked. Contact abusereply@cloudflare.com.`。
-Cloudflare 未说明具体触发原因，因此**不能断定是哪段代码、哪条规则导致的**。
-在官方给出说明前，任何「改打包方式即可恢复单项目」的说法都没有证据支持。
+| 产物 | 内容 | 用途 |
+|------|------|------|
+| `dist/control.js` | 面板 + 订阅 + 优选池 + 探针 | 管理界面，**不含出站拨号代码** |
+| `dist/dataplane.js` | VLESS / Trojan-WS 代理入站 | 客户端实际连接的转发层 |
 
-详见 [部署诊断状态](docs/cloudflare-deployment-diagnosis.md)。
+两者共用同一个 KV 命名空间，面板改配置对数据面立即生效。控制面通过 `DATA_HOST`
+环境变量指定数据面域名，生成订阅时用它作为节点地址。
 
-### 临时方案：两个 Pages 项目
+```bash
+# 自动创建 KV 并完成双项目部署
+npx -y cfpilot-deploy@latest pages-split --account <账号ID> --yes
 
-1. **数据面**：只做代理转发，绑你的自定义域名（客户端连这个域名）
-2. **控制面**：面板 + 订阅，可以用 `*.pages.dev` 或另一个域名
+# 复用已有 KV
+npx -y cfpilot-deploy@latest pages-split --account <账号ID> --kv <命名空间ID> --yes
+```
 
-数据面需要把配置写入 KV 的 `config` 键，并把控制面的 `DATA_HOST` 指向数据面域名。
-两边共用同一个 KV，因此面板改配置对数据面立即生效。
+部署完成后两个项目都能原地更新。
 
-> ⚠️ 拆分只是**临时可用**，不是架构结论。等 Cloudflare 说明封禁原因后应重新评估单项目部署。
-
-## 部署到 Cloudflare Pages
-
-edgetunnel / cfnew / BPB / CFNext 都选择 Pages 作为主通道，本项目同样以 Pages 为推荐通道。
-
-> 关于 Workers 脚本通道：早期曾观察到合并包在 zone 路由上「前几次正常、数分钟后持续 1101」，
-> 而一个 114 字节的静态脚本在 `*.workers.dev` 上也返回 1101、在 zone 路由上却正常。
-> 因此 1101 既可能来自本项目代码，也可能来自平台侧限制，**不能仅凭 1101 断定代码有错**。
-> 该问题尚未定位，详见 [部署诊断状态](docs/cloudflare-deployment-diagnosis.md)。
-
-### 三条实测规则
+### Pages 通道的三条规则
 
 1. **顺序不能反**：先建项目 → 设环境变量 / 绑 KV → **最后才部署**。
    Pages 的绑定与变量只对**之后的**部署生效，先部署再配置等于白配。
-2. **合并包在同一个项目上通常只能成功部署一次**，第二次会返回
-   `8000119 Your Pages project has been blocked`。
-   因此升级内核时请**新建一个项目**（名字随机），不要在旧项目上重复部署。
-   这也是上面推荐拆分部署的原因。
+2. **合并包在同一个项目上重复部署可能被平台拒绝**。因此升级内核时请新建项目，
+   或直接使用上面的拆分部署（两个项目都能原地更新）。
 3. 带哈希的部署 URL（`<hash>.<project>.pages.dev`）需要认证，
    请始终使用项目主域 `<project>.pages.dev` 或已绑定的自定义域名。
 
-### 手动步骤
+### 出站拨号依赖 `cloudflare:sockets`
 
-1. Workers & Pages → 创建 → **Pages** → 直接上传（不要连 Git）
-2. 项目建好后，先到 Settings → 变量与绑定：
-   - 绑 **KV 命名空间**，变量名必须是 **`KV`**
-   - 加文本变量 `PANEL_PATH=/p-你的随机串`、`PANEL_PASSWORD=你的密码`
-3. 最后上传文件：目录里放一个 **`_worker.js`**（内容就是 `packages/worker-core/dist/worker.js`），
-   部署该目录
-4. Custom domains 里绑定你的自定义域名（`*.pages.dev` 在国内可能不通，且订阅里的
-   `sni` 是按访问域名自动生成的，必须用自定义域名）
-5. 访问 `https://<你的域名><PANEL_PATH>`
+数据面的出站 TCP 依赖该内置模块。不同 Cloudflare 账号 / 区域下它的可用性存在差异，
+若部署后代理不可用，建议先用一个最小 Worker 验证 `connect()` 是否能正常建立连接，
+再排查本项目代码。
 
-### 用 wrangler 部署（一条命令）
+### 数据面实现说明
 
-```bash
-mkdir -p upload && cp packages/worker-core/dist/worker.js upload/_worker.js
-npx wrangler pages deploy upload --project-name <随机项目名> --branch main
-```
-
-> 面板路径以 **KV 里的 `PANEL_PATH`** 为准（优先级高于环境变量）。
-> 如果忘记路径，可以读 KV 的 `PANEL_PATH` 键，或删掉该键后重新部署。
+当前数据面的 WebSocket 入站复用 [CFNext](https://github.com/PAICNI/CFNext) 的
+`wsHandler`（源码见 `packages/worker-core/src/vendor/`）。已知限制：
+**面板里配置的 SOCKS5 / HTTP 代理池不会传给数据面**，只有 `PROXYIP` 生效。
 
 ---
 
@@ -174,14 +151,16 @@ CFPilot/
 
 | 模块 | 职责 |
 |------|------|
-| `src/index.ts` | 路由分发：探针 / 面板 API / 订阅 / 面板 / 三种代理入站 |
+| `src/index.ts` | 路由分发：探针 / 面板 API / 订阅 / 面板 / 代理入站 |
+| `src/routes/control.ts` | 控制面路由（面板 + 订阅 + 探针） |
+| `src/routes/data.ts` | 数据面路由（代理入站） |
 | `src/protocols/vless.ts` | VLESS 协议头解析（UUID 校验、命令、地址） |
-| `src/protocols/trojan.ts` | Trojan 协议头解析（SHA224 口令，注意地址类型编号与 VLESS 不同） |
+| `src/protocols/trojan.ts` | Trojan 协议头解析（SHA224 口令，地址类型编号与 VLESS 不同） |
 | `src/protocols/xhttp.ts` | VLESS + XHTTP（stream-one）入站：一个 POST 请求承载上下行 |
 | `src/protocols/sha224.ts` | 纯 TS 的 SHA-224（WebCrypto 不支持，Trojan 口令校验必需） |
-| `src/outbound/dial.ts` | 出站拨号：TCP 并发竞速、ProxyIP 故障转移、NAT64 合成 |
+| `src/outbound/dial.ts` | 出站拨号：并发竞速、ProxyIP 故障转移、NAT64 合成 |
 | `src/outbound/socks5.ts` / `http-proxy.ts` | SOCKS5 与 HTTP CONNECT 落地代理 |
-| `src/sub-engine.ts` | 四层优选池合并 + 脏数据清洗 + Base64/Clash/Sing-box 输出 |
+| `src/sub-engine.ts` | 优选池合并 + 脏数据清洗 + Base64/Clash/Sing-box 输出 |
 | `src/probe.ts` | `/__edge_probe`：WS 101 握手 + 流式下行测速 |
 | `src/auth.ts` | 面板密码 + KV 会话 + 一次性扫描令牌 |
 | `src/ui/panel.html` | 内嵌中文管理面板（单文件、零框架） |
@@ -204,8 +183,8 @@ CFPilot/
 
 | 来源 | 数据从哪来 | 说明 |
 |------|-----------|------|
-| 官方优选 IP | CF 官方 15 个 IPv4 网段，请求时随机抽样 | Cloudflare 的 IP 是 anycast，静态表必然过期，所以按需随机生成（edgetunnel 同样思路） |
-| 优选域名 | 内置 21 条社区公开优选域名（来自 cfnew 的直连域名列表），随机取样 | 域名只负责解析出好 IP，`sni` / `Host` 仍是你的 Worker 域名 |
+| 官方优选 IP | CF 官方 IPv4 网段，请求时随机抽样 | Cloudflare 的 IP 是 anycast，静态表必然过期，所以按需随机生成 |
+| 优选域名 | 内置社区公开优选域名，随机取样 | 域名只负责解析出好 IP，`sni` / `Host` 仍是你的 Worker 域名 |
 | 手动优选 IP | 本地真连接扫描结果（KV `LOCAL_PREFERRED_IPS`）+ 面板手填 | 优先级最高，因为它是**在你自己的域名上验证过 101 握手**的 IP |
 
 > **关于「国家」筛选**：CF 的 anycast IP 本身没有国家归属，机房要连接后才知道。
@@ -220,10 +199,18 @@ CFPilot/
 ### 直跑模式
 
 ```bash
-npx -y cfpilot-scanner@latest --host "cfpilot.example.com" --token "面板令牌"
+npx -y cfpilot-scanner@latest scan --host "cfpilot.example.com" --path /vless --no-callback
 ```
 
-跑完后会把 Top 15 结果自动回填到面板 KV（`IP:Port#机房_延迟_速度` 格式）。
+结果会附上一段可直接复制的输出，方便粘贴到同类项目的自定义 IP 输入框：
+
+```
+104.17.242.168:443#LAX
+104.19.73.179:443#LAX
+104.16.59.243:443#LAX
+```
+
+对接任意 VLESS-WS 项目时，用 `--path` 指定它的 WS 路径即可，不依赖 CFPilot 自己的探针端点。
 
 ### 桥接模式（面板一键调用）
 
@@ -245,9 +232,11 @@ npx -y cfpilot-scanner@latest serve
 | 参数 | 默认 | 说明 |
 |------|------|------|
 | `--host` | 必填 | 你的 Worker 自定义域名（作为 SNI / Host） |
+| `--path` | `/vless` | 目标项目的 WS 路径 |
 | `--port` | `443` | 端口 |
 | `--token` | — | 回填令牌（面板生成的一次性令牌，10 分钟有效） |
 | `--callback` | `https://<host>/api/v1/preferred-ips` | 回填地址 |
+| `--no-callback` | — | 只扫描不回填 |
 | `--top` | `15` | 返回条数 |
 | `--sample` | `20000` | 候选 IP 采样数 |
 | `--cidr` | — | 自定义网段（逗号分隔） |
@@ -262,21 +251,19 @@ npx -y cfpilot-scanner@latest serve
 ## cfpilot-deploy：全中文部署向导
 
 ```bash
-npx -y cfpilot-deploy@latest init          # 交互式
-npx -y cfpilot-deploy@latest init --yes --domain cfpilot.example.com
-npx -y cfpilot-deploy@latest token --token <API_TOKEN>   # 仅校验 Token
+npx -y cfpilot-deploy@latest init                              # Worker 单项目
+npx -y cfpilot-deploy@latest pages-split                       # Pages 双项目（推荐）
+npx -y cfpilot-deploy@latest token --token <API_TOKEN>        # 仅校验 Token
+npx -y cfpilot-deploy@latest token --check --zone example.com # 逐项探测权限
 ```
 
 Token 所需权限：
 
 - Account → Workers Scripts → **Edit**
 - Account → Workers KV Storage → **Edit**
+- Account → Pages → **Edit**（`pages-split` 需要）
 - Zone → Zone → **Read**
 - Zone → DNS → **Edit**
-
-### 无损升级
-
-重新执行 `cfpilot-deploy init` 即可热更新内核，**已有 KV 里的 UUID、优选 IP、配置都会保留**。
 
 ---
 
@@ -308,8 +295,9 @@ Token 所需权限：
 | `PANEL_PASSWORD` | — | 面板初始密码（首次启动后写入 KV 哈希） |
 | `PANEL_PATH` | — | 面板路径（不设则随机生成） |
 | `SCANNER_TOKEN` | — | 扫描回填令牌 |
+| `DATA_HOST` | — | 数据面域名（拆分部署时控制面用它生成订阅） |
 | `UUID` | `uuid` | VLESS UUID |
-| `PROXYIP` | `proxyIp` | ProxyIP 池（`host:port`，默认按 SOCKS5 处理） |
+| `PROXYIP` | `proxyIp` | ProxyIP 池（`host:port`，按直连落地语义解析） |
 | `SOCKS5` | `socks5` | SOCKS5 代理 |
 | `HTTP_PROXY` | `httpProxy` | HTTP 代理 |
 | `NAT64` | `nat64` | NAT64 前缀，如 `64:ff9b::` |
@@ -331,34 +319,13 @@ KV 键：
 | 键 | 内容 |
 |----|------|
 | `CONFIG` | 用户配置 JSON |
+| `config` | 数据面配置（CFNext schema） |
 | `LOCAL_PREFERRED_IPS` | 本地真连接优选结果（每行一条） |
 | `POOL_DOMAIN_LIBRARY` | 面板里自定义的优选域名库（每行一个；空 = 用内置库） |
 | `SCANNER_TOKEN` | 长期扫描令牌 |
 | `PANEL_PATH` / `ADMIN_PW_HASH` | 面板路径与密码哈希 |
 | `SESSION:<token>` | 面板会话（24 小时） |
 | `ONETIME:<token>` | 一次性扫描令牌（10 分钟） |
-
----
-
-## 开发与测试
-
-```bash
-npm install
-npm run typecheck     # tsc
-npm test              # vitest（协议解析 / SHA-224 / 订阅清洗 / CF API）
-npm run build         # 打包内核 + 两个 CLI
-npm run verify        # build + typecheck + test
-```
-
-本地调试 Worker：
-
-```bash
-npm run dev -w @cfpilot/worker-core      # wrangler dev --local
-curl "http://localhost:8787/__edge_probe?bytes=1024"
-```
-
-> 国内网络访问 npm 缓慢时，可临时使用镜像：
-> `npm install --registry=https://registry.npmmirror.com`
 
 ---
 
@@ -375,6 +342,9 @@ curl "http://localhost:8787/__edge_probe?bytes=1024"
 **Q：XHTTP 节点连不上？**
 XHTTP 需要客户端使用 Xray 内核（`type=xhttp`、`mode=stream-one`）。
 Clash / sing-box 内核不支持 XHTTP，请改用 WS 节点。
+
+**Q：数据面配了 SOCKS5 代理但不生效？**
+当前数据面只读取 `PROXYIP`，面板里的 SOCKS5 / HTTP 代理池不会传进去。详见[技术约束](#技术约束)。
 
 **Q：免费额度 CPU 超限？**
 内核内置 Free CPU 预算保护（默认 8ms），会在订阅生成、CSV 解析等重活上提前中止。

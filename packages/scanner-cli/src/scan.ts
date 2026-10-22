@@ -3,10 +3,32 @@
  *
  * 阶段一：高并发 TCP 握手初筛（只保留能建连且延迟够低的 IP）
  * 阶段二：强制携带用户域名作为 TLS SNI / HTTP Host，验证是否返回 101 Switching Protocols
- * 阶段三：仅对通过 101 校验的 IP 测量真实下行速度
+ * 阶段三：**只对通过 101 校验的 IP** 测量真实下行速度
+ *
+ * ## 为什么阶段三必须先过阶段二
+ *
+ * 测速有两种方式，但都只回答「这个 IP 有多快」，不回答「这个 IP 能不能服务你的域名」。
+ * 若跳过阶段二直接按速度排序，就会选出「速度很快但导入客户端全是 -1」的 IP。
+ * 因此阶段二是**强制前置**，测速只在它筛出的集合里做。
+ *
+ * ## 两种测速方式的取舍
+ *
+ * | 方式 | 要求 | 通用性 | 忠实度 |
+ * |------|------|--------|--------|
+ * | `probe` 走目标项目探针端点 | 目标须提供 `/__edge_probe` 类端点 | 差（只适用 CFPilot） | 高（走代理真实路径） |
+ * | `url` 走公开测速地址 | 无 | 好（任何项目） | 中（测的是到 CF 边缘的带宽） |
+ *
+ * 两种都跑在「已通过 101 校验的 IP」上，所以都不会产出 -1 节点。
  */
 import * as net from 'node:net'
-import { probeWs101, measureDownload, type WsProbeResult, type DownloadResult } from './true-probe'
+import {
+  probeWs101,
+  measureDownload,
+  measureThroughput,
+  type WsProbeResult,
+  type DownloadResult,
+} from './true-probe'
+import { parseSpeedUrl, withBytes, schemeForPort, DEFAULT_SPEED_URL } from './speed-url'
 
 export interface ScanOptions {
   /** Worker 域名（作为 SNI / Host） */
@@ -37,8 +59,16 @@ export interface ScanOptions {
   speedBytes?: number
   /** 阶段二校验的 WebSocket 路径（默认 /__edge_probe；对接其它项目时填它的 WS 路径） */
   wsPath?: string
-  /** 阶段三测速路径（默认 /__edge_probe） */
+  /** probe 模式的测速路径（默认 /__edge_probe） */
   probePath?: string
+  /** 测速方式：probe = 目标项目探针端点；url = 公开测速地址。默认 probe */
+  speedMode?: 'probe' | 'url'
+  /** url 模式的测速地址（不含协议也行，如 speed.cloudflare.com/__down?bytes=104857600） */
+  speedUrl?: string
+  /** 测速并发连接数（url 模式）：单连接受 TCP 窗口限制，多连接更接近真实带宽 */
+  speedConnections?: number
+  /** 测速时长（ms，url 模式） */
+  speedDurationMs?: number
   /** 跳过测速，只按延迟排序 */
   skipSpeed?: boolean
   /** 最终返回条数 */
@@ -179,13 +209,50 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   const stage2 = wsOk.sort((a, b) => a.latency - b.latency).slice(0, speedLimit)
 
   // ---- 阶段三：真实下行测速（可用 --no-speed 跳过） ----
-  let speedResults: Array<{ ip: string; ok: boolean; latency: number; probe: WsProbeResult; download?: DownloadResult }>
+  //
+  // 两种方式都只作用于**已通过 101 校验**的 stage2，因此不会产出
+  // 「速度快但不能服务你的域名」的 -1 节点。
+  let speedResults: Array<{
+    ip: string
+    ok: boolean
+    latency: number
+    probe: WsProbeResult
+    speed?: number
+  }>
+
+  const speedMode = options.speedMode ?? 'probe'
 
   if (options.skipSpeed) {
     report({ type: 'stage', stage: 3, name: '跳过测速（按延迟排序）', total: stage2.length })
     speedResults = stage2.map((r) => ({ ...r }))
+  } else if (speedMode === 'url') {
+    report({ type: 'stage', stage: 3, name: '真实下行速度测试（公开测速地址）', total: stage2.length })
+    const parsedUrl = parseSpeedUrl(options.speedUrl ?? DEFAULT_SPEED_URL, schemeForPort(options.port))
+    const requestPath = withBytes(parsedUrl, options.speedBytes ?? 104857600)
+    let speedDone = 0
+    speedResults = await pool(stage2, speedConcurrency, async (item) => {
+      const result = await measureThroughput({
+        ip: item.ip,
+        port: options.port,
+        sniHost: parsedUrl.host,
+        requestHost: parsedUrl.host,
+        path: requestPath,
+        connections: options.speedConnections ?? 3,
+        durationMs: options.speedDurationMs ?? 6000,
+        timeoutMs: options.speedTimeoutMs ?? 20000,
+      })
+      speedDone++
+      report({
+        type: 'progress',
+        stage: 3,
+        done: speedDone,
+        total: stage2.length,
+        message: `测速 ${speedDone}/${stage2.length} ${result.peakMBps.toFixed(1)} MB/s`,
+      })
+      return { ...item, speed: result.ok ? result.peakMBps : 0 }
+    })
   } else {
-    report({ type: 'stage', stage: 3, name: '真实下行速度测试', total: stage2.length })
+    report({ type: 'stage', stage: 3, name: '真实下行速度测试（项目探针端点）', total: stage2.length })
     let speedDone = 0
     speedResults = await pool(stage2, speedConcurrency, async (item) => {
       const result: DownloadResult = await measureDownload(
@@ -204,18 +271,18 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
         total: stage2.length,
         message: `测速 ${speedDone}/${stage2.length} ${result.speedMBps.toFixed(1)} MB/s`,
       })
-      return { ...item, download: result }
+      return { ...item, speed: result.ok ? result.speedMBps : 0 }
     })
   }
 
   const entries: ScanEntry[] = speedResults
-    .filter((r) => (options.skipSpeed ? true : Boolean(r.download && r.download.ok && r.download.speedMBps > 0)))
+    .filter((r) => (options.skipSpeed ? true : Boolean(r.speed && r.speed > 0)))
     .map((r) => ({
       ip: r.ip,
       port: options.port,
       colo: r.probe.colo || 'UNK',
       latency: r.latency,
-      speed: r.download ? Number(r.download.speedMBps.toFixed(2)) : 0,
+      speed: r.speed ? Number(r.speed.toFixed(2)) : 0,
     }))
     .sort((a, b) => (options.skipSpeed ? a.latency - b.latency : b.speed - a.speed || a.latency - b.latency))
     .slice(0, top)

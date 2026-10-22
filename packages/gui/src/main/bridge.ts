@@ -228,6 +228,10 @@ export interface ScanParams {
   skipSpeed: boolean
   sample: number
   top: number
+  speedMode?: 'auto' | 'probe' | 'url'
+  speedUrl?: string
+  speedConnections?: number
+  speedDurationMs?: number
 }
 
 /**
@@ -394,10 +398,15 @@ export async function runScanJob(
       host,
       port: params.port,
       wsPath,
-      probePath: params.probePath.trim() || wsPath,
+      // 探针路径：用户填了就用，没填则用 CFPilot 的默认端点做「是否存在」探测
+      probePath: params.probePath.trim() || '/__edge_probe',
       skipSpeed: params.skipSpeed,
       sample: params.sample,
       top: params.top,
+      speedMode: params.speedMode ?? 'auto',
+      speedUrl: params.speedUrl,
+      speedConnections: params.speedConnections,
+      speedDurationMs: params.speedDurationMs,
       onProgress: (event: ScanEvent) => {
         if (event.type === 'stage') {
           sendLog(win, `阶段 ${event.stage}：${event.name}（共 ${event.total ?? 0} 个候选）`)

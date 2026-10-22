@@ -15,6 +15,11 @@ import { flagBool, flagList, flagNumber, flagString, parseArgs } from './args'
 import { BUILTIN_IPV4_CIDRS, BUILTIN_IPV6_CIDRS, readIpFile } from './ip-ranges'
 import { resolveCandidates } from './candidates'
 import { detectProxyInterference } from './net-env'
+import {
+  DEFAULT_SPEED_URL,
+  SPEED_URL_PRESETS,
+  pickAvailableSpeedUrl,
+} from './speed-url'
 import { formatEntries, runScan, type ScanEvent, type ScanEntry, formatCopyable } from './scan'
 import { postResults } from './callback'
 import { BRIDGE_VERSION, DEFAULT_BRIDGE_PORT, startBridge } from './server'
@@ -40,8 +45,17 @@ scan 选项:
   --no-callback          只打印结果，不回填
   --path <path>          阶段二校验的 WebSocket 路径，默认 /__edge_probe
                          （对接其它项目时填它自己的 WS 路径，例如 /vless 或 /<uuid>）
-  --probe-path <path>    阶段三测速路径，默认 /__edge_probe
-  --no-speed             跳过测速，只按延迟排序（目标没有 CFPilot 探针时用）
+  --probe-path <path>    probe 模式的测速路径，默认 /__edge_probe
+  --speed-mode <mode>    测速方式：auto（默认）/ probe / url
+                         auto  = 目标有探针端点就用它，否则自动改用公开测速地址
+                         probe = 只用目标项目的探针端点（最忠实，要求对方有该端点）
+                         url   = 只用公开测速地址（任何项目都能测）
+  --speed-url <url>      公开测速地址，默认 ${DEFAULT_SPEED_URL}
+                         可换成任意返回大文件的地址
+  --speed-conns <n>      测速并发连接数，默认 3
+                         单条 TCP 连接受拥塞窗口限制，多连接更接近真实带宽
+  --speed-duration <ms>  测速时长，默认 6000
+  --no-speed             跳过测速，只按延迟排序
   --top <n>              返回条数，默认 15
   --concurrency <n>      阶段一并发，默认 300
   --sample <n>           候选 IP 采样数，默认 20000
@@ -299,22 +313,50 @@ async function commandScan(args: ReturnType<typeof parseArgs>): Promise<void> {
   }
   if (!quiet) process.stdout.write(`候选 IP：${candidates.length} 个\n`)
 
+  // ---- 决定测速方式 ----
+  //
+  // 优先用目标项目自己的探针端点（最忠实），它不存在时**自动改用公开测速地址**，
+  // 而不是直接跳过测速 —— 后者会让第三方项目的速度永远是 0。
+  // 无论哪种方式，测速都只作用于已通过 101 校验的 IP，因此不会出现 -1 节点。
   let skipSpeed = noSpeed
+  let speedMode: 'probe' | 'url' = 'probe'
+  let speedUrl = flagString(args, 'speed-url', DEFAULT_SPEED_URL)
+
   if (!skipSpeed) {
-    try {
-      const probe = await fetch(`https://${host}${probePath}?bytes=1024`, {
-        method: 'GET',
-        signal: AbortSignal.timeout(8000),
-      })
-      if (!probe.headers.get('x-probe-bytes')) {
-        skipSpeed = true
-        if (!quiet) {
-          process.stdout.write('\n提示：' + probePath + ' 不是 CFPilot 探针端点，已跳过测速（只按延迟排序）\n')
-          process.stdout.write('      如需测速，请用 --probe-path 指定目标项目的测速路径\n')
-        }
+    const forcedMode = flagString(args, 'speed-mode') // 'probe' | 'url' | ''
+
+    if (forcedMode === 'url') {
+      speedMode = 'url'
+      if (!quiet) process.stdout.write(`测速方式：公开测速地址（${speedUrl}）\n`)
+    } else if (forcedMode === 'probe') {
+      speedMode = 'probe'
+    } else {
+      // 自动：探测目标是否有 CFPilot 风格的探针端点
+      let hasProbe = false
+      try {
+        const probe = await fetch(`https://${host}${probePath}?bytes=1024`, {
+          method: 'GET',
+          signal: AbortSignal.timeout(8000),
+        })
+        hasProbe = Boolean(probe.headers.get('x-probe-bytes'))
+      } catch {
+        hasProbe = false
       }
-    } catch {
-      skipSpeed = true
+
+      if (hasProbe) {
+        speedMode = 'probe'
+        if (!quiet) process.stdout.write('测速方式：项目探针端点（最忠实）\n')
+      } else {
+        speedMode = 'url'
+        if (!quiet) {
+          process.stdout.write(`\n提示：${probePath} 不是 CFPilot 探针端点，改用公开测速地址测速\n`)
+          process.stdout.write('      （仍会先做 101 校验，因此不会选出连不上的 IP）\n')
+        }
+        speedUrl = await pickAvailableSpeedUrl(
+          [speedUrl, ...SPEED_URL_PRESETS.map((p) => p.url)],
+          quiet ? undefined : (m) => process.stdout.write(`      ${m}\n`)
+        )
+      }
     }
   }
 
@@ -333,6 +375,10 @@ async function commandScan(args: ReturnType<typeof parseArgs>): Promise<void> {
     speedLimit: flagNumber(args, 'speed-limit', 30),
     speedTimeoutMs: flagNumber(args, 'speed-timeout', 12000),
     speedBytes: flagNumber(args, 'speed-bytes', 5 * 1024 * 1024),
+    speedMode,
+    speedUrl,
+    speedConnections: flagNumber(args, 'speed-conns', 3),
+    speedDurationMs: flagNumber(args, 'speed-duration', 6000),
     top,
     onProgress: (event) => printProgress(event, quiet),
   })

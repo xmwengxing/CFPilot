@@ -10,7 +10,19 @@ export { runScan, formatCopyable, formatEntries } from './scan'
 export type { ScanOptions, ScanEvent, ScanEntry, ScanSummary } from './scan'
 export { resolveCandidates, normalizeCandidateList } from './candidates'
 export type { CandidateOptions, IpFamily } from './candidates'
-export { probeWs101, measureDownload } from './true-probe'
-export type { WsProbeResult, DownloadResult } from './true-probe'
+export { probeWs101, measureDownload, measureThroughput } from './true-probe'
+export type { WsProbeResult, DownloadResult, ThroughputResult, ThroughputOptions } from './true-probe'
 export { detectProxyInterference, isFakeIp, isPortListening, readSystemProxy, PROXY_PORTS } from './net-env'
 export type { NetEnvResult, ProxyFinding } from './net-env'
+export {
+  DEFAULT_SPEED_URL,
+  SPEED_URL_PRESETS,
+  parseSpeedUrl,
+  withBytes,
+  schemeForPort,
+  checkSpeedUrlAvailable,
+  pickAvailableSpeedUrl,
+  detectProbeEndpoint,
+  resolveSpeedMode,
+} from './speed-url'
+export type { ParsedSpeedUrl } from './speed-url'

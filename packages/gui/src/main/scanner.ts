@@ -45,7 +45,7 @@ export interface ScanOptions {
   port: number
   /** 阶段二校验的 WS 路径 */
   wsPath: string
-  /** 阶段三测速路径 */
+  /** probe 模式的测速路径 */
   probePath: string
   /** 是否跳过测速 */
   skipSpeed: boolean
@@ -53,6 +53,16 @@ export interface ScanOptions {
   sample: number
   /** 保留条数 */
   top: number
+  /** 测速方式：auto（默认，按目标是否提供探针端点决定）/ probe / url */
+  speedMode?: 'auto' | 'probe' | 'url'
+  /** 公开测速地址（url 模式） */
+  speedUrl?: string
+  /** 进入测速的候选数 */
+  speedLimit?: number
+  /** 测速并发连接数 */
+  speedConnections?: number
+  /** 测速时长（ms） */
+  speedDurationMs?: number
   /** 进度回调 */
   onProgress?: (event: ScanEvent) => void
 }
@@ -69,6 +79,15 @@ interface ScannerLib {
     clean: boolean
     findings: Array<{ message: string; advice: string }>
   }>
+  /** 决定测速方式：目标有探针端点则 probe，否则 url */
+  resolveSpeedMode: (
+    host: string,
+    probePath: string,
+    explicit?: 'probe' | 'url' | 'auto'
+  ) => Promise<{ mode: 'probe' | 'url'; reason: string }>
+  /** 预检并挑选可用的公开测速地址 */
+  pickAvailableSpeedUrl: (candidates: string[]) => Promise<string>
+  SPEED_URL_PRESETS: Array<{ url: string; label: string }>
 }
 
 /** 定位 scanner 库文件（构建产物） */
@@ -87,11 +106,6 @@ function findScannerLib(): string {
 }
 
 /**
- * 执行一次三阶扫描。
- *
- * 库文件与主进程同为 CJS，直接 require 即可。
- */
-/**
  * 加载 scanner 库。
  *
  * 库文件与主进程同为 CJS，用 createRequire 从 CJS 上下文加载。
@@ -104,6 +118,12 @@ function loadScannerLib(): ScannerLib {
 
 /**
  * 执行一次三阶扫描。
+ *
+ * 测速方式自动决策：
+ *   - 目标有 CFPilot 探针端点 → probe 模式（走项目自身路径，最忠实）
+ *   - 否则 → url 模式（公开测速地址，任何项目都能测出速度）
+ *
+ * 两种方式都只作用于**已通过 101 校验**的 IP，所以不会产出 -1 节点。
  */
 export async function runLocalScan(options: ScanOptions): Promise<{
   entries: ScanEntry[]
@@ -119,8 +139,23 @@ export async function runLocalScan(options: ScanOptions): Promise<{
   report({ type: 'stage', stage: 1, name: '生成候选 IP', total: 0 })
   const candidates = await lib.resolveCandidates({ sample: options.sample })
   if (candidates.length === 0) {
-    report({ type: 'error', message: '未能生成候选 IP（检查网络或用 --cidr 指定网段）' })
+    report({ type: 'error', message: '未能生成候选 IP（检查网络或用自定义网段）' })
     return { entries: [], copyable: '', stats: {} }
+  }
+
+  // 测速方式：用户显式指定优先，否则按目标是否提供探针端点自动选择
+  let speedMode: 'probe' | 'url' = 'probe'
+  let speedUrl = options.speedUrl ?? ''
+  if (!options.skipSpeed) {
+    const decided = await lib.resolveSpeedMode(options.host, options.probePath, options.speedMode)
+    speedMode = decided.mode
+    report({ type: 'stage', stage: 0, name: decided.reason, total: 0 })
+    if (speedMode === 'url') {
+      speedUrl = await lib.pickAvailableSpeedUrl([
+        speedUrl,
+        ...lib.SPEED_URL_PRESETS.map((p: { url: string }) => p.url),
+      ])
+    }
   }
 
   const summary = await lib.runScan({
@@ -130,6 +165,11 @@ export async function runLocalScan(options: ScanOptions): Promise<{
     wsPath: options.wsPath,
     probePath: options.probePath,
     skipSpeed: options.skipSpeed,
+    speedMode,
+    speedUrl,
+    speedConnections: options.speedConnections,
+    speedDurationMs: options.speedDurationMs,
+    speedLimit: options.speedLimit,
     top: options.top,
     onProgress: report,
   })

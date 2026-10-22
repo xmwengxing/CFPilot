@@ -193,6 +193,13 @@
       if (!host) { log('请填写 Worker 域名（数据面地址）', 'warn'); return }
       if (!path) { log('请填写 WS 路径', 'warn'); return }
 
+      // 测速地址输入框两种用法：
+      //   以 / 开头  → 阶段二/三的探针路径（目标项目自己的端点）
+      //   否则      → 公开测速地址（强制 url 模式）
+      const probeInput = $('optProbePath').value.trim()
+      const probePath = probeInput.startsWith('/') ? probeInput : ''
+      const speedUrl = probeInput && !probeInput.startsWith('/') ? probeInput : ''
+
       setBusy(true)
       $('scanOut').textContent = '正在优选，请稍候…'
       try {
@@ -200,10 +207,14 @@
           host,
           port: Number($('optPort').value),
           wsPath: path,
-          probePath: $('optProbePath').value.trim(),
+          probePath,
           skipSpeed: $('optNoSpeed').checked,
           sample: Number($('optSample').value) || 300,
           top: Number($('optTop').value) || 15,
+          speedMode: speedUrl ? 'url' : 'auto',
+          speedUrl,
+          speedConnections: Number($('optSpeedConns').value) || 3,
+          speedDurationMs: (Number($('optSpeedDur').value) || 6) * 1000,
         })
         if (!result.ok) {
           $('scanOut').textContent = '优选失败：' + (result.error ?? '')

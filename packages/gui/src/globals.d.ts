@@ -78,6 +78,10 @@ interface Window {
       skipSpeed: boolean
       sample: number
       top: number
+      speedMode?: 'auto' | 'probe' | 'url'
+      speedUrl?: string
+      speedConnections?: number
+      speedDurationMs?: number
     }): Promise<{ ok: boolean; count?: number; copyable?: string; error?: string }>
     detectAccount(): Promise<{ accountId: string; accountName: string; kvId: string }>
     checkEnvironment(): Promise<{ clean: boolean; findings: string[] }>

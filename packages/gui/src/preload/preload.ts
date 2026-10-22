@@ -43,6 +43,10 @@ const api = {
     skipSpeed: boolean
     sample: number
     top: number
+    speedMode?: 'auto' | 'probe' | 'url'
+    speedUrl?: string
+    speedConnections?: number
+    speedDurationMs?: number
   }) =>
     ipcRenderer.invoke('scan:run', params) as Promise<{
       ok: boolean

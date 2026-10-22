@@ -1,6 +1,8 @@
 node_modules/
 dist/
 build/
+!packages/gui/build/
+!packages/gui/build/**
 .wrangler/
 .dev.vars
 .dev.vars.*
@@ -24,3 +26,6 @@ packages/worker-core/src/ui/panel.generated.ts
 /packages/worker-core/.merge-single/
 /packages/worker-core/.dev-remote/
 /packages/worker-core/dist-wr/
+
+# GUI 打包产物（图标源文件在 packages/gui/build，需保留）
+/packages/gui/release/

@@ -12,6 +12,7 @@ CFPilot 把「代理内核 + 优选订阅 + 本地真连接优选 + 中文部署
 
 - [它解决什么问题](#它解决什么问题)
 - [快速开始](#快速开始)
+- [图形化工具（Windows）](#图形化工具windows)
 - [技术约束](#技术约束)
 - [仓库结构](#仓库结构)
 - [面板说明](#面板说明)
@@ -87,6 +88,24 @@ npx -y cfpilot-scanner@latest --host "你的Worker域名" --token "面板里生�
 
 ---
 
+## 图形化工具（Windows）
+
+不想碰终端的话，用图形版：
+
+1. 到 [Releases](https://github.com/xmwengxing/CFPilot/releases) 下载
+   `CFPilot-<版本>-x64.exe`（安装版）或 `CFPilot-<版本>-portable.exe`（便携版）
+2. 双击运行，**不需要预先安装 Node.js**
+3. 在「Cloudflare 凭据」页填 API Token 并保存 → 点「自动检测账号与 KV」
+4. 在「一键部署」页点「开始部署」
+5. 在「本地真连接优选」页填数据面域名，跑一次优选，把结果粘贴到面板的「手动优选 IP」
+
+界面分四个页签：凭据 / 部署 / 优选 / 说明，下方是常驻运行日志。
+
+**令牌只保存在本机** `~/.cfpilot-gui/secrets.json`，不会上传，也不随安装包分发。
+详见 [packages/gui/README.md](packages/gui/README.md)。
+
+---
+
 ## 技术约束
 
 部署前请了解以下平台限制，它们决定了本项目的部署形态与能力边界。
@@ -144,7 +163,8 @@ CFPilot/
 ├── packages/
 │   ├── worker-core/              # @cfpilot/worker-core —— 边缘内核 + 中文面板
 │   ├── scanner-cli/              # cfpilot-scanner —— 本地真连接优选器（npm）
-│   └── deploy-wizard/            # cfpilot-deploy —— 全中文部署向导（npm）
+│   ├── deploy-wizard/            # cfpilot-deploy —— 全中文部署向导（npm）
+│   └── gui/                      # @cfpilot/gui —— 图形化部署与维护工具（Electron）
 ```
 
 ### worker-core（Worker 内核）

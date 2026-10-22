@@ -12,6 +12,7 @@
 import { join, resolve } from 'node:path'
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { app, type BrowserWindow } from 'electron'
 import { loadSecrets, saveSecrets, clearSecrets, hasToken } from './config-store'
 import { runLocalScan, type ScanEvent } from './scanner'
@@ -31,25 +32,31 @@ function sendLog(win: BrowserWindow | null, message: string, level: 'info' | 'ok
   win?.webContents.send('log', { message, level, at: Date.now() })
 }
 
-/** 定位 monorepo 里的 worker-core 产物目录 */
+/** 定位 worker-core 的产物目录（打包后随 extraResources 一起走） */
 function findDistDir(): string {
   const candidates = [
     resolve(here, '../../worker-core/dist'),
     resolve(here, '../../../worker-core/dist'),
     resolve(process.cwd(), 'packages/worker-core/dist'),
+    // 打包后：resources/worker-core/dist
+    resolve(process.resourcesPath ?? '', 'worker-core/dist'),
     resolve(app.getAppPath(), '../worker-core/dist'),
   ]
   for (const c of candidates) {
-    if (existsSync(join(c, 'control.js'))) return c
+    try {
+      if (existsSync(join(c, 'control.js'))) return c
+    } catch {
+      /* 某些路径在 Windows 下会抛异常，忽略 */
+    }
   }
   return candidates[0]!
 }
 
 /**
- * deploy-wizard 的部署接口（运行时按候选路径动态加载）。
+ * deploy-wizard 的部署接口。
  *
- * 这里用手写接口而非 `typeof import('...')`：tsc 无法解析跨包的猜测路径，
- * 而 esbuild 会把 `import(p)` 打包成真实引用。
+ * 用手写接口而非 `typeof import('...')`：tsc 无法解析跨包路径，
+ * 而 esbuild 会在构建时把库打成本地文件，运行时直接 require。
  */
 interface DeployerModule {
   deployPagesSplit(options: {
@@ -92,25 +99,31 @@ interface CfApiModule {
   }
 }
 
-/** 加载 deploy-wizard 的部署函数 */
-async function loadDeployer(): Promise<DeployerModule> {
-  const paths = [
-    resolve(here, '../../deploy-wizard/src/pages-deploy.ts'),
-    resolve(here, '../../../deploy-wizard/src/pages-deploy.ts'),
-    resolve(process.cwd(), 'packages/deploy-wizard/src/pages-deploy.ts'),
+/** 定位 deploy-wizard 库文件（构建产物） */
+function findDeployerLib(): string {
+  const candidates = [
+    join(__dirname, 'deployer-lib.js'),
+    join(__dirname, '../main/deployer-lib.js'),
+    join(process.cwd(), 'packages/gui/dist/main/deployer-lib.js'),
   ]
-  let lastError: unknown = null
-  for (const p of paths) {
-    try {
-      return (await import(p)) as unknown as DeployerModule
-    } catch (err) {
-      lastError = err
-    }
+  for (const c of candidates) {
+    if (existsSync(c)) return c
   }
   throw new Error(
-    `未找到 deploy-wizard 源码（${lastError instanceof Error ? lastError.message : String(lastError)}），` +
-      '请在 monorepo 中运行或先执行 npm run build'
+    `未找到 deployer 库文件，试过：${candidates.join('、')}。请先执行 npm run build -w @cfpilot/gui`
   )
+}
+
+/** 加载 deploy-wizard 的部署函数 */
+function loadDeployer(): DeployerModule {
+  const req = createRequire(__filename)
+  return req(findDeployerLib()) as DeployerModule
+}
+
+/** 加载 Cloudflare API 客户端（同一个库文件里导出） */
+function loadCfApi(): CfApiModule {
+  const req = createRequire(__filename)
+  return req(findDeployerLib()) as unknown as CfApiModule
 }
 
 export interface DeployParams {
@@ -232,9 +245,7 @@ export async function detectAccount(
     return { accountId: '', accountName: '', kvId: '' }
   }
   try {
-    const cfApi = (await import(
-      resolve(here, '../../deploy-wizard/src/cf-api.ts')
-    )) as unknown as CfApiModule
+    const cfApi = loadCfApi()
     const client = new cfApi.CloudflareClient({ token: secrets.cfToken })
 
     const accounts = await client.listAccounts()
@@ -342,9 +353,7 @@ export async function checkDeployed(win: BrowserWindow | null): Promise<void> {
     return
   }
   try {
-    const cfApi = (await import(
-      resolve(here, '../../deploy-wizard/src/cf-api.ts')
-    )) as unknown as CfApiModule
+    const cfApi = loadCfApi()
     const client = new cfApi.CloudflareClient({ token: secrets.cfToken })
     const raw = await client.getKvValue(
       secrets.accountId.trim(),

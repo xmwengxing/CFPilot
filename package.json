@@ -48,6 +48,8 @@
     "wrangler": "^4.151.3"
   },
   "allowScripts": {
-    "electron@33.4.11": true
+    "electron@33.4.11": true,
+    "app-builder-bin": true,
+    "7zip-bin": true
   }
 }

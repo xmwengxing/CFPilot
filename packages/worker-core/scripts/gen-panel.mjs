@@ -39,7 +39,14 @@ const minifiedCss = inlineCss
   : ''
 
 // 2) 去掉注释与多余空白，再把压缩后的片段放回原位
+//
+// ⚠️ 必须先把换行统一成 LF：
+//   git 的 autocrlf 会在不同环境下把同一份源文件检出成 CRLF 或 LF，
+//   而字节不同 → gzip 输出不同 → 面板产物不同 → CI 的
+//   「构建产物与仓库一致」校验必然失败。
+//   统一成 LF 后，产物与检出方式、平台、zlib 版本都无关。
 html = html
+  .replace(/\r\n/g, '\n')
   .replace('@@CFPILOT_JS@@', () => minifiedJs)
   .replace('@@CFPILOT_CSS@@', () => minifiedCss)
   .replace(/<!--[\s\S]*?-->/g, '')

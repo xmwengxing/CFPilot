@@ -23,7 +23,8 @@
   "workspaces": [
     "packages/worker-core",
     "packages/scanner-cli",
-    "packages/deploy-wizard"
+    "packages/deploy-wizard",
+    "packages/gui"
   ],
   "engines": {
     "node": ">=20.10.0"
@@ -45,5 +46,8 @@
     "typescript": "^5.9.3",
     "vitest": "^5.0.5",
     "wrangler": "^4.151.3"
+  },
+  "allowScripts": {
+    "electron@33.4.11": true
   }
 }

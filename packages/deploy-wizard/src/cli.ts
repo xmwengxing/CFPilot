@@ -75,23 +75,26 @@ CFPilot 全中文部署向导 —— 自动创建 KV、部署 Worker 内核、�
    ⚠️ 双项目是「当前唯一实测可用的安排」，不是 Cloudflare 的硬性要求。
       平台未说明 8000119 的具体触发原因，详见 docs/cloudflare-deployment-diagnosis.md。
 
-Token 所需权限（Cloudflare 新版权限名）:
-  Account / Workers KV Storage / Edit
-      创建并绑定 KV 命名空间（优选池、配置、会话都存这里）
-  Account / Workers Scripts / Edit（或 Workers / Edit/Admin）
-      上传内核、开启 workers.dev 子域路由、开启 Workers Logs
-  Account / Account Settings / Read
-      读取账号列表（部署第一步）
-  Zone / Zone / Read
-      列出账号下的域名（仅自定义域名需要）
-  Zone / DNS / Edit
-      检测冲突 DNS、创建 CNAME（自定义域名回退路径）
-  Zone / Workers Routes / Edit
-      创建 Route（自定义域名 522 时的回退路径）
+Token 所需权限（Cloudflare 新版按「Developer Platform / Zone」分类）:
+   Account / Account Settings / Read
+       读取账号列表（部署第一步）
+   Developer Platform / Workers KV Storage / Edit
+       创建并绑定 KV 命名空间（优选池、配置、会话都存这里）
+   Developer Platform / Workers Scripts / Edit
+       上传内核、开启 workers.dev 子域路由、开启 Workers Logs
+   Developer Platform / Pages / Edit
+       pages-split 创建项目、配置变量、触发部署
 
-  以下权限本项目完全用不到，可以不勾：
-    Registrar Domains / Registrar Sandbox Domains（域名注册）
-    Account DNS Setting（账号级 DNS 默认设置，向导不调用）
+   仅绑定自定义域名时才需要（Zone 分类）:
+   Zone / Zone / Read            列出账号下的域名
+   Zone / DNS / Edit             检测冲突 DNS、创建 CNAME
+   Zone / Workers Routes / Edit  创建 Route（自定义域名 522 时的回退路径）
+
+   以下权限本项目完全用不到，可以不勾:
+     DNA & Zone / Account DNS Settings（账号级 DNS 默认设置，向导不调用）
+     DNA & Zone / DNS Firewall（DNS 防火墙规则）
+     DNA & Zone / DNS View（内部 DNS 视图）
+     Registrar Domains / Registrar Sandbox Domains（域名注册）
 
 Token 有效期说明:
   account-owned Token（cfat_ 前缀）无需 /user/tokens/verify，
@@ -120,7 +123,23 @@ ${NAME} pages-split —— Pages 双项目部署（控制面 + 数据面）
   --control <name>       控制面 Pages 项目名（默认随机）
   --data <name>          数据面 Pages 项目名（默认随机）
   --panel-path <path>    面板访问路径（默认随机）
+  --mode <mode>          部署模式：auto（默认，自动判断）/ fresh（强制首次）/ update（强制更新）
+  --force                忽略版本检查，强制重新部署
+  --new-credentials      更新部署时也重新生成 UUID / WS 路径 / 面板凭据
+                          （默认沿用旧凭据，客户端订阅地址不变）
   --yes                  非交互模式
+
+首次还是更新？
+  向导把部署清单写在 KV 的 CFP_DEPLOY_MANIFEST 键里，记录上次用的两个
+  Pages 项目名与凭据。因此：
+    · 首次部署：KV 里没有清单 → 创建新项目、生成随机凭据
+    · 更新部署：KV 里有清单 → 自动找到同源项目、沿用 UUID 与 WS 路径
+  你不需要记项目名，也不需要判断是不是首次。
+
+版本跳过:
+  每次构建会生成 git短hash-时间戳 的版本号并写入产物。
+  线上版本与本地一致时跳过部署，避免无谓触发平台审核。
+  加 --force 可强制重新部署。
 
 产物来源:
   packages/worker-core/dist/control.js  控制面（面板 + 订阅 + 探针，无 sockets）
@@ -169,19 +188,27 @@ async function runPagesSplit(args: ReturnType<typeof parseArgs>): Promise<void> 
     process.stdout.write(`✓ KV 已创建：${ns.id}\n`)
   }
 
-  const panelPath = flagString(args, 'panel-path') || randomPanelPath()
-  const panelPassword = flagString(args, 'panel-password') || randomPassword()
+  const mode = (flagString(args, 'mode') || 'auto') as 'auto' | 'fresh' | 'update'
+  if (!['auto', 'fresh', 'update'].includes(mode)) {
+    process.stderr.write(`✗ --mode 只接受 auto / fresh / update，收到：${mode}\n`)
+    process.exitCode = 1
+    return
+  }
+  // 默认沿用旧凭据：客户端订阅地址不变。显式传参则覆盖。
+  const keepCredentials = !flagBool(args, 'new-credentials')
+  const skipSameVersion = !flagBool(args, 'force')
+
+  const panelPath = flagString(args, 'panel-path') || ''
+  const panelPassword = flagString(args, 'panel-password') || ''
   const controlName = flagString(args, 'control') || randomWorkerName()
   const dataName = flagString(args, 'data') || randomWorkerName()
   // WS 路径默认随机：不用 /vless 这类字面量（强特征文本，且所有默认部署完全一致）
-  const wsPath = flagString(args, 'ws-path') || randomWsPath()
-  const uuid = flagString(args, 'uuid') || randomUUID()
-  const trojanPassword = flagString(args, 'trojan-password') || randomPassword()
+  const wsPath = flagString(args, 'ws-path') || ''
+  const uuid = flagString(args, 'uuid') || ''
+  const trojanPassword = flagString(args, 'trojan-password') || ''
 
-  process.stdout.write(`\n面板路径：${panelPath}\n面板密码：${panelPassword}\n`)
-  process.stdout.write(`UUID：${uuid}\nTrojan 密码：${trojanPassword}\n`)
-  process.stdout.write(`WS 路径：${wsPath}\n`)
-  process.stdout.write(`控制面项目：${controlName}\n数据面项目：${dataName}\n\n`)
+  // 本地产物版本：构建时由 build.mjs 注入，这里从产物里读出来
+  const localBuild = await readLocalBuild()
 
   const result = await deployPagesSplit({
     token,
@@ -196,18 +223,57 @@ async function runPagesSplit(args: ReturnType<typeof parseArgs>): Promise<void> 
     wsPath,
     enableTrojan: true,
     enableXhttp: false,
+    mode,
+    keepCredentials,
+    skipSameVersion,
+    localBuild,
     log: (m) => process.stdout.write(`${m}\n`),
   })
 
   process.stdout.write(`\n${'─'.repeat(52)}\n`)
-  process.stdout.write(`控制面：https://${result.control.subdomain}${panelPath}\n`)
+  process.stdout.write(`控制面：https://${result.control.subdomain}${result.panelPath ?? ''}\n`)
   process.stdout.write(`数据面：https://${result.data.subdomain}\n`)
-  process.stdout.write(`\n⚠️ 请把上面的面板路径与密码保存到安全的地方。\n`)
+  if (result.uuid) process.stdout.write(`UUID：${result.uuid}\n`)
+  if (result.wsPath) process.stdout.write(`WS 路径：${result.wsPath}\n`)
 
   if (result.warnings.length > 0) {
     process.stdout.write(`\n告警（${result.warnings.length} 条）：\n`)
     for (const w of result.warnings) process.stdout.write(`  ⚠ ${w}\n`)
   }
+}
+
+/**
+ * 从本地产物里读构建版本。
+ *
+ * 版本号在构建时由 esbuild 的 define 注入为 `__CFP_BUILD__` 常量，
+ * 打包后会以字符串形式出现在产物里。读不到时返回 undefined，
+ * 此时不做版本跳过（保守起见仍然部署）。
+ */
+async function readLocalBuild(): Promise<string | undefined> {
+  try {
+    const { readFile } = await import('node:fs/promises')
+    const { dirname, resolve } = await import('node:path')
+    const { fileURLToPath } = await import('node:url')
+    const here = dirname(fileURLToPath(import.meta.url))
+    const candidates = [
+      resolve(here, '../worker-core/dist/control.js'),
+      resolve(here, '../../worker-core/dist/control.js'),
+      resolve(process.cwd(), 'packages/worker-core/dist/control.js'),
+    ]
+    for (const candidate of candidates) {
+      try {
+        const code = await readFile(candidate, 'utf8')
+        // 匹配形如 "abc1234-202610221430" 的版本串
+        const m = /["']([0-9a-f]{7,10}-\d{12})["']/.exec(code)
+        if (m) return m[1]
+      } catch {
+        /* 试下一个 */
+      }
+    }
+  } catch {
+    /* 忽略 */
+  }
+  return undefined
 }
 
 async function main(): Promise<void> {

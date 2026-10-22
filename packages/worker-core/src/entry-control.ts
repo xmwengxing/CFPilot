@@ -7,6 +7,7 @@
 import type { Env } from './types'
 import { routeControlPlane } from './routes/control'
 import { neutralPage } from './ui/neutral'
+import { VERSION_PATH, versionResponse } from './version'
 
 export default {
   async fetch(
@@ -16,6 +17,8 @@ export default {
   ): Promise<Response> {
     void ctx
     try {
+      // 版本查询必须在路由之前：部署向导靠它判断是否需要更新
+      if (new URL(request.url).pathname === VERSION_PATH) return versionResponse()
       return (await routeControlPlane(request, env)) ?? neutralPage(200)
     } catch {
       return neutralPage(500)

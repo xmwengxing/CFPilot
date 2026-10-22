@@ -291,6 +291,35 @@ export class CloudflareClient {
     }
   }
 
+  /**
+   * 写入 KV 键值。
+   *
+   * 用于把部署凭据同步到数据面读取的 `config` 键。
+   */
+  async setKvValue(
+    accountId: string,
+    namespaceId: string,
+    key: string,
+    value: string
+  ): Promise<void> {
+    const response = await fetch(
+      `${this.apiBase}/accounts/${accountId}/storage/kv/namespaces/${namespaceId}/values/${encodeURIComponent(key)}`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          'Content-Type': 'text/plain',
+        },
+        body: value,
+        signal: AbortSignal.timeout(this.timeoutMs),
+      }
+    )
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      throw parseApiError(response.status, text)
+    }
+  }
+
   /** 列出已部署的 Worker 脚本 */
   async listScripts(accountId: string): Promise<string[]> {
     return await this.request('GET', `/accounts/${accountId}/workers/scripts`)
@@ -602,5 +631,28 @@ export class CloudflareClient {
   /** 删除 Pages 项目 */
   async deletePagesProject(accountId: string, name: string): Promise<void> {
     await this.request('DELETE', `/accounts/${accountId}/pages/projects/${name}`)
+  }
+
+  /**
+   * 查询 Pages 项目当前部署的构建版本。
+   *
+   * 项目不存在、未部署、或跑的是旧版内核（无版本端点）时返回 null。
+   * 用于「同版本跳过部署」。
+   */
+  async getPagesBuildVersion(accountId: string, name: string): Promise<string | null> {
+    try {
+      const project = await this.getPagesProject(accountId, name)
+      const subdomain = project.subdomain
+      if (!subdomain) return null
+      const response = await fetch(`https://${subdomain}/__cfp_version`, {
+        headers: { 'User-Agent': 'cfpilot-deploy' },
+        signal: AbortSignal.timeout(15000),
+      })
+      if (!response.ok) return null
+      const body = (await response.json()) as { build?: string }
+      return body.build ?? null
+    } catch {
+      return null
+    }
   }
 }

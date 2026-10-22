@@ -9,6 +9,7 @@
 // 拆分产物用于现有部署兼容，不代表 Cloudflare 要求拆分架构。
 import { build } from 'esbuild'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { execSync } from 'node:child_process'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -65,6 +66,25 @@ function assertNoStaticExternals(outFile, targetName) {
   }
 }
 
+/**
+ * 构建版本号。
+ *
+ * 用 git 短 hash + 时间戳，保证每次构建都不同（同版本跳过部署依赖这一点）。
+ * 注入了每个产物的 `__CFP_BUILD__` 常量，运行时通过 /__cfp_version 暴露。
+ */
+function buildVersion() {
+  let git = 'nogit'
+  try {
+    git = execSync('git rev-parse --short HEAD', { encoding: 'utf8', timeout: 5000 }).trim()
+  } catch {
+    /* 不在 git 仓库时用 nogit */
+  }
+  const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12)
+  return `${git}-${stamp}`
+}
+
+const BUILD_VERSION = buildVersion()
+
 for (const target of TARGETS) {
   const outFile = resolve(outDir, target.out)
   await build({
@@ -77,7 +97,10 @@ for (const target of TARGETS) {
     minify: true,
     legalComments: 'none',
     conditions: ['worker', 'browser'],
-    define: { 'process.env.NODE_ENV': '"production"' },
+    define: {
+      'process.env.NODE_ENV': '"production"',
+      __CFP_BUILD__: JSON.stringify(BUILD_VERSION),
+    },
     external: EXTERNALS,
   })
 

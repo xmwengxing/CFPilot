@@ -21,6 +21,8 @@
 - Pages **双项目部署**：控制面（面板+订阅+探针）+ 数据面（代理入站），共用同一 KV
 - 代理链路：VLESS-WS 101 握手成功 → VLESS 响应头 `[0,0]` → 出站数据帧正常
 - 面板：登录、订阅（Base64/Clash/Sing-box）、一键优选全部可用
+- **优选测速支持任意项目**：先 101 校验筛出「能服务你域名」的 IP，再对它们测速
+  （目标有探针端点走 probe，否则自动切公开测速地址）—— 实测产出 12.2 / 9.5 / 8.7 MB/s
 - 更新部署：沿用原 UUID 与 WS 路径，**客户端订阅地址不用改**
 - GUI 应用内更新：查 Releases → 下载 → 替换 → 重启
 
@@ -61,6 +63,30 @@
 
 ---
 
+## 0.11 2026-10-22 的决定性对照实验
+
+这一节记录了推翻旧结论的证据，接手者请先读。
+
+| 实验 | 结果 | 推翻了什么 |
+|------|------|-----------|
+| 114 字节静态 Worker → workers.dev | 1101 | 「workers.dev 可用」 |
+| 同一脚本 → 独立 zone route | 6/6 正常 | 「1101 是账号级封禁」 |
+| **cfnext 原版文件**（一行未改）→ Pages 全新随机项目名 | **1/3，第 2 次被封** | 「是我们改坏了数据面」「esbuild 打包导致封禁」 |
+| edgetunnel 原版（**完全不用** `cloudflare:sockets`）→ Pages 全新随机项目名 | **4/4 全部成功** | 「Pages 第二次部署必然失败」 |
+| 极简 Worker（无 sockets）→ Pages | 4/4 成功 | 同上 |
+| 30 行只含 sockets 的脚本 | 加载正常，`connect()` 返回 `TCP Loop detected` | 「TCP Loop 是目标选择问题」 |
+
+**结论**：
+- 平台对**含 `cloudflare:sockets` 的 Pages 项目**在第二次部署时拒绝；
+  不用 sockets 的项目（edgetunnel 路线）不受影响。
+- `TCP Loop detected` 在该环境下是 `cloudflare:sockets` 的系统性限制，
+  与目标形态、协议实现无关。
+- 因此**双项目拆分**是当前唯一可行的部署形态（各项目首次部署总是成功）。
+- 想恢复单项目原地更新，需改用 `fetch()` 落地（edgetunnel 路线），
+  这会失去 ProxyIP / NAT64 / SOCKS5 出站能力。
+
+---
+
 ## 0.12 优选器的适用边界（2026-10-22 实测）
 
 **代理工具会毁掉优选结果 —— 这是最容易踩的坑。**
@@ -94,7 +120,64 @@
 - 优选器的价值主要在**延迟排序**，而不是「筛掉不可用 IP」——
   对一个正常的 CF 域名，几乎所有 CF IP 都能通过 101 校验
 
-## 0.13 WS 路径规则
+## 0.13 测速方案（2026-10-22 重做）
+
+### 原方案的问题
+
+只能请求 `<目标路径>?bytes=N`，依赖目标项目有 `/__edge_probe` 这个 **CFPilot 专有端点**。
+对接第三方项目时该端点不存在 → **速度永远是 0**。
+
+### 取长补短的结论
+
+同类工具（如 CFData-WEB）用**公开测速地址**解决了通用性，
+但它**跳过了真连接校验**，于是选出「速度很快但导入客户端全是 -1」的 IP。
+CFPilot 的强项恰恰是 101 真连接校验。两者结合：
+
+> **先用 101 校验筛出「确实能服务你的域名」的 IP，再只对这些 IP 测速。**
+
+实测（同一域名，逐个探测不同网段）：
+
+| 探测 IP | 101 校验 | 峰值速度 | 总平均 |
+|---------|---------|---------|--------|
+| 188.114.96.1 | ✅ | 51.67 MB/s | 16.44 MB/s |
+| 其它 6 个 | ❌ | — | 跳过测速 |
+
+注意**峰值与总平均差 3 倍** —— 用平均会严重低估，这是取窗口峰值的原因。
+
+端到端扫描产出：`12.2 / 9.5 / 8.7 MB/s`（此前全是 0）。
+
+### 两种测速方式
+
+| 方式 | 适用 | 要求 | 忠实度 |
+|------|------|------|--------|
+| `probe` | 目标有探针端点 | 对方须提供 `/__edge_probe` 类端点 | 高（走代理真实路径） |
+| `url` | **任何项目** | 无 | 中（测候选 IP 到 CF 边缘的带宽） |
+
+`--speed-mode auto`（默认）自动探测选择。**两种都只作用于已过 101 校验的 IP**。
+
+### 测速精度的三个设计点
+
+1. **滑动窗口峰值，而非总平均** —— 丢弃前 1 秒 TCP 慢启动样本
+2. **默认 3 条并发连接** —— 单条 TCP 受拥塞窗口/BDP 限制，高延迟线路填不满带宽
+3. **测速地址可用性预检** —— 避免把「地址不可用」误判成「所有 IP 速度都是 0」
+
+### 关键文件
+
+| 想改什么 | 文件 |
+|---------|------|
+| 吞吐测量（多连接 / 峰值窗口） | `packages/scanner-cli/src/true-probe.ts` 的 `measureThroughput()` |
+| 测速地址预设与预检 | `packages/scanner-cli/src/speed-url.ts` |
+| 测速方式决策 | `speed-url.ts` 的 `resolveSpeedMode()` |
+| 三阶流程编排 | `packages/scanner-cli/src/scan.ts` |
+
+## 0.14 测速地址解析的一个坑（已修）
+
+`parseSpeedUrl` 原本没拦非 http(s) 协议：
+`ftp://example.com/a` 会被规范化成 `https://ftp://example.com/a`，
+被解析成 `host=ftp` —— **不报错但完全跑不通**。
+现在先匹配 `scheme://` 前缀并拒绝非 http(s)。
+
+## 0.15 WS 路径规则
 
 `--path` / GUI 的「WS 路径」**必须与目标项目实际的 WebSocket 路径完全一致**：
 
@@ -116,17 +199,7 @@
 **填错路径不会产生假结果**，只会一个都选不出来 —— 因为校验是真的发起
 TLS + WebSocket 101 握手，不是看返回码猜。
 
-## 0.14 测速为什么总是 0
-
-测速需要目标提供探针端点（CFPilot 是 `/__edge_probe`）。
-**其它同类项目通常没有这个端点**，此时：
-
-- CLI：自动探测失败后跳过测速、只按延迟排序
-- GUI：默认勾选「跳过测速」，速度列显示 `—`（不是 `0`，避免误解成「测出来是 0」）
-
-想真的测速，需要 `--probe-path` 指向目标项目自己的测速端点。
-
-## 0.15 scanner CLI 的 MSYS 路径污染（同类问题第二次出现）
+## 0.16 scanner CLI 的 MSYS 路径污染（同类问题第二次出现）
 
 Git-Bash 下 `--path /vless` 会被 MSYS 转换成
 `C:/Users/<用户名>/.../node_modules/@dsh-ops/bash-win32-x64/vless`，
@@ -143,7 +216,7 @@ Git-Bash 下 `--path /vless` 会被 MSYS 转换成
 > 部署向导的 `validateOptions()` 早就拦了同类问题，但 scanner 漏了。
 > **新增 CLI 路径参数时务必检查这一点。**
 
-## 0.16 GUI 打包产物的两个坑
+## 0.17 GUI 打包产物的两个坑
 
 1. **GPU 开关必须写在主进程顶部**，不能只放在 `scripts/start.mjs`。
    打包后的 exe 不经过 start.mjs，远程桌面下 GPU 进程起不来
@@ -154,30 +227,6 @@ Git-Bash 下 `--path /vless` 会被 MSYS 转换成
 2. **`setAttribute('disabled', '')` 不等于取消禁用**。
    HTML 里只要 `disabled` 属性存在就生效，设成空串仍然禁用，
    表现为按钮永久变灰、必须重启程序。要用 `el.disabled = busy`。
-
----
-
-## 0.11 2026-10-22 的决定性对照实验
-
-这一节记录了推翻旧结论的证据，接手者请先读。
-
-| 实验 | 结果 | 推翻了什么 |
-|------|------|-----------|
-| 114 字节静态 Worker → workers.dev | 1101 | 「workers.dev 可用」 |
-| 同一脚本 → 独立 zone route | 6/6 正常 | 「1101 是账号级封禁」 |
-| **cfnext 原版文件**（一行未改）→ Pages 全新随机项目名 | **1/3，第 2 次被封** | 「是我们改坏了数据面」「esbuild 打包导致封禁」 |
-| edgetunnel 原版（**完全不用** `cloudflare:sockets`）→ Pages 全新随机项目名 | **4/4 全部成功** | 「Pages 第二次部署必然失败」 |
-| 极简 Worker（无 sockets）→ Pages | 4/4 成功 | 同上 |
-| 30 行只含 sockets 的脚本 | 加载正常，`connect()` 返回 `TCP Loop detected` | 「TCP Loop 是目标选择问题」 |
-
-**结论**：
-- 平台对**含 `cloudflare:sockets` 的 Pages 项目**在第二次部署时拒绝；
-  不用 sockets 的项目（edgetunnel 路线）不受影响。
-- `TCP Loop detected` 在该环境下是 `cloudflare:sockets` 的系统性限制，
-  与目标形态、协议实现无关。
-- 因此**双项目拆分**是当前唯一可行的部署形态（各项目首次部署总是成功）。
-- 想恢复单项目原地更新，需改用 `fetch()` 落地（edgetunnel 路线），
-  这会失去 ProxyIP / NAT64 / SOCKS5 出站能力。
 
 ---
 
@@ -798,6 +847,10 @@ git tag gui-v0.2.0 && git push origin gui-v0.2.0
 | GUI 界面 | `packages/gui/src/renderer/*` |
 | GUI 应用内更新 | `packages/gui/src/main/updater.ts` |
 | GUI 打包配置 | `packages/gui/package.json` 的 `build` 字段 |
+| **吞吐测量**（多连接 / 峰值窗口） | `packages/scanner-cli/src/true-probe.ts` 的 `measureThroughput()` |
+| **测速地址预设与预检** | `packages/scanner-cli/src/speed-url.ts` |
+| 测速方式决策 | `speed-url.ts` 的 `resolveSpeedMode()` |
+| 网络环境（代理）检测 | `packages/scanner-cli/src/net-env.ts` |
 | 自研数据面归档（勿启用） | `archive/self-developed-dataplane/` |
 | 打包与体积检查 | `packages/worker-core/scripts/build.mjs` |
 | 面板压缩注入 | `packages/worker-core/scripts/gen-panel.mjs` |

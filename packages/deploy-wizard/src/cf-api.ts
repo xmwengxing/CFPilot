@@ -72,6 +72,36 @@ export interface WorkerDomain {
   enabled?: boolean
 }
 
+/* ------------------------------------------------------------------ */
+/* Pages                                                               */
+/* ------------------------------------------------------------------ */
+
+/** Pages 项目 */
+export interface PagesProject {
+  id: string
+  name: string
+  subdomain: string
+  domains?: string[]
+  production_branch: string
+  latest_deployment?: PagesDeployment
+}
+
+/** Pages 部署 */
+export interface PagesDeployment {
+  id: string
+  url: string
+  latest_stage: { name: string; status: string; ended_on?: string }
+  stages: Array<{ name: string; status: string }>
+}
+
+/** Pages 项目的环境变量 / KV 绑定配置 */
+export interface PagesDeploymentConfig {
+  kv_namespaces?: Record<string, { namespace_id: string }>
+  env_vars?: Record<string, { value: string }>
+  compatibility_date?: string
+  compatibility_flags?: string[]
+}
+
 export interface ApiErrorBody {
   success: false
   errors: Array<{ code: number; message: string }>
@@ -157,15 +187,18 @@ export class CloudflareClient {
     this.timeoutMs = options.timeoutMs ?? 30000
   }
 
-  /** 发送 JSON 请求并解出 result 字段 */
+  /** 发送 JSON / multipart 请求并解出 result 字段 */
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    // FormData 绝不能手动设 Content-Type：必须让 fetch 自己带 boundary，
+    // 否则 Cloudflare 会解析失败（Pages 部署接口尤其敏感）。
+    const isForm = typeof FormData !== 'undefined' && body instanceof FormData
     const response = await fetch(`${this.apiBase}${path}`, {
       method,
       headers: {
         Authorization: `Bearer ${this.token}`,
-        'Content-Type': 'application/json',
+        ...(isForm ? {} : { 'Content-Type': 'application/json' }),
       },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: body === undefined ? undefined : isForm ? (body as FormData) : JSON.stringify(body),
       signal: AbortSignal.timeout(this.timeoutMs),
     })
     return await readApiResponse<T>(response)
@@ -440,5 +473,112 @@ export class CloudflareClient {
       `/accounts/${accountId}/workers/subdomain`
     )
     return result?.subdomain ?? ''
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Pages                                                             */
+  /* ---------------------------------------------------------------- */
+
+  /** 创建 Pages 项目 */
+  async createPagesProject(
+    accountId: string,
+    options: { name: string; productionBranch?: string }
+  ): Promise<PagesProject> {
+    return await this.request('POST', `/accounts/${accountId}/pages/projects`, {
+      name: options.name,
+      production_branch: options.productionBranch ?? 'main',
+    })
+  }
+
+  /** 查询 Pages 项目详情 */
+  async getPagesProject(accountId: string, name: string): Promise<PagesProject> {
+    return await this.request('GET', `/accounts/${accountId}/pages/projects/${name}`)
+  }
+
+  /** 列出 Pages 项目 */
+  async listPagesProjects(accountId: string): Promise<PagesProject[]> {
+    return await this.request('GET', `/accounts/${accountId}/pages/projects`)
+  }
+
+  /**
+   * 更新 Pages 项目的部署配置（KV 绑定 / 环境变量）。
+   *
+   * ⚠️ 顺序必须是「建项目 → 设变量/绑 KV → 最后才部署」：
+   * Pages 的绑定与变量只对**之后的**部署生效，先部署再配置等于白配。
+   */
+  async updatePagesDeploymentConfig(
+    accountId: string,
+    name: string,
+    production: PagesDeploymentConfig
+  ): Promise<void> {
+    await this.request('PATCH', `/accounts/${accountId}/pages/projects/${name}`, {
+      deployment_configs: { production },
+    })
+  }
+
+  /**
+   * 上传 `_worker.js` 并触发部署。
+   *
+   * 直接调 Pages 部署 API（不经过 wrangler），避免 wrangler 二次打包改变产物。
+   * 表单字段：branch / manifest / _worker.bundle（内含嵌套 multipart）。
+   */
+  async deployPagesWorker(
+    accountId: string,
+    name: string,
+    options: { code: string; branch?: string }
+  ): Promise<PagesDeployment> {
+    // 内层：_worker.bundle 本身是一个 multipart，含 metadata + _worker.js
+    const bundle = new FormData()
+    bundle.set(
+      'metadata',
+      new Blob([JSON.stringify({ main_module: '_worker.js', bindings: {} })], {
+        type: 'application/json',
+      }),
+      'metadata.json'
+    )
+    bundle.set(
+      '_worker.js',
+      new Blob([options.code], { type: 'application/javascript+module' }),
+      '_worker.js'
+    )
+    const bundleRequest = new Request('https://placeholder.invalid', {
+      method: 'POST',
+      body: bundle,
+    })
+
+    // 外层：部署请求
+    const form = new FormData()
+    form.set('branch', options.branch ?? 'main')
+    form.set('manifest', '{}')
+    form.set(
+      '_worker.bundle',
+      new Blob([await bundleRequest.arrayBuffer()], {
+        type: bundleRequest.headers.get('content-type') ?? 'multipart/form-data',
+      }),
+      '_worker.bundle'
+    )
+
+    return await this.request(
+      'POST',
+      `/accounts/${accountId}/pages/projects/${name}/deployments`,
+      form
+    )
+  }
+
+  /** 查询 Pages 部署状态 */
+  async getPagesDeployments(accountId: string, name: string): Promise<PagesDeployment[]> {
+    return await this.request('GET', `/accounts/${accountId}/pages/projects/${name}/deployments`)
+  }
+
+  /** 给 Pages 项目绑定自定义域名 */
+  async addPagesDomain(accountId: string, name: string, domain: string): Promise<unknown> {
+    return await this.request('POST', `/accounts/${accountId}/pages/projects/${name}/domains`, {
+      name: domain,
+    })
+  }
+
+  /** 删除 Pages 项目 */
+  async deletePagesProject(accountId: string, name: string): Promise<void> {
+    await this.request('DELETE', `/accounts/${accountId}/pages/projects/${name}`)
   }
 }

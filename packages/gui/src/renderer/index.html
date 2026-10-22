@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CFPilot 部署与维护工具</title>
+  <style>
+    :root {
+      --bg: #0a1024;
+      --bg-card: #121a33;
+      --bg-input: #0d1430;
+      --line: #24304f;
+      --text: #e6ebf5;
+      --muted: #8b9bb8;
+      --accent: #4f7cff;
+      --accent-hover: #6b91ff;
+      --ok: #34d399;
+      --warn: #fbbf24;
+      --err: #f87171;
+      --radius: 12px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      background: var(--bg); color: var(--text);
+      font: 14px/1.6 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      overflow: hidden;
+    }
+    .app { height: 100vh; display: flex; flex-direction: column; }
+
+    header {
+      display: flex; align-items: center; gap: 14px;
+      padding: 14px 22px; border-bottom: 1px solid var(--line); flex: 0 0 auto;
+    }
+    .logo {
+      width: 36px; height: 36px; border-radius: 9px;
+      background: linear-gradient(135deg, var(--accent), #8b5cf6);
+      display: grid; place-items: center; font-weight: 700; font-size: 17px; color: #fff;
+    }
+    header h1 { font-size: 17px; font-weight: 600; }
+    header .sub { color: var(--muted); font-size: 12px; }
+
+    nav {
+      display: flex; gap: 4px; padding: 10px 22px 0; flex: 0 0 auto;
+      border-bottom: 1px solid var(--line);
+    }
+    nav button {
+      background: transparent; border: none; border-bottom: 2px solid transparent;
+      color: var(--muted); padding: 9px 16px; font-size: 13.5px; cursor: pointer;
+      font-family: inherit; transition: .15s; border-radius: 6px 6px 0 0;
+    }
+    nav button:hover { color: var(--text); background: rgba(79,124,255,.07); }
+    nav button.active { color: #fff; border-bottom-color: var(--accent); }
+
+    .body { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+    .pages { flex: 1 1 auto; overflow-y: auto; padding: 20px 22px; min-height: 0; }
+    .page { display: none; max-width: 940px; }
+    .page.active { display: block; }
+
+    .log-panel {
+      flex: 0 0 200px; border-top: 1px solid var(--line);
+      background: #070c1c; display: flex; flex-direction: column; min-height: 0;
+    }
+    .log-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 7px 22px; border-bottom: 1px solid var(--line); flex: 0 0 auto;
+    }
+    .log-head span { font-size: 12px; color: var(--muted); }
+    .log-head button {
+      background: transparent; border: 1px solid var(--line); color: var(--muted);
+      border-radius: 6px; padding: 3px 10px; font-size: 11.5px; cursor: pointer; font-family: inherit;
+    }
+    .log-head button:hover { color: var(--text); border-color: var(--accent); }
+    .log {
+      flex: 1 1 auto; overflow-y: auto; padding: 8px 22px 12px; margin: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px;
+    }
+    .log-line { padding: 1px 0; white-space: pre-wrap; word-break: break-all; }
+    .log-line .t { color: #4a5878; margin-right: 8px; }
+    .log-line.ok { color: var(--ok); }
+    .log-line.warn { color: var(--warn); }
+    .log-line.err { color: var(--err); }
+
+    .card {
+      background: var(--bg-card); border: 1px solid var(--line);
+      border-radius: var(--radius); padding: 18px; margin-bottom: 16px;
+    }
+    .card h2 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+    .card .desc { color: var(--muted); font-size: 12.5px; margin-bottom: 14px; }
+
+    label { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 5px; }
+    input[type="text"], input[type="password"], input[type="number"], select {
+      width: 100%; background: var(--bg-input); border: 1px solid var(--line);
+      border-radius: 8px; padding: 9px 11px; color: var(--text); font-size: 13px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    input:focus, select:focus { outline: none; border-color: var(--accent); }
+    .field { margin-bottom: 14px; }
+    .row { display: flex; gap: 10px; }
+    .row > * { flex: 1; }
+    .tip { color: var(--muted); font-size: 11.5px; margin-top: 5px; line-height: 1.7; }
+    .tip b { color: #b9c8ff; font-weight: 500; }
+
+    button.btn {
+      border: none; border-radius: 8px; padding: 10px 16px; font-size: 13px;
+      font-weight: 500; cursor: pointer; transition: .15s; font-family: inherit;
+    }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover { background: var(--accent-hover); }
+    .btn-ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+    .btn-ghost:hover { color: var(--text); border-color: var(--accent); }
+    .btn-danger { background: transparent; color: var(--err); border: 1px solid rgba(248,113,113,.35); }
+    .btn-danger:hover { background: rgba(248,113,113,.1); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 6px; }
+
+    .chk { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); cursor: pointer; }
+    .chk input { width: 15px; height: 15px; accent-color: var(--accent); }
+    .radios { display: flex; gap: 16px; flex-wrap: wrap; }
+    .radios .chk { white-space: nowrap; }
+    .radios input { accent-color: var(--accent); }
+
+    .badge {
+      display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px;
+      padding: 3px 9px; border-radius: 20px; font-weight: 500; margin-left: 6px;
+    }
+    .badge.ok { background: rgba(52,211,153,.13); color: var(--ok); }
+    .badge.warn { background: rgba(251,191,36,.13); color: var(--warn); }
+    .badge.err { background: rgba(248,113,113,.13); color: var(--err); }
+    .badge.info { background: rgba(79,124,255,.13); color: var(--accent); }
+
+    .secure {
+      background: rgba(52,211,153,.07); border: 1px solid rgba(52,211,153,.22);
+      border-radius: var(--radius); padding: 14px 16px; font-size: 12.5px; line-height: 1.9;
+    }
+    .secure b { color: var(--ok); }
+    code {
+      background: var(--bg-input); padding: 1px 6px; border-radius: 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .links { font-size: 12.5px; line-height: 2.1; }
+    .kv-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 9px 12px; background: var(--bg-input); border-radius: 8px; margin-bottom: 8px;
+      font-size: 12.5px;
+    }
+    .kv-row .k { color: var(--muted); }
+    .kv-row .v { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+    .result-box {
+      background: #060b1a; border: 1px solid var(--line); border-radius: 10px;
+      padding: 12px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+      white-space: pre-wrap; word-break: break-all; color: #b9c8ff; max-height: 240px; overflow-y: auto;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 14px; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-weight: 500; font-size: 11.5px; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div class="logo">C</div>
+      <div>
+        <h1>CFPilot 部署与维护工具</h1>
+        <div class="sub">Pages 双项目部署 · 本地真连接优选</div>
+      </div>
+    </header>
+
+    <nav id="nav">
+      <button data-page="cred" class="active">Cloudflare 凭据</button>
+      <button data-page="deploy">一键部署</button>
+      <button data-page="scan">本地真连接优选</button>
+      <button data-page="about">说明</button>
+    </nav>
+
+    <div class="body">
+      <div class="pages" id="pages">
+
+        <!-- ============ 凭据 ============ -->
+        <section class="page active" id="page-cred">
+          <div class="card">
+            <h2>🔑 Cloudflare API Token <span class="badge info" id="tokenBadge">未保存</span></h2>
+            <p class="desc">用于调用 Cloudflare 官方 API 完成部署。只保存在本机，不会上传到任何服务器。</p>
+
+            <div class="field">
+              <label>API Token</label>
+              <div class="row">
+                <input type="password" id="cfToken" placeholder="粘贴 Cloudflare API Token" />
+                <button class="btn btn-ghost" id="btnSaveToken" style="flex:0 0 auto">保存</button>
+              </div>
+              <p class="tip">
+                没有令牌？<a href="#" data-url="https://dash.cloudflare.com/profile/api-tokens">点此创建</a>。
+                需要哪些权限见下方说明。
+              </p>
+            </div>
+
+            <div class="field">
+              <label>面板密码</label>
+              <input type="password" id="panelPassword" placeholder="留空则随机生成" />
+              <p class="tip">面板的登录密码。留空会自动生成随机密码并在部署后显示。</p>
+            </div>
+
+            <div class="btn-row">
+              <button class="btn btn-primary" id="btnDetect">自动检测账号与 KV</button>
+              <button class="btn btn-danger" id="btnWipe">清除本机凭据</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <h2>📦 检测结果</h2>
+            <div class="kv-row"><span class="k">目标账号</span><span class="v" id="detAccount">—</span></div>
+            <div class="kv-row"><span class="k">KV 命名空间</span><span class="v" id="detKv">—</span></div>
+            <p class="tip" style="margin-top:6px">
+              账号 ID 与 KV 不需要手填：点「自动检测」后，工具会用 Token 查询可见账号，
+              复用已有的 KV，没有就自动建一个。
+            </p>
+          </div>
+
+          <div class="card">
+            <h2>🔐 安全说明</h2>
+            <div class="secure">
+              你的 <b>API Token</b> 与<b>面板密码</b>只保存在本机
+              <code>~/.cfpilot-gui/secrets.json</code>，<br>
+              <b>不会上传</b>到任何服务器，也不随安装包分发。<br><br>
+              工具运行时的出境网络请求只有：<br>
+              · <b>api.cloudflare.com</b>（部署功能必需，令牌仅用于该请求的 Authorization 头）<br>
+              · <b>优选阶段</b>访问你自己的域名做 101 校验<br>
+              · 你主动点击的官方链接（用系统浏览器打开）<br><br>
+              点「清除本机凭据」可随时删除。
+            </div>
+          </div>
+
+          <div class="card">
+            <h2>📋 需要的 Token 权限</h2>
+            <div class="links">
+              <b>必需</b><br>
+              · Account / Account Settings / <b>Read</b> —— 读取账号列表<br>
+              · Developer Platform / Workers KV Storage / <b>Edit</b> —— 创建 KV、写配置<br>
+              · Developer Platform / Workers Scripts / <b>Edit</b> —— 上传内核<br>
+              · Developer Platform / Pages / <b>Edit</b> —— 创建项目、触发部署<br><br>
+              <b>仅绑定自定义域名时需要</b><br>
+              · Zone / Zone / Read · Zone / DNS / Edit · Zone / Workers Routes / Edit<br><br>
+              <span style="color:var(--muted)">DNA &amp; Zone 分类下的 Account DNS Settings、DNS Firewall、
+              DNS View、Registrar Domains 等本工具<b>不需要</b>。</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ 部署 ============ -->
+        <section class="page" id="page-deploy">
+          <div class="card">
+            <h2>🚀 一键部署</h2>
+            <p class="desc">
+              Pages 双项目：控制面（面板 + 订阅 + 探针）+ 数据面（代理入站），共用同一个 KV。
+            </p>
+
+            <div class="field">
+              <label>部署模式</label>
+              <div class="radios">
+                <label class="chk"><input type="radio" name="mode" value="auto" checked /> 自动判断</label>
+                <label class="chk"><input type="radio" name="mode" value="update" /> 更新部署</label>
+                <label class="chk"><input type="radio" name="mode" value="fresh" /> 首次部署</label>
+              </div>
+              <p class="tip">
+                <b>自动判断</b>：工具在 KV 里存了部署清单，有清单就是更新，没有就是首次。<br>
+                <b>更新部署</b>会沿用原来的 UUID 与 WS 路径 —— <b>客户端订阅地址不用改</b>。<br>
+                <b>首次部署</b>忽略清单，重新创建项目并生成新凭据。
+              </p>
+            </div>
+
+            <div class="row">
+              <div class="field">
+                <label>控制面项目名（可选）</label>
+                <input type="text" id="controlProject" placeholder="留空 = 随机或按清单" />
+                <p class="tip">控制面承载面板、订阅与探针，客户端不连它。</p>
+              </div>
+              <div class="field">
+                <label>数据面项目名（可选）</label>
+                <input type="text" id="dataProject" placeholder="留空 = 随机或按清单" />
+                <p class="tip">数据面是代理转发层，<b>客户端连的就是它</b>。</p>
+              </div>
+            </div>
+
+            <div class="row">
+              <div class="field">
+                <label>面板路径（可选）</label>
+                <input type="text" id="panelPath" placeholder="如 /p-a1b2c3d4" />
+                <p class="tip">面板的访问路径。留空则随机生成或沿用已有值。</p>
+              </div>
+              <div class="field">
+                <label>WS 路径（可选）</label>
+                <input type="text" id="wsPath" placeholder="如 /k7m2x9q4w8" />
+                <p class="tip">代理的 WebSocket 路径。留空则随机生成或沿用已有值。</p>
+              </div>
+            </div>
+
+            <label class="chk" style="margin-bottom:8px">
+              <input type="checkbox" id="optNewCred" /> 更新时重新生成 UUID / WS 路径 / 面板凭据
+            </label>
+            <label class="chk">
+              <input type="checkbox" id="optForce" /> 强制重新部署（忽略「版本相同则跳过」）
+            </label>
+
+            <div class="btn-row" style="margin-top:16px">
+              <button class="btn btn-primary" id="btnDeploy">开始部署</button>
+              <button class="btn btn-ghost" id="btnCheck">检查更新</button>
+            </div>
+            <p class="tip" id="deployStatus" style="margin-top:10px">尚未部署</p>
+          </div>
+        </section>
+
+        <!-- ============ 优选 ============ -->
+        <section class="page" id="page-scan">
+          <div class="card">
+            <h2>⚡ 本地真连接优选</h2>
+            <p class="desc">
+              用你自己的域名做 TLS SNI + WebSocket 101 握手校验，
+              只保留<b>真正能连通</b>的 Cloudflare IP。跑完直接得到可粘贴的 IP 列表。
+            </p>
+
+            <div class="row">
+              <div class="field">
+                <label>Worker 域名</label>
+                <input type="text" id="optHost" placeholder="如 cfp-dat.pages.dev" />
+                <p class="tip">
+                  你的代理域名（<b>数据面</b>的地址）。检查更新后会自动填入。
+                  用它做 TLS SNI 与 HTTP Host，才能测出真实可用性。
+                </p>
+              </div>
+              <div class="field">
+                <label>WS 路径</label>
+                <input type="text" id="optPath" placeholder="如 /vless" />
+                <p class="tip">
+                  代理的 WebSocket 路径，必须与客户端里填的一致。
+                  CFNext 常见是 UUID，部分项目是 <code>/vless</code>。
+                </p>
+              </div>
+            </div>
+
+            <div class="row">
+              <div class="field">
+                <label>端口</label>
+                <select id="optPort">
+                  <option value="443">443（推荐）</option>
+                  <option value="2053">2053</option>
+                  <option value="2083">2083</option>
+                  <option value="2087">2087</option>
+                  <option value="2096">2096</option>
+                  <option value="8443">8443</option>
+                </select>
+                <p class="tip">必须与客户端填的端口一致，否则结果无效。</p>
+              </div>
+              <div class="field">
+                <label>保留条数（--top）</label>
+                <input type="number" id="optTop" value="15" min="1" max="100" />
+                <p class="tip">建议 <b>10~20</b>。太多会让订阅变长且质量下降。</p>
+              </div>
+            </div>
+
+            <div class="row">
+              <div class="field">
+                <label>候选采样数（--sample）</label>
+                <input type="number" id="optSample" value="300" min="10" max="20000" />
+                <p class="tip">
+                  建议 <b>200~500</b>。太小可能吃不到好 IP，太大会让第一阶段等很久。
+                </p>
+              </div>
+              <div class="field">
+                <label>测速路径（--probe-path）</label>
+                <input type="text" id="optProbePath" placeholder="留空 = 与 WS 路径相同" />
+                <p class="tip">
+                  只有目标提供测速端点时才需要。CFPilot 用 <code>/__edge_probe</code>；
+                  其它项目通常没有，此时请勾选「跳过测速」。
+                </p>
+              </div>
+            </div>
+
+            <label class="chk" style="margin-bottom:8px">
+              <input type="checkbox" id="optNoSpeed" checked /> 跳过测速，只按延迟排序
+            </label>
+            <label class="chk">
+              <input type="checkbox" id="optNoCallback" checked /> 不回填面板，只输出列表
+            </label>
+            <p class="tip" style="margin-top:6px">
+              勾选「跳过测速」适合对接没有测速端点的项目，速度快很多。
+              勾选「不回填」时结果只在下方显示，复制到面板「手动优选 IP」框即可。
+            </p>
+
+            <div class="btn-row" style="margin-top:16px">
+              <button class="btn btn-primary" id="btnScan">开始优选</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <h2>📋 优选结果</h2>
+            <div class="result-box" id="scanOut">还没有结果。填好上面的参数后点「开始优选」。</div>
+            <div class="btn-row" style="margin-top:10px">
+              <button class="btn btn-ghost" id="btnCopyResult">复制结果</button>
+            </div>
+            <table id="scanTable" hidden>
+              <thead><tr><th>#</th><th>地址</th><th>机房</th><th>延迟(ms)</th><th>下行(MB/s)</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- ============ 说明 ============ -->
+        <section class="page" id="page-about">
+          <div class="card">
+            <h2>📘 这是什么</h2>
+            <p class="desc" style="line-height:1.9">
+              CFPilot 的图形化部署与维护工具。功能与命令行版
+              <code>cfpilot-deploy</code> / <code>cfpilot-scanner</code> 相同，
+              适合不想碰终端的用户。
+            </p>
+            <div class="links">
+              <b>三步部署</b><br>
+              1. 在「Cloudflare 凭据」页填 Token 并保存，点「自动检测账号与 KV」<br>
+              2. 在「一键部署」页点「开始部署」<br>
+              3. 在「本地真连接优选」页填上一步得到的数据面域名，跑一次优选，把结果粘贴到面板的「手动优选 IP」<br><br>
+              <b>更新升级</b><br>
+              再跑一次「开始部署」即可：工具认得自己的项目，会沿用 UUID 与 WS 路径，
+              <b>客户端订阅地址不用改</b>。
+            </div>
+          </div>
+
+          <div class="card">
+            <h2>🔒 安全说明</h2>
+            <div class="secure">
+              <b>API Token</b> 与<b>面板密码</b>只写在本机
+              <code>~/.cfpilot-gui/secrets.json</code>，<b>不会上传</b>到任何服务器，
+              也不随安装包分发。<br><br>
+              工具的出境网络请求只有三类：<br>
+              · <b>api.cloudflare.com</b> —— 部署必需，令牌仅用于该请求的 Authorization 头<br>
+              · <b>你自己的域名</b> —— 优选阶段的 101 握手校验<br>
+              · 你主动点击的官方链接 —— 用系统浏览器打开<br><br>
+              不存在「把令牌发到第三方」的路径。随时可点「清除本机凭据」删除。
+            </div>
+          </div>
+
+          <div class="card">
+            <h2>🔗 相关链接</h2>
+            <div class="links">
+              <div><a href="#" data-url="https://dash.cloudflare.com/profile/api-tokens">创建 API Token</a></div>
+              <div><a href="#" data-url="https://github.com/xmwengxing/CFPilot">项目仓库 / 检查新版本</a></div>
+              <div><a href="#" data-url="https://github.com/xmwengxing/CFPilot/releases">发布页面（下载新版）</a></div>
+              <div><a href="#" data-url="https://dash.cloudflare.com/workers-and-pages">Cloudflare 控制台</a></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h2>❓ 常见问题</h2>
+            <div class="links">
+              <b>面板打不开？</b>面板路径是随机生成的，部署日志里会打印。<br><br>
+              <b>优选结果全是 -1？</b>检查域名与 WS 路径是否和客户端一致，端口是否为 443 等 TLS 端口。<br><br>
+              <b>提示「版本相同已跳过」？</b>说明线上已是最新版本，无需重新部署；需要强制更新就勾选「强制重新部署」。<br><br>
+              <b>部署失败？</b>看下方日志里的具体错误；权限问题可对照「凭据」页的权限说明。
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- ============ 常驻日志 ============ -->
+      <div class="log-panel">
+        <div class="log-head">
+          <span>运行日志</span>
+          <button id="btnClearLog">清空</button>
+        </div>
+        <div class="log" id="logBox"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="./renderer.js"></script>
+</body>
+</html>

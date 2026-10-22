@@ -80,6 +80,18 @@
   /* 登录页的常驻错误提示（toast 会消失，失败原因需要留着） */
   .muted.err { color: #fca5a5; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+  /* 可折叠区块：默认收起，内容多时不占首屏 */
+  .fold { border: 1px solid var(--line); border-radius: 10px; margin: 12px 0; background: #0d1430; }
+  .fold > summary {
+    cursor: pointer; padding: 10px 14px; font-size: 13px; color: #b9c8ff;
+    list-style: none; user-select: none;
+  }
+  .fold > summary::-webkit-details-marker { display: none; }
+  .fold > summary::before { content: '▸ '; color: var(--muted); }
+  .fold[open] > summary::before { content: '▾ '; }
+  .fold > summary:hover { color: #fff; }
+  .fold-body { padding: 4px 14px 14px; border-top: 1px solid var(--line); }
+  .fold-body .field { margin-top: 12px; }
   pre.cmd {
     background: #08101f; border: 1px dashed var(--line); border-radius: 10px; padding: 12px;
     overflow-x: auto; white-space: pre-wrap; word-break: break-all; color: #b9c8ff; margin: 0 0 12px;
@@ -156,6 +168,7 @@
     <button data-tab="pool">节点来源</button>
     <button data-tab="sub">订阅</button>
     <button data-tab="inbound">入站配置</button>
+    <button data-tab="optimize">本地优选</button>
     <button data-tab="advanced">高级</button>
   </nav>
 
@@ -174,7 +187,7 @@
       <p class="hint" style="line-height:2">
         1. 打开 <b>节点来源</b>，按需勾选「官方优选 IP / 优选域名 / 手动优选 IP」——都不勾也会自动给 20+10；<br>
         2. 复制 <b>订阅</b> 页里的地址导入客户端（Clash / Sing-box / v2ray）；<br>
-        3. 想要更快的节点？在 <b>节点来源</b> 底部跑一次本地真连接优选，结果会进入「手动优选 IP」。
+        3. 想要更快的节点？打开 <b>本地优选</b> 跑一次真连接扫描，结果会进入「手动优选 IP」。
       </p>
     </div>
   </section>
@@ -262,20 +275,93 @@
         </table>
       </div>
     </div>
+  </section>
 
+  <section class="tab-page hidden" id="tab-optimize">
     <div class="card">
       <h2><span class="dot"></span>⚡ 本地真连接优选</h2>
       <p class="hint" style="line-height:1.8">
         用<b>你自己的 Worker 域名</b>作为 TLS SNI 与 HTTP Host，逐个候选 IP 完成 WebSocket 101 握手校验，
         只有真正可用的 IP 才会回填到「手动优选 IP」池。
       </p>
-      <div class="row" style="margin:12px 0">
+
+      <h3 style="margin:18px 0 8px;font-size:14px">运行环境</h3>
+      <p class="hint" style="line-height:1.8">
+        优选器通过 <code>npx</code> 直接拉取，无需手动安装，但本机需要 <b>Node.js 18+</b>。
+        还没装的话先到官网下载：<a href="https://nodejs.org/zh-cn/download" target="_blank" rel="noopener">nodejs.org/zh-cn/download</a>
+        （国内可从 <a href="https://npmmirror.com/" target="_blank" rel="noopener">npmmirror.com</a> 找安装包）。
+      </p>
+
+      <div class="row" style="margin:14px 0">
         <button class="primary" id="btnScan">开始优选</button>
         <button class="ghost" id="btnCopyCmd">复制命令</button>
         <span class="muted" id="bridgeState">未检测到本地桥接服务</span>
       </div>
-      <pre class="cmd" id="scanCmd">正在生成命令…</pre>
-      <div class="progress" style="margin-bottom:10px"><i id="scanBar"></i></div>
+
+      <details class="fold">
+        <summary>命令参数（可选，默认值已按大多数情况调好）</summary>
+        <div class="fold-body">
+          <div class="field">
+            <label>--token <span class="muted">回填令牌</span></label>
+            <input id="optToken" placeholder="留空则不自动回填，需手动复制结果" />
+            <p class="muted" style="margin:4px 0 0">面板会在点击「开始优选」时自动签发一次性令牌（10 分钟有效）。担心令牌外泄就留空，用下面的免令牌命令。</p>
+          </div>
+          <div class="field">
+            <label>--top <span class="muted">保留条数</span></label>
+            <input id="optTop" type="number" value="15" min="1" max="100" />
+            <p class="muted" style="margin:4px 0 0">建议 10–20。条数越多订阅越长，但质量会下降。</p>
+          </div>
+          <div class="field">
+            <label>--sample <span class="muted">候选 IP 采样数</span></label>
+            <input id="optSample" type="number" value="300" min="10" max="20000" />
+            <p class="muted" style="margin:4px 0 0">建议 200–500。太小吃不到好 IP，太大会让一阶段等很久。</p>
+          </div>
+          <div class="field">
+            <label>--port <span class="muted">端口</span></label>
+            <div class="row" id="optPortGroup">
+              <label class="chk"><input type="radio" name="optPort" value="443" checked /> 443（推荐）</label>
+              <label class="chk"><input type="radio" name="optPort" value="2053" /> 2053</label>
+              <label class="chk"><input type="radio" name="optPort" value="2083" /> 2083</label>
+              <label class="chk"><input type="radio" name="optPort" value="2087" /> 2087</label>
+              <label class="chk"><input type="radio" name="optPort" value="2096" /> 2096</label>
+              <label class="chk"><input type="radio" name="optPort" value="8443" /> 8443</label>
+            </div>
+            <p class="muted" style="margin:4px 0 0">必须与客户端里填的端口一致，否则优选结果无效。默认 443。</p>
+          </div>
+          <label class="chk"><input type="checkbox" id="optNoCallback" /> --no-callback（只扫描不回填）</label>
+          <p class="muted" style="margin:4px 0 12px">勾选后不会把结果写回 KV，适合只想拿一份 IP 列表的用户。</p>
+          <div class="row end"><button class="ghost" id="btnRebuildCmd">重新生成命令</button></div>
+        </div>
+      </details>
+
+      <h3 style="margin:18px 0 8px;font-size:14px">生成的命令</h3>
+      <p class="muted" style="margin:0 0 6px">带令牌：点「开始优选」后自动回填面板</p>
+      <pre class="cmd" id="scanCmd">请点击「开始优选」生成命令</pre>
+      <p class="muted" style="margin:12px 0 6px">免令牌：不会写回 KV，优选完把结果复制到「手动优选 IP」输入框</p>
+      <pre class="cmd" id="scanCmdNoToken">请点击「开始优选」生成命令</pre>
+
+      <details class="fold" style="margin-top:14px">
+        <summary>获取 Cloudflare API Token 及权限说明</summary>
+        <div class="fold-body">
+          <p class="hint" style="line-height:1.9">
+            本面板的「本地优选」只用 <b>Workers KV Storage</b> 一项权限，用于把结果写回 KV。<br>
+            如果你还要用部署向导（<code>cfpilot-deploy</code>），那需要的是另一组权限，
+            详见项目 README 的「API Token 权限」章节。
+          </p>
+          <p class="hint" style="line-height:1.9">
+            1. 打开 <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener">dash.cloudflare.com/profile/api-tokens</a><br>
+            2. 点「创建令牌」→「创建自定义令牌」<br>
+            3. 权限选 <b>Account / Workers KV Storage / Edit</b><br>
+            4. 账号资源选你的账号，保存后复制生成的令牌
+          </p>
+          <p class="muted" style="margin:0">
+            注意：面板这里的输入框是给「本地优选」用的，与部署向导的 Token 不是同一个用途，
+            但可以用同一个 Token（权限取并集）。
+          </p>
+        </div>
+      </details>
+
+      <div class="progress" style="margin:16px 0 10px"><i id="scanBar"></i></div>
       <div class="log" id="scanLog"></div>
     </div>
   </section>
@@ -671,32 +757,66 @@
       });
   }
 
-  function buildCmd(token) {
+  /** 读取参数表单 */
+  function readOpts() {
+    var portEl = document.querySelector('input[name="optPort"]:checked');
+    return {
+      token: ($('optToken').value || '').trim(),
+      top: Math.max(1, Math.min(100, Number($('optTop').value) || 15)),
+      sample: Math.max(10, Math.min(20000, Number($('optSample').value) || 300)),
+      port: portEl ? portEl.value : '443',
+      noCallback: $('optNoCallback').checked,
+    };
+  }
+
+  /** 生成命令；withToken=false 时不带 --token 与 --callback */
+  function buildCmd(token, withToken) {
     var host = location.hostname;
-    var callback = location.origin + '/api/v1/preferred-ips';
-    return 'npx -y cfpilot-scanner@latest --host "' + host + '" --token "' + token +
-      '" --callback "' + callback + '" --top 15';
+    var o = readOpts();
+    var parts = ['npx -y cfpilot-scanner@latest'];
+    parts.push('--host "' + host + '"');
+    if (withToken && token) {
+      parts.push('--token "' + token + '"');
+      parts.push('--callback "' + location.origin + '/api/v1/preferred-ips"');
+    }
+    if (o.noCallback || !withToken) parts.push('--no-callback');
+    parts.push('--port ' + o.port);
+    parts.push('--top ' + o.top);
+    parts.push('--sample ' + o.sample);
+    return parts.join(' ');
+  }
+
+  /** 刷新两个命令框 */
+  function renderCmds() {
+    var o = readOpts();
+    var token = state.token || o.token;
+    if (token) {
+      $('scanCmd').textContent = buildCmd(token, true);
+    } else {
+      $('scanCmd').textContent = '请点击「开始优选」生成命令';
+    }
+    $('scanCmdNoToken').textContent = buildCmd('', false);
   }
 
   function prepareScan() {
     return api('/api/v1/scanner-token', { method: 'POST' }).then(function (r) {
       state.token = r.token;
-      state.cmd = buildCmd(r.token);
-      $('scanCmd').textContent = state.cmd;
+      renderCmds();
       return r.token;
     });
   }
 
   function startScan() {
     $('scanLog').innerHTML = '';
+    var o = readOpts();
     prepareScan().then(function (token) {
       var payload = {
         host: location.hostname,
-        port: 443,
+        port: Number(o.port),
         token: token,
         callback: location.origin + '/api/v1/preferred-ips',
-        top: 15,
-        sample: 300
+        top: o.top,
+        sample: o.sample
       };
       return fetch(BRIDGE + '/start-scan', {
         method: 'POST',
@@ -846,10 +966,22 @@
 
     $('btnScan').addEventListener('click', startScan);
     $('btnCopyCmd').addEventListener('click', function () {
-      var cmd = state.cmd || '';
-      if (!cmd) { prepareScan().then(function () { copy(state.cmd); }); return; }
+      // 复制当前显示的命令；没有令牌时复制免令牌版本
+      var cmd = $('scanCmd').textContent;
+      if (!cmd || /请点击/.test(cmd)) cmd = $('scanCmdNoToken').textContent;
       copy(cmd);
     });
+    $('btnRebuildCmd').addEventListener('click', function () { renderCmds(); toast('命令已更新'); });
+    // 参数变更即时刷新命令（免令牌版本不依赖令牌，可实时更新）
+    ['optToken', 'optTop', 'optSample', 'optNoCallback'].forEach(function (id) {
+      $(id).addEventListener('input', renderCmds);
+      $(id).addEventListener('change', renderCmds);
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('input[name="optPort"]'), function (radio) {
+      radio.addEventListener('change', renderCmds);
+    });
+    // 进入页面时先把免令牌命令渲染出来
+    renderCmds();
     $('btnRefreshSub').addEventListener('click', function () { refreshSubLinks(); loadNodes(); });
 
     Array.prototype.forEach.call(document.querySelectorAll('[data-copy]'), function (btn) {

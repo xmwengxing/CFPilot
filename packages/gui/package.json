@@ -1,0 +1,26 @@
+{
+  "name": "@cfpilot/gui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CFPilot 图形化部署与维护工具 —— 一键部署 Pages 双项目、本地真连接优选、检查更新",
+  "main": "dist/main/main.js",
+  "license": "MIT",
+  "author": "CFPilot Contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xmwengxing/CFPilot.git"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "node scripts/start.mjs",
+    "dist": "npm run build && electron-builder",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3"
+  }
+}

@@ -51,15 +51,34 @@ npx -y cfpilot-deploy@latest init --yes
 
 ## Token 所需权限
 
-| 权限项 | 用途 |
-| --- | --- |
-| Account / Workers KV Storage / Edit | 创建并绑定 KV 命名空间 |
-| Account / Workers Scripts / Edit（或 Workers / Edit/Admin） | 上传内核、开启 workers.dev 子域路由、开启 Workers Logs |
-| Account / Pages / Edit | `pages-split` 创建项目、配置变量、触发部署 |
-| Account / Account Settings / Read | 读取账号列表 |
-| Zone / Zone / Read | 列出域名（自定义域名需要） |
-| Zone / DNS / Edit | 检测冲突 DNS、创建 CNAME |
-| Zone / Workers Routes / Edit | 创建 Route（自定义域名回退路径） |
+在 [Cloudflare 控制台 → My Profile → API Tokens](https://dash.cloudflare.com/profile/api-tokens)
+创建自定义 Token。
+
+**必需**
+
+| 分类 | 权限项 | 用途 |
+|---|---|---|
+| Account | Account Settings → Read | 读取账号列表 |
+| Developer Platform | Workers KV Storage → Edit | 创建 KV、读写配置 |
+| Developer Platform | Workers Scripts → Edit | 上传内核、开 workers.dev 路由、开 Workers Logs |
+
+**`pages-split` 额外需要**
+
+| 分类 | 权限项 | 用途 |
+|---|---|---|
+| Developer Platform | Pages → Edit | 创建项目、配置变量、触发部署 |
+
+**只有绑定自定义域名才需要**
+
+| 分类 | 权限项 | 用途 |
+|---|---|---|
+| Zone | Zone → Read | 列出域名供选择 |
+| Zone | DNS → Edit | 检测冲突记录、创建 CNAME |
+| Zone | Workers Routes → Edit | 自定义域名不可用时降级 Route + CNAME |
+
+> 控制台新版按「Developer Platform / Zone / DNA & Zone」分类。
+> **DNA & Zone** 下的 Account DNS Settings、DNS Firewall、DNS View、
+> Registrar Domains、Registrar Sandbox Domains 本项目都不需要。
 
 `token --check` 会把缺失权限翻译成具体后果与修复建议。
 

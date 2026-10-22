@@ -7,6 +7,7 @@
 import type { Env } from './types'
 import { routeDataPlane } from './routes/data'
 import { neutralPage } from './ui/neutral'
+import { VERSION_PATH, versionResponse } from './version'
 
 export default {
   async fetch(
@@ -15,6 +16,7 @@ export default {
     ctx?: { waitUntil(promise: Promise<unknown>): void }
   ): Promise<Response> {
     try {
+      if (new URL(request.url).pathname === VERSION_PATH) return versionResponse()
       return (await routeDataPlane(request, env, ctx)) ?? neutralPage(200)
     } catch {
       return neutralPage(500)

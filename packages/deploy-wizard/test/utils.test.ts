@@ -35,8 +35,8 @@ describe('随机值生成', () => {
       // 关键：不能是可预测的字面量，也不能含协议特征词
       expect(path).not.toBe('/vless')
       expect(path).not.toBe('/trojan')
-      // 只检查「作为路径片段」的特征词，随机串里偶然出现 ws 这类字母组合无害
-      for (const word of ['vless', 'trojan', 'proxy', 'cfpilot', 'xhttp', '/ws']) {
+      // 只检查「作为路径片段」的特征词；随机串里偶然出现字母组合无害
+      for (const word of ['vless', 'trojan', 'cfpilot', 'xhttp', '/proxy', '/ws']) {
         expect(path).not.toContain(word)
       }
       paths.add(path)

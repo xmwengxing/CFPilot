@@ -31,7 +31,9 @@
 import { readFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { CloudflareClient, CloudflareError, type PagesDeployment } from './cf-api'
+import { randomPanelPath, randomPassword, randomWsPath } from './utils'
 
 export interface PagesSplitDeployOptions {
   token: string
@@ -58,6 +60,25 @@ export interface PagesSplitDeployOptions {
   enableXhttp: boolean
   /** 扫描令牌（可选） */
   scannerToken?: string
+  /**
+   * 部署模式。
+   *   - 'auto'      ：读 KV 清单自动判断（有清单=更新，无清单=首次）
+   *   - 'fresh'     ：强制首次部署，忽略清单
+   *   - 'update'    ：强制更新部署，沿用 KV 里的 UUID / 路径 / 密码
+   */
+  mode?: 'auto' | 'fresh' | 'update'
+  /**
+   * 更新部署时是否沿用已有凭据（UUID / WS 路径 / Trojan 密码 / 面板密码）。
+   * 默认 true —— 否则用户每次更新都要在客户端改一遍订阅地址。
+   */
+  keepCredentials?: boolean
+  /**
+   * 线上版本与本地一致时跳过部署。
+   * 默认 true。传 false 可强制重新部署。
+   */
+  skipSameVersion?: boolean
+  /** 本地产物的构建版本（用于版本比对；不传则不做版本跳过） */
+  localBuild?: string
   /** 部署完成后的等待与轮询配置 */
   wait?: { timeoutMs: number; intervalMs: number }
   /** 覆盖 API 地址（测试用；生产环境不要传） */
@@ -73,7 +94,77 @@ export interface PagesSplitDeployOptions {
 export interface PagesSplitDeployResult {
   control: { name: string; subdomain: string; deploymentId?: string }
   data: { name: string; subdomain: string; deploymentId?: string }
+  /** 实际生效的面板路径（更新模式下可能来自清单） */
+  panelPath?: string
+  /** 实际生效的 UUID */
+  uuid?: string
+  /** 实际生效的 WS 路径 */
+  wsPath?: string
   warnings: string[]
+}
+
+/**
+ * KV 里的部署清单键。
+ *
+ * 记录本项目上次部署用的是哪些 Pages 项目、什么配置。
+ * 更新部署时先读它，就能知道「同源项目」是哪两个，
+ * 不需要用户记项目名，也不需要去猜。
+ */
+const MANIFEST_KEY = 'CFP_DEPLOY_MANIFEST'
+
+interface DeployManifest {
+  /** 清单格式版本 */
+  v: 1
+  /** 控制面 Pages 项目名 */
+  controlProject: string
+  /** 数据面 Pages 项目名（可能因 8000119 换过名） */
+  dataProject: string
+  /** 控制面域名 */
+  controlSubdomain: string
+  /** 数据面域名 */
+  dataSubdomain: string
+  /** 上次部署的构建版本 */
+  build: string
+  /** 上次部署时间（ISO） */
+  at: string
+  /** 创建时生成的凭据（更新时沿用，避免客户端订阅地址失效） */
+  credentials: {
+    panelPath: string
+    panelPassword: string
+    uuid: string
+    trojanPassword: string
+    wsPath: string
+  }
+}
+
+/** 读取部署清单；不存在返回 null */
+async function readManifest(
+  client: CloudflareClient,
+  accountId: string,
+  namespaceId: string
+): Promise<DeployManifest | null> {
+  try {
+    const raw = await client.getKvValue(accountId, namespaceId, MANIFEST_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as DeployManifest
+    return parsed && parsed.v === 1 ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+/** 写入部署清单 */
+async function writeManifest(
+  client: CloudflareClient,
+  accountId: string,
+  namespaceId: string,
+  manifest: DeployManifest
+): Promise<void> {
+  try {
+    await client.setKvValue(accountId, namespaceId, MANIFEST_KEY, JSON.stringify(manifest))
+  } catch {
+    /* 清单写失败不影响部署本身，只影响下次更新识别 */
+  }
 }
 
 /**
@@ -223,6 +314,89 @@ async function waitForDeployment(
 }
 
 /**
+ * CFNext 数据面的 KV `config` 键结构。
+ *
+ * 源码里是 `Object.assign(默认配置, kvConfig)` 整体覆盖，
+ * 因此这里必须写全字段，缺字段会让数据面读到 undefined。
+ */
+interface DataPlaneKvConfig {
+  uuid: string
+  /** WS 路径，不带前导斜杠 */
+  path: string
+  admin: string
+  adminInit: boolean
+  login: string
+  host: string
+  enableVless: boolean
+  enableTrojan: boolean
+  trojanPassword: string
+  enableXhttp: boolean
+  proxyIP: string
+  outboundProxy: string
+  outboundMode: string
+  tlsOnly: boolean
+}
+
+/**
+ * 把本次部署凭据写入 KV 的 `config` 键，让数据面真正生效。
+ *
+ * 保留已有的非凭据字段（proxyIP / host / tlsOnly 等用户手动配的值），
+ * 只覆盖 uuid / path / trojanPassword 等本次生成的部分。
+ */
+async function syncDataPlaneKvConfig(
+  client: CloudflareClient,
+  options: PagesSplitDeployOptions,
+  dataSubdomain: string,
+  warnings: string[],
+  log: (m: string) => void,
+  effective: {
+    panelPath: string
+    panelPassword: string
+    uuid: string
+    trojanPassword: string
+    wsPath: string
+  }
+): Promise<void> {
+  if (!dataSubdomain) return
+
+  // 读旧值，保留用户手动配置的字段
+  let existing: Partial<DataPlaneKvConfig> = {}
+  try {
+    const raw = await client.getKvValue(options.accountId, options.kvNamespaceId, 'config')
+    if (raw) existing = JSON.parse(raw) as Partial<DataPlaneKvConfig>
+  } catch {
+    /* 旧值解析失败时按空处理，下面会写全字段 */
+  }
+
+  const merged: DataPlaneKvConfig = {
+    uuid: effective.uuid,
+    path: effective.wsPath.replace(/^\//, ''),
+    admin: existing.admin ?? '',
+    adminInit: existing.adminInit ?? true,
+    login: existing.login ?? '',
+    host: existing.host ?? '',
+    enableVless: existing.enableVless ?? true,
+    enableTrojan: options.enableTrojan,
+    trojanPassword: effective.trojanPassword,
+    enableXhttp: options.enableXhttp,
+    proxyIP: existing.proxyIP ?? '',
+    outboundProxy: existing.outboundProxy ?? '',
+    outboundMode: existing.outboundMode ?? '',
+    tlsOnly: existing.tlsOnly ?? true,
+  }
+
+  try {
+    await client.setKvValue(options.accountId, options.kvNamespaceId, 'config', JSON.stringify(merged))
+    log(`✅ 数据面配置已同步到 KV（path=${merged.path}）`)
+  } catch (err) {
+    warnings.push(
+      `数据面 KV 配置同步失败：${err instanceof Error ? err.message : String(err)}` +
+        `（数据面仍会用 KV 里的旧配置，--ws-path / --uuid 不生效）`
+    )
+  }
+}
+
+/**
  * 执行双项目部署。
  *
  * 设计原则与单 Worker 向导一致：**尽力而为，绝不抛出**。
@@ -244,6 +418,10 @@ export async function deployPagesSplit(
   const client = new CloudflareClient({ token: options.token, apiBase: options.apiBase })
   const wait = options.wait ?? { timeoutMs: 90000, intervalMs: 3000 }
 
+  const mode = options.mode ?? 'auto'
+  const keepCredentials = options.keepCredentials ?? true
+  const skipSameVersion = options.skipSameVersion ?? true
+
   const result: PagesSplitDeployResult = {
     control: { name: options.controlProject, subdomain: '' },
     data: { name: options.dataProject, subdomain: '' },
@@ -252,10 +430,79 @@ export async function deployPagesSplit(
 
   const kv = { KV: { namespace_id: options.kvNamespaceId } }
 
+  /* ---------------- 0. 读部署清单，判断首次还是更新 ---------------- */
+
+  const manifest = await readManifest(client, options.accountId, options.kvNamespaceId)
+
+  // 生效的配置：更新部署且要求保留凭据时，用 KV 里的旧值；
+  // 首次部署时对缺项生成随机值（调用方可以只传部分参数）。
+  let effective = {
+    panelPath: options.panelPath,
+    panelPassword: options.panelPassword,
+    uuid: options.uuid,
+    trojanPassword: options.trojanPassword,
+    wsPath: options.wsPath,
+  }
+
+  // 同源项目名：有清单就按清单来，用户不需要记项目名
+  let controlName = options.controlProject
+  let dataName = options.dataProject
+
+  if (manifest && mode !== 'fresh') {
+    log(`· 检测到已有部署（${manifest.at}），进入更新模式`)
+    controlName = manifest.controlProject
+    dataName = manifest.dataProject
+    result.control.name = controlName
+    result.data.name = dataName
+    result.control.subdomain = manifest.controlSubdomain
+    result.data.subdomain = manifest.dataSubdomain
+
+    if (keepCredentials) {
+      // 沿用旧凭据：UUID / WS 路径不变，客户端订阅地址无需改动
+      log('· 沿用已有 UUID / WS 路径 / 面板凭据（客户端订阅地址不变）')
+      effective = {
+        panelPath: options.panelPath || manifest.credentials.panelPath,
+        panelPassword: options.panelPassword || manifest.credentials.panelPassword,
+        uuid: options.uuid || manifest.credentials.uuid,
+        trojanPassword: options.trojanPassword || manifest.credentials.trojanPassword,
+        wsPath: options.wsPath || manifest.credentials.wsPath,
+      }
+      log(`  · UUID：${effective.uuid}`)
+      log(`  · WS 路径：${effective.wsPath}`)
+    }
+
+    // 同版本跳过：避免无谓触发平台审核
+    if (skipSameVersion && options.localBuild && manifest.build === options.localBuild) {
+      log(`✅ 线上已是最新版本（${options.localBuild}），跳过部署`)
+      result.panelPath = effective.panelPath
+      result.uuid = effective.uuid
+      result.wsPath = effective.wsPath
+      return result
+    }
+    if (manifest.build && options.localBuild && manifest.build !== options.localBuild) {
+      log(`· 版本变化：${manifest.build} → ${options.localBuild}`)
+    }
+  } else if (manifest && mode === 'fresh') {
+    log('· 指定了首次部署模式，忽略已有清单')
+  } else {
+    log('· 未检测到已有部署，进入首次部署模式')
+  }
+
+  // 首次部署：缺项的凭据生成随机值
+  if (!effective.panelPath) effective.panelPath = randomPanelPath()
+  if (!effective.panelPassword) effective.panelPassword = randomPassword()
+  if (!effective.uuid) effective.uuid = randomUUID()
+  if (!effective.trojanPassword) effective.trojanPassword = randomPassword()
+  if (!effective.wsPath) effective.wsPath = randomWsPath()
+
+  result.panelPath = effective.panelPath
+  result.uuid = effective.uuid
+  result.wsPath = effective.wsPath
+
   /* ---------------- 1. 创建两个 Pages 项目 ---------------- */
   for (const [label, name] of [
-    ['控制面', options.controlProject],
-    ['数据面', options.dataProject],
+    ['控制面', controlName],
+    ['数据面', dataName],
   ] as const) {
     try {
       const project = await client.createPagesProject(options.accountId, {
@@ -291,47 +538,27 @@ export async function deployPagesSplit(
 
   // KV 已有配置时，环境变量不生效（优先级 KV > 环境变量）。
   // 这会让用户拿到「新生成的路径/密码却登不进去」，必须提前告知。
-  const kvConflict = await detectKvConfigConflict(client, options.accountId, options.kvNamespaceId, log)
+  await detectKvConfigConflict(client, options.accountId, options.kvNamespaceId, log)
 
   if (result.control.subdomain) {
-    try {
-      await client.updatePagesDeploymentConfig(options.accountId, options.controlProject, {
-        kv_namespaces: kv,
-        env_vars: {
-          PANEL_PATH: { value: options.panelPath },
-          PANEL_PASSWORD: { value: options.panelPassword },
-          // 拆分部署：控制面用 DATA_HOST 指定节点域名
-          DATA_HOST: { value: result.data.subdomain },
-          ...(options.scannerToken ? { SCANNER_TOKEN: { value: options.scannerToken } } : {}),
-        },
-      })
-      log('✅ 控制面已配置 KV 与环境变量')
-    } catch (err) {
-      warnings.push(
-        `控制面配置失败：${err instanceof Error ? err.message : String(err)}（会导致部署后变量不生效）`
-      )
-    }
+    await configureProject(client, options.accountId, controlName, '控制面', result, options, log, warnings, effective)
   }
 
   if (result.data.subdomain) {
-    try {
-      await client.updatePagesDeploymentConfig(options.accountId, options.dataProject, {
-        kv_namespaces: kv,
-        env_vars: {
-          UUID: { value: options.uuid },
-          TROJAN: { value: options.enableTrojan ? 'true' : 'false' },
-          TROJAN_PASSWORD: { value: options.trojanPassword },
-          PATH: { value: options.wsPath },
-          XHTTP: { value: options.enableXhttp ? 'true' : 'false' },
-        },
-      })
-      log('✅ 数据面已配置 KV 与环境变量')
-    } catch (err) {
-      warnings.push(
-        `数据面配置失败：${err instanceof Error ? err.message : String(err)}（会导致部署后变量不生效）`
-      )
-    }
+    await configureProject(client, options.accountId, dataName, '数据面', result, options, log, warnings, effective)
   }
+
+  /* ---------------- 2b. 同步数据面配置到 KV 的 config 键 ---------------- */
+
+  // 数据面用 CFNext 实现，它读的是 KV 的 `config` 键（CFNext schema），
+  // 与环境变量是两套机制：源码里先应用 U/PATH/L 等环境变量，
+  // 再 `Object.assign(e, kvConfig)` 整体覆盖，因此 KV 始终优先。
+  //
+  // 不同步的后果：--ws-path / --uuid 对数据面无效，用户连的仍是旧路径，
+  // 且 WS 路径无法随机化。这里显式把本次凭据写进 KV。
+  //
+  // ⚠️ 必须写全字段：Object.assign 是整体覆盖，缺字段会变成 undefined。
+  await syncDataPlaneKvConfig(client, options, result.data.subdomain, warnings, log, effective)
 
   /* ---------------- 3. 部署（先数据面，控制面的 DATA_HOST 才有效） ---------------- */
   let dataCode = options.bundles?.data ?? ''
@@ -351,47 +578,239 @@ export async function deployPagesSplit(
     }
   }
 
-  if (dataCode && result.data.subdomain) {
-    try {
-      const deployment = await client.deployPagesWorker(options.accountId, options.dataProject, {
-        code: dataCode,
-      })
-      result.data.deploymentId = deployment.id
-      log(`✅ 数据面已触发部署：${deployment.id}`)
-      const final = await waitForDeployment(client, options.accountId, options.dataProject, wait, log)
-      if (final?.latest_stage?.status === 'success') {
-        log('✅ 数据面部署完成')
-      } else {
-        warnings.push(`数据面部署未确认成功（状态：${final?.latest_stage?.status ?? '未知'}）`)
-      }
-    } catch (err) {
-      warnings.push(
-        `数据面部署失败：${err instanceof Error ? err.message : String(err)}` +
-          '（若错误含 8000119，说明项目已被平台标记，需联系 abusereply@cloudflare.com）'
-      )
-    }
+  /* ---------------- 3. 部署（先数据面，控制面的 DATA_HOST 才有效） ---------------- */
+
+  // ⚠️ 已知平台行为（2026-10-22 实测，含 cfnext 原版文件对照）：
+  //    Pages 对含代理入站 + 出站拨号的项目，**第二次部署必然返回
+  //    HTTP 400 / 8000119 blocked**，与项目名、是否二次打包、
+  //    是否改动源码均无关（原版文件 + 全新随机项目名同样 1/3）。
+  //    而不含代理内容的极简 Worker 可 4/4 连续部署。
+  //
+  //    因此「原地更新」对数据面不可用。妥协方案：命中 8000119 时
+  //    自动换一个新的随机项目名重新部署，保证上游有更新时仍能上线。
+  //    旧项目不会被删除（用户可能还绑着自定义域名），由用户自行迁移。
+  const dataAttempt = await deployWithBlockRetry({
+    client,
+    accountId: options.accountId,
+    preferredName: dataName,
+    code: dataCode,
+    label: '数据面',
+    result,
+    options,
+    effective,
+    wait,
+    log,
+    warnings,
+  })
+  if (dataAttempt) {
+    result.data.name = dataAttempt.project ?? options.dataProject
+    result.data.subdomain = dataAttempt.subdomain
   }
 
-  if (controlCode && result.control.subdomain) {
-    try {
-      const deployment = await client.deployPagesWorker(options.accountId, options.controlProject, {
-        code: controlCode,
-      })
-      result.control.deploymentId = deployment.id
-      log(`✅ 控制面已触发部署：${deployment.id}`)
-      const final = await waitForDeployment(client, options.accountId, options.controlProject, wait, log)
-      if (final?.latest_stage?.status === 'success') {
-        log('✅ 控制面部署完成')
-      } else {
-        warnings.push(`控制面部署未确认成功（状态：${final?.latest_stage?.status ?? '未知'}）`)
-      }
-    } catch (err) {
-      warnings.push(
-        `控制面部署失败：${err instanceof Error ? err.message : String(err)}` +
-          '（若错误含 8000119，说明项目已被平台标记，需联系 abusereply@cloudflare.com）'
-      )
-    }
+  const controlAttempt = await deployWithBlockRetry({
+    client,
+    accountId: options.accountId,
+    preferredName: controlName,
+    code: controlCode,
+    label: '控制面',
+    result,
+    options,
+    effective,
+    wait,
+    log,
+    warnings,
+  })
+  if (controlAttempt) {
+    result.control.name = controlAttempt.project ?? controlName
+    result.control.subdomain = controlAttempt.subdomain
+  }
+
+  /* ---------------- 4. 写回部署清单（下次更新靠它识别同源项目） ---------------- */
+
+  if (result.control.subdomain && result.data.subdomain) {
+    await writeManifest(client, options.accountId, options.kvNamespaceId, {
+      v: 1,
+      controlProject: result.control.name,
+      dataProject: result.data.name,
+      controlSubdomain: result.control.subdomain,
+      dataSubdomain: result.data.subdomain,
+      build: options.localBuild ?? 'unknown',
+      at: new Date().toISOString(),
+      credentials: {
+        panelPath: effective.panelPath,
+        panelPassword: effective.panelPassword,
+        uuid: effective.uuid,
+        trojanPassword: effective.trojanPassword,
+        wsPath: effective.wsPath,
+      },
+    })
+    log('· 已记录部署清单，下次更新会自动识别同源项目')
   }
 
   return result
+}
+
+/** 生成随机后缀（换名重试用） */
+function randomSuffix(length: number): string {
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789'
+  const bytes = randomBytes(length)
+  let out = ''
+  for (const byte of bytes) out += alphabet[byte % alphabet.length]
+  return out
+}
+
+/** 部署结果（用于回写实际使用的项目名） */
+interface DeployAttemptResult {
+  /** 最终成功的项目名；失败时为 null */
+  project: string | null
+  subdomain: string
+  deploymentId?: string
+}
+
+/**
+ * 配置一个 Pages 项目的 KV 绑定与环境变量。
+ *
+ * 抽成独立函数的原因：命中 8000119 换名重试时，新项目也要配一遍。
+ *
+ * KV 绑定两个名字：
+ *   - `KV`：CFPilot 自研代码读的名字（store.ts 用 env.KV）
+ *   - `K` ：vendor 数据面读的名字（源码里 `t.K.get("config")`）
+ * 少绑一个就会有一侧读不到配置。
+ */
+async function configureProject(
+  client: CloudflareClient,
+  accountId: string,
+  project: string,
+  label: string,
+  result: PagesSplitDeployResult,
+  options: PagesSplitDeployOptions,
+  log: (m: string) => void,
+  warnings: string[],
+  effective: {
+    panelPath: string
+    panelPassword: string
+    uuid: string
+    trojanPassword: string
+    wsPath: string
+  }
+): Promise<void> {
+  const kvBindings = {
+    KV: { namespace_id: options.kvNamespaceId },
+    K: { namespace_id: options.kvNamespaceId },
+  }
+
+  const envVars: Record<string, { value: string }> =
+    label === '控制面'
+      ? {
+          PANEL_PATH: { value: effective.panelPath },
+          PANEL_PASSWORD: { value: effective.panelPassword },
+          // 拆分部署：控制面用 DATA_HOST 指定节点域名
+          DATA_HOST: { value: result.data.subdomain },
+          ...(options.scannerToken ? { SCANNER_TOKEN: { value: options.scannerToken } } : {}),
+        }
+      : {
+          UUID: { value: effective.uuid },
+          TROJAN: { value: options.enableTrojan ? 'true' : 'false' },
+          TROJAN_PASSWORD: { value: effective.trojanPassword },
+          PATH: { value: effective.wsPath },
+          XHTTP: { value: options.enableXhttp ? 'true' : 'false' },
+        }
+
+  try {
+    await client.updatePagesDeploymentConfig(accountId, project, {
+      kv_namespaces: kvBindings,
+      env_vars: envVars,
+    })
+    log(`✅ ${label}已配置 KV 与环境变量`)
+  } catch (err) {
+    warnings.push(
+      `${label}配置失败：${err instanceof Error ? err.message : String(err)}（会导致部署后变量不生效）`
+    )
+  }
+}
+
+/**
+ * 部署一个 Pages 项目；命中 8000119 时自动换随机项目名重试。
+ *
+ * 为什么必须换名：平台对代理类项目的封禁是**按项目**生效的，
+ * 同一个项目第二次部署必被拒，原地更新不可用。
+ */
+async function deployWithBlockRetry(params: {
+  client: CloudflareClient
+  accountId: string
+  preferredName: string
+  code: string
+  label: string
+  result: PagesSplitDeployResult
+  options: PagesSplitDeployOptions
+  effective: {
+    panelPath: string
+    panelPassword: string
+    uuid: string
+    trojanPassword: string
+    wsPath: string
+  }
+  wait: { timeoutMs: number; intervalMs: number }
+  log: (m: string) => void
+  warnings: string[]
+}): Promise<DeployAttemptResult | null> {
+  const { client, accountId, preferredName, code, label, result, options, effective, wait, log, warnings } = params
+  if (!code) {
+    warnings.push(`${label}产物为空，跳过部署`)
+    return null
+  }
+
+  const slot = label === '数据面' ? result.data : result.control
+  const candidates = [preferredName]
+  // 预留 2 个备用随机名
+  for (let i = 0; i < 2; i++) candidates.push(`${preferredName}-${randomSuffix(4)}`)
+
+  for (const [index, name] of candidates.entries()) {
+    try {
+      const deployment = await client.deployPagesWorker(accountId, name, { code })
+      slot.name = name
+      slot.deploymentId = deployment.id
+      log(`✅ ${label}已触发部署：${name}（${deployment.id}）`)
+
+      const final = await waitForDeployment(client, accountId, name, wait, log)
+      if (final?.latest_stage?.status === 'success') {
+        log(`✅ ${label}部署完成：${name}`)
+        // 成功后同步 subdomain
+        try {
+          const project = await client.getPagesProject(accountId, name)
+          slot.subdomain = project.subdomain
+        } catch {
+          /* subdomain 取不到不影响主流程 */
+        }
+        return { project: name, subdomain: slot.subdomain, deploymentId: deployment.id }
+      }
+      warnings.push(`${label}部署未确认成功（项目 ${name}，状态：${final?.latest_stage?.status ?? '未知'}）`)
+      return { project: name, subdomain: slot.subdomain, deploymentId: deployment.id }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      const blocked = /8000119|has been blocked/i.test(message)
+
+      if (blocked && index < candidates.length - 1) {
+        log(`⚠ ${label}项目 ${name} 已被平台拒绝部署（8000119）`)
+        log(`  → 改用品名 ${candidates[index + 1]} 重新部署`)
+        // 换名重试前要先建项目、配变量
+        try {
+          await client.createPagesProject(accountId, { name: candidates[index + 1]!, productionBranch: 'main' })
+          await configureProject(client, accountId, candidates[index + 1]!, label, result, options, log, warnings, effective)
+          log(`  → 已创建并配置 ${candidates[index + 1]}`)
+        } catch (setupErr) {
+          warnings.push(`创建备用${label}项目失败：${setupErr instanceof Error ? setupErr.message : String(setupErr)}`)
+          return null
+        }
+        continue
+      }
+
+      warnings.push(
+        `${label}部署失败：${message}` +
+          (blocked ? '（平台已拒绝该项目；已尝试更换项目名，可在 Cloudflare 控制台查看详情）' : '')
+      )
+      return null
+    }
+  }
+  return null
 }

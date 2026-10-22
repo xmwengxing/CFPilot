@@ -1,7 +1,7 @@
-# CFPilot
+# CFPilot（CP面板）
 
 > Cloudflare Workers 代理微内核 · 真连接优选面板 · 一键部署
-> MIT License · 架构设计参考 [edgetunnel](https://github.com/cmliu/edgetunnel)、[cfnew](https://github.com/byJoey/cfnew)、[BPB-Worker-Panel](https://github.com/bia-pain-bache/BPB-Worker-Panel) 等公开项目
+> MIT License · 架构设计参考 [CFNext](https://github.com/PAICNI/CFNext)项目
 
 CFPilot 把「代理内核 + 优选订阅 + 本地真连接优选 + 中文部署向导」整合成一套方案，
 核心目标是解决 Cloudflare 代理最常见的那类故障：**本地优选测速几百兆，客户端却全是 `-1`**。
@@ -257,13 +257,48 @@ npx -y cfpilot-deploy@latest token --token <API_TOKEN>        # 仅校验 Token
 npx -y cfpilot-deploy@latest token --check --zone example.com # 逐项探测权限
 ```
 
-Token 所需权限：
+### API Token 权限
 
-- Account → Workers Scripts → **Edit**
-- Account → Workers KV Storage → **Edit**
-- Account → Pages → **Edit**（`pages-split` 需要）
-- Zone → Zone → **Read**
-- Zone → DNS → **Edit**
+在 [Cloudflare 控制台 → My Profile → API Tokens](https://dash.cloudflare.com/profile/api-tokens)
+创建自定义 Token，按下面勾选。
+
+**必需（两种部署方式都要）**
+
+| 分类 | 权限项 | 用途 |
+|---|---|---|
+| Account | **Account Settings** → Read | 读取账号列表 |
+| Developer Platform | **Workers KV Storage** → Edit | 创建 KV、读写配置 |
+| Developer Platform | **Workers Scripts** → Edit | 上传内核、开 workers.dev 路由、开 Workers Logs |
+
+**`pages-split` 额外需要**
+
+| 分类 | 权限项 | 用途 |
+|---|---|---|
+| Developer Platform | **Pages** → Edit | 创建项目、配置变量、触发部署 |
+
+**只有绑定自定义域名才需要**（只用 `*.pages.dev` / `*.workers.dev` 可跳过）
+
+| 分类 | 权限项 | 用途 |
+|---|---|---|
+| Zone | **Zone** → Read | 列出账号下的域名供选择 |
+| Zone | **DNS** → Edit | 检测冲突记录、创建 CNAME |
+| Zone | **Workers Routes** → Edit | 自定义域名不可用时降级 Route + CNAME |
+
+> 控制台新版把权限按「Developer Platform / Zone / DNA & Zone」分类。
+> 其中 **DNA & Zone** 分类下的 Account DNS Settings、DNS Firewall、DNS View、
+> Registrar Domains、Registrar Sandbox Domains 本项目**都不需要**——
+> 它们分别管账号级 DNS 默认设置、DNS 防火墙规则、内部 DNS 视图和域名注册。
+
+**不想逐项勾选**：可以直接用 `Edit Cloudflare Workers` / `Edit Cloudflare Pages`
+这类预设模板，权限范围更大但能跑通。
+
+**验证权限是否够**：
+
+```bash
+npx -y cfpilot-deploy@latest token --check --zone example.com
+```
+
+会逐项探测并输出「权限项 / 状态 / 缺失后果」。
 
 ---
 

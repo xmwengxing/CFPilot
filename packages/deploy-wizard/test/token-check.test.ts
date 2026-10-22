@@ -46,6 +46,9 @@ const fullPermissionHandler: MockHandler = (request) => {
   if (method === 'GET' && path === '/zones/zone-1/workers/routes') {
     return ok([])
   }
+  if (method === 'GET' && path === '/accounts/acc-1/pages/projects') {
+    return ok([])
+  }
   return cfError(404, `测试未模拟的接口：${method} ${path}`, 7000)
 }
 
@@ -58,7 +61,7 @@ describe('checkTokenPermissions', () => {
       expect(result.accountName).toBe('测试账号')
       expect(result.accountId).toBe('acc-1')
       expect(result.zoneName).toBe('example.com')
-      expect(result.rows).toHaveLength(9)
+      expect(result.rows).toHaveLength(10)
       expect(result.rows.every((row) => row.status === 'ok')).toBe(true)
       expect(result.rows.map((row) => row.name)).toEqual([
         '账号读取',
@@ -68,9 +71,14 @@ describe('checkTokenPermissions', () => {
         'Workers 脚本',
         'workers.dev 子域读取',
         'workers.dev 路由开关',
+        'Pages 项目',
         'DNS 记录',
         'Worker Routes',
       ])
+      // Pages 是 pages-split 的必需项
+      const pages = result.rows.find((row) => row.name === 'Pages 项目')!
+      expect(pages.required).toBe(true)
+      expect(pages.hint).toContain('Developer Platform / Pages / Edit')
     })
   })
 
@@ -91,7 +99,7 @@ describe('checkTokenPermissions', () => {
       expect(dns.required).toBe(false)
       expect(dns.detail).toContain('403')
       expect(routes.status).toBe('missing')
-      expect(routes.hint).toContain('Zone → Workers Routes → Edit')
+      expect(routes.hint).toContain('Zone / Workers Routes / Edit')
     })
   })
 
@@ -117,8 +125,8 @@ describe('checkTokenPermissions', () => {
       expect(dns.status).toBe('missing')
       const text = renderTokenCheck(result)
       expect(text).toContain('❌ 2 项必需权限未通过')
-      expect(text).toContain('Zone → DNS → Edit')
-      expect(text).toContain('Zone → Workers Routes → Edit')
+      expect(text).toContain('Zone / DNS / Edit')
+      expect(text).toContain('Zone / Workers Routes / Edit')
     })
   })
 
@@ -207,7 +215,7 @@ describe('权限表格渲染', () => {
         status: 'missing',
         consequence: '无法创建 CNAME',
         detail: 'HTTP 403',
-        hint: 'Zone → DNS → Edit',
+        hint: 'Zone / DNS / Edit',
       },
       {
         name: 'Worker Routes',
@@ -215,7 +223,7 @@ describe('权限表格渲染', () => {
         status: 'unknown',
         consequence: '无法回退',
         detail: '网络错误',
-        hint: 'Zone → Workers Routes → Edit',
+        hint: 'Zone / Workers Routes / Edit',
       },
     ])
     expect(table).toContain('权限项')

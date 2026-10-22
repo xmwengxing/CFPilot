@@ -233,7 +233,7 @@ export async function checkTokenPermissions(
         '账号读取',
         true,
         '无法读取账号列表，部署流程无法开始',
-        'Token 中添加 Account → Account Settings → Read（或 Account → Workers 权限）',
+        'Token 中添加 Account / Account Settings / Read',
         accountProbe
       )
     )
@@ -282,7 +282,7 @@ export async function checkTokenPermissions(
       '账号读取',
       true,
       '无法读取账号列表，部署流程无法开始',
-      'Token 中添加 Account → Account Settings → Read（或 Account → Workers 权限）',
+      'Token 中添加 Account / Account Settings / Read',
       { status: 'ok', detail: `账号：${account.name}（${account.id}）` }
     )
   )
@@ -315,7 +315,7 @@ export async function checkTokenPermissions(
     expectCustomDomain
       ? '无法选择域名、无法绑定自定义域名，只能使用 workers.dev 地址'
       : '自定义域名能力不可用，只能使用 workers.dev 地址',
-    'Token 中添加 Zone → Zone → Read',
+    'Token 中添加 Zone / Zone / Read',
     zoneProbe
   )
   if (zoneProbe.status === 'ok' && zones.length === 0 && expectCustomDomain) {
@@ -337,7 +337,7 @@ export async function checkTokenPermissions(
       'Workers KV Storage',
       true,
       '无法创建 / 绑定 KV 命名空间，部署会中断',
-      'Token 中添加 Account → Workers KV Storage → Edit',
+      'Token 中添加 Developer Platform / Workers KV Storage / Edit',
       kvProbe
     )
   )
@@ -352,7 +352,7 @@ export async function checkTokenPermissions(
       'Workers 脚本',
       true,
       '无法上传或更新内核，部署会中断',
-      'Token 中添加 Account → Workers Scripts → Edit（Workers → Edit/Admin）',
+      'Token 中添加 Developer Platform / Workers Scripts / Edit',
       scriptsProbe
     )
   )
@@ -367,7 +367,7 @@ export async function checkTokenPermissions(
       'workers.dev 子域读取',
       true,
       '无法拼出 https://<name>.<sub>.workers.dev 地址',
-      'Token 中添加 Account → Workers Scripts → Read',
+      'Token 中添加 Developer Platform / Workers Scripts / Read',
       subdomainProbe
     )
   )
@@ -400,8 +400,23 @@ export async function checkTokenPermissions(
       'workers.dev 路由开关',
       true,
       '部署后 workers.dev 会一直显示「There is nothing here yet」',
-      'Token 中添加 Account → Workers Scripts → Edit',
+      'Token 中添加 Developer Platform / Workers Scripts / Edit',
       subdomainRouteProbe
+    )
+  )
+
+  // 7.5) Pages 权限（pages-split 必需）
+  const pagesProbe = await probePermission(async () => {
+    const projects = await client.listPagesProjects(account.id)
+    return `共 ${projects.length} 个项目`
+  })
+  rows.push(
+    makeRow(
+      'Pages 项目',
+      true,
+      'pages-split 无法创建项目、配置变量与触发部署',
+      'Token 中添加 Developer Platform / Pages / Edit',
+      pagesProbe
     )
   )
 
@@ -417,7 +432,7 @@ export async function checkTokenPermissions(
         'DNS 记录',
         expectCustomDomain,
         '无法检测冲突 DNS、无法创建 CNAME；自定义域名失败时无法降级 Route + CNAME',
-        'Token 中添加 Zone → DNS → Edit',
+        'Token 中添加 Zone / DNS / Edit',
         { status: 'unknown', detail }
       )
     )
@@ -426,7 +441,7 @@ export async function checkTokenPermissions(
         'Worker Routes',
         expectCustomDomain,
         '自定义域名出现 522 时无法降级 Route + CNAME，只能回退 workers.dev',
-        'Token 中添加 Zone → Workers Routes → Edit',
+        'Token 中添加 Zone / Workers Routes / Edit',
         { status: 'unknown', detail }
       )
     )
@@ -440,7 +455,7 @@ export async function checkTokenPermissions(
         'DNS 记录',
         expectCustomDomain,
         '无法检测冲突 DNS、无法创建 CNAME；自定义域名失败时无法降级 Route + CNAME',
-        'Token 中添加 Zone → DNS → Edit',
+        'Token 中添加 Zone / DNS / Edit',
         dnsProbe
       )
     )
@@ -454,7 +469,7 @@ export async function checkTokenPermissions(
         'Worker Routes',
         expectCustomDomain,
         '自定义域名出现 522 时无法降级 Route + CNAME，只能回退 workers.dev',
-        'Token 中添加 Zone → Workers Routes → Edit',
+        'Token 中添加 Zone / Workers Routes / Edit',
         routesProbe
       )
     )

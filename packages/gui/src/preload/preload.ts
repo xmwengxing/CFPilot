@@ -74,6 +74,10 @@ const api = {
   applyUpdate: (file: string) =>
     ipcRenderer.invoke('update:apply', file) as Promise<{ ok: boolean; error?: string }>,
 
+  // 网络环境检测（识别代理工具干扰）
+  checkEnvironment: () =>
+    ipcRenderer.invoke('env:check') as Promise<{ clean: boolean; findings: string[] }>,
+
   // 打开外链
   openExternal: (url: string) => ipcRenderer.invoke('app:openExternal', url),
 
@@ -103,6 +107,7 @@ const api = {
       entries: Array<{ ip: string; port: number; colo: string; latency: number; speed: number }>
       copyable: string
       stats: Record<string, number>
+      skippedSpeed?: boolean
     }) => void
   ) => {
     const listener = (
@@ -111,6 +116,7 @@ const api = {
         entries: Array<{ ip: string; port: number; colo: string; latency: number; speed: number }>
         copyable: string
         stats: Record<string, number>
+        skippedSpeed?: boolean
       }
     ): void => cb(payload)
     ipcRenderer.on('scan-result', listener)

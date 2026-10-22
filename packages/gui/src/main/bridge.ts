@@ -15,7 +15,7 @@ import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { app, type BrowserWindow } from 'electron'
 import { loadSecrets, saveSecrets, clearSecrets, hasToken } from './config-store'
-import { runLocalScan, type ScanEvent } from './scanner'
+import { runLocalScan, detectProxyInterference, type ScanEvent } from './scanner'
 
 /**
  * 当前文件所在目录。
@@ -279,6 +279,92 @@ export async function detectAccount(
 }
 
 /**
+ * 优选前的环境预检。
+ *
+ * ## 为什么必须提醒用户关闭代理工具
+ *
+ * 扫描器要测的是「本机直连某个 Cloudflare IP 的真实质量」。
+ * 但只要本机有代理工具在接管流量（TUN 模式、系统代理、或者规则里把这些
+ * 目标 IP 走了代理），测出来的就是**到代理的延迟**，而不是到目标 IP 的延迟。
+ *
+ * 后果具有欺骗性：
+ *   - 结果看起来是「正常的」，不会报错
+ *   - 但所有候选 IP 的成绩趋于一致（都走同一条出口）
+ *   - 优选出的 IP 导入客户端后大量 -1，因为从未真正直连验证过
+ *
+ * 因此这里做检测，并且**只警告不阻断**（用户可能确实需要走代理，
+ * 例如目标域名在本地被污染；强行阻断反而挡住正常用法）。
+ *
+ * 判定逻辑来自 scanner-cli 的 net-env 模块，命令行版与图形版共用一套。
+ */
+async function preflightScan(
+  win: BrowserWindow | null,
+  host: string,
+  path: string
+): Promise<{ fatal: boolean }> {
+  let fatal = false
+
+  // 1) 路径格式
+  if (!path.startsWith('/')) {
+    sendLog(win, `WS 路径必须以 / 开头，当前是「${path}」`, 'err')
+    fatal = true
+  }
+
+  // 2) 代理干扰检测
+  const env = await detectProxyInterference(host)
+  if (!env.clean) {
+    sendLog(win, '', 'warn')
+    sendLog(win, '⚠️ 网络环境提醒：检测到可能干扰优选的因素', 'warn')
+    for (const f of env.findings) sendLog(win, '   ' + f.message, 'warn')
+    sendLog(win, '', 'warn')
+    sendLog(win, '   优选器测的是「本机直连该 IP」的真实质量。', 'warn')
+    sendLog(win, '   只要流量被代理接管，测出来的就是到代理的延迟而不是到目标 IP 的延迟：', 'warn')
+    sendLog(win, '     · 结果会看起来正常，但所有 IP 成绩趋于一致', 'warn')
+    sendLog(win, '     · 导入客户端后大量 -1，因为从未真正直连验证过', 'warn')
+    sendLog(win, '   → 建议先关闭代理工具（含 TUN 模式、系统代理），再重新优选。', 'warn')
+    sendLog(win, '   → 如果必须开着代理，请把本程序加入直连/绕过名单。', 'warn')
+    sendLog(win, '', 'warn')
+  }
+
+  // 3) 根路径提示
+  if (path === '/') {
+    sendLog(win, '提示：WS 路径填 / 表示「目标项目的 WebSocket 就在根路径」。', 'warn')
+    sendLog(win, '      仅当该项目确实如此时才对；若它用的是 /vless、/<UUID> 这类路径，', 'warn')
+    sendLog(win, '      用 / 会连不上（校验阶段就会失败，不会产生假结果）。', 'warn')
+  }
+
+  return { fatal }
+}
+
+/**
+ * 独立的网络环境检测（供「检测网络环境」按钮调用）。
+ */
+export async function checkNetworkEnvironment(
+  win: BrowserWindow | null
+): Promise<{ clean: boolean; findings: string[] }> {
+  sendLog(win, '── 网络环境检测 ──')
+  const env = await detectProxyInterference()
+  if (env.clean) {
+    sendLog(win, '✅ 未检测到代理干扰，优选结果可信', 'ok')
+    return { clean: true, findings: [] }
+  }
+
+  const lines: string[] = []
+  sendLog(win, '⚠️ 检测到以下可能干扰优选的因素：', 'warn')
+  for (const f of env.findings) {
+    for (const line of f.message.split('\n')) {
+      sendLog(win, '   ' + line, 'warn')
+      lines.push(line)
+    }
+    sendLog(win, '   → ' + f.advice, 'warn')
+    lines.push(f.advice)
+  }
+  sendLog(win, '', 'warn')
+  sendLog(win, '   优选需要的是「本机直连」的测量结果，请先关闭代理再重试。', 'warn')
+  return { clean: false, findings: lines }
+}
+
+/**
  * 执行本地真连接优选。
  *
  * 直接复用 scanner-cli 的 runScan()（库函数），进度实时推给渲染层。
@@ -287,24 +373,28 @@ export async function runScanJob(
   win: BrowserWindow | null,
   params: ScanParams
 ): Promise<{ ok: boolean; count?: number; copyable?: string; error?: string }> {
-  const host = params.host.trim()
+  const host = params.host.trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '')
   if (!host) {
     sendLog(win, '请填写 Worker 域名', 'err')
     return { ok: false, error: '缺少域名' }
   }
-  if (!params.wsPath.trim()) {
-    sendLog(win, '请填写 WS 路径', 'err')
+  const wsPath = params.wsPath.trim()
+  if (!wsPath) {
+    sendLog(win, '请填写 WS 路径（不知道就填 / 试试）', 'err')
     return { ok: false, error: '缺少 WS 路径' }
   }
 
-  sendLog(win, `开始优选：${host}${params.wsPath}（端口 ${params.port}）`)
+  const pre = await preflightScan(win, host, wsPath)
+  if (pre.fatal) return { ok: false, error: '参数不合法' }
+
+  sendLog(win, `开始优选：${host}${wsPath}（端口 ${params.port}）`)
 
   try {
     const result = await runLocalScan({
       host,
       port: params.port,
-      wsPath: params.wsPath.trim(),
-      probePath: params.probePath.trim() || params.wsPath.trim(),
+      wsPath,
+      probePath: params.probePath.trim() || wsPath,
       skipSpeed: params.skipSpeed,
       sample: params.sample,
       top: params.top,
@@ -315,7 +405,8 @@ export async function runScanJob(
           sendLog(win, '  ' + event.message)
         } else if (event.type === 'result' && event.entry) {
           const e = event.entry
-          sendLog(win, `  ✅ ${e.ip}:${e.port}  ${e.colo}  ${e.latency}ms  ${e.speed}MB/s`, 'ok')
+          const speed = params.skipSpeed ? '' : `  ${e.speed}MB/s`
+          sendLog(win, `  ✅ ${e.ip}:${e.port}  ${e.colo}  ${e.latency}ms${speed}`, 'ok')
         } else if (event.type === 'error') {
           sendLog(win, event.message ?? '优选失败', 'err')
         }
@@ -323,11 +414,19 @@ export async function runScanJob(
     })
 
     if (result.entries.length === 0) {
-      sendLog(win, '没有通过校验的节点，试试增大采样数或换端口', 'warn')
+      sendLog(win, '', 'warn')
+      sendLog(win, '没有 IP 通过 101 校验。常见原因：', 'warn')
+      sendLog(win, '  1. WS 路径不对（必须与目标项目实际路径完全一致）', 'warn')
+      sendLog(win, '  2. 目标项目在根路径不提供 WebSocket', 'warn')
+      sendLog(win, '  3. TUN / fake-ip 拦截（见上方警告）', 'warn')
+      sendLog(win, '  4. 采样数太小，试试调到 500~1000', 'warn')
       return { ok: false, error: '无可用节点' }
     }
 
     sendLog(win, `优选完成，共 ${result.entries.length} 个可用 IP`, 'ok')
+    if (params.skipSpeed) {
+      sendLog(win, '（已跳过测速，按延迟排序；速度列显示 — 属正常）', 'warn')
+    }
     sendLog(win, '可直接复制到面板「手动优选 IP」输入框：')
     for (const line of result.copyable.split('\n')) sendLog(win, '  ' + line, 'ok')
 
@@ -335,6 +434,7 @@ export async function runScanJob(
       entries: result.entries,
       copyable: result.copyable,
       stats: result.stats,
+      skippedSpeed: params.skipSpeed,
     })
     return { ok: true, count: result.entries.length, copyable: result.copyable }
   } catch (err) {

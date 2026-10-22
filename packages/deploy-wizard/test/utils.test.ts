@@ -35,8 +35,11 @@ describe('随机值生成', () => {
       // 关键：不能是可预测的字面量，也不能含协议特征词
       expect(path).not.toBe('/vless')
       expect(path).not.toBe('/trojan')
-      // 只检查「作为路径片段」的特征词；随机串里偶然出现字母组合无害
-      for (const word of ['vless', 'trojan', 'cfpilot', 'xhttp', '/proxy', '/ws']) {
+      // /ws 只有 2 个字符，随机串以 ws 开头的概率是 1/36² ≈ 1/1296，
+      // 200 次循环下约 14% 会误报，所以只能做精确匹配。
+      expect(path).not.toBe('/ws')
+      // 这几个特征词足够长，用 toContain 检查不会误伤随机串
+      for (const word of ['vless', 'trojan', 'cfpilot', 'xhttp', '/proxy']) {
         expect(path).not.toContain(word)
       }
       paths.add(path)

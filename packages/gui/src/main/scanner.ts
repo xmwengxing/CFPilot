@@ -65,6 +65,10 @@ interface ScannerLib {
     stats: Record<string, number>
   }>
   formatCopyable: (e: ScanEntry[]) => string
+  detectProxyInterference: (host?: string) => Promise<{
+    clean: boolean
+    findings: Array<{ message: string; advice: string }>
+  }>
 }
 
 /** 定位 scanner 库文件（构建产物） */
@@ -135,4 +139,21 @@ export async function runLocalScan(options: ScanOptions): Promise<{
     copyable: lib.formatCopyable(summary.entries),
     stats: summary.stats,
   }
+}
+
+/**
+ * 检测本机是否有代理工具在接管流量。
+ *
+ * 复用 scanner-cli 的 net-env 模块 —— 命令行版与图形版共用同一套判定，
+ * 避免两边口径不一致。
+ */
+export async function detectProxyInterference(host?: string): Promise<{
+  clean: boolean
+  findings: Array<{ message: string; advice: string }>
+}> {
+  const lib = loadScannerLib()
+  if (typeof lib.detectProxyInterference !== 'function') {
+    return { clean: true, findings: [] }
+  }
+  return await lib.detectProxyInterference(host)
 }

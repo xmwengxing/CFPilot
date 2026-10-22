@@ -111,9 +111,18 @@
     return (el?.value ?? 'auto') as 'auto' | 'fresh' | 'update'
   }
 
+  /**
+   * 统一的忙碌态开关。
+   *
+   * ⚠️ 不要用 `setAttribute('disabled', '')` 来「取消禁用」：
+   * HTML 里只要 disabled 属性**存在**就是禁用状态，
+   * 设成空字符串仍然禁用，表现为按钮永久变灰、必须重启程序。
+   * 必须用 removeAttribute 或直接操作 .disabled 属性。
+   */
   function setBusy(busy: boolean): void {
     for (const id of ['btnDeploy', 'btnCheck', 'btnScan', 'btnDetect']) {
-      document.getElementById(id)!.setAttribute('disabled', busy ? '1' : '')
+      const el = document.getElementById(id) as HTMLButtonElement | null
+      if (el) el.disabled = busy
     }
   }
 
@@ -151,6 +160,7 @@
   function renderScanResult(payload: {
     entries: Array<{ ip: string; port: number; colo: string; latency: number; speed: number }>
     copyable: string
+    skippedSpeed?: boolean
   }): void {
     const out = $('scanOut')
     out.textContent = payload.copyable || '（没有结果）'
@@ -159,7 +169,9 @@
     tbody.innerHTML = ''
     payload.entries.forEach((e, i) => {
       const tr = document.createElement('tr')
-      const cells = [String(i + 1), e.ip + ':' + e.port, e.colo, String(e.latency), String(e.speed)]
+      // 跳过测速时速度本就是 0，显示 — 而不是 0，避免误解成「测出来是 0」
+      const speed = payload.skippedSpeed ? '—' : String(e.speed)
+      const cells = [String(i + 1), e.ip + ':' + e.port, e.colo, String(e.latency), speed]
       for (const c of cells) {
         const td = document.createElement('td')
         td.textContent = c
@@ -168,6 +180,10 @@
       tbody.appendChild(tr)
     })
     table.hidden = payload.entries.length === 0
+
+    // 表头也标明速度列是否有效
+    const speedHead = table.querySelectorAll('th')[4]
+    if (speedHead) speedHead.textContent = payload.skippedSpeed ? '下行(已跳过)' : '下行(MB/s)'
   }
 
   function bindScan(): void {
@@ -204,6 +220,18 @@
       const text = $('scanOut').textContent ?? ''
       if (!text || text.includes('还没有结果')) { log('还没有可复制的结果', 'warn'); return }
       copy(text)
+    })
+
+    document.getElementById('btnEnvCheck')!.addEventListener('click', async () => {
+      log('检测网络环境…')
+      try {
+        const result = await window.cfpilot.checkEnvironment()
+        if (result.clean) {
+          log('✅ 环境正常，优选结果可信', 'ok')
+        }
+      } catch (err) {
+        log('检测失败：' + (err instanceof Error ? err.message : String(err)), 'err')
+      }
     })
   }
 

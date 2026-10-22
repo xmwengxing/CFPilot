@@ -77,6 +77,8 @@
   .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   .row.end { justify-content: flex-end; }
   .muted { color: var(--muted); font-size: 12.5px; }
+  /* 登录页的常驻错误提示（toast 会消失，失败原因需要留着） */
+  .muted.err { color: #fca5a5; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
   pre.cmd {
     background: #08101f; border: 1px dashed var(--line); border-radius: 10px; padding: 12px;
@@ -419,10 +421,20 @@
     options.credentials = 'same-origin';
     options.headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {});
     return fetch(path, options).then(function (r) {
-      if (r.status === 401) { showLogin(); throw new Error('未登录'); }
+      // 登录接口的 401 表示「密码错误」，不是「会话过期」。
+      // 若走下面的 showLogin() 分支，用户会停在登录页并只看到「未登录」，
+      // 完全看不出是密码输错了。因此登录请求单独处理。
+      var isLogin = /\/api\/v1\/login$/.test(path);
+      if (r.status === 401 && !isLogin) { showLogin(); throw new Error('未登录或会话已过期'); }
       return r.json().then(function (data) {
-        if (!r.ok || data.ok === false) throw new Error(data.error || ('请求失败 ' + r.status));
+        if (!r.ok || data.ok === false) {
+          throw new Error(data.error || ('请求失败 ' + r.status));
+        }
         return data;
+      }).catch(function (e) {
+        // 响应不是 JSON 时给出可读错误，避免吞掉真实原因
+        if (e instanceof SyntaxError) throw new Error('响应解析失败 ' + r.status);
+        throw e;
       });
     });
   }
@@ -451,10 +463,19 @@
   }
   function doLogin() {
     var pwd = $('loginPassword').value;
+    var hint = $('loginHint');
     if (!pwd) { toast('请输入密码', true); return; }
+    if (hint) { hint.textContent = '正在登录…'; hint.className = 'muted'; }
     api('/api/v1/login', { method: 'POST', body: JSON.stringify({ password: pwd }) })
-      .then(function () { showApp(); boot(); toast('登录成功'); })
-      .catch(function (e) { toast(e.message, true); });
+      .then(function () {
+        if (hint) hint.textContent = '';
+        showApp(); boot(); toast('登录成功');
+      })
+      .catch(function (e) {
+        // 同时用 toast 与常驻提示：toast 3 秒后消失，用户容易错过失败原因
+        toast(e.message, true);
+        if (hint) { hint.textContent = e.message; hint.className = 'err'; }
+      });
   }
 
   function boot() {

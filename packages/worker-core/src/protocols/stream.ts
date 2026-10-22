@@ -2,6 +2,16 @@
  * 字节流工具：从 WebSocket / HTTP 请求体中精确读取协议头
  */
 
+/** 拼接两个字节数组 */
+export function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array<ArrayBuffer> {
+  if (a.byteLength === 0) return b as Uint8Array<ArrayBuffer>
+  if (b.byteLength === 0) return a as Uint8Array<ArrayBuffer>
+  const out = new Uint8Array(new ArrayBuffer(a.byteLength + b.byteLength))
+  out.set(a, 0)
+  out.set(b, a.byteLength)
+  return out
+}
+
 export class ByteStream {
   private readonly reader: ReadableStreamDefaultReader<Uint8Array>
   private chunks: Uint8Array[] = []

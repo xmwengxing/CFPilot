@@ -1,0 +1,97 @@
+name: Release GUI
+
+on:
+  push:
+    tags:
+      - 'gui-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（如 0.1.0）'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建内核与 CLI
+        run: |
+          npm run build -w @cfpilot/worker-core
+          npm run build -w cfpilot-deploy
+          npm run build -w cfpilot-scanner
+
+      - name: 确定版本号
+        id: ver
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $v = "${{ inputs.version }}"
+          } else {
+            $v = "${{ github.ref_name }}" -replace '^gui-v', ''
+          }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "版本：$v"
+
+      - name: 同步 GUI 版本号
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $p = "packages/gui/package.json"
+          $j = Get-Content $p -Raw | ConvertFrom-Json
+          $j.version = $v
+          $j | ConvertTo-Json -Depth 20 | Set-Content $p -Encoding utf8
+
+      - name: 打包 GUI
+        shell: pwsh
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+          ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
+        run: |
+          cd packages/gui
+          npm run build
+          npx electron-builder --win --publish never
+
+      - name: 上传安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: CFPilot-gui-${{ steps.ver.outputs.version }}
+          path: packages/gui/release/*.exe
+          retention-days: 30
+
+      - name: 发布到 Release
+        if: startsWith(github.ref, 'refs/tags/gui-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packages/gui/release/*.exe
+          generate_release_notes: true
+          body: |
+            ## CFPilot 图形化部署工具 ${{ steps.ver.outputs.version }}
+
+            - `CFPilot-${{ steps.ver.outputs.version }}-x64.exe` —— 安装版（可选安装目录、创建快捷方式）
+            - `CFPilot-${{ steps.ver.outputs.version }}-portable.exe` —— 便携版（免安装，双击即用）
+
+            首次使用请先看仓库 README 的「图形化工具」章节。
+
+      - name: 提交版本号变更
+        if: startsWith(github.ref, 'refs/tags/gui-v')
+        shell: pwsh
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/gui/package.json
+          git diff --cached --quiet || git commit -m "chore(gui): 发布版本 ${{ steps.ver.outputs.version }}"
+          git push

@@ -74,6 +74,21 @@ await build({
 })
 console.log('[gui] scanner 库 → dist/main/scanner-lib.js')
 
+// deployer 库：部署逻辑同理，打成独立 CJS 文件，
+// 打包后不依赖任何 TS 源码（asar 里只有编译产物）。
+await build({
+  bundle: true,
+  platform: 'node',
+  target: 'node20',
+  format: 'cjs',
+  minify: true,
+  legalComments: 'none',
+  sourcemap: false,
+  entryPoints: [resolve(repoRoot, 'packages/deploy-wizard/src/deployer-lib.ts')],
+  outfile: resolve(outDir, 'main/deployer-lib.js'),
+})
+console.log('[gui] deployer 库 → dist/main/deployer-lib.js')
+
 // 预加载与渲染层
 const uiTargets = [
   { entry: 'src/preload/preload.ts', out: 'preload/preload.js', label: '预加载' },

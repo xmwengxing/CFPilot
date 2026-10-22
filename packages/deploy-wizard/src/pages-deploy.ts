@@ -209,14 +209,36 @@ export async function detectKvConfigConflictForTest(
 }
 
 /**
+ * 当前模块所在目录（同时兼容 ESM 与 CJS）。
+ *
+ * CLI 以 ESM 运行（import.meta.url 可用），
+ * GUI 会把本模块打成 CJS 库（import.meta 为 undefined，需用 __dirname）。
+ */
+function moduleDir(): string {
+  // ESM 优先
+  try {
+    const meta = import.meta
+    if (meta && typeof meta.url === 'string') return dirname(fileURLToPath(meta.url))
+  } catch {
+    /* CJS 产物：import.meta 不存在，走下面的 __dirname */
+  }
+  // CJS 兜底
+  return typeof __dirname === 'string' ? __dirname : process.cwd()
+}
+
+/**
  * 读取 worker-core 的构建产物。
  *
  * 打包后 `here` 是 `packages/deploy-wizard/dist`，所以 worker-core 在
  * `../worker-core/dist/`；开发时（ts 源码直接跑）`here` 是 `src/`，
  * 需要 `../../worker-core/dist/`。两种情况都试。
+ *
+ * ⚠️ 本模块既会被 CLI（ESM）直接跑，也会被 GUI 打成 CJS 库后 require。
+ * 因此不能用 import.meta.url（CJS 下是 undefined），
+ * 也不能只用 __dirname（ESM 下不存在）——两个都做兼容。
  */
 async function loadBundle(fileName: string): Promise<string> {
-  const here = dirname(fileURLToPath(import.meta.url))
+  const here = moduleDir()
   const candidates = [
     resolve(here, `../worker-core/dist/${fileName}`),
     resolve(here, `../../worker-core/dist/${fileName}`),

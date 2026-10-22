@@ -5,6 +5,7 @@ import {
   randomPassword,
   randomProbeScriptName,
   randomWorkerName,
+  randomWsPath,
 } from '../src/utils'
 
 describe('随机值生成', () => {
@@ -24,6 +25,23 @@ describe('随机值生成', () => {
 
   it('面板路径为 /p- 加 8 位随机字符', () => {
     expect(randomPanelPath()).toMatch(/^\/p-[a-z0-9]{8}$/)
+  })
+
+  it('WS 路径是随机串，不含 vless / trojan / proxy 等特征词', () => {
+    const paths = new Set<string>()
+    for (let i = 0; i < 200; i++) {
+      const path = randomWsPath()
+      expect(path).toMatch(/^\/[a-z0-9]{10}$/)
+      // 关键：不能是可预测的字面量，也不能含协议特征词
+      expect(path).not.toBe('/vless')
+      expect(path).not.toBe('/trojan')
+      // 只检查「作为路径片段」的特征词，随机串里偶然出现 ws 这类字母组合无害
+      for (const word of ['vless', 'trojan', 'proxy', 'cfpilot', 'xhttp', '/ws']) {
+        expect(path).not.toContain(word)
+      }
+      paths.add(path)
+    }
+    expect(paths.size).toBeGreaterThan(195)
   })
 
   it('管理密码保留 cfp- 前缀与 14 位随机字符', () => {

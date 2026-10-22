@@ -269,6 +269,28 @@ export class CloudflareClient {
     return await this.request('POST', `/accounts/${accountId}/storage/kv/namespaces`, { title })
   }
 
+  /**
+   * 读取 KV 里的一个键值（不存在时返回 null）。
+   *
+   * 用于部署前检测「KV 已有配置会覆盖环境变量」的情况。
+   */
+  async getKvValue(accountId: string, namespaceId: string, key: string): Promise<string | null> {
+    try {
+      const response = await fetch(
+        `${this.apiBase}/accounts/${accountId}/storage/kv/namespaces/${namespaceId}/values/${encodeURIComponent(key)}`,
+        {
+          headers: { Authorization: `Bearer ${this.token}` },
+          signal: AbortSignal.timeout(this.timeoutMs),
+        }
+      )
+      if (response.status === 404) return null
+      if (!response.ok) return null
+      return await response.text()
+    } catch {
+      return null
+    }
+  }
+
   /** 列出已部署的 Worker 脚本 */
   async listScripts(accountId: string): Promise<string[]> {
     return await this.request('GET', `/accounts/${accountId}/workers/scripts`)

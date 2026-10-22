@@ -60,9 +60,15 @@ export async function withMockServer(
   try {
     await fn(`http://127.0.0.1:${port}/client/v4`, requests)
   } finally {
-    server.closeAllConnections()
+    // 关闭顺序有讲究：
+    //   closeAllConnections() 会让服务端强制断开，'close' 事件可能在
+    //   close() 之前就触发。若此时才注册 once('close')，就会永远等不到
+    //   而挂起（表现为测试超时失败，且只在部分平台/时序下出现）。
+    //   因此先注册监听，再关闭。
+    const closed = once(server, 'close')
+    server.closeAllConnections?.()
     server.close()
-    await once(server, 'close')
+    await closed
   }
 }
 

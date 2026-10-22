@@ -28,8 +28,10 @@ async function withMockServer(
   try {
     await fn(`http://127.0.0.1:${port}/client/v4`)
   } finally {
+    // 先注册监听再关闭：否则 'close' 可能已触发，once 会永远等不到
+    const closed = once(server, 'close')
     server.close()
-    await once(server, 'close')
+    await closed
   }
 }
 

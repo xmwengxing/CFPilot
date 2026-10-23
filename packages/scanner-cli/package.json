@@ -31,7 +31,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "node ../../scripts/sync-version.mjs packages/scanner-cli && npm run build"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

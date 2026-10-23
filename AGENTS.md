@@ -262,3 +262,28 @@ XHTTP **不支持 UDP**。
 - `scanner-cli` / `deploy-wizard` 发布到 npm 前需 `npm run build`，
   `scanner-cli` 的 `files` 字段只包含 `dist`。
 - 不要提交密钥：Cloudflare Token、面板密码、扫描令牌一律走环境变量或 KV。
+
+---
+
+## 6. 版本号政策（单一版本源，2026-10-24 立）
+
+1. **所有包同版本**：root / worker-core / scanner-cli / deploy-wizard / gui
+   的版本号永远一致。无论某个包本身有没有代码变动，只要发布就一起升——
+   免去逐包管理版本号的麻烦（用户明确要求）。
+2. **根 `package.json` 的 `version` 是唯一版本源**。任何包都不允许单独改版本号；
+   直接手改子包 `package.json` 或 `src/version.ts` 一律视为违规。
+3. **升级唯一入口**：
+   ```bash
+   npm run version:bump -- 0.4.0    # 或 major / minor / patch
+   ```
+   该命令改根版本并调用 `scripts/sync-version.mjs` 全量同步
+   （各包 `package.json` + scanner-cli / deploy-wizard 的 `src/version.ts`）。
+4. **`src/version.ts` 只允许脚本生成**（文件头有 `sync-version.mjs` 标记注释）。
+   worker-core 的 `version.ts` 是构建注入的 `BUILD_VERSION`，与包版本无关，禁止覆盖；
+   gui 没有 `version.ts`，版本只存在于 `package.json`。
+5. **npm 发布前的兜底**：`scanner-cli` / `deploy-wizard` 的 `prepublishOnly`
+   会再跑一次 sync，保证包内版本号与根一致（2026-10-23 曾因漏改 `version.ts`
+   出现「npm 上是 0.3.0、CLI 报 0.2.0」的事故）。
+6. **GUI 发布**：tag 必须用 `gui-v<统一版本号>`（如 `gui-v0.3.0`），
+   CI 会校验 tag 与根版本一致，不一致直接失败。
+7. npm 已发布版本号不可覆盖重发，所以每次升级必须是**严格递增**的新号。

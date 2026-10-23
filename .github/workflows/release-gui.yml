@@ -46,6 +46,17 @@ jobs:
           "version=$v" >> $env:GITHUB_OUTPUT
           Write-Host "版本：$v"
 
+      - name: 校验 tag 与根版本一致（单一版本源）
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $root = Get-Content "package.json" -Raw | ConvertFrom-Json
+          if ($root.version -ne $v) {
+            Write-Error "tag 版本 $v 与根 package.json 版本 $($root.version) 不一致。统一版本号政策：所有包同版本，请先 npm run version:bump -- $v 并提交，再打 tag。"
+            exit 1
+          }
+          Write-Host "版本一致：$v"
+
       - name: 同步 GUI 版本号
         shell: pwsh
         run: |

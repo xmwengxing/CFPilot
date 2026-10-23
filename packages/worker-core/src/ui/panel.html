@@ -405,22 +405,26 @@
         <div class="field"><label>Trojan-WS 路径</label><input id="cfgTrojanPath" placeholder="/trojan" /></div>
         <div class="field"><label>XHTTP 路径</label><input id="cfgXhttpPath" placeholder="/xhttp" /></div>
         <div class="field"><label>订阅域名（留空 = 当前 Worker 域名）</label><input id="cfgSubDomain" placeholder="例如 cfpilot.example.com" /></div>
-        <div class="field">
-          <label>订阅协议</label>
-          <select id="cfgSubProtocol">
-            <option value="both">VLESS + Trojan</option>
-            <option value="vless">仅 VLESS</option>
-            <option value="trojan">仅 Trojan</option>
-          </select>
+      </div>
+      <div class="field">
+        <label>订阅下发的节点形态（可多选）</label>
+        <div class="row" style="gap:18px;flex-wrap:wrap;margin-top:4px">
+          <label class="chk" style="width:auto"><input type="checkbox" id="cfgVarVlessWs" style="width:auto" /> VLESS + WebSocket</label>
+          <label class="chk" style="width:auto"><input type="checkbox" id="cfgVarVlessXhttp" style="width:auto" /> VLESS + XHTTP</label>
+          <label class="chk" style="width:auto"><input type="checkbox" id="cfgVarTrojan" style="width:auto" /> Trojan</label>
         </div>
-        <div class="field">
-          <label>订阅传输</label>
-          <select id="cfgSubTransport">
-            <option value="both">WS + XHTTP</option>
-            <option value="ws">仅 WebSocket</option>
-            <option value="xhttp">仅 XHTTP</option>
-          </select>
-        </div>
+        <p class="tip">
+          订阅里每个节点会按这里勾选的形态各生成一份。<br />
+          · <b>VLESS + WebSocket</b>：兼容性最好，Clash Verge / mihomo / v2rayN 都支持。<br />
+          · <b>VLESS + XHTTP</b>：仅 Xray 内核支持；Clash / mihomo / sing-box 不认这个传输。<br />
+          · <b>Trojan</b>：需要数据面开启 Trojan 入站（默认已开启）。<br />
+          没勾选的形态**不会**出现在订阅里，节点数也不会被乘三。<br />
+          对应 XHTTP 入站没开启时，XHTTP 形态会自动跳过。
+        </p>
+      </div>
+      <div class="row" style="margin-top:4px">
+        <label class="chk" style="width:auto"><input type="checkbox" id="cfgEnableTrojan" style="width:auto" /> 启用 Trojan 入站</label>
+        <label class="chk" style="width:auto"><input type="checkbox" id="cfgEnableXhttp" style="width:auto" /> 启用 XHTTP 入站</label>
       </div>
       <div class="row end"><button class="primary" id="btnSaveInbound">保存入站配置</button></div>
     </div>
@@ -432,8 +436,15 @@
       <div class="grid">
         <div class="field"><label>ProxyIP 池（每行 host:port，默认 SOCKS5）</label><textarea id="cfgProxyIp" placeholder="1.2.3.4:1080"></textarea></div>
         <div class="field"><label>SOCKS5 代理（host:port）</label><input id="cfgSocks5" placeholder="1.2.3.4:1080" /></div>
-        <div class="field"><label>HTTP 代理（host:port）</label><input id="cfgHttpProxy" placeholder="1.2.3.4:8080" /></div>
+        <div class="field">
+          <label>HTTP / HTTPS 代理（https:// 前缀走 TLS，可用 #sni= 指定证书名）</label>
+          <input id="cfgHttpProxy" placeholder="1.2.3.4:8080 或 https://user:pass@proxy.example.com:8443#sni=proxy.example.com" />
+        </div>
         <div class="field"><label>NAT64 前缀</label><input id="cfgNat64" placeholder="64:ff9b::" /></div>
+        <div class="field">
+          <label>反代入口池（每行一条：IP / IP:端口 / 域名）</label>
+          <textarea id="cfgRelayPool" placeholder="1.2.3.4&#10;my-relay.example.com:443"></textarea>
+        </div>
         <div class="field"><label>客户端指纹</label><input id="cfgFingerprint" placeholder="chrome" /></div>
       </div>
       <div class="row" style="margin-top:6px">
@@ -441,6 +452,38 @@
           <input type="checkbox" id="cfgConcurrent" style="width:auto" /><span>开启 TCP 并发竞速拨号（TCP_CONCURRENT_DIAL）</span>
         </label>
       </div>
+      <div class="row" style="margin-top:10px">
+        <label style="display:flex;align-items:center;gap:8px;margin:0">
+          <input type="checkbox" id="cfgResolvePreferred" style="width:auto" /><span>出站前自动 DoH 解析优选 IP（RESOLVE_PREFERRED）</span>
+        </label>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <label style="display:flex;align-items:center;gap:8px;margin:0">
+          <input type="checkbox" id="cfgBuiltinRelay" style="width:auto" /><span>启用内置反代入口表（USE_BUILTIN_RELAY）</span>
+        </label>
+      </div>
+      <div class="hint" style="margin-top:4px">
+        目标站点解析到 Cloudflare 网段时，Worker 不能连回 Cloudflare 自家入口，
+        必须经第三方反代按 SNI 转发。内置表依赖社区第三方服务；填入自己的入口可完全不依赖它。
+      </div>
+      <div class="hint" style="margin-top:4px">
+        开启后，Worker 会用 DoH 解析目标域名取得可用落地 IP（TXT 优选库优先，回退 A/AAAA）。
+        Worker 不能连回 Cloudflare 自家 Anycast 入口，解析到的 Cloudflare 网段 IP 会被自动降权。
+      </div>
+      <div class="row" style="margin-top:10px">
+        <label style="display:flex;align-items:center;gap:8px;margin:0">
+          <input type="checkbox" id="cfgEchOn" style="width:auto" /><span>启用 ECH 加密（隐藏真实 SNI）</span>
+        </label>
+      </div>
+      <div class="grid" style="margin-top:8px">
+        <div class="field"><label>ECH 服务器名（留空用 cloudflare-ech.com）</label><input id="cfgEchHost" placeholder="cloudflare-ech.com" /></div>
+        <div class="field"><label>ECH DNS（DoH，留空用客户端默认）</label><input id="cfgEchDns" placeholder="https://223.5.5.5/dns-query" /></div>
+      </div>
+      <p class="hint" style="margin-top:6px">
+        ECH 让客户端把 TLS ClientHello 里的真实域名加密，隐藏你访问的是哪个域名。
+        这是<strong>客户端侧</strong>的能力：内核只负责把参数写进订阅，由支持 ECH 的客户端
+        （mihomo / sing-box 1.13+ / v2rayN 等）实际执行。客户端不支持时该参数会被忽略。
+      </p>
       <div class="row" style="margin-top:10px">
         <label style="display:flex;align-items:center;gap:8px;margin:0">
           <input type="checkbox" id="cfgTrojanOn" style="width:auto" /><span>启用 Trojan 入站</span>
@@ -615,8 +658,23 @@
     $('cfgTrojanPath').value = c.trojanPath || '';
     $('cfgXhttpPath').value = c.xhttpPath || '';
     $('cfgSubDomain').value = c.subDomain || '';
-    $('cfgSubProtocol').value = c.subProtocol || 'both';
-    $('cfgSubTransport').value = c.subTransport || 'both';
+    // 订阅形态（多选）。兼容旧的 subProtocol/subTransport：
+    // 老配置里 protocol=both + transport=both 相当于勾了全部三种。
+    var variants = String(c.subVariants || '').split(/[,;\s]+/).filter(Boolean);
+    if (!variants.length) {
+      var legacy = [];
+      if (c.subProtocol === 'vless' || c.subProtocol === 'both') {
+        if (c.subTransport === 'ws' || c.subTransport === 'both') legacy.push('vless-ws');
+        if (c.subTransport === 'xhttp' || c.subTransport === 'both') legacy.push('vless-xhttp');
+      }
+      if (c.subProtocol === 'trojan' || c.subProtocol === 'both') legacy.push('trojan');
+      variants = legacy.length ? legacy : ['vless-ws'];
+    }
+    $('cfgVarVlessWs').checked = variants.indexOf('vless-ws') >= 0;
+    $('cfgVarVlessXhttp').checked = variants.indexOf('vless-xhttp') >= 0;
+    $('cfgVarTrojan').checked = variants.indexOf('trojan') >= 0;
+    $('cfgEnableTrojan').checked = c.enableTrojan !== false;
+    $('cfgEnableXhttp').checked = c.enableXhttp === true;
     $('cfgAdd').value = c.add || '';
     $('cfgAddApi').value = c.addApi || '';
     $('cfgAddCsv').value = c.addCsv || '';
@@ -627,8 +685,14 @@
     $('cfgSocks5').value = c.socks5 || '';
     $('cfgHttpProxy').value = c.httpProxy || '';
     $('cfgNat64').value = c.nat64 || '';
+    $('cfgRelayPool').value = c.relayPool || '';
+    $('cfgBuiltinRelay').checked = c.useBuiltinRelay !== false;
     $('cfgFingerprint').value = c.clientFingerprint || 'chrome';
+    $('cfgEchOn').checked = !!c.ech;
+    $('cfgEchHost').value = c.echHost || 'cloudflare-ech.com';
+    $('cfgEchDns').value = c.echDns || '';
     $('cfgConcurrent').checked = !!c.concurrentDial;
+    $('cfgResolvePreferred').checked = c.resolvePreferred !== false;
     $('cfgTrojanOn').checked = !!c.enableTrojan;
     $('cfgXhttpOn').checked = !!c.enableXhttp;
 
@@ -930,8 +994,13 @@
         trojanPath: $('cfgTrojanPath').value.trim(),
         xhttpPath: $('cfgXhttpPath').value.trim(),
         subDomain: $('cfgSubDomain').value.trim(),
-        subProtocol: $('cfgSubProtocol').value,
-        subTransport: $('cfgSubTransport').value
+        subVariants: [
+          $('cfgVarVlessWs').checked ? 'vless-ws' : '',
+          $('cfgVarVlessXhttp').checked ? 'vless-xhttp' : '',
+          $('cfgVarTrojan').checked ? 'trojan' : ''
+        ].filter(Boolean).join(','),
+        enableTrojan: $('cfgEnableTrojan').checked,
+        enableXhttp: $('cfgEnableXhttp').checked
       }, '入站配置已保存');
     });
 
@@ -951,7 +1020,13 @@
         socks5: $('cfgSocks5').value.trim(),
         httpProxy: $('cfgHttpProxy').value.trim(),
         nat64: $('cfgNat64').value.trim(),
+        relayPool: $('cfgRelayPool').value.trim(),
+        useBuiltinRelay: $('cfgBuiltinRelay').checked,
         clientFingerprint: $('cfgFingerprint').value.trim() || 'chrome',
+        resolvePreferred: $('cfgResolvePreferred').checked,
+        ech: $('cfgEchOn').checked,
+        echHost: $('cfgEchHost').value.trim() || 'cloudflare-ech.com',
+        echDns: $('cfgEchDns').value.trim(),
         concurrentDial: $('cfgConcurrent').checked,
         enableTrojan: $('cfgTrojanOn').checked,
         enableXhttp: $('cfgXhttpOn').checked

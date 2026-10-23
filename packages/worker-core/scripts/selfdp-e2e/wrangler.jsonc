@@ -1,0 +1,12 @@
+{
+  "$schema": "../../../../node_modules/wrangler/config-schema.json",
+  "name": "cfpilot-selfdp-e2e",
+  "main": "entry.ts",
+  "compatibility_date": "2026-01-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "DATAPLANE": "self",
+    "RESOLVE_PREFERRED": "true",
+    "TCP_CONCURRENT_DIAL": "true"
+  }
+}

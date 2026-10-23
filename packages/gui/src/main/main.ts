@@ -17,6 +17,8 @@ import {
   credentialsState,
   runScanJob,
   detectAccount,
+  listKvOptions,
+  createKvNamespace,
   checkNetworkEnvironment,
   type DeployParams,
   type ScanParams,
@@ -91,8 +93,12 @@ function createWindow(): void {
 
 /* ---------------- IPC ---------------- */
 
-ipcMain.handle('deploy:run', (_event, params: DeployParams) => runDeploy(mainWindow, params))
-ipcMain.handle('deploy:check', () => checkDeployed(mainWindow))
+ipcMain.handle('deploy:run', (_event, params: DeployParams, kvNamespaceId?: string) =>
+  runDeploy(mainWindow, params, kvNamespaceId)
+)
+ipcMain.handle('deploy:check', (_event, kvNamespaceId?: string) =>
+  checkDeployed(mainWindow, kvNamespaceId)
+)
 
 ipcMain.handle('cred:save', (_event, input: Parameters<typeof saveCredentials>[0]) => saveCredentials(input))
 ipcMain.handle('cred:wipe', () => wipeCredentials())
@@ -101,6 +107,10 @@ ipcMain.handle('cred:state', () => credentialsState())
 ipcMain.handle('scan:run', (_event, params: ScanParams) => runScanJob(mainWindow, params))
 ipcMain.handle('env:check', () => checkNetworkEnvironment(mainWindow))
 ipcMain.handle('account:detect', () => detectAccount(mainWindow))
+ipcMain.handle('kv:list', (_event, accountId: string) => listKvOptions(mainWindow, accountId))
+ipcMain.handle('kv:create', (_event, accountId: string, title?: string) =>
+  createKvNamespace(mainWindow, accountId, title)
+)
 
 ipcMain.handle('update:check', () => checkForUpdate())
 ipcMain.handle('update:download', async (_event, url: string) => {

@@ -90,6 +90,10 @@ const baseConfig = {
   uuid: UUID,
   nat64: '',
   concurrentDial: true,
+  resolvePreferred: true,
+  relayPool: '',
+  useBuiltinRelay: true,
+  subVariants: 'vless-ws',
 } as unknown as Parameters<typeof handleXhttp>[1]
 
 function setupDial() {

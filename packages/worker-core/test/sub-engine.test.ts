@@ -44,12 +44,19 @@ const config: UserConfig = {
   httpProxy: '',
   nat64: '',
   concurrentDial: true,
+  resolvePreferred: true,
+  relayPool: '',
+  useBuiltinRelay: true,
+  subVariants: 'vless-ws',
   enableTrojan: true,
   enableXhttp: true,
   subDomain: '',
   subProtocol: 'both',
   subTransport: 'both',
   clientFingerprint: 'chrome',
+  ech: false,
+  echHost: 'cloudflare-ech.com',
+  echDns: '',
   tlsFragment: false,
   tlsFragmentSize: '10-20',
   tlsFragmentDelay: '10-20',
@@ -288,7 +295,8 @@ describe('订阅输出', () => {
   }
 
   it('Base64 订阅包含 VLESS / Trojan / XHTTP 链接且 SNI 正确', () => {
-    const body = renderBase64(ctx)
+    // 显式勾选三种形态（默认只勾 vless-ws）
+    const body = renderBase64({ ...ctx, config: { ...ctx.config, subVariants: 'vless-ws,vless-xhttp,trojan' } })
     const decoded = base64Decode(body)
     const links = decoded.split('\n')
     expect(links.some((l) => l.startsWith('vless://') && l.includes('sni=cfpilot.example.com'))).toBe(true)
@@ -301,7 +309,7 @@ describe('订阅输出', () => {
   })
 
   it('Clash YAML 关键字段完整', () => {
-    const yaml = renderClash(ctx)
+    const yaml = renderClash({ ...ctx, config: { ...ctx.config, subVariants: 'vless-ws,trojan' } })
     expect(yaml).toContain('type: vless')
     expect(yaml).toContain('type: trojan')
     expect(yaml).toContain('server: 1.2.3.4')
@@ -339,10 +347,21 @@ describe('端到端：默认配置渲染三种订阅', () => {
       transport: 'both',
     }
 
-    // 30 个节点 × (VLESS-WS + VLESS-XHTTP + Trojan-WS)
+    // ⚠️ 默认只勾 vless-ws → **30 个节点就是 30 条链接**（不再乘三）。
+    // 旧行为（subProtocol=both × subTransport=both）会生成 30 × 3 = 90 条，
+    // 客户端里多出大量用不了的 XHTTP / Trojan 节点，测速全是 -1。
     const links = base64Decode(renderBase64(fullCtx)).split('\n')
-    expect(links).toHaveLength(90)
+    expect(links).toHaveLength(30)
     expect(links.every((l) => l.includes('sni=cfpilot.example.com'))).toBe(true)
+    expect(links.every((l) => l.startsWith('vless://') && l.includes('type=ws'))).toBe(true)
+
+    // 显式勾选三种形态 → 才会展开成 90 条
+    const allCtx: RenderContext = {
+      ...fullCtx,
+      config: { ...config, subVariants: 'vless-ws,vless-xhttp,trojan' },
+    }
+    const allLinks = base64Decode(renderBase64(allCtx)).split('\n')
+    expect(allLinks).toHaveLength(90)
 
     // Clash 主组是扁平的：所有节点直接列在 CFPilot 组里（避免客户端只显示分组）
     const yaml = renderClash(fullCtx)

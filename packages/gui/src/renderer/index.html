@@ -232,7 +232,7 @@
             </div>
 
             <div class="btn-row">
-              <button class="btn btn-primary" id="btnDetect">自动检测账号与 KV</button>
+              <button class="btn btn-primary" id="btnDetect">检测账号</button>
               <button class="btn btn-danger" id="btnWipe">清除本机凭据</button>
             </div>
           </div>
@@ -240,10 +240,45 @@
           <div class="card">
             <h2>📦 检测结果</h2>
             <div class="kv-row"><span class="k">目标账号</span><span class="v" id="detAccount">—</span></div>
-            <div class="kv-row"><span class="k">KV 命名空间</span><span class="v" id="detKv">—</span></div>
-            <p class="tip" style="margin-top:6px">
-              账号 ID 与 KV 不需要手填：点「自动检测」后，工具会用 Token 查询可见账号，
-              复用已有的 KV，没有就自动建一个。
+          </div>
+
+          <div class="card">
+            <h2>🗄️ KV 命名空间</h2>
+            <p class="desc">
+              一个 KV 命名空间对应且仅对应一个 CFPilot 部署实例。
+              内核在 KV 里用的是全局平铺的键（CONFIG / PANEL_PATH / SESSION 等），没有实例前缀，
+              两个实例共用一个 KV 会互相覆盖凭据与面板密码。
+            </p>
+
+            <div class="field">
+              <label>本次部署使用的 KV</label>
+              <select id="kvSelect">
+                <option value="">— 请先检测账号 —</option>
+              </select>
+              <p class="tip" id="kvHint">
+                点「刷新 KV 列表」查看账号下有哪些命名空间。带 ● 的是本工具部署的实例，
+                带 ○ 的是空命名空间或他人在用。
+              </p>
+            </div>
+
+            <div class="field">
+              <label>或手动指定 KV ID</label>
+              <div class="row">
+                <input type="text" id="kvManual" placeholder="粘贴 KV 命名空间 ID" />
+                <button class="btn btn-ghost" id="btnKvManual" style="flex:0 0 auto">使用此 ID</button>
+              </div>
+              <p class="tip">
+                从别的机器迁移、或 KV 列表里没显示时，可直接粘贴 ID。
+              </p>
+            </div>
+
+            <div class="btn-row">
+              <button class="btn btn-ghost" id="btnKvRefresh">刷新 KV 列表</button>
+              <button class="btn btn-ghost" id="btnKvNew">新建 KV（部署新实例）</button>
+              <button class="btn btn-ghost" id="btnKvSave">保存此选择</button>
+            </div>
+            <p class="tip" style="margin-top:8px">
+              选中后点「保存此选择」会记住它；不保存则每次部署都使用下面这个下拉框里的当前项。
             </p>
           </div>
 
@@ -295,7 +330,18 @@
               <p class="tip">
                 <b>自动判断</b>：工具在 KV 里存了部署清单，有清单就是更新，没有就是首次。<br>
                 <b>更新部署</b>会沿用原来的 UUID 与 WS 路径 —— <b>客户端订阅地址不用改</b>。<br>
-                <b>首次部署</b>忽略清单，重新创建项目并生成新凭据。
+                <b>首次部署</b>忽略清单，重新创建项目并生成新凭据 —— 需要一个<b>未被占用</b>的 KV，
+                请在凭据页为它新建一个。
+              </p>
+            </div>
+
+            <div class="field">
+              <label>本次使用的 KV</label>
+              <p class="kv-row" style="margin:0">
+                <span class="k">命名空间</span><span class="v" id="deployKv">—</span>
+              </p>
+              <p class="tip">
+                在「Cloudflare 凭据」页选择。选错或没选会在这里提示，不会带着错的 KV 部署。
               </p>
             </div>
 
@@ -323,10 +369,24 @@
                 <input type="text" id="wsPath" placeholder="如 /k7m2x9q4w8" />
                 <p class="tip">代理的 WebSocket 路径。留空则随机生成或沿用已有值。</p>
               </div>
+              <div class="field">
+                <label>数据面实现</label>
+                <select id="dataPlane">
+                  <option value="self">自研（默认）—— 失败可诊断、支持 SOCKS5/HTTP/HTTPS 代理池</option>
+                  <option value="vendor">CFNext 原版 —— 第三方项目原实现</option>
+                </select>
+                <p class="tip">
+                  两者在同一环境下的实测可用性已持平；自研额外提供失败分级诊断、代理池、DoH 优选解析与可配置反代入口。
+                </p>
+              </div>
             </div>
 
             <label class="chk" style="margin-bottom:8px">
               <input type="checkbox" id="optNewCred" /> 更新时重新生成 UUID / WS 路径 / 面板凭据
+            </label>
+            <label class="chk" style="margin-bottom:8px">
+              <input type="checkbox" id="optForceKv" />
+              覆盖 KV 归属校验（明知选中的 KV 属于别的实例仍然继续）
             </label>
             <label class="chk">
               <input type="checkbox" id="optForce" /> 强制重新部署（忽略「版本相同则跳过」）
@@ -483,12 +543,15 @@
             </p>
             <div class="links">
               <b>三步部署</b><br>
-              1. 在「Cloudflare 凭据」页填 Token 并保存，点「自动检测账号与 KV」<br>
-              2. 在「一键部署」页点「开始部署」<br>
+              1. 在「Cloudflare 凭据」页填 Token 并保存，点「检测账号」，再点「刷新 KV 列表」<br>
+              2. 在下拉框里选一个 KV（带 ● 的是已有实例，空的可以部署新实例），点「开始部署」<br>
               3. 在「本地真连接优选」页填上一步得到的数据面域名，跑一次优选，把结果粘贴到面板的「手动优选 IP」<br><br>
               <b>更新升级</b><br>
-              再跑一次「开始部署」即可：工具认得自己的项目，会沿用 UUID 与 WS 路径，
-              <b>客户端订阅地址不用改</b>。
+              再跑一次「开始部署」即可：选同一个 KV，工具认得自己的项目，会沿用 UUID 与 WS 路径，
+              <b>客户端订阅地址不用改</b>。<br><br>
+              <b>部署多个实例</b><br>
+              一个 KV 只能承载一个实例。要在同一账号下跑多个，
+              点「新建 KV」给每个实例各建一个，然后分别选对应的 KV 部署。
             </div>
           </div>
 

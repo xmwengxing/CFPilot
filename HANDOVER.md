@@ -33,14 +33,26 @@
 2. **控制面与数据面必须分开部署**。合并包在 Pages 上第二次部署返回
    `8000119 Your Pages project has been blocked`（平台主动拒绝，
    Cloudflare 未说明具体触发原因，**不要臆测规则**）。
-3. **数据面必须绑定 KV 变量名 `K`**（CFNext 源码读 `t.K.get("config")`），
-   控制面读 `KV`。两个都要绑，缺一个就有一侧读不到配置。
-4. **数据面配置有两套来源**：环境变量（`U`/`PATH`/`L`）与 KV 的 `config` 键（CFNext schema）。
-   后者优先级更高（源码里 `Object.assign(默认, kvConfig)` 整体覆盖）。
-   向导会同步写 KV `config` 键。
-5. **构建产物必须可复现**。版本号形式为 `<git hash>-<源码内容哈希>`，
+3. **数据面必须绑定 KV 变量名 `K`**，控制面读 `KV`。两个都要绑，缺一个就有一侧读不到配置。
+   （注：当前数据面产物由 `src/entry-data.ts` 构建，它走 CFPilot 自己的 `loadConfig()`，
+   读的是 **大写 `CONFIG` 键**；`K` 绑定是给 vendor CFNext 风格代码留的兼容位。见 §0.12。）
+4. **⚠️ 一个 KV 命名空间只能承载一个 CFPilot 部署实例。**
+   内核在 KV 里用的是全局平铺的键，**没有实例前缀**：
+   `CONFIG` / `PANEL_PATH` / `ADMIN_PW_HASH` / `LOCAL_PREFERRED_IPS` /
+   `POOL_DOMAIN_LIBRARY` / `SESSION:*` / `SCANNER_TOKEN` / `CFP_DEPLOY_MANIFEST`。
+   两个实例共用一个 KV 会互相覆盖 UUID、WS 路径、面板密码与会话。
+   部署向导在**写入任何键之前**做归属校验，越界写入一律中止（见 §0.12）。
+   要在同一账号下跑多个实例，给每个实例一个独立 KV。
+5. **绝不要写 CFNext 的小写 `config` 键。**
+   那是 CFNext 原版的配置键，vendor 侧是 `Object.assign(默认, kvConfig)` **整体覆盖**：
+   往里写会直接改坏共栖的 CFNext 项目的 uuid / path / trojanPassword。
+   CFPilot 自己的数据面**不读**这个键（读的是大写 `CONFIG`），写了纯属破坏。
+6. **配置优先级仍是 `KV (CONFIG) > 环境变量 > 内置默认值`**（AGENTS.md 铁律 1）。
+   因此部署向导把本次凭据写入 KV 的 `CONFIG` 键，让它真正生效；
+   环境变量只作为 KV 不可用时的兜底。
+7. **构建产物必须可复现**。版本号形式为 `<git hash>-<源码内容哈希>`，
    **绝不能加时间戳**（否则 CI 资产一致性校验必然失败）。
-6. **面板产物必须统一换行为 LF**（`gen-panel.mjs` 已做）。
+8. **面板产物必须统一换行为 LF**（`gen-panel.mjs` 已做）。
    git 的 autocrlf 会让同一份源码产出不同字节，这是历史 CI 反复失败的主因。
 
 ### 待办
@@ -230,6 +242,838 @@ Git-Bash 下 `--path /vless` 会被 MSYS 转换成
 
 ---
 
+## 0.18 KV 实例隔离与数据面产物的实证（2026-10-22 晚，本文最新结论）
+
+本节是对 §0 中若干**过时描述**的更正，每条都有代码/产物层面的证据。
+设计文档见 [docs/kv-instance-isolation.md](docs/kv-instance-isolation.md)。
+
+### 0.18.1 数据面产物到底是什么（更正 §0.9 / §0.10）
+
+**结论：数据面产物是 `dist/dataplane.js`（`src/entry-data.ts` 构建），内含 vendor 的 `wsHandler`。
+不是「CFNext 原版文件、不二次打包」。**
+
+证据：
+
+- `packages/worker-core/scripts/build.mjs` 的 `TARGETS`：
+  `{ entry: 'src/entry-data.ts', out: 'dataplane.js' }`（从 `d5c7a16` 起从未变过）。
+- `packages/deploy-wizard/assets/` 在 git 全历史里**只有** `cfpilot-worker.js`，
+  从未存在 `dataplane.js`；向导的 `loadBundle('dataplane.js')` 实际解析到
+  `packages/worker-core/dist/dataplane.js`。
+- 产物里含 vendor 特征串（`WebSocketPair`、`preferredIPs`、`CFNext`）。
+
+### 0.18.2 vendor `wsHandler` 的真实签名与行为（更正「数据面读 KV `config` 键」）
+
+对 `vendor/cfnext-dataplane.js` 做**精确的花括号配平解析**（跳过字符串/模板/注释）后确认：
+
+- 导出的 `Gt` 签名是 **`Gt(request, config)`**：首参是 Request，次参是配置对象。
+  体内 `t.K` 出现 **0** 次，`get("config")` 出现 **0** 次 ——
+  **它既不读 KV，也不读 env**，只吃传进来的 `config`（`e.uuid` / `e.trojanPassword` / `e.enableTrojan`）。
+- CFNext 自己的配置加载器是另一个函数 `lt(env)`，它才读 env（`U`/`PATH`/`L`…）
+  与 KV 的小写 `config` 键。但 `lt` 只被 vendor 内部的 `on`（默认 fetch 处理器）调用，
+  而本项目只 import 了 `wsHandler` → **`lt` 被 esbuild tree-shaking 整个移除**。
+  实证：产物里 `WARP_ENDPOINTS` / `MASQUE_SNI` / `YXURL` / `HOME_WAN` / `TGTOKEN` /
+  `OUTBOUND` / `ALPN` 等 `lt` 独有特征串**全部为 0**；`.K.` 访问 **0** 次。
+
+**因此：数据面走的是 CFPilot 自己的 `loadConfig()`，读 KV 的大写 `CONFIG` 键。**
+路径路由也由 `src/routes/data.ts` 用 `config.wsPath` 判断，不是 vendor 做的。
+
+### 0.18.3 两个由此暴露的真实缺陷（已修）
+
+1. **向导写错了键**：旧 `syncDataPlaneKvConfig()` 往小写 `config` 键写 CFNext schema。
+   但数据面根本不读它 —— 写了没用；更糟的是它会**整体覆盖**共栖的 CFNext 项目的
+   `config`（vendor 侧 `Object.assign(默认, kvConfig)`），直接改坏别人的 uuid / path。
+   → 已删除该函数，改为写大写 `CONFIG` 键。
+
+2. **内核的环境变量层有缺口**（违反 AGENTS.md 铁律 1）：
+   `configFromEnv()` 原本只读 `env.UUID`，`wsPath` 写死 `/vless`，
+   `trojanPassword` 写死空串，`enableTrojan` / `enableXhttp` 写死 `true`。
+   实测注入 `PATH=/randomws123` 与 `TROJAN_PASSWORD=trojan-pw-xyz` 后，
+   内核读到的仍是 `/vless` 与随机生成的密码 —— **向导注入的数据面环境变量全是死的**。
+   → 已补齐 `WS_PATH`/`PATH`、`TROJAN_PASSWORD`、`ENABLE_TROJAN`/`TROJAN`、
+   `ENABLE_XHTTP`/`XHTTP`。
+
+### 0.18.4 KV 归属：为什么「一个 KV = 一个实例」
+
+内核在 KV 里用的键**全局平铺、没有实例前缀**：
+`CONFIG`、`PANEL_PATH`、`ADMIN_PW_HASH`、`ADMIN_PW_PLAIN`、`LOCAL_PREFERRED_IPS`、
+`POOL_DOMAIN_LIBRARY`、`SESSION:*`、`ONETIME:*`、`SCANNER_TOKEN`、`CFP_DEPLOY_MANIFEST`。
+两个实例共用一个 KV 会互相覆盖 UUID / WS 路径 / 面板密码，且会话可跨实例复用。
+
+判断「这个 KV 属于谁」**只能靠清单键** `CFP_DEPLOY_MANIFEST`（由 CFPilot 自己写入）；
+标题、UUID、路径等字段值都不唯一，不能作为归属依据。
+
+**新的部署前校验（`assertKvOwnership`）**，在写任何键之前执行：
+
+| 目标 KV 状态 | 判定 | 行为 |
+|---|---|---|
+| 空 | `empty` | ✅ 放行 |
+| 清单属于本次目标 | `owned` | ✅ 放行（原地更新，沿用凭据） |
+| 清单属于**另一个**实例 | `occupied` | ❌ **中止**（`--force-kv` 可强推） |
+| 含 CFNext 的 `config` 键 | `foreign` | ⚠️ 只提醒（两者键不重叠，可共存） |
+| 含 `CONFIG` 但无清单 | `stale` | ❌ 中止（残留配置） |
+
+### 0.18.5 旧实现的三个问题（已修）
+
+1. **CLI 的「自动识别复用清单」从未生效**：
+   旧 `--kv` 缺省就无条件新建 KV → 新 KV 里没有清单 → 永远走首次部署 →
+   **UUID 与 WS 路径每次都变 → 客户端订阅地址每次都变**。
+   这与 CLI 帮助文本和 §0「更新部署沿用原 UUID」的说法都矛盾。
+   → 现改为：未指定 `--kv` 时列出账号下所有 KV 并探测清单；
+   恰好一个含清单 → 复用（进入更新模式）；一个都没有 → 新建；有多个 → 要求 `--kv` 明确指定。
+   另加 `--new-kv`（部署新实例）与 `--list-kv`（查看账号下有哪些实例）。
+
+2. **GUI 强制复用且不可修改**：
+   旧 `detectAccount()` 取 `namespaces[0]`（完全不看归属）、立刻落盘锁定；
+   账号下只要有 ≥1 个 KV 就永远不新建；界面上的 KV 是只读 `span`；
+   `saveCredentials` 虽有 `kvNamespaceId` 参数但 renderer 从不传（死通路）；
+   换 Token 后 `accountId` 永不更新。
+   → 现改为：凭据页有 KV 下拉（每项标注归属：● 本工具实例 / ○ 空或他人在用）、
+   「新建 KV」按钮、手填 KV ID 输入框；检测只解析账号，KV 由用户显式选择。
+
+3. **`fresh` 模式在共用 KV 下是破坏性操作**：
+   旧 `fresh` 只跳过读清单，照样覆盖清单与配置 → 把别人的实例改坏。
+   → 现改为：`fresh` 必须绑定未被占用的 KV，否则中止并提示新建。
+
+### 0.18.6 一个账号跑多个实例
+
+现在**支持**，且是推荐用法：
+
+- CLI：`--new-kv` 建独立命名空间后部署；`--list-kv` 查看已有实例；
+  多个实例时必须用 `--kv <id>` 指定。
+- GUI：凭据页点「新建 KV」为每个实例各建一个，分别选中后部署。
+- 用户若已有**原版 CFNext 的 Pages 项目**：它的 KV 用的是小写 `config` 键，
+  与 CFPilot 的键**完全不重叠**，可以共存；向导会给出提醒但不阻断。
+  但建议仍为 CFPilot 单独建一个 KV，避免共享命名空间的配额与误操作。
+
+---
+
+## 0.19 订阅格式识别、ECH 与真机复验（2026-10-23，本文最新结论）
+
+本节是 §0.18 之后的追加结论，同样每条都有真机或产物级证据。
+
+### 0.19.1 Clash Verge 导入失败的根因：**订阅格式只看 URL 参数，不看 User-Agent**
+
+用户反馈：「Clash Verge 导入失败，但浏览器可以直接读到 YAML 文本」。
+
+**根因**：订阅路由只认 `?target=` / `?format=` 查询参数
+（`routes/control.ts` → `resolveFormat()`），**完全不看 `User-Agent`**。
+而客户端导入订阅时**只给订阅 URL，不会加 `?target=clash`**，
+是靠自己的 User-Agent 表明身份的：
+
+| 客户端 | User-Agent | 期望格式 |
+|--------|-----------|---------|
+| Clash Verge / Clash / mihomo | `clash-verge/…` | YAML |
+| sing-box | `sing-box/…` | JSON |
+| v2rayN / Shadowrocket / NekoBox | `v2rayNG/…` 等 | Base64 |
+
+于是 Clash Verge 拿到的是 **Base64 分享链接集合**，按 YAML 解析必然失败。
+用户在浏览器里手动加 `?target=clash` 才看到 YAML —— 这正好解释了那个现象。
+
+**已修**：新增 `resolveFormatByUserAgent()`（`routes/shared.ts`），
+判定优先级改为 **URL 显式参数 > User-Agent > 默认 base64**；
+识别不出来时返回 null（不猜）。
+
+**真机复验**（部署 `hmn1q6y6` 控制面后实测）：
+
+| User-Agent | Content-Type | 结果 |
+|-----------|--------------|------|
+| `clash-verge/v1.6.6` | `text/yaml` | ✅ YAML（修复前是 base64） |
+| `Mozilla/5.0` | `text/plain` | ✅ Base64（不变） |
+| `v2rayNG/1.8.5` | `text/plain` | ✅ Base64（不变） |
+
+### 0.19.2 Clash YAML 模板的兼容性问题（已修）
+
+原模板本身**语法合法、字段齐全**（用 PyYAML 严格解析 + mihomo schema 逐项校验均通过），
+但有三处会让 Clash Verge 用起来别扭：
+
+1. **`external-controller: 127.0.0.1:9090`** —— Clash Verge 自己会注入并管理这个地址。
+   订阅里再写死一个，会与客户端实际使用的端口冲突。
+   → 已移除。
+2. **`port` / `socks-port`** —— mihomo 只认 `mixed-port`，分开写的是老 Clash 字段。
+   → 改为只写 `mixed-port`。
+3. **没有 `dns` 段** —— ECH 需要 DoH 解析 ECH 配置。
+   → 已补 `dns` 段（fake-ip + DoH nameserver + fallback）。
+
+另外补了 `unified-delay` / `tcp-concurrent`（mihomo 专有，客户端可忽略）。
+
+**真机复验**：线上 YAML 60 个节点全部合规，
+组与规则的引用 0 错误、节点名 60/60 唯一、无 `external-controller`。
+
+### 0.19.3 ECH 特性（新增，默认关闭）
+
+参考 edgetunnel 的做法实现（`tmp/edgetunnel-worker.js` 是本地参考副本）。
+**ECH 是客户端侧能力**：内核只负责把参数写进订阅，由客户端执行。
+
+新增配置项（`UserConfig`）与环境变量层：
+
+| 配置 | 环境变量 | 默认 |
+|------|---------|------|
+| `ech` | `ECH` | `false`（默认关闭） |
+| `echHost` | `ECH_HOST` | `cloudflare-ech.com` |
+| `echDns` | `ECH_DNS` | 空（用客户端默认） |
+
+三种订阅格式的输出（与 edgetunnel 约定一致）：
+
+- **Clash YAML**：每个节点加 `ech-opts: { enable: true, query-server-name: <SNI> }`，
+  并在 `dns.nameserver-policy` 里把 ECH 服务器名指向 DoH
+- **Base64 分享链接**：URL 加 `&ech=<SNI>+<DoH>`（edgetunnel 的约定）
+- **Sing-box**：出站加 `tls.ech = { enabled: true, query_server_name: <SNI> }`
+
+**真机复验**：默认关闭时 YAML 里 `ech-opts` 0 处、90 条链接含 `ech=` 的 0 条；
+开启后 YAML 60 个节点全部带 `ech-opts`、90 条链接全部带 `ech=cloudflare-ech.com`。
+
+### 0.19.4 ⚠️ 8000119 是**间歇性**的，不是配置或内容决定的（更正 §0.9 / §0.10 的归因）
+
+§0.9 / §0.10 把 `8000119 blocked` 归因为「把数据面也打进包里 → 判为代理服务」。
+**2026-10-23 真机复验推翻了这一归因**，实验记录如下：
+
+在同一账号、同一 KV、同一产物（`dist/dataplane.js`，245 KB）下反复部署到新建项目：
+
+| 配置 | 结果 |
+|------|------|
+| 最小脚本 + 无 KV 无 env | ✅ 受理 + success |
+| 最小脚本 + 双 KV 绑定 | ✅ 受理 + success |
+| 数据面产物 + 无 KV 无 env | ✅ 受理 + success |
+| 数据面产物 + **双 KV 绑定**（`KV` + `K`） | ❌ 一次 timeout、一次 `8000119` |
+| 数据面产物 + **仅 `KV` 绑定** | ✅ 受理 + success |
+| 数据面产物 + 仅 env | ✅ 受理 + success |
+| **完全相同的双 KV 绑定配置，连续 6 次** | ✅ **6/6 全部成功** |
+| 双 KV 绑定，换一个 KV | ✅ 成功 |
+| **最初失败的那个项目，原样重试** | ✅ **成功** |
+
+**结论**：
+- 失败与「内容是不是代理」「有没有 KV 绑定」「绑几个名字」**都不构成稳定因果**；
+- 完全相同的配置重复 6 次全部成功；
+- **最初失败的项目原样重试即成功**。
+
+因此 `8000119` 更像是**账号级、间歇性的风控判定**（短时间内大量新建项目/部署会提高触发概率），
+而不是「产物内容决定了被封」。
+
+**这解释了 §0.9 那些「1/3」「2/2」「4/4」的不一致比例** —— 它们本来就是随机采样。
+
+**对产品的意义**：
+- 向导里已有的 **8000119 换名重试**（`deployWithBlockRetry`）方向是对的，
+  但**重试次数太少**（只换 2 个备用名）。实测同一个项目原样重试就能成功，
+  说明应当**先原样重试、再换名**。
+- 部署失败时**不应把责任归给用户**（旧日志说「是我们改坏了数据面」是误导）。
+
+> ⚠️ 尚未确定触发条件，**不要臆测规则**（沿用 §0.10 的告诫）。
+> 下一步若要继续查，应做的是「固定账号、固定配置、重复 N 次」的统计，
+> 而不是「换内容看结果」的对照实验。
+
+### 0.19.5 真机复验清单（2026-10-23）
+
+用用户提供的全权限令牌，在账号 `70ec011b12cd621609a8412a4d0c1668` 上完成：
+
+| 项 | 结果 |
+|----|------|
+| `--list-kv` 列出实例 | ✅ 正确识别 `cfnext` 为「非 CFPilot 实例」 |
+| `--new-kv` 全新部署 | ✅ 控制面成功；数据面首次超时、**原样重试成功** |
+| `--mode update` 复用实例 | ✅ UUID / WS 路径不变（订阅地址不用改） |
+| KV 键检查 | ✅ 大写 `CONFIG` 有值、清单有值、**小写 `config` 不存在**（不再污染共栖的 CFNext 项目） |
+| 订阅 UA 自动识别 | ✅ 见 0.19.1 |
+| Clash YAML 合规性 | ✅ 60 节点、0 引用错误、名称唯一 |
+| ECH 开关 | ✅ 见 0.19.3 |
+| 数据面 WS 101 | ✅ `/py3fq5efbe` 与 `/__edge_probe` 均 101 |
+| **完整 VLESS 握手** | ✅ **响应头 `版本=0 加盐长度=0`**（UUID 认证通过，与 §0 记录的 `[0,0]` 一致） |
+| 清理 | ✅ 8 个对照项目全删；只留 `cfnext`（用户原有）与验证实例 |
+
+---
+
+## 0.20 自研数据面：真机实验结论与新架构（2026-10-23，本文最新结论）
+
+用户提出：重新尝试全自研数据面（参考 edgetunnel / BPB-Worker-Panel / CFNext），
+并指出「旧代码陷入开发死循环、永远无法部署还找不出原因」。
+
+**结论：旧代码的死循环有确定的技术根因，且归档文档给出的归因是错的。**
+完整设计见 [docs/self-developed-dataplane-design.md](docs/self-developed-dataplane-design.md)。
+
+### 0.20.1 ⚠️ 更正：「静态 import sockets 会导致 1101」是错的
+
+归档文档与 `src/outbound/dial.ts` 的注释都写着
+「静态导入 `cloudflare:sockets` 会让 isolate 在启动阶段失败（1101）」，
+并称「一个只导入 sockets 的 30 行脚本同样复现 TCP Loop detected」。
+
+**2026-10-23 真机复验（同一账号）**：
+
+| 脚本 | 内容 | 部署 | 运行时 |
+|------|------|------|--------|
+| A | 静态 import sockets，**从不调用** | ✅ success | `A-ok` |
+| B | 动态 import sockets，从不调用 | ✅ success | `B-ok` |
+| C | 静态 import + **真的调用 connect()** | ✅ success | `proxy request failed...` |
+
+**静态导入完全正常。** 失败发生在**运行时出站**。
+
+### 0.20.2 出站可达性矩阵（同一 Worker 实例内对照，可复现）
+
+```
+8.8.8.8:53          → OK        8.8.8.8:443        → OK
+9.9.9.9:443         → OK        208.67.222.222:443 → OK
+1.1.1.1:443         → BLOCKED   cloudflare.com:443  → BLOCKED
+104.16.0.1:443      → BLOCKED
+```
+
+**被拒的恰好是 Cloudflare 自家的 Anycast 地址**：
+Worker 不能主动连回 Cloudflare 自己的入口（会构成环路），
+Cloudflare 侧直接拒绝并报 `TCP Loop detected`。
+**第三方 IP 的 443 完全可用。**
+
+`request.fetcher.connect`（edgetunnel 用的）**不能**绕过此限制，错误信息与 sockets 完全一致。
+
+### 0.20.3 旧代码死循环的根因（三个缺陷叠加）
+
+```
+1) 缺陷 A：同区域过滤写成 p.kind === 'direct'
+   → 把 SOCKS5 / HTTP 代理全滤掉
+2) 缺陷 B：优选 IP 库装的是硬编码 CF 网段（104.16.0.0/12 等）
+   → 候选目标必然是 CF 自家 IP
+3) 缺陷 C：tryDial 的 catch 把异常吞掉、只返回 null
+   → 每一层失败都表现为「目标不可达」，日志里没有任何线索
+```
+
+**所以「永远无法部署还找不出原因」的真相**：
+失败发生在出站选路，异常被吞，看起来像随机失败 → 反复重试 → 永远不成。
+（对照：CFNext 的优选库用的是**域名** `proxyip.hk.<域名>` 解析出的 IP，未必落在 CF Anycast 段。）
+
+### 0.20.4 三个成熟项目的可借鉴点
+
+| 项目 | 值得借鉴 |
+|------|---------|
+| **edgetunnel** | 完全不用 `cloudflare:sockets`（实测 0 次引用）；`request.fetcher.connect` 抽象成连接器；自研 `TlsClient` 在裸 TCP 上做 TLS；出站 = 连 `cloudflare.com:443` 探测 → 经 SOCKS5/HTTP 代理 → `CONNECT` 隧道；特征码字典混淆 |
+| **BPB-Worker-Panel** | 先回 VLESS/Trojan 协议响应头再中继（避免客户端误判首包）；面板与订阅一体化；代理池配置面；XHTTP/gRPC |
+| **CFNext**（当前 vendor） | 出站三级候选顺序：`m()` 直连目标 → `h()` 同区域优选 IP 竞速 → `g()` 走 outboundProxy；`Ct(ip,4000)` 拨号语义；`Ft()` DoH 解析优选 IP；`lt(env)` 三层配置加载器 |
+
+**三者共同的架构事实**：
+> 出站要么直连**第三方** IP，要么经外部代理隧道；**不能指望 Worker 直连 Cloudflare 自家 Anycast**。
+
+### 0.20.5 8000119 与滥用邮件（结合用户补充的事实）
+
+用户补充：**邮件从第一次测试部署就收到、几十封一模一样；只要部署被检测到可疑就会有；账号本身很健康。**
+
+实测与之一致，且补上了关键一环：
+
+- **完全中性内容**（`return new Response("ok")`）连续部署 10 次 → **成功 9 次、泛化错误 1 次**
+- 明文 `vless`/`trojan`/`proxy` 特征串 vs 拆分混淆版本 → **结果相同（都成功）**
+
+**因此**：
+- 邮件 = **每一次部署被判定为可疑**就触发一次，不是「部署次数过多」的账号处罚
+- 「几十封一模一样」= 几十次部署各自命中判定
+- 「账号健康」与实测一致：失败率约 1/10，**没有账号级封禁**
+- 部署受理的成败**与产物内容无稳定因果**
+
+**应对**：失败时**先原样重试同一项目，再换名**（§0.19.4 已实施）。
+另注：edgetunnel / CFNext 的「特征码字典混淆」在**部署受理**层面无实测收益
+（我们的明文 vs 拆分对照即证据）；它更可能服务于运行时流量特征层，两者不应混谈。
+
+### 0.20.6 新自研数据面的实施路线
+
+> 状态更新见 §0.20.8（实现）与 §0.20.9（真机验证）：阶段 1–6 全部完成，
+> 阶段 3 闸门已于 2026-10-23 通过。
+
+| 阶段 | 内容 | 闸门 | 状态 |
+|------|------|------|------|
+| 1 | 归档代码复用到 `src/outbound/`，修正选路算法 | 本地单测全绿 | ✅ |
+| 2 | 出站选路重写 + **分级错误诊断** | 单测覆盖候选顺序 | ✅ |
+| 3 | **真机验证直连第三方 IP 的代理链路** | VLESS 握手返回 `[0,0]` 且能取回真实 HTTP 响应 | ✅ **已过**（见 §0.20.9） |
+| 4 | 优选 IP 库接入（DoH 解析**第三方域名**） | 优选链路真机可用 | ✅ 代码完成（真机待验） |
+| 5 | 代理池落地（SOCKS5 / HTTP CONNECT / HTTPS） | 经代理真机可用 | ✅ 代码完成（真机待验） |
+| 6 | 特性开关：自研 / vendor 可切换 | 两种实现都能部署与工作 | ✅ |
+
+> ⚠️ 阶段 3 的验证方法要注意：应连**明文 HTTP 目标站**或用**会自己完成 TLS 的客户端**。
+> 用明文 HTTP 去请求 HTTPS 站拿不到响应，那是验证方法问题，不是实现缺 TLS（详见 §0.20.8）。
+
+### 0.20.7 多实例并存
+
+用户要求支持一个账号同时跑多个 CFPilot 实例 —— 与 §0.18/§0.19 的 KV 隔离契约一致，
+每个实例用自己的 KV；自研数据面不改变这个约束。
+
+### 0.20.8 第二阶段：DoH 优选库 / 代理池 / HTTPS 代理（2026-10-23，已实施）
+
+用户指示「自研实现继续推进下一步」。按 `docs/self-developed-dataplane-design.md` §5 重排后的优先级实施。
+
+#### ⚠️ 先更正一条误判：「补 TLS 能力」不是主出站路径的必需项
+
+§0.20.6 的实施路线把「补 TLS 能力」排在第 1 位。**该判断有误**，本阶段复核了三方**源码**（非 README）后更正：
+
+| 项目 | 直连目标 | 优选 IP | SOCKS5 | HTTP 代理 | HTTPS 代理 |
+|------|---------|--------|--------|----------|-----------|
+| CFNext（vendor） | 纯 TCP | 纯 TCP | — | — | 不支持 |
+| edgetunnel | 纯 TCP | 纯 TCP | 纯 TCP | 纯 TCP | `secureTransport:'on'` + 自研 `TlsClient` |
+| BPB | 纯 TCP | 纯 TCP | — | — | — |
+
+源码证据：
+- **CFNext** `Pt()` 内只有 `connect({hostname, port})`，全文件搜不到 `secureTransport` / `startTls` / `TlsClient`
+- **edgetunnel** `connectDirect()` / `connectProxyIP()` / `socks5Connect()` / `httpConnect()` 全是纯 TCP；
+  `secureTransport:'on'` 与 `TlsClient` **只**出现在 `httpsConnect()`（连 HTTPS 代理服务器）与 `sstpConnect()`（连 SSTP 代理服务器）
+
+**原因（协议本质）**：VLESS / Trojan over WebSocket 是 **TLS 透传代理**，TLS 有两层不能混淆 ——
+第一层「客户端 → CF 边缘」由客户端发起、CF 边缘终结；
+第二层「Worker → 目标站」**Worker 不终结 TLS**，只透传客户端发来的密文（客户端与目标站直接完成握手）。
+若 Worker 自己终结 TLS，会破坏端到端 TLS 语义（证书校验 / SNI / 指纹全部错位）。
+
+**结论**：`secureTransport` 的唯一正确用途是「**代理服务器本身是 HTTPS/SSTP**」——
+这正是 vendor 缺失、edgetunnel 具备的能力，本阶段已补上。
+
+#### 本阶段实施内容
+
+| 项 | 文件 | 说明 |
+|----|------|------|
+| DoH 优选库 | `src/outbound/doh.ts`（新增） | TXT 优选库 → A → AAAA，5 分钟缓存；机制对齐 vendor `Ft()` / edgetunnel 预加载竞速 |
+| 候选分组 | `src/outbound/route.ts` | 新增 `groupCandidates()`：代理 / 直连 / 降权三组 |
+| 代理落地 | `src/outbound/dial.ts` | SOCKS5 / HTTP / HTTPS 全部进选路；`secureTransport` 支持 |
+| HTTPS 代理 | `src/outbound/proxy-pool.ts` | 新增 `https` 类型（`https://` 前缀） |
+| 代理认证 | `src/outbound/http-proxy.ts` | 补 `Proxy-Authorization`（此前**解析了凭据却没发出去**） |
+| 配置项 | `config.ts` / `types.ts` / `panel.html` | `resolvePreferred` + `RESOLVE_PREFERRED` + 面板开关 |
+| CLI | `deploy-wizard` | `--resolve-preferred=false` |
+
+#### 三个值得记住的实现要点
+
+1. **代理与直连必须互斥**：同池竞速会让直连先成功而**静默绕过代理** ——
+   出口 IP 与用户预期不符且无任何报错。现语义对齐 edgetunnel：有代理只走代理，代理全失败抛错。
+2. **DoH 优选库必须整体判定**：目标域名的 TXT 绝大多数不是优选库
+   （实测 `example.com` 是 `"v=spf1 -all"`、`www.cloudflare.com` 是域名验证记录）。
+   若「挑出形似 IP 的片段」，SPF 里的 `ip4:1.2.3.4` 会被误当优选 IP，
+   **所有出站被悄悄导向该 IP 且无任何报错**。现要求整条记录全是 IP 才认。
+3. **候选排序必须稳定**：`Array.prototype.sort` 对长度 > 10 的数组用非稳定 TimSort，
+   会让竞速时「谁先试」随机、排查无法复现。现改为「权重 + 原始下标」稳定排序。
+
+#### 验证
+
+typecheck 全绿；测试 **28 文件 / 288 用例**全绿（新增 `doh.test.ts` 21 例、`http-proxy.test.ts` 7 例、
+`socks5-integration.test.ts` 3 例，`route.test.ts` 扩至 29 例）；build 通过，
+esbuild metafile 确认 5 个新/改模块均在 `dist/dataplane.js` 内。
+（§0.20.9 的真机验证又新增了直连降权相关用例）
+
+### 0.20.9 真机验证：自研数据面出站链路**已跑通**（2026-10-23）
+
+阶段 3 闸门通过。自研数据面在**真实 Cloudflare** 上被完整证明可用。
+
+#### 验证手段：本地 workerd + 真实 Pages 双层
+
+关键前提：**本地 `wrangler dev --local`（workerd）完整支持 `cloudflare:sockets`**
+（实测：导入 / connect / 真实数据交换全部成功），
+因此可以在不出云的情况下把整条出站链路验完 —— 这比反复撞真机边缘窗口高效得多。
+
+配套工具在 `tmp/selfdp-e2e/`：明文 HTTP 回显服务器、VLESS 测试客户端、测试套件、SOCKS5 代理。
+
+#### 结果
+
+| 层 | 场景 | 结果 |
+|----|------|------|
+| 本地 workerd | 基本链路 | ✅ VLESS `[0,0]` + 真实响应 446B |
+| 本地 workerd | **1MB 负载逐字节完整** | ✅ 1048576 / 1048576 字节无差错 |
+| 本地 workerd | 错误 UUID 被拒 | ✅ 无响应头、无数据 |
+| 本地 workerd | 不可达目标分级诊断 | ✅ close 1011 + 逐候选原因 + 修复建议 |
+| 本地 workerd | **SOCKS5 代理路径** | ✅ 代理日志证实请求/响应全部经由代理 |
+| **真机 Pages** | `neverssl.com:80`（非 CF 网段） | ✅ **upgrade 8/8、VLESS `[0,0]` 8/8、真实 HTTP 响应 6/8** |
+| 真机 Pages | `example.com:80`（全 CF 网段） | VLESS `[0,0]` 4/4，出站必然失败（符合预期） |
+
+真机部署：`jyhii42d4-0tkb.pages.dev`（`DATAPLANE=self`）。
+
+#### ⚠️ 验证中发现并修复的两个**真实缺陷**
+
+##### 缺陷 1：协议响应头必须在出站建连**之前**回
+
+原实现是「先 `await` 出站建连成功，再回响应头」。本地 workerd 直接报：
+
+```
+Workers runtime canceled this request because it detected that your Worker's code had hung
+```
+
+出站稍慢客户端就等不到响应头。**已修**：认证通过即回响应头，出站转后台，
+失败用 close 1011 + 分级原因告知（与 vendor / BPB 一致）。
+认证在 `parseTarget` 内已完成，回响应头不引入安全漏洞。
+
+##### 缺陷 2：目标域名解析到 CF 网段时，域名直连**必须降权**
+
+实测证据：
+
+```
+example.com    → 172.66.147.243, 104.20.23.154   ← 全是 CF 网段 → 出站 100% 失败
+neverssl.com   → 34.223.124.45                    ← 第三方 IP          → 出站成功
+```
+
+把域名丢给 `connect()` 让运行时自己解析，必然连回 CF Anycast 被拒；
+而直连候选原本排在最前，会先白白耗掉一次超时。
+**已修**：`RouteInput` 新增 `deprioritizeDirect`；
+`dial()` 在「成功解析且结果全为 CF 网段」时降权域名直连，优先用第三方 IP 建连。
+
+#### 两个测试坑（写给后续维护者）
+
+1. **workerd 的文本帧（opcode 1）不会进入服务端二进制分支** —— 必须发二进制帧（opcode 2）。
+2. **VLESS 地址字段的长度字节不能被域名首字符覆盖** ——
+   布局是 `[类型(1)] + [长度(1)] + [域名]`；
+   写成 `[类型] + 域名` 会让域名首字符（如 `'1'` = 0x31）当成长度，解析全错。
+
+#### 💡 可复用发现：**本地 workerd 可以验证整条出站链路**
+
+`wrangler dev --local`（workerd）**完整支持 `cloudflare:sockets`** ——
+实测导入、`connect()`、真实数据交换全部成功。
+
+这意味着**不需要反复撞真机的边缘拦截窗口**就能把出站链路验完：
+本地验功能正确性 → 真机只做最终确认。建议以后所有数据面改动都先走本地验证。
+
+> ⚠️ workerd 的两个行为差异（写给后续维护者）：
+> ① **文本帧（opcode 1）不会进入服务端的二进制处理分支** —— 必须发二进制帧（opcode 2）；
+> ② `Response(null, {status:101, webSocket})` 在 workerd 下可用，但 Node/vitest 下不支持 101。
+
+#### ⚠️ 令牌探测的坑（避免误判）
+
+`cfat_` 前缀是 **account-owned token**，**不支持** `/user/tokens/verify` 端点，
+对该端点调用恒返回 401「Invalid API Token」。
+**这不代表令牌失效** —— 判断有效性要用 `GET /accounts`。
+（本次差点误判令牌失效，实际是探测端点选错。）
+
+#### 仍未验证
+
+- 代理池三种类型（SOCKS5 / HTTP CONNECT / HTTPS）**只验过本地**，真机需要一个公网可达的代理。
+- DoH 的「TXT 优选库」路径需特定域名才能验（普通域名的 TXT 是 SPF / 域名验证记录）。
+
+### 0.20.10 vendor vs self 对照实验 → **自研成为默认数据面**（2026-10-23）
+
+用户要求「把自研数据面设为默认实现，按建议执行」——即先做同环境对照再切。
+
+#### ⚠️ 用户环境提示：Clash Verge 的 TUN 模式
+
+用户告知：**TUN 模式一直开着**，为本轮部署与测试带来两个干扰：
+
+1. **Node 的 `fetch` 在 TUN 模式下会 `fetch failed`** —— 部署向导写 KV 连续失败，
+   导致数据面 KV 里没有 `CONFIG` 键 → **WS 路径 404**。
+   用 curl 写同一个 KV 却成功 → 确认是 TUN 与 undici 的兼容性问题，**不是代码 bug**。
+   TUN 关闭后向导的 KV 写入恢复正常（部署日志出现「部署凭据已写入 KV」）。
+2. 本机出站被全面限速（连 `8.8.8.8:443` 都超时），**本机不是有效的出站测试基准** ——
+   有效的基准是「Cloudflare 边缘 → 目标站」，即真机数据面。
+
+> 💡 建议：部署/测试前确认代理状态；TUN 开启时优先用 curl 验证 API 可达性。
+
+#### 对照实验设计
+
+同一账号、同时段、同一客户端、同一目标；两个实例各自独立 KV；**交替采样**（A→B→A→B）。
+真实 TLS 客户端首包用手工构造的合法 ClientHello（`scripts/selfdp-e2e/clienthello.mjs`）——
+手写简化版会被目标站直接 RST，测不出真实差异。
+
+#### 关键发现：vendor 靠「第三方反代入口」打通 CF 网段目标
+
+第一次对照：**vendor 100% vs self 0%**（CF 网段目标）。根因是 vendor 内置了
+
+```
+proxyip.{hk,us,jp,...}.cmliussss.net     （__D = "cmli"+"ussss"+".net"）
+```
+
+这些域名 CNAME 到**动态轮换的 IP 池**（`proxyip.fast-ip.eu.org`）。
+反代入口是第三方服务器，收到客户端 TLS ClientHello 后**按 SNI 转发**到目标：
+
+```
+Worker ──connect(反代IP:443)──> 第三方反代（按 SNI 转发）──> Cloudflare 边缘
+```
+
+出口是第三方 VPS 而非 Cloudflare 自己的边缘 → **不触发 TCP Loop 限制**。
+自研原先只有「DoH 解析 + CF 网段降权」，缺这一层，CF 网段目标必然失败。
+
+> 这回答了 §6 一直存疑的「CFNext 的 `proxyip.<地区>.<域名>` 域名从哪来」。
+
+#### 补齐：新增 `src/outbound/relay.ts`
+
+实现了同一机制，且**可配置、可关闭**（vendor 只能硬编码依赖第三方）：
+
+- 面板可填自己的反代入口（`relayPool`）→ **完全不依赖第三方**；
+- `USE_BUILTIN_RELAY=false` 关闭内置表；
+- **按当前边缘机房（colo）优先选地区**（与 vendor 的 `_Zc()` 同构）；
+- **缓存 30 秒**（不是 5 分钟）—— 动态轮换池，长缓存会拿到已失效的 IP。
+
+#### 优化迭代（实测数据驱动）
+
+| 改动 | CF 网段目标成功率 |
+|------|------------------|
+| 无反代入口 | **0%** |
+| 全量并发（53 个候选） | 70% |
+| 限到 8 个 | 40%（备选太少） |
+| 分批（每批 8，批间串行） | 33%（串行等待耗尽客户端预算） |
+| 每域名 4 个 + 短缓存 + colo 优先 + 轮转 | **67% → 100%** |
+
+结论：**候选要多、地区要分散、缓存要短**。
+
+#### 最终结果与决策
+
+| 目标 | vendor | self |
+|------|--------|------|
+| 非 CF 网段 `github.com:443` | 100% | **100%** |
+| 全 CF 网段 `example.com:443` | 73% / 80% | **67% / 100%** |
+
+vendor 自身在 73%~100% 间波动（第三方池不稳定），self 已持平甚至更好。
+
+**决策**：`resolveDataPlaneImpl()` 缺省改为 `self`；`DATAPLANE=vendor` 保留回退。
+GUI 新增「数据面实现」下拉框（默认自研）。
+
+自研独有能力：失败分级诊断、SOCKS5/HTTP/HTTPS 代理池、DoH 优选解析、
+反代入口可配置、降权候选稳定排序。
+
+#### 仍未验证
+
+- 代理池三种类型只验过本地 workerd，真机需公网可达的代理。
+- 自配反代入口的端到端路径（配置 → 面板保存 → 生效）未在真机验过。
+
+### 0.20.11 代理路径 + 自配反代入口真机验证（2026-10-23）
+
+用户要求「把这两项验掉」——即上一节列出的两个未验证项。
+
+#### 一、自配反代入口：端到端路径已通 ✅
+
+完全走**用户真实操作路径**（面板 API → KV → 数据面）：
+
+```
+PUT /api/v1/config {relayPool:"45.192.247.177", useBuiltinRelay:false}
+  → KV CONFIG 确认写入
+  → 数据面出站 → example.com:443（全 CF 网段，直连必然失败）
+  → 4/4 成功
+```
+
+**内置表关闭 + 只配自营入口仍成功** → 证明生效的是「用户自配」这条来源。
+
+> 面板 API 的路径是**根路径** `/api/v1/config`（不是面板路径前缀），
+> cookie 名是 `cfpilot_sess`（见 `auth.ts` 的 `SESSION_COOKIE`）。
+
+#### 二、代理路径
+
+| 类型 | 结果 |
+|------|------|
+| **SOCKS5**（代理池 3 个） | ✅ **10/10**，每次收到 httpbin 真实响应 499 字节 |
+| **HTTPS 代理**（`secureTransport:'on'` + CONNECT，池 3 个） | ✅ **5/10**，成功时收到真实响应 |
+| HTTP CONNECT（明文） | ⚠️ 未单独验 —— 组合已被上面两项覆盖（TCP 层 = SOCKS5 路径，握手层 = HTTPS 路径，同一份 `httpConnect()`）。公共明文 HTTP 代理几乎都不支持 CONNECT 隧道（实测 190+ 个全失败） |
+
+**关键观察**：单代理 1/8，代理池 10/10 ——
+**代理池竞速把单个不稳定代理的问题掩盖了**。这是自研独有能力（vendor 只读 `PROXYIP`）。
+
+#### 三、真机发现的三个真实缺陷（本地测不出来）
+
+| 缺陷 | 症状 | 修复 |
+|------|------|------|
+| 代理握手**无超时** | 代理连上但不回应 → 数据面**既不报错也不关闭**，静默挂起 45s+ | `socks5.ts` / `http-proxy.ts` 握手读取加 6s 超时 |
+| **close reason 超 123 字节** | RFC 6455 限制；超长时 **Cloudflare 边缘静默丢弃整个 close frame** → 客户端一直连着。本地 workerd 宽容地照发，只有真机暴露 | `closeWith()` 统一截断到 123 字节（按**字节**算；省略号占 3 字节，追加后还要再检查一次） |
+| 完整诊断**没有出口** | close reason 装不下多行诊断 | 新增数据面诊断端点 `GET /__diag`（自研专有），返回最近 20 条完整诊断 |
+
+> ⚠️ 截断修复漏了「追加省略号后再检查」→ 仍超 1 字节 → 真机依旧不 close。
+> **这类坑只有真机能暴露**，本地 workerd 全部通过。
+
+#### 四、Cloudflare 平台的两个硬限制（实测）
+
+1. **边缘拒绝把 CONNECT 方法转发给 Worker**（400，`CF-RAY: -` 表示没到 Worker）。
+   → 标准 HTTP CONNECT 代理**无法用 Cloudflare Worker 搭**；
+   Worker 又不能当 TCP 服务端（无入站 TCP）。
+   → 可行替代是 **POST + 二进制 body** 承载隧道（目标放 query，数据走 body）。
+   本项目**未**引入这种非标准代理类型（语义是请求-响应而非持续隧道，不适合作为生产特性）。
+2. **本机 `workers.dev` 不通**（`pages.dev` 正常）→ 测试一律用 Pages。
+
+#### 收尾
+
+- 测试 30 文件 / 315 用例全绿（新增 `close-reason.test.ts` 7 例）。
+- 云端清理：删除 4 个临时探测 Worker + 7 个测试 Pages 项目 + 1 个 Workers 脚本。
+- 保留实例（用户要自己跑代理工具测试）：
+  **数据面 `ck12akov-tw5u-r993-vmsg.pages.dev`**，
+  控制面 `e4kkjet6.pages.dev/p-vgagv2c4`，
+  UUID `fbe5bd2d-5dca-4bd6-84b8-a8b727df3374`，WS 路径 `/ooosrkxwbt`。
+  配置已恢复干净（内置反代表开启、无用户代理）。
+
+### 0.20.12 用户实测反馈的三个问题（2026-10-23，全部已修）
+
+用户拿保留的实例实测，反馈三个问题。逐个定位如下。
+
+#### 问题 1：默认下发 30 个节点，订阅里却有 90 个
+
+**根因**：`subProtocol`（vless/trojan/both）× `subTransport`（ws/xhttp/both）
+两个独立开关交叉 → 必然生成三种形态 → 节点数乘三。
+
+**修复**：新增 `subVariants`（多选），面板三个复选框，默认只勾 `vless-ws`。
+`resolveSubVariants()` 负责：
+- 依赖的入站没启用 → 自动剔除该形态；
+- Clash / sing-box 不支持 XHTTP → 这些格式跳过 XHTTP 形态（否则订阅为空）；
+- 全被剔除 → 回落到 `vless-ws`。
+
+实测：默认 30 条，勾三种 → 90 条。
+
+#### 问题 2：XHTTP 与 Trojan 延迟全 -1
+
+**Trojan 服务端实现正确** —— 真机用真实 Trojan 握手验证：
+收到目标站完整 HTTP 响应（458 字节）+ 正常关闭。
+
+**XHTTP 两个真机才暴露的 bug**：
+
+1. **`relay()` 关闭了 socket 写流** → 等于关闭整个 TCP 连接，
+   目标站收到 RST 来不及回数据（症状：握手成功但永远收不到数据）。
+   对比：WS 路径只 `releaseLock()` 不 `close()`，一直正常。
+   修复：`relay()` 加 `closeTarget` 参数，socket 场景传 `false`。
+2. **`async start` 阻塞下行读取** → `start` 的 Promise 未完成时 `pull` 不被调用，
+   消费者一直等（症状：响应头到了，后续数据永远不来）。
+   修复：`start` 只入队响应头立即返回，下行放到 `pull` 里读。
+
+附带：XHTTP 的 `dial()` 漏了 `resolvePreferred` / `relayPool`，已与 WS 路径对齐。
+
+#### 问题 3：vless+WS 一开始可用，后来全失效
+
+**根因**：数据面因 `8000119` 换名重建后，控制面 `DATA_HOST` 仍指向**已删除的旧域名**
+→ 订阅里所有节点的 `sni`/`host` 都指向不存在的域名。
+
+**修复**：部署向导在数据面部署完成后比对控制面 `DATA_HOST`，不一致就重新配置控制面。
+真机上已被触发验证两次。
+
+#### 顺带：官方优选 IP 池质量修正
+
+`curl --resolve` 逐段实测（WS 升级是否返回 101）：
+
+```
+104.16–104.25  8/8 ✅      104.26 2/8    104.27 6/8
+104.28–104.31  0/8 ❌      172.66/67 6/8   172.64/65/68-71 0/8 ❌
+其余 13 个段   0/8 ❌
+```
+
+旧表 15 个段里 13 个完全不可用（随机采样命中率约 1/4）→ 订阅大半节点是坏的。
+修复：`CF_IPV4_CIDRS` 换成实测可用的 3 段；`CURATED_OFFICIAL_IPS` 10 → 27 个。
+
+> ⚠️ 可用段与具体站点有关（CF 按站点分配），但 `104.16.0.0/11` 是主力通用段。
+> 想完全对齐自己的站点，用面板「本地真连接优选」实测筛一遍最准。
+
+#### ⚠️ 本轮踩到的两个测试方法坑
+
+1. **自制 WS 客户端会被 Cloudflare 边缘拒绝**（原始 TCP + 手写握手 → 400），
+   而 `ws` 库能过。**用 `curl --resolve` 或 `ws` 库**测 IP 可用性才准 ——
+   我一度用自制客户端测出「所有 IP 都不可用」的假结论。
+2. **每次部署后数据面域名都会变**（8000119 换名），
+   测试脚本必须用**当前**域名 —— 我有一轮测试全打在已删除的旧项目上，
+   得出了「XHTTP 修不好」的错误结论。
+
+### 0.20.13 HTTPS 代理路径打通 + 一个被推翻的根因（2026-10-23）
+
+用户要求「把这两项验掉」的最后一项：**HTTPS 代理**（`https://` 前缀，代理服务器本身走 TLS）。
+
+#### 🔴 先说被推翻的结论
+
+上一轮我判定「HTTPS 代理失败是因为**自签证书不被 Cloudflare 信任**」。
+**这个判断是错的**，真机取证把它拆成了三层：
+
+| 层 | 当时的判断 | 实测结论 |
+|----|-----------|---------|
+| ① TLS 没生效 | 「`secureTransport:'on'` 是惰性 TLS，明文 CONNECT 被当 ClientHello」 | ❌ **错** —— `secureTransport` 压根没传到运行时 |
+| ② 证书不被信任 | 「自签证书被 CF 拒绝」 | ❌ **部分错** —— 自签确实被拒，但**主因是别处** |
+| ③ 真正根因 | — | ✅ **`connect(address, options)` 的 options 放错了参数位** |
+
+**根因 ① 的确切机制**（`@cloudflare/workers-types` 的声明）：
+
+```ts
+function _connect(address: string | SocketAddress, options?: SocketOptions): Socket;
+interface SocketOptions { secureTransport?: string; allowHalfOpen: boolean; }
+interface SocketAddress { hostname: string; port: number; }
+```
+
+旧代码把 `secureTransport` 塞进了**第一个**参数（address 对象）：
+```ts
+// ❌ 旧代码：运行时静默忽略 secureTransport
+connect({ hostname, port, secureTransport })
+// ✅ 正确
+connect({ hostname, port }, { secureTransport })
+```
+
+TypeScript 不会报错（多余字段被放过），运行时静默忽略 ——
+**socket 实际是明文**，于是：
+- 对端 TLS 服务器看到明文 → 报 `HTTPS_PROXY_REQUEST`；
+- 调 `startTls()` → 抛「The `secureTransport` socket option must be set to 'starttls'」。
+
+**定位手法（值得复用）**：`socket.secureTransport` 是只读 getter，
+返回 `"off" | "on" | "starttls"`。打印它就能立刻确认选项有没有真的生效 ——
+比从报错文案反推快得多。
+
+#### 修正后的真机结论（Cloudflare 边缘）
+
+| 模式 | 结果 |
+|------|------|
+| `secureTransport:'on'`（options 放对） | `socket.opened` 直接 reject：「proxy request failed, cannot connect to the specified address」 |
+| `secureTransport:'starttls'` + `startTls()` | **进入 TLS 握手阶段**（能拿到具体的握手错误） |
+| `starttls` + 自签证书 | 服务端收到 `remote error: tls: unknown certificate authority` |
+| `starttls` + 用 IP 连接（证书签给域名） | 服务端收到 `remote error: tls: bad certificate` |
+| `starttls` + **域名连接 + SNI 匹配 + 公信 CA 证书** | ✅ **握手成功，CONNECT 隧道建立** |
+
+**结论：`'on'` 与 `'starttls'` 都会校验证书**（workerd 的 TLS 能力只有
+`TlsOptions = { expectedServerHostname?: string }`，**无法指定自有 CA**）。
+两者区别只在失败时机：`'on'` 在 `opened` 阶段就挂（拿不到可诊断信息），
+`'starttls'` 能进到握手阶段。所以生产实现选 `'starttls'`。
+
+#### 代码改动
+
+1. **`outbound/dial.ts`**
+   - `ConnectFn` 类型改成 `(address, options?)`；
+   - `connectWithTimeout()` 把 `secureTransport` 放进第二个参数；
+   - `startTls()` 支持传 `expectedServerHostname`（SNI + 主机名校验）；
+   - `starttls` 分支的错误信息从「连接超时」细化为「TLS 握手超时」；
+   - catch 分支关闭**升级后**的 socket（原 socket 已被 `startTls()` 关闭）。
+2. **`outbound/proxy-pool.ts`**
+   - `ProxyEndpoint` 新增 `serverName`；
+   - 解析 `https://` 条目时，域名形式的 host 自动作为 SNI；
+   - 支持 `#sni=example.com` 后缀显式指定（代理只能写 IP 时用）；
+   - IP 形式**不**推导 SNI（证书不可能签给 IP）。
+3. **`outbound/route.ts`** —— `via` 透传 `serverName`。
+4. **面板** —— HTTP 代理输入框的提示文案补充 `https://` 与 `#sni=` 用法。
+5. **测试** —— 新增 `test/proxy-sni.test.ts`（7 个用例）。
+
+#### 真机验证结果（3/3 全绿）
+
+阿里云 `47.104.173.139` 上分别跑 SOCKS5 / HTTP CONNECT / HTTPS(TLS) 三个代理，
+经真实 Pages 数据面 + 真实 VLESS 会话：
+
+```
+=========== socks5 ===========   ✅✅✅   出站成功 3/3
+=========== http  ===========   ✅✅✅   出站成功 3/3
+=========== https ===========   ✅✅✅   出站成功 3/3
+```
+
+代理端日志佐证（确实经代理，不是静默直连）：
+```
+[#11] TLS 握手完成 from 104.28.157.104:34778（SNI="exammaster.zzzjl.com"）
+[#11] CONNECT httpbin.org:80 隧道已建立
+[cfp-proxy] SOCKS5 CONNECT httpbin.org:80
+[cfp-proxy] HTTP CONNECT httpbin.org:80
+```
+
+#### ⚠️ 测试环境上踩的三个坑（都不是代码缺陷）
+
+1. **CentOS 7 的 OpenSSL 1.0.2k 不支持 TLS 1.3** ——
+   而 CF 边缘的 `startTls()` **只发 TLS 1.3 ClientHello**。
+   症状很隐蔽：Python 的 `ssl` 模块当服务端时握手**永远挂起**，
+   表现为「63 条 ESTABLISHED 连接堆积、Recv-Q 有数据但服务端不读」，
+   **不是**明确的报错。
+   → 换 Go 写的静态编译代理（`CGO_ENABLED=0 GOOS=linux go build`）才通。
+   → 以后在旧系统上验 TLS，先查 `openssl version`。
+2. **本地 workerd 拒绝连私有 IP**（`127.0.0.1` / `192.168.x`），
+   错误文案与真机的「CF 网段被拒」**完全一样**（都是
+   「proxy request failed, cannot connect to the specified address」），
+   极易误判。→ 验出站用**公网 IP** 目标或直接上真机。
+3. **Pages 部署 `_worker.js` 的 metadata 不能带 `compatibility_date`** ——
+   带了就让 Pages 忽略 `_worker.js`，表现为「部署成功、HTTP 200、返回默认 Welcome 页」。
+   正确格式只有 `{ main_module: '_worker.js', bindings: {} }`。
+   另：Pages 绑定与变量**只对之后的部署生效**，顺序必须是
+   「建项目 → PATCH 设变量 → 部署」；且 PATCH 会自动触发一次部署，
+   之后再 POST `/deployments` 就是二次部署 → 触发 `8000119`。
+
+#### 阿里云服务器清理（用户要求「不破坏网站项目」）
+
+已全部还原：
+
+| 项 | 清理前 | 清理后 |
+|----|--------|--------|
+| 测试进程（`cfp_proxy.py` / `cfptlsproxy` / `relay-39182.py`） | 3 个 | **0** |
+| 监听端口 39080-39082 / 39182 | 4 个 | **0** |
+| `/tmp/cfp-test/` 目录 | 存在 | **已删除** |
+| firewalld 临时端口放行 | `39080-39082/tcp`、`39182/tcp` | **已移除** |
+| firewalld CF 网段 rich rules | 45 条 | **0 条**（45 条全是测试期间加的） |
+| 临时 Docker 镜像（alpine:3.20） | 1 个 | **已删除** |
+
+**未受影响（已验证）**：
+- `/www/wwwroot/` 5 个站点目录完好：`edu / exammaster / exam / e / zzzjl .com`
+- 5 个站点 HTTP 全部正常：`301 / 200 / 302 / 200 / 200`
+- `exammaster.zzzjl.com` HTTPS：`200`
+- 服务状态：`nginx` / `mysqld` / `docker` 均 `active`
+- 容器全部存活：`easytier` / `easytier-web` / `watchtower` / `edumaster_api` / `edumaster_postgres`
+
+---
+
 ## 0.1–0.10 历史记录（结论已被推翻，仅供追溯）
 
 ### 0.1 真机 1101 / 522 的根因（推翻了上一任的结论）
@@ -397,6 +1241,11 @@ POST https://api.cloudflare.com/client/v4/accounts/{account_id}/workers/observab
 
 ### 0.9 数据面根因与最终方案（2026-10-22 凌晨，已实测通过）
 
+> ⚠️ **2026-10-23 更正**：本节的归因（「只要触及 `cloudflare:sockets` 就无法运行」）
+> **已被真机实验推翻**。真正原因是**出站选路必然连向 Cloudflare 自家 Anycast 地址**，
+> 而这类地址在 Worker 运行时一律被拒。详见 §0.20.1 / §0.20.2 / §0.20.3。
+> 本节其余内容（最终方案 = 改用 vendor 的 `wsHandler`）依然成立且仍在用。
+
 **现象**：CFPilot 全套代码部署到 Pages 后，面板/订阅/探针全部正常，
 但 WebSocket 入站在真机上恒定抛 `TCP Loop detected`（客户端全部 `-1`）。
 
@@ -449,11 +1298,23 @@ CFNext 的明文版（334KB）在**新建项目**上连续部署 2 次全部成�
 
 | 组件 | 内容 | 产物 | 可原地更新 |
 |------|------|------|-----------|
-| 控制面 | 面板 + 订阅 + 探针 | `dist/control.js`（46.9 KB） | ✅ 4/4 |
-| 数据面 | CFNext 明文版原文件（不二次打包） | `dist/` 外，直接用上游文件 | ✅ 3/3 |
+| 控制面 | 面板 + 订阅 + 探针 | `dist/control.js`（约 53 KB） | ✅ 4/4 |
+| 数据面 | CFNext 的 `wsHandler` + CFPilot 自己的路由 | `dist/dataplane.js`（约 245 KB） | ✅ 3/3 |
 
-- 数据面配置写入 KV 的 `config` 键（CFNext 的 schema），并设环境变量
-  `U=uuid`、`PATH=<ws 路径>`、`TROJAN=true`、`TROJAN_PASSWORD`、`L=<其面板入口>`
+> ⚠️ **本节早期版本写的是「数据面 = CFNext 明文版原文件（不二次打包），产物在 `dist/` 外」——
+> 那是实验期的临时形态，与最终实现不符。**
+> 查 `packages/worker-core/scripts/build.mjs` 的 `TARGETS` 可确认：数据面产物一直是
+> `src/entry-data.ts` → `dist/dataplane.js`，由 esbuild 打包，内含 vendor 的 `wsHandler`。
+> `packages/deploy-wizard/assets/` 目录**从未**存在过 `dataplane.js`
+> （git 全历史只有 `cfpilot-worker.js` 一个文件）。
+> 部署向导 `loadBundle('dataplane.js')` 解析到的就是 `packages/worker-core/dist/dataplane.js`。
+>
+> 详见 §0.18，其中给出了产物行为的逐条实证。
+
+- 数据面**读 KV 的大写 `CONFIG` 键**（CFPilot 自己的 `UserConfig` schema），
+  由 `src/routes/data.ts` → `loadDataPlaneConfig()` → `loadConfig()` 完成；
+  并设环境变量 `UUID` / `TROJAN_PASSWORD` / `WS_PATH`（另兼容 `PATH`）
+  / `ENABLE_TROJAN` / `ENABLE_XHTTP` 作为兜底
 - 控制面通过环境变量 `DATA_HOST` 指定节点域名（订阅里的 `sni`/`host`）
 - 两个产物共用同一个 KV
 - 实测：订阅节点全部可用（真实 VLESS 握手拿到出站 HTTP 301）
@@ -504,11 +1365,11 @@ CFPilot 是一个跑在 Cloudflare Workers 上的**代理微内核 + 真连接�
 
 | 子包 | 状态 | 说明 |
 |------|------|------|
-| `packages/worker-core` | ✅ 功能完成 | 边缘内核 + 中文面板。合并版 267 KB / 控制面 50 KB / 数据面 226 KB |
+| `packages/worker-core` | ✅ 功能完成 | 边缘内核 + 中文面板。合并版 289 KB / 控制面 53 KB / 数据面 245 KB |
 | `packages/scanner-cli` | ✅ 可用，未发布 npm | 三阶真连接扫描器 + 本地桥接服务，版本 0.2.0 |
 | `packages/deploy-wizard` | ✅ 可用，未发布 npm | 全中文部署向导（Worker 单项目 + Pages 双项目），版本 0.1.0 |
 | `packages/gui` | ✅ **已发布 v0.1.1** | Electron 图形化工具，安装版 + 便携版，无需预装 Node |
-| 单元测试 | ✅ **178 个全绿** | 19 个测试文件（协议 / 鉴权 / 订阅清洗 / CF API / Pages 部署 / 优选） |
+| 单元测试 | ✅ **315 个全绿** | 30 个测试文件（协议 / 鉴权 / 订阅清洗 / CF API / Pages 部署 / 优选 / 选路 / DoH 解析 / 反代入口 / HTTP 代理 / SOCKS5 集成 / ECH / 数据面切换 / UA 格式协商） |
 | CI | ✅ **全绿** | 类型检查 → 单测 → 构建 → 资产一致性 → GUI 构建 |
 | 真实端到端部署 | ✅ **已验证** | Pages 双项目部署 + 代理链路 + 面板 + 订阅 + 优选全部实测通过 |
 | 面板「一键优选」 | ✅ **链路已通** | GUI 与 CLI 均可完成三阶扫描并回填 |
@@ -731,12 +1592,21 @@ CFPilot/
 10. **控制面与数据面必须分开部署。** 合并包在 Pages 上第二次部署会被平台拒绝
     （`8000119`）。Cloudflare 未说明原因，**不要臆测规则、不要试图混淆规避**。
 11. **数据面必须绑 KV 变量名 `K`**，控制面绑 `KV`。两个都绑。
-    CFNext 源码读 `t.K.get("config")`，只绑 `KV` 会导致数据面读不到配置。
-12. **数据面配置要写 KV 的 `config` 键**（CFNext schema），不只是环境变量。
-    源码里 `Object.assign(默认, kvConfig)` 是整体覆盖，KV 优先于环境变量。
-13. **构建产物必须可复现。** 版本号 = `<git hash>-<源码内容哈希前8位>`，
+    （注：当前数据面产物由 `src/entry-data.ts` 构建，走 CFPilot 自己的 `loadConfig()`，
+    读的是**大写 `CONFIG` 键**；`K` 是给 vendor CFNext 风格代码留的兼容位。详见 §0.18。）
+12. **⚠️ 一个 KV 命名空间只能承载一个 CFPilot 部署实例。**
+    内核在 KV 里的键全局平铺、无实例前缀，两个实例共用会互相覆盖
+    UUID / WS 路径 / 面板密码 / 会话。部署向导必须在写入前校验归属
+    （`assertKvOwnership`），越界写入一律中止。归属只能靠清单键
+    `CFP_DEPLOY_MANIFEST` 判断，字段值不唯一、不能作为依据。
+13. **⚠️ 绝不要写 CFNext 的小写 `config` 键。**
+    vendor 侧是 `Object.assign(默认, kvConfig)` 整体覆盖，写进去会直接改坏
+    共栖的 CFNext 项目的 uuid / path / trojanPassword；
+    而 CFPilot 的数据面根本不读它（读大写 `CONFIG`），写了纯属破坏。
+    部署凭据一律写 KV 的**大写 `CONFIG`** 键。
+14. **构建产物必须可复现。** 版本号 = `<git hash>-<源码内容哈希前8位>`，
     **绝不能加时间戳**。
-14. **面板产物必须统一换行为 LF**（`gen-panel.mjs` 已做）。git 的 autocrlf 会让
+15. **面板产物必须统一换行为 LF**（`gen-panel.mjs` 已做）。git 的 autocrlf 会让
     同一份源码产出不同字节，这是历史 CI 反复失败的主因。
 
 ### 三个容易踩的「不要动」点
@@ -765,12 +1635,31 @@ CFPilot/
 ```bash
 npm install
 npm run typecheck     # 各子包 tsc --noEmit（worker-core 会先重新生成面板产物）
-npm test              # vitest run —— 19 文件 / 178 用例
+npm test              # vitest run —— 30 文件 / 315 用例
 npm run build         # 内核 + 两个 CLI + GUI 打包，并同步 assets/cfpilot-worker.js
 npm run verify        # build + typecheck + test
 npm run clean         # 清理 dist / .wrangler
 
 # 本地调试用的凭据在 packages/worker-core/.dev.vars（已被 .gitignore 排除，不要提交）
+```
+
+### 部署（多实例）
+
+```bash
+# 部署第一个实例：未指定 --kv 时自动新建一个命名空间
+npx -y cfpilot-deploy@latest pages-split --token "$TOKEN"
+
+# 更新已有实例：自动探测到唯一的实例并复用（UUID 与 WS 路径不变）
+npx -y cfpilot-deploy@latest pages-split --token "$TOKEN"
+
+# 查看账号下有哪些实例（KV、项目名、域名、部署时间）
+npx -y cfpilot-deploy@latest pages-split --token "$TOKEN" --list-kv
+
+# 部署第二个实例：新建独立 KV（一个 KV 只能承载一个实例）
+npx -y cfpilot-deploy@latest pages-split --token "$TOKEN" --new-kv
+
+# 账号下有多个实例时，必须用 --kv 明确指定
+npx -y cfpilot-deploy@latest pages-split --token "$TOKEN" --kv <namespace-id>
 ```
 
 ### 图形化工具
@@ -875,15 +1764,18 @@ git tag gui-v0.2.0 && git push origin gui-v0.2.0
 |------|------|
 | Pages `cfp-ctl-test` | 控制面，域名 `cfp-ctl-test.pages.dev`，面板路径见部署日志 |
 | Pages `cfp-dat2-umv1` | 数据面（换名后的当前版本），`cfp-dat2-umv1.pages.dev` |
-| Pages `cfnext` | 用户原有的 CFNext 项目，**不要动** |
+| Pages `cfnext` | 用户原有的 CFNext 项目，**不要动**（它用 KV 的小写 `config` 键，与 CFPilot 的键不重叠） |
 | KV `cfp-kv` | 两个项目共用，存配置 / 优选池 / 部署清单 / 凭据哈希 |
 | Worker 脚本 | 0 个（数据面走 Pages） |
 
-部署清单在 KV 的 `CFP_DEPLOY_MANIFEST` 键，是识别「同源项目」的唯一依据。
+部署清单在 KV 的 `CFP_DEPLOY_MANIFEST` 键，是识别「同源项目」与「KV 归属」的**唯一依据**。
 
 > 这些是**用户测试账号**的资源。接手后如果要重新部署，优先用
-> `npx -y cfpilot-deploy@latest pages-split`（自动识别并复用清单），
+> `npx -y cfpilot-deploy@latest pages-split`（自动探测并复用清单），
 > 不要手工建 Pages 项目，否则清单会指向旧项目。
+>
+> ⚠️ 若账号下已有多个 CFPilot 实例，`pages-split` 会要求用 `--kv <id>` 明确指定；
+> 用 `--list-kv` 可以查看账号下各实例的 KV 与项目名。
 
 ---
 

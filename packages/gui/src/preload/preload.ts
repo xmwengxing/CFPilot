@@ -8,16 +8,21 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 const api = {
   // 部署
-  runDeploy: (params: {
-    mode: 'auto' | 'fresh' | 'update'
-    force: boolean
-    newCredentials: boolean
-    controlProject: string
-    dataProject: string
-    panelPath: string
-    wsPath: string
-  }) => ipcRenderer.invoke('deploy:run', params),
-  checkDeployed: () => ipcRenderer.invoke('deploy:check'),
+  runDeploy: (
+    params: {
+      mode: 'auto' | 'fresh' | 'update'
+      force: boolean
+      forceKv: boolean
+      newCredentials: boolean
+      controlProject: string
+      dataProject: string
+      panelPath: string
+      wsPath: string
+      dataPlane: 'self' | 'vendor'
+    },
+    kvNamespaceId?: string
+  ) => ipcRenderer.invoke('deploy:run', params, kvNamespaceId),
+  checkDeployed: (kvNamespaceId?: string) => ipcRenderer.invoke('deploy:check', kvNamespaceId),
 
   // 凭据
   saveCredentials: (input: {
@@ -55,13 +60,35 @@ const api = {
       error?: string
     }>,
 
-  // 账号与 KV 自动检测
+  // 账号与 KV
   detectAccount: () =>
     ipcRenderer.invoke('account:detect') as Promise<{
       accountId: string
       accountName: string
-      kvId: string
     }>,
+
+  /** 列出账号下的 KV 候选（供用户选择归属） */
+  listKvOptions: (accountId: string) =>
+    ipcRenderer.invoke('kv:list', accountId) as Promise<{
+      options: Array<{
+        id: string
+        title: string
+        ownership: 'instance' | 'cfnext' | 'cfpilot' | 'empty'
+        controlProject?: string
+        dataProject?: string
+        at?: string
+        build?: string
+        controlSubdomain?: string
+        dataSubdomain?: string
+      }>
+    }>,
+
+  /** 新建 KV 命名空间（用于部署新的实例） */
+  createKvNamespace: (accountId: string, title?: string) =>
+    ipcRenderer.invoke('kv:create', accountId, title) as Promise<{
+      id: string
+      title: string
+    } | null>,
 
   // 应用内更新
   checkUpdate: () =>

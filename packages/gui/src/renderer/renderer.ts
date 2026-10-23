@@ -9,6 +9,16 @@
 
   function $(id: string) { return document.getElementById(id) as HTMLInputElement }
 
+  /** 取下拉框元素 */
+  function $sel(id: string): HTMLSelectElement {
+    return document.getElementById(id) as unknown as HTMLSelectElement
+  }
+
+  /** 取文本节点元素 */
+  function $text(id: string): HTMLElement {
+    return document.getElementById(id) as unknown as HTMLElement
+  }
+
   /* ---------------- 导航 ---------------- */
   function switchPage(name: string): void {
     document.querySelectorAll('#nav button').forEach((b) => {
@@ -52,6 +62,20 @@
   }
 
   /* ---------------- 凭据 ---------------- */
+
+  /** 当前账号 ID（检测后填充） */
+  let currentAccountId = ''
+  /** KV 候选列表 */
+  let kvOptions: Array<{
+    id: string
+    title: string
+    ownership: 'instance' | 'cfnext' | 'cfpilot' | 'empty'
+    controlProject?: string
+    dataProject?: string
+    at?: string
+    build?: string
+  }> = []
+
   async function refreshCredState(): Promise<void> {
     const state = await window.cfpilot.credentialsState()
     const badge = document.getElementById('tokenBadge')!
@@ -65,6 +89,85 @@
     // 令牌与密码不回显：只在输入框留 placeholder
     $('cfToken').value = ''
     $('panelPassword').value = ''
+    if (state.accountId) currentAccountId = state.accountId
+  }
+
+  /** 把 KV 选项渲染进下拉框 */
+  function renderKvOptions(selectedId?: string): void {
+    const select = $sel('kvSelect')
+    select.innerHTML = ''
+    if (kvOptions.length === 0) {
+      const opt = document.createElement('option')
+      opt.value = ''
+      opt.textContent = currentAccountId ? '（没有可用的 KV，点「新建 KV」）' : '— 请先检测账号 —'
+      select.appendChild(opt)
+      return
+    }
+    for (const item of kvOptions) {
+      const opt = document.createElement('option')
+      opt.value = item.id
+      if (item.ownership === 'instance') {
+        opt.textContent = `● ${item.title} — 实例 ${item.controlProject}/${item.dataProject}（${item.at ?? ''}）`
+      } else if (item.ownership === 'cfnext') {
+        opt.textContent = `○ ${item.title} — 疑似原版 CFNext 项目占用`
+      } else if (item.ownership === 'cfpilot') {
+        opt.textContent = `○ ${item.title} — 含 CFPilot 残留配置`
+      } else {
+        opt.textContent = `○ ${item.title} — 空命名空间`
+      }
+      select.appendChild(opt)
+    }
+    if (selectedId) select.value = selectedId
+    updateKvHint()
+  }
+
+  /** 根据当前选中的 KV 更新提示与部署页显示 */
+  function updateKvHint(): void {
+    const select = $sel('kvSelect')
+    const id = select.value
+    const item = kvOptions.find((o) => o.id === id)
+    const hint = $text('kvHint')
+    const deployKv = $text('deployKv')
+    if (!item) {
+      hint.textContent = currentAccountId
+        ? '请选择一个命名空间，或点「新建 KV」为本次部署单独建一个。'
+        : '点「刷新 KV 列表」查看账号下有哪些命名空间。'
+      deployKv.textContent = '—'
+      return
+    }
+    if (item.ownership === 'instance') {
+      hint.textContent =
+        `这是本工具部署的实例：控制面 ${item.controlProject} / 数据面 ${item.dataProject}，` +
+        `部署于 ${item.at}。选它 = 更新这个实例（UUID 与 WS 路径不变）。`
+      deployKv.textContent = `${item.title}（${item.id}）`
+    } else if (item.ownership === 'cfnext') {
+      hint.textContent =
+        '此命名空间含 CFNext 的 config 键，疑似你自己的原版 CFNext 项目在用。' +
+        '两者使用的键不重叠，可以共存，但建议为 CFPilot 单独建一个。'
+      deployKv.textContent = `${item.title}（${item.id}）`
+    } else if (item.ownership === 'cfpilot') {
+      hint.textContent =
+        '此命名空间含 CFPilot 的 CONFIG 键但没有部署清单（残留配置）。' +
+        '部署会覆盖它，除非你确实知道自己在做什么。'
+      deployKv.textContent = `${item.title}（${item.id}）`
+    } else {
+      hint.textContent = '空命名空间，可用于部署新实例。'
+      deployKv.textContent = `${item.title}（${item.id}）`
+    }
+  }
+
+  /** 拉取 KV 列表 */
+  async function loadKvOptions(): Promise<void> {
+    if (!currentAccountId) {
+      log('请先点「检测账号」', 'warn')
+      return
+    }
+    log('读取 KV 列表…')
+    const result = await window.cfpilot.listKvOptions(currentAccountId)
+    kvOptions = result.options
+    const state = await window.cfpilot.credentialsState()
+    renderKvOptions(state.kvNamespaceId || undefined)
+    log(`共 ${kvOptions.length} 个命名空间`, 'ok')
   }
 
   function bindCredentials(): void {
@@ -81,19 +184,56 @@
     })
 
     document.getElementById('btnDetect')!.addEventListener('click', async () => {
-      log('检测账号与 KV…')
+      log('检测账号…')
       const result = await window.cfpilot.detectAccount()
-      document.getElementById('detAccount')!.textContent =
+      $text('detAccount').textContent =
         result.accountName ? result.accountName + '（' + result.accountId + '）' : '—'
-      document.getElementById('detKv')!.textContent = result.kvId || '—'
+      if (result.accountId) {
+        currentAccountId = result.accountId
+        await loadKvOptions()
+      }
     })
+
+    document.getElementById('btnKvRefresh')!.addEventListener('click', async () => {
+      await loadKvOptions()
+    })
+
+    document.getElementById('btnKvNew')!.addEventListener('click', async () => {
+      if (!currentAccountId) { log('请先点「检测账号」', 'warn'); return }
+      const created = await window.cfpilot.createKvNamespace(currentAccountId)
+      if (!created) return
+      log(`已创建 KV：${created.title}`, 'ok')
+      await loadKvOptions()
+      const select = $sel('kvSelect')
+      select.value = created.id
+      updateKvHint()
+      log('已为新实例选中新建的 KV，可直接部署', 'ok')
+    })
+
+    document.getElementById('btnKvManual')!.addEventListener('click', async () => {
+      const id = $('kvManual').value.trim()
+      if (!id) { log('请先填写 KV 命名空间 ID', 'warn'); return }
+      await window.cfpilot.saveCredentials({ kvNamespaceId: id })
+      log(`已保存 KV ID：${id}`, 'ok')
+      await loadKvOptions()
+    })
+
+    document.getElementById('btnKvSave')!.addEventListener('click', async () => {
+      const id = $sel('kvSelect').value
+      if (!id) { log('请先选择一个 KV 命名空间', 'warn'); return }
+      await window.cfpilot.saveCredentials({ kvNamespaceId: id })
+      log('已保存本次选择的 KV', 'ok')
+    })
+
+    $('kvSelect').addEventListener('change', () => { updateKvHint() })
 
     document.getElementById('btnWipe')!.addEventListener('click', async () => {
       if (!confirm('确定清除本机保存的 API Token 与面板密码？')) return
       await window.cfpilot.wipeCredentials()
       log('已清除本机凭据', 'ok')
-      document.getElementById('detAccount')!.textContent = '—'
-      document.getElementById('detKv')!.textContent = '—'
+      $text('detAccount').textContent = '—'
+      kvOptions = []
+      renderKvOptions()
       await refreshCredState()
     })
 
@@ -120,7 +260,16 @@
    * 必须用 removeAttribute 或直接操作 .disabled 属性。
    */
   function setBusy(busy: boolean): void {
-    for (const id of ['btnDeploy', 'btnCheck', 'btnScan', 'btnDetect']) {
+    for (const id of [
+      'btnDeploy',
+      'btnCheck',
+      'btnScan',
+      'btnDetect',
+      'btnKvRefresh',
+      'btnKvNew',
+      'btnKvSave',
+      'btnKvManual',
+    ]) {
       const el = document.getElementById(id) as HTMLButtonElement | null
       if (el) el.disabled = busy
     }
@@ -128,18 +277,34 @@
 
   function bindDeploy(): void {
     document.getElementById('btnDeploy')!.addEventListener('click', async () => {
+      // 用下拉框当前选中的 KV；没有选中则回落到本机保存的值
+      const select = $sel('kvSelect')
+      const kvId = select.value
+      if (!kvId) {
+        log('请先在「Cloudflare 凭据」页选择 KV 命名空间（可点「新建 KV」）', 'warn')
+        return
+      }
       setBusy(true)
       log('── 开始部署 ──')
       try {
-        const result = await window.cfpilot.runDeploy({
-          mode: readMode(),
-          force: $('optForce').checked,
-          newCredentials: $('optNewCred').checked,
-          controlProject: $('controlProject').value.trim(),
-          dataProject: $('dataProject').value.trim(),
-          panelPath: $('panelPath').value.trim(),
-          wsPath: $('wsPath').value.trim(),
-        })
+        const result = await window.cfpilot.runDeploy(
+          {
+            mode: readMode(),
+            force: $('optForce').checked,
+            forceKv: $('optForceKv').checked,
+            newCredentials: $('optNewCred').checked,
+            controlProject: $('controlProject').value.trim(),
+            dataProject: $('dataProject').value.trim(),
+            panelPath: $('panelPath').value.trim(),
+            wsPath: $('wsPath').value.trim(),
+            // 数据面实现：self（默认）/ vendor
+            dataPlane:
+              (document.getElementById('dataPlane') as HTMLSelectElement | null)?.value === 'vendor'
+                ? 'vendor'
+                : 'self',
+          },
+          kvId
+        )
         const status = document.getElementById('deployStatus')!
         status.textContent = result.ok ? '✅ 部署完成' : '❌ 部署失败：' + (result.error ?? '')
       } catch (err) {
@@ -152,7 +317,8 @@
 
     document.getElementById('btnCheck')!.addEventListener('click', async () => {
       log('检查线上部署状态…')
-      await window.cfpilot.checkDeployed()
+      const select = $sel('kvSelect')
+      await window.cfpilot.checkDeployed(select.value || undefined)
     })
   }
 
@@ -385,6 +551,7 @@
     bindUpdater()
     bindPush()
     await refreshCredState()
+    renderKvOptions()
     log('CFPilot GUI 已就绪')
     log('凭据只保存在本机，不会上传')
   })

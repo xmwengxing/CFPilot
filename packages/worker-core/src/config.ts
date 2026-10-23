@@ -40,12 +40,19 @@ export const DEFAULT_CONFIG: UserConfig = {
   httpProxy: '',
   nat64: '',
   concurrentDial: true,
+  resolvePreferred: true,
+  relayPool: '',
+  useBuiltinRelay: true,
   enableTrojan: true,
   enableXhttp: true,
   subDomain: '',
   subProtocol: 'vless',
   subTransport: 'ws',
+  subVariants: 'vless-ws',
   clientFingerprint: 'chrome',
+  ech: false,
+  echHost: 'cloudflare-ech.com',
+  echDns: '',
   tlsFragment: false,
   tlsFragmentSize: '10-20',
   tlsFragmentDelay: '10-20',
@@ -78,8 +85,10 @@ function text(value: unknown, fallback: string): string {
 export function configFromEnv(env: Env): UserConfig {
   return {
     uuid: text(env.UUID, ''),
-    trojanPassword: '',
-    wsPath: DEFAULT_CONFIG.wsPath,
+    trojanPassword: text(env.TROJAN_PASSWORD, ''),
+    // WS 路径：PATH 是 CFNext 的历史命名，WS_PATH 是本项目的命名。
+    // 两者都读，避免部署向导注入的 PATH 被静默忽略。
+    wsPath: text(env.WS_PATH || env.PATH, DEFAULT_CONFIG.wsPath),
     trojanPath: DEFAULT_CONFIG.trojanPath,
     xhttpPath: DEFAULT_CONFIG.xhttpPath,
     add: text(env.ADD, ''),
@@ -99,12 +108,19 @@ export function configFromEnv(env: Env): UserConfig {
     httpProxy: text(env.HTTP_PROXY, ''),
     nat64: text(env.NAT64, ''),
     concurrentDial: bool(env.TCP_CONCURRENT_DIAL, true),
-    enableTrojan: true,
-    enableXhttp: true,
+    resolvePreferred: bool(env.RESOLVE_PREFERRED, DEFAULT_CONFIG.resolvePreferred),
+    relayPool: text(env.RELAY_POOL, ''),
+    useBuiltinRelay: bool(env.USE_BUILTIN_RELAY, DEFAULT_CONFIG.useBuiltinRelay),
+    enableTrojan: bool(env.ENABLE_TROJAN ?? env.TROJAN, DEFAULT_CONFIG.enableTrojan),
+    enableXhttp: bool(env.ENABLE_XHTTP ?? env.XHTTP, DEFAULT_CONFIG.enableXhttp),
     subDomain: '',
     subProtocol: 'both',
     subTransport: 'both',
+    subVariants: text(env.SUB_VARIANTS, DEFAULT_CONFIG.subVariants),
     clientFingerprint: DEFAULT_CONFIG.clientFingerprint,
+    ech: bool(env.ECH, DEFAULT_CONFIG.ech),
+    echHost: text(env.ECH_HOST, DEFAULT_CONFIG.echHost),
+    echDns: text(env.ECH_DNS, DEFAULT_CONFIG.echDns),
     tlsFragment: false,
     tlsFragmentSize: DEFAULT_CONFIG.tlsFragmentSize,
     tlsFragmentDelay: DEFAULT_CONFIG.tlsFragmentDelay,
@@ -120,9 +136,12 @@ export function mergeConfig(base: UserConfig, override: Partial<UserConfig>): Us
       ;(merged as unknown as Record<string, number>)[key] = num(value, 0)
     } else if (
       key === 'concurrentDial' ||
+      key === 'resolvePreferred' ||
+      key === 'useBuiltinRelay' ||
       key === 'enableTrojan' ||
       key === 'enableXhttp' ||
       key === 'tlsFragment' ||
+      key === 'ech' ||
       key === 'poolOfficial' ||
       key === 'poolDomain' ||
       key === 'poolManual'

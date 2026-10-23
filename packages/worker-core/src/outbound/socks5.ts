@@ -7,6 +7,35 @@ import { isIpv4, isIpv6 } from '../protocols/address'
 export interface Socks5Options {
   username?: string
   password?: string
+  /** 握手超时（ms），默认 6000 */
+  handshakeTimeoutMs?: number
+}
+
+/** 默认握手超时（ms） */
+const DEFAULT_HANDSHAKE_TIMEOUT_MS = 6000
+
+/**
+ * 带超时的精确读取。
+ *
+ * ⚠️ **必须有超时**：代理连上但不回应协议（真机实测：把不支持 SOCKS5 的
+ * 服务器配成 SOCKS5 代理），无超时的读会**永远挂起** ——
+ * 客户端拿到协议响应头后一直收不到数据、也不报错（静默挂起 60s+）。
+ */
+async function readWithTimeout(
+  stream: ByteStream,
+  n: number,
+  timeoutMs: number,
+  label: string
+): Promise<Uint8Array | null> {
+  const deadline = Date.now() + timeoutMs
+  const result = await Promise.race([
+    stream.readExactly(n),
+    new Promise<null>((r) => setTimeout(() => r(null), Math.max(1, deadline - Date.now()))),
+  ])
+  if (result === null) {
+    throw new Error(`${label}超时（${timeoutMs}ms 无响应）`)
+  }
+  return result
 }
 
 /**
@@ -22,6 +51,7 @@ export async function socks5Connect(
 ): Promise<ReadableStream<Uint8Array>> {
   const stream = new ByteStream(readable)
   const writer = writable.getWriter()
+  const timeoutMs = options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS
 
   const send = async (bytes: Uint8Array): Promise<void> => {
     await writer.write(bytes)
@@ -36,7 +66,7 @@ export async function socks5Connect(
     greeting.set(methods, 2)
     await send(greeting)
 
-    const methodReply = await stream.readExactly(2)
+    const methodReply = await readWithTimeout(stream, 2, timeoutMs, 'SOCKS5 握手')
     if (!methodReply || methodReply[0] !== 0x05) throw new Error('SOCKS5 握手失败：非法响应')
     const method = methodReply[1]!
 
@@ -50,7 +80,7 @@ export async function socks5Connect(
       auth[2 + user.length] = pass.length
       auth.set(pass, 3 + user.length)
       await send(auth)
-      const authReply = await stream.readExactly(2)
+      const authReply = await readWithTimeout(stream, 2, timeoutMs, 'SOCKS5 认证')
       if (!authReply || authReply[1] !== 0x00) throw new Error('SOCKS5 用户名/密码认证失败')
     } else if (method !== 0x00) {
       throw new Error(`SOCKS5 不支持的认证方式：0x${method.toString(16)}`)
@@ -64,20 +94,20 @@ export async function socks5Connect(
     request.set(address, 3)
     await send(request)
 
-    const reply = await stream.readExactly(4)
+    const reply = await readWithTimeout(stream, 4, timeoutMs, 'SOCKS5 CONNECT')
     if (!reply || reply[0] !== 0x05) throw new Error('SOCKS5 CONNECT 响应非法')
     if (reply[1] !== 0x00) throw new Error(`SOCKS5 CONNECT 失败：0x${reply[1]!.toString(16)}`)
 
     // 读取绑定地址（长度取决于地址类型）
     const atyp = reply[3]!
-    if (atyp === 0x01) await stream.readExactly(4)
+    if (atyp === 0x01) await readWithTimeout(stream, 4, timeoutMs, 'SOCKS5 响应')
     else if (atyp === 0x03) {
-      const lenByte = await stream.readExactly(1)
+      const lenByte = await readWithTimeout(stream, 1, timeoutMs, 'SOCKS5 响应')
       if (!lenByte) throw new Error('SOCKS5 响应截断')
-      await stream.readExactly(lenByte[0]!)
+      await readWithTimeout(stream, lenByte[0]!, timeoutMs, 'SOCKS5 响应')
     } else if (atyp === 0x04) await stream.readExactly(16)
     else throw new Error('SOCKS5 响应地址类型非法')
-    await stream.readExactly(2) // 端口
+    await readWithTimeout(stream, 2, timeoutMs, 'SOCKS5 响应') // 端口
 
     return stream.release()
   } finally {

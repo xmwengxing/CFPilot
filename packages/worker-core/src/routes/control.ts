@@ -14,13 +14,48 @@ import { collectNodes, renderSubscription } from '../sub-engine'
 import { handleEdgeProbe } from '../probe'
 import { getPanelHtml } from '../ui/panel'
 import { jsonError } from '../ui/neutral'
-import { getStore, getConfig, getAuth, invalidateConfig, resolveFormat } from './shared'
+import { getStore, getConfig, getAuth, invalidateConfig, resolveFormat, resolveFormatByUserAgent } from './shared'
 
 type ApiModule = typeof import('../api')
 let apiModule: ApiModule | null = null
 async function loadApi(): Promise<ApiModule> {
   if (!apiModule) apiModule = await import('../api')
   return apiModule
+}
+
+/**
+ * 把「节点域名」配置规范化成裸域名。
+ *
+ * ## 为什么需要（2026-10-23 真机踩坑）
+ *
+ * `DATA_HOST` / `subDomain` 的值会被**原样**用作订阅节点里的
+ * `sni` / `host` / `servername` / Clash `Host` 头。
+ * 用户在面板里很容易顺手填成完整 URL（`https://xxx.pages.dev/`），
+ * 于是 SNI 变成 `https://xxx.pages.dev/` —— TLS 握手必败，
+ * 且**没有任何报错**（客户端只表现为「全部节点连不上」）。
+ *
+ * 部署向导写的一直是裸域名（`result.data.subdomain`），
+ * 所以这个坑只在**用户手改**时出现；这里兜底，防再犯。
+ */
+export function normalizeNodeDomain(value: string): string {
+  let text = String(value ?? '').trim()
+  if (!text) return text
+  // 去掉 scheme（http:// / https://，大小写不敏感）
+  text = text.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, '')
+  // 去掉路径 / query / hash（第一个 / ? # 起都不要）
+  text = text.replace(/[/?#].*$/, '')
+  // 去掉用户信息（user@host 形式不会出现，防御而已）
+  const at = text.lastIndexOf('@')
+  if (at >= 0) text = text.slice(at + 1)
+  // 去掉端口（host:port → host；IPv6 [addr]:port → addr）
+  if (text.startsWith('[')) {
+    const end = text.indexOf(']')
+    if (end > 0) text = text.slice(1, end)
+  } else {
+    const first = text.indexOf(':')
+    if (first >= 0 && text.indexOf(':', first + 1) < 0) text = text.slice(0, first)
+  }
+  return text.trim()
 }
 
 /** 订阅输出 */
@@ -40,12 +75,20 @@ async function handleSubscription(
     return jsonError('订阅令牌无效', 403)
   }
 
-  const format: SubFormat = resolveFormat(url.searchParams.get('target') ?? url.searchParams.get('format'))
+  // 格式判定优先级：URL 显式参数 > User-Agent > 默认 base64。
+  //
+  // 客户端导入订阅时只给 URL、不加 `?target=clash`，
+  // 而是靠 User-Agent 表明身份（Clash Verge 发 `clash-verge/…`）。
+  // 只认 URL 参数的话，Clash Verge 拿到的是 base64 文本，按 YAML 解析必然失败。
+  const explicit = url.searchParams.get('target') ?? url.searchParams.get('format')
+  const format = explicit
+    ? resolveFormat(explicit)
+    : (resolveFormatByUserAgent(request.headers.get('User-Agent')) ?? resolveFormat(null))
   const localIps = (await store.get(LOCAL_IPS_KEY)) ?? ''
   const collected = await collectNodes(config, localIps)
 
   // 拆分部署时控制面域名 ≠ 数据面域名，必须用 subDomain（或 DATA_HOST）指定节点地址
-  const domain = config.subDomain || env.DATA_HOST || url.hostname
+  const domain = normalizeNodeDomain(config.subDomain || env.DATA_HOST || url.hostname)
   const ctx: RenderContext = {
     nodes: collected.nodes,
     groups: collected.groups,

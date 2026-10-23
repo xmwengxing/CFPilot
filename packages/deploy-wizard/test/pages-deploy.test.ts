@@ -20,38 +20,160 @@ describe('内核产物路径解析', () => {
   })
 })
 
-describe('KV 配置冲突检测', () => {
-  it('KV 为空时提示凭据会生效', async () => {
+/**
+ * KV 归属校验。
+ *
+ * 一个 KV 命名空间 = 一个 CFPilot 部署实例。
+ * 往不属于自己的命名空间里写键会直接改坏别人的线上项目，
+ * 因此越界写入必须在动手前被拦住。
+ */
+describe('KV 归属校验', () => {
+  const notFound = { status: 404, body: { success: false, errors: [{ code: 10009, message: 'not found' }] } }
+
+  /** 构造一个只对指定键返回内容的 mock */
+  function kvWith(keys: Record<string, string>) {
+    return (req: { url: string }) => {
+      const key = decodeURIComponent(req.url.split('/values/')[1] ?? '')
+      const value = keys[key]
+      if (value !== undefined) {
+        return { status: 200, body: value, contentType: 'text/plain' }
+      }
+      return notFound
+    }
+  }
+
+  it('空命名空间放行', async () => {
     const logs: string[] = []
     await withMockServer(
-      () => ({ status: 404, body: { success: false, errors: [{ code: 10009, message: 'not found' }] } }),
+      kvWith({}),
       async (base) => {
-        const { detectKvConfigConflictForTest } = await import('../src/pages-deploy')
-        await detectKvConfigConflictForTest(base, logs.push.bind(logs))
+        const { assertKvOwnership } = await import('../src/pages-deploy')
+        const { CloudflareClient } = await import('../src/cf-api')
+        const client = new CloudflareClient({ token: 't', apiBase: base })
+        const info = await assertKvOwnership(client, 'acc', 'ns', {
+          controlProject: 'ctl',
+          mode: 'auto',
+          log: logs.push.bind(logs),
+        })
+        expect(info.verdict).toBe('empty')
       }
     )
-    expect(logs.join('\n')).toContain('KV 是空的')
+    expect(logs.join('\n')).toContain('归属校验通过')
   })
 
-  it('KV 已有 PANEL_PATH 时提示环境变量不生效', async () => {
-    const logs: string[] = []
+  it('清单属于本次目标时放行（原地更新）', async () => {
+    const manifest = JSON.stringify({
+      v: 1,
+      controlProject: 'ctl',
+      dataProject: 'dat',
+      controlSubdomain: 'a.pages.dev',
+      dataSubdomain: 'b.pages.dev',
+      build: 'x',
+      at: '2026-10-22T00:00:00.000Z',
+      credentials: { panelPath: '/p', panelPassword: 'pw', uuid: 'u', trojanPassword: 't', wsPath: '/w' },
+    })
     await withMockServer(
-      (req) => {
-        const key = req.url.split('/values/')[1] ?? ''
-        if (key === 'PANEL_PATH') {
-          return { status: 200, body: '/p-existing', contentType: 'text/plain' }
-        }
-        return { status: 404, body: { success: false, errors: [{ code: 10009, message: 'not found' }] } }
-      },
+      kvWith({ CFP_DEPLOY_MANIFEST: manifest }),
       async (base) => {
-        const { detectKvConfigConflictForTest } = await import('../src/pages-deploy')
-        await detectKvConfigConflictForTest(base, logs.push.bind(logs))
+        const { assertKvOwnership } = await import('../src/pages-deploy')
+        const { CloudflareClient } = await import('../src/cf-api')
+        const client = new CloudflareClient({ token: 't', apiBase: base })
+        const info = await assertKvOwnership(client, 'acc', 'ns', {
+          controlProject: 'ctl',
+          mode: 'update',
+          log: () => {},
+        })
+        expect(info.verdict).toBe('owned')
       }
     )
-    const text = logs.join('\n')
-    expect(text).toContain('PANEL_PATH')
-    expect(text).toContain('不会生效')
-    expect(text).toContain('/p-existing')
+  })
+
+  it('清单属于另一个实例时中止', async () => {
+    const manifest = JSON.stringify({
+      v: 1,
+      controlProject: 'other-ctl',
+      dataProject: 'other-dat',
+      controlSubdomain: 'a.pages.dev',
+      dataSubdomain: 'b.pages.dev',
+      build: 'x',
+      at: '2026-10-22T00:00:00.000Z',
+      credentials: { panelPath: '/p', panelPassword: 'pw', uuid: 'u', trojanPassword: 't', wsPath: '/w' },
+    })
+    await withMockServer(
+      kvWith({ CFP_DEPLOY_MANIFEST: manifest }),
+      async (base) => {
+        const { assertKvOwnership } = await import('../src/pages-deploy')
+        const { CloudflareClient } = await import('../src/cf-api')
+        const client = new CloudflareClient({ token: 't', apiBase: base })
+        await expect(
+          assertKvOwnership(client, 'acc', 'ns', { controlProject: 'ctl', mode: 'auto', log: () => {} })
+        ).rejects.toThrow(/另一个 CFPilot 实例/)
+      }
+    )
+  })
+
+  it('force 时允许覆盖他人实例', async () => {
+    const manifest = JSON.stringify({
+      v: 1,
+      controlProject: 'other-ctl',
+      dataProject: 'other-dat',
+      controlSubdomain: 'a.pages.dev',
+      dataSubdomain: 'b.pages.dev',
+      build: 'x',
+      at: '2026-10-22T00:00:00.000Z',
+      credentials: { panelPath: '/p', panelPassword: 'pw', uuid: 'u', trojanPassword: 't', wsPath: '/w' },
+    })
+    const logs: string[] = []
+    await withMockServer(
+      kvWith({ CFP_DEPLOY_MANIFEST: manifest }),
+      async (base) => {
+        const { assertKvOwnership } = await import('../src/pages-deploy')
+        const { CloudflareClient } = await import('../src/cf-api')
+        const client = new CloudflareClient({ token: 't', apiBase: base })
+        const info = await assertKvOwnership(client, 'acc', 'ns', {
+          controlProject: 'ctl',
+          mode: 'auto',
+          force: true,
+          log: logs.push.bind(logs),
+        })
+        expect(info.verdict).toBe('occupied')
+      }
+    )
+    expect(logs.join('\n')).toContain('强制覆盖')
+  })
+
+  it('含 CFNext config 键时只提醒不阻断（两者键不重叠，可共存）', async () => {
+    const logs: string[] = []
+    await withMockServer(
+      kvWith({ config: '{"uuid":"x"}' }),
+      async (base) => {
+        const { assertKvOwnership } = await import('../src/pages-deploy')
+        const { CloudflareClient } = await import('../src/cf-api')
+        const client = new CloudflareClient({ token: 't', apiBase: base })
+        const info = await assertKvOwnership(client, 'acc', 'ns', {
+          controlProject: 'ctl',
+          mode: 'auto',
+          log: logs.push.bind(logs),
+        })
+        expect(info.verdict).toBe('foreign')
+        expect(info.blocking).toBe(false)
+      }
+    )
+    expect(logs.join('\n')).toContain('CFNext')
+  })
+
+  it('含残留 CONFIG 但无清单时中止', async () => {
+    await withMockServer(
+      kvWith({ CONFIG: '{"uuid":"x"}' }),
+      async (base) => {
+        const { assertKvOwnership } = await import('../src/pages-deploy')
+        const { CloudflareClient } = await import('../src/cf-api')
+        const client = new CloudflareClient({ token: 't', apiBase: base })
+        await expect(
+          assertKvOwnership(client, 'acc', 'ns', { controlProject: 'ctl', mode: 'auto', log: () => {} })
+        ).rejects.toThrow(/残留配置/)
+      }
+    )
   })
 })
 
@@ -129,7 +251,7 @@ describe('部署参数校验', () => {
   })
 })
 
-describe('数据面 KV config 同步', () => {
+describe('部署凭据写入 KV 的 CONFIG 键', () => {
   const baseOptions = {
     token: 't',
     accountId: 'acc',
@@ -145,41 +267,36 @@ describe('数据面 KV config 同步', () => {
     enableXhttp: false,
   }
 
-  it('把 uuid / path / trojanPassword 写进 KV 的 config 键', async () => {
-    const written = new Map()
-    await withMockServer(
-      (req) => {
-        const url = req.url
-        // KV 读：旧 config
-        if (req.method === 'GET' && url.includes('/values/config')) {
-          return {
-            status: 200,
-            body: JSON.stringify({
-              uuid: 'old-uuid', path: 'oldpath', admin: 'keep-admin',
-              proxyIP: 'keep.proxyip.example', tlsOnly: true,
-            }),
-            contentType: 'text/plain',
-          }
-        }
-        // KV 写
-        if (req.method === 'PUT' && url.includes('/values/')) {
-          const key = url.split('/values/')[1] ?? ''
-          written.set(key, req.body)
-          return { status: 200, body: 'ok', contentType: 'text/plain' }
-        }
-        if (req.method === 'POST' && url.endsWith('/pages/projects')) {
-          const name = JSON.parse(req.body).name
-          return { status: 200, body: { success: true, result: { id: name, name, subdomain: `${name}.pages.dev` } } }
-        }
-        if (req.method === 'PATCH') return { status: 200, body: { success: true, result: {} } }
-        if (req.method === 'GET' && url.includes('/values/')) {
+  /** 只放行 GET（读 KV）与 PUT（写 KV），其余一律 404 */
+  function kvMock(written: Map<string, string>, existing?: Record<string, string>) {
+    return (req: CapturedRequest) => {
+      const url = req.url
+      if (req.method === 'GET' && url.includes('/values/')) {
+        const key = decodeURIComponent(url.split('/values/')[1] ?? '')
+        const value = existing?.[key]
+        if (value === undefined) {
           return { status: 404, body: { success: false, errors: [{ code: 1, message: 'not found' }] } }
         }
-        if (req.method === 'PUT' && url.includes('/values/')) {
-          return { status: 200, body: 'ok', contentType: 'text/plain' }
-        }
-        return { status: 404, body: { success: false, errors: [{ code: 1, message: 'x' }] } }
-      },
+        return { status: 200, body: value, contentType: 'text/plain' }
+      }
+      if (req.method === 'PUT' && url.includes('/values/')) {
+        const key = decodeURIComponent(url.split('/values/')[1] ?? '')
+        written.set(key, req.body)
+        return { status: 200, body: 'ok', contentType: 'text/plain' }
+      }
+      if (req.method === 'POST' && url.endsWith('/pages/projects')) {
+        const name = JSON.parse(req.body).name
+        return { status: 200, body: { success: true, result: { id: name, name, subdomain: `${name}.pages.dev` } } }
+      }
+      if (req.method === 'PATCH') return { status: 200, body: { success: true, result: {} } }
+      return { status: 404, body: { success: false, errors: [{ code: 1, message: 'x' }] } }
+    }
+  }
+
+  it('把 uuid / wsPath / trojanPassword 写进大写 CONFIG 键', async () => {
+    const written = new Map<string, string>()
+    await withMockServer(
+      kvMock(written),
       async (base) => {
         const { deployPagesSplit } = await import('../src/pages-deploy')
         await deployPagesSplit({
@@ -189,90 +306,99 @@ describe('数据面 KV config 同步', () => {
           wait: { timeoutMs: 500, intervalMs: 10 },
           log: () => {},
         })
-        expect(written.size).toBeGreaterThan(0)
-        expect(written.has('config')).toBe(true)
-        const cfg = JSON.parse(written.get("config")!)
-        // 本次凭据必须写进去
-        expect(cfg.uuid).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
-        expect(cfg.path).toBe('newpath123')
-        expect(cfg.trojanPassword).toBe('tp-new')
-        // 用户手动配的字段必须保留
-        expect(cfg.admin).toBe('keep-admin')
-        expect(cfg.proxyIP).toBe('keep.proxyip.example')
-        expect(cfg.tlsOnly).toBe(true)
-        // Object.assign 整体覆盖，缺字段会变 undefined：必须写全
-        for (const field of ['adminInit', 'login', 'host', 'enableVless', 'enableTrojan', 'enableXhttp', 'outboundProxy', 'outboundMode']) {
-          expect(cfg[field], `字段 ${field} 不应为 undefined`).not.toBeUndefined()
-        }
       }
     )
+    // 内核读的是大写 CONFIG
+    expect(written.has('CONFIG')).toBe(true)
+    const cfg = JSON.parse(written.get('CONFIG')!)
+    expect(cfg.uuid).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
+    expect(cfg.wsPath).toBe('/newpath123')
+    expect(cfg.trojanPassword).toBe('tp-new')
+    expect(cfg.enableTrojan).toBe(true)
+    expect(cfg.enableXhttp).toBe(false)
   })
 
-  it('WS 路径去掉前导斜杠后再写入', async () => {
-    const written = new Map()
+  it('绝不写 CFNext 的小写 config 键（否则会整体覆盖原版 CFNext 项目的配置）', async () => {
+    const written = new Map<string, string>()
     await withMockServer(
-      (req) => {
-        const url = req.url
-        if (req.method === 'GET' && url.includes('/values/config')) {
-          return { status: 404, body: { success: false, errors: [{ code: 1, message: 'x' }] } }
-        }
-        if (req.method === 'PUT' && url.includes('/values/')) {
-          const key = url.split('/values/')[1] ?? ''
-          written.set(key, req.body)
-          return { status: 200, body: 'ok', contentType: 'text/plain' }
-        }
-        if (req.method === 'POST' && url.endsWith('/pages/projects')) {
-          const name = JSON.parse(req.body).name
-          return { status: 200, body: { success: true, result: { id: name, name, subdomain: `${name}.pages.dev` } } }
-        }
-        if (req.method === 'PATCH') return { status: 200, body: { success: true, result: {} } }
-        if (req.method === 'GET' && url.includes('/values/')) {
-          return { status: 404, body: { success: false, errors: [{ code: 1, message: 'not found' }] } }
-        }
-        if (req.method === 'PUT' && url.includes('/values/')) {
-          return { status: 200, body: 'ok', contentType: 'text/plain' }
-        }
-        return { status: 404, body: { success: false, errors: [{ code: 1, message: 'x' }] } }
-      },
+      kvMock(written),
       async (base) => {
         const { deployPagesSplit } = await import('../src/pages-deploy')
         await deployPagesSplit({
           ...baseOptions,
-          wsPath: '/stripme',
           apiBase: base,
           bundles: { control: 'x', data: 'x' },
           wait: { timeoutMs: 500, intervalMs: 10 },
           log: () => {},
         })
-        expect(JSON.parse(written.get('config')!).path).toBe('stripme')
       }
     )
+    expect(written.has('config')).toBe(false)
+  })
+
+  it('保留用户在面板里改过的优选池等设置', async () => {
+    const written = new Map<string, string>()
+    // 带清单 → 归属为 owned（同一实例的原地更新），因此允许继续
+    const manifest = JSON.stringify({
+      v: 1,
+      controlProject: 'ctl',
+      dataProject: 'dat',
+      controlSubdomain: 'ctl.pages.dev',
+      dataSubdomain: 'dat.pages.dev',
+      build: 'build-000',
+      at: '2026-10-22T00:00:00.000Z',
+      credentials: { panelPath: '/p', panelPassword: 'pw', uuid: 'u', trojanPassword: 't', wsPath: '/w' },
+    })
+    await withMockServer(
+      kvMock(written, {
+        CFP_DEPLOY_MANIFEST: manifest,
+        CONFIG: JSON.stringify({
+          uuid: 'old-uuid',
+          add: 'https://keep.example/pool.txt',
+          proxyIp: 'keep.proxyip.example',
+          subDomain: 'keep.example.com',
+          officialCount: 30,
+        }),
+      }),
+      async (base) => {
+        const { deployPagesSplit } = await import('../src/pages-deploy')
+        await deployPagesSplit({
+          ...baseOptions,
+          apiBase: base,
+          bundles: { control: 'x', data: 'x' },
+          wait: { timeoutMs: 500, intervalMs: 10 },
+          log: () => {},
+        })
+      }
+    )
+    const cfg = JSON.parse(written.get('CONFIG')!)
+    // 本次凭据覆盖
+    expect(cfg.uuid).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
+    // 用户设置保留
+    expect(cfg.add).toBe('https://keep.example/pool.txt')
+    expect(cfg.proxyIp).toBe('keep.proxyip.example')
+    expect(cfg.subDomain).toBe('keep.example.com')
+    expect(cfg.officialCount).toBe(30)
   })
 
   it('KV 写入失败时记入 warnings 且不抛出', async () => {
     await withMockServer(
-      (req) => {
+      (req: CapturedRequest) => {
         const url = req.url
-        if (req.method === 'GET' && url.includes('/values/config')) {
-          return { status: 404, body: { success: false, errors: [{ code: 1, message: 'x' }] } }
-        }
-        if (req.method === 'PUT' && url.includes('/values/config')) {
+        if (req.method === 'PUT' && url.includes('/values/CONFIG')) {
           return {
             status: 403,
             body: { success: false, errors: [{ code: 10000, message: 'Authentication error' }] },
           }
         }
+        if (req.method === 'GET' && url.includes('/values/')) {
+          return { status: 404, body: { success: false, errors: [{ code: 1, message: 'not found' }] } }
+        }
         if (req.method === 'POST' && url.endsWith('/pages/projects')) {
           const name = JSON.parse(req.body).name
           return { status: 200, body: { success: true, result: { id: name, name, subdomain: `${name}.pages.dev` } } }
         }
         if (req.method === 'PATCH') return { status: 200, body: { success: true, result: {} } }
-        if (req.method === 'GET' && url.includes('/values/')) {
-          return { status: 404, body: { success: false, errors: [{ code: 1, message: 'not found' }] } }
-        }
-        if (req.method === 'PUT' && url.includes('/values/')) {
-          return { status: 200, body: 'ok', contentType: 'text/plain' }
-        }
         return { status: 404, body: { success: false, errors: [{ code: 1, message: 'x' }] } }
       },
       async (base) => {
@@ -284,7 +410,7 @@ describe('数据面 KV config 同步', () => {
           wait: { timeoutMs: 500, intervalMs: 10 },
           log: () => {},
         })
-        expect(result.warnings.some((w) => w.includes('KV 配置同步失败'))).toBe(true)
+        expect(result.warnings.some((w) => w.includes('KV 凭据写入失败'))).toBe(true)
       }
     )
   })
@@ -436,14 +562,35 @@ describe('部署清单与更新模式', () => {
         log: () => {},
       })
       expect(mock.deploys.sort()).toEqual(['ctl-old', 'dat-old'])
-      const cfg = JSON.parse(mock.kv.get('config'))
+      // 凭据写入大写 CONFIG 键（内核读的就是这个）
+      const cfg = JSON.parse(mock.kv.get('CONFIG')!)
       expect(cfg.uuid).toBe('99999999-8888-7777-6666-555555555555')
-      expect(cfg.path).toBe('oldpath12')
+      expect(cfg.wsPath).toBe('/oldpath12')
     })
   })
 
-  it('fresh 模式忽略清单，使用新项目名与新凭据', async () => {
+  it('fresh 模式在属于别人的 KV 上会被拒绝（一个 KV 只能承载一个实例）', async () => {
     const mock = fullMock({ existingManifest: oldManifest })
+    await withMockServer(mock.handler, async (base) => {
+      const { deployPagesSplit } = await import('../src/pages-deploy')
+      await expect(
+        deployPagesSplit({
+          ...baseOptions,
+          mode: 'fresh',
+          apiBase: base,
+          bundles: { control: 'x', data: 'x' },
+          wait: { timeoutMs: 500, intervalMs: 10 },
+          log: () => {},
+        })
+      ).rejects.toThrow(/另一个 CFPilot 实例/)
+    })
+    // 拒绝必须发生在任何写入与部署之前
+    expect(mock.deploys).toEqual([])
+    expect(mock.kv.get('CONFIG')).toBeUndefined()
+  })
+
+  it('fresh 模式在空 KV 上正常部署，使用新凭据', async () => {
+    const mock = fullMock()
     await withMockServer(mock.handler, async (base) => {
       const { deployPagesSplit } = await import('../src/pages-deploy')
       await deployPagesSplit({
@@ -455,9 +602,85 @@ describe('部署清单与更新模式', () => {
         log: () => {},
       })
       expect(mock.deploys.sort()).toEqual(['ctl', 'dat'])
-      const cfg = JSON.parse(mock.kv.get('config'))
+      const cfg = JSON.parse(mock.kv.get('CONFIG')!)
       expect(cfg.uuid).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
+      expect(cfg.wsPath).toBe('/testpath12')
     })
+  })
+})
+
+describe('部署重试：先原样重试，再换名', () => {
+  it('8000119 时先重试同一项目，成功则不换名', async () => {
+    let attempts = 0
+    const logs: string[] = []
+    await withMockServer(
+      (req: CapturedRequest) => {
+        const url = req.url
+        if (req.method === 'GET' && url.includes('/deployments')) {
+          const project = /projects\/([^/]+)\/deployments/.exec(url)?.[1] ?? ''
+          return {
+            status: 200,
+            body: { success: true, result: [{ id: 'dep-' + project, url: 'u', latest_stage: { name: 'deploy', status: 'success' }, stages: [] }] },
+          }
+        }
+        if (req.method === 'POST' && url.includes('/deployments')) {
+          attempts++
+          // 前两次被拒，第三次放行
+          if (attempts <= 2) {
+            return { status: 400, body: { success: false, errors: [{ code: 8000119, message: 'Your Pages project has been blocked.' }] } }
+          }
+          const project = /projects\/([^/]+)\/deployments/.exec(url)?.[1] ?? ''
+          return {
+            status: 200,
+            body: { success: true, result: { id: 'dep-' + project, url: 'u', latest_stage: { name: 'deploy', status: 'success' }, stages: [] } },
+          }
+        }
+        if (req.method === 'POST' && url.endsWith('/pages/projects')) {
+          const name = JSON.parse(req.body).name
+          return { status: 200, body: { success: true, result: { id: name, name, subdomain: name + '.pages.dev' } } }
+        }
+        if (req.method === 'GET' && /pages\/projects\/[^/]+$/.test(url)) {
+          const name = url.split('/').pop()
+          return { status: 200, body: { success: true, result: { id: name, name, subdomain: name + '.pages.dev' } } }
+        }
+        if (req.method === 'PATCH') return { status: 200, body: { success: true, result: {} } }
+        if (req.method === 'GET' && url.includes('/values/')) {
+          return { status: 404, body: { success: false, errors: [{ code: 1, message: 'not found' }] } }
+        }
+        if (req.method === 'PUT' && url.includes('/values/')) {
+          return { status: 200, body: 'ok', contentType: 'text/plain' }
+        }
+        return { status: 404, body: { success: false, errors: [{ code: 1, message: 'x' }] } }
+      },
+      async (base) => {
+        const { deployPagesSplit } = await import('../src/pages-deploy')
+        const result = await deployPagesSplit({
+          token: 't',
+          accountId: 'acc',
+          kvNamespaceId: 'ns-1',
+          controlProject: 'ctl',
+          dataProject: 'dat',
+          panelPath: '/p-abc12345',
+          panelPassword: 'pw',
+          uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+          trojanPassword: 'tp',
+          wsPath: '/testpath12',
+          enableTrojan: true,
+          enableXhttp: false,
+          apiBase: base,
+          bundles: { control: 'x', data: 'x' },
+          wait: { timeoutMs: 500, intervalMs: 10 },
+          log: (m: string) => logs.push(m),
+        })
+        // 重试成功，不该换名
+        expect(result.control.name).toBe('ctl')
+        expect(result.data.name).toBe('dat')
+        expect(result.warnings).toEqual([])
+      }
+    )
+    // 控制面与数据面各重试 3 次（其中前两次被拒）
+    expect(attempts).toBeGreaterThanOrEqual(4)
+    expect(logs.join('\n')).toContain('同名重试')
   })
 })
 
@@ -600,6 +823,25 @@ describe('Pages 双项目部署流程', () => {
             body: { success: true, result: [{ id: `dep-${project}`, url: 'u', latest_stage: { name: 'deploy', status: 'success' }, stages: [] }] },
           }
         }
+        // 读单个 Pages 项目（部署向导用来核对控制面 DATA_HOST 是否指向旧域名）
+        if (req.method === 'GET' && url.includes('/pages/projects/')) {
+          const name = /projects\/([^/?]+)/.exec(url)?.[1] ?? ''
+          return {
+            status: 200,
+            body: {
+              success: true,
+              result: {
+                id: name,
+                name,
+                subdomain: `${name}.pages.dev`,
+                production_branch: 'main',
+                deployment_configs: {
+                  production: { env_vars: { DATA_HOST: { value: `${name}.pages.dev` } } },
+                },
+              },
+            },
+          }
+        }
         return { status: 404, body: { success: false, errors: [{ code: 1, message: 'unhandled ' + req.method + ' ' + url }] } }
       },
       async (base) => {
@@ -629,16 +871,99 @@ describe('Pages 双项目部署流程', () => {
         expect(result.control.deploymentId).toBe('dep-ctl')
         expect(result.data.deploymentId).toBe('dep-dat')
 
-        // 顺序校验：两个项目创建 → 两次 PATCH 配置 → 数据面部署 → 控制面部署
+        // 顺序校验：两个项目创建 → PATCH 配置 → 数据面部署 → 控制面部署
         const creates = calls.filter((c) => c.method === 'POST' && c.path.endsWith('/pages/projects'))
         const patches = calls.filter((c) => c.method === 'PATCH')
         const deploys = calls.filter((c) => c.method === 'POST' && c.path.includes('/deployments'))
         expect(creates.length).toBe(2)
-        expect(patches.length).toBe(2)
+        // 3 次 PATCH：控制面 + 数据面 + **控制面 DATA_HOST 同步**
+        // （mock 里控制面的 DATA_HOST 指向 ctl.pages.dev，与实际数据面 dat.pages.dev 不一致，
+        //   触发同步 —— 这正是「数据面换名后必须重配控制面」的保护逻辑）
+        expect(patches.length).toBe(3)
         expect(deploys.length).toBe(2)
         // 数据面必须先部署（控制面的 DATA_HOST 才有效）
         expect(deploys[0]!.path).toContain('/dat/deployments')
         expect(deploys[1]!.path).toContain('/ctl/deployments')
+      }
+    )
+  })
+
+  it('控制面 DATA_HOST 已指向当前数据面时，不重复配置控制面', async () => {
+    const calls: Array<{ method: string; path: string }> = []
+    await withMockServer(
+      (req) => {
+        calls.push({ method: req.method, path: req.url })
+        const url = req.url
+        if (req.method === 'POST' && url.endsWith('/pages/projects')) {
+          const name = JSON.parse(req.body).name
+          return { status: 200, body: { success: true, result: { id: name, name, subdomain: `${name}.pages.dev` } } }
+        }
+        if (req.method === 'PATCH' && url.includes('/pages/projects/')) {
+          return { status: 200, body: { success: true, result: {} } }
+        }
+        if (req.method === 'GET' && url.includes('/values/')) {
+          return { status: 404, body: { success: false, errors: [{ code: 1, message: 'not found' }] } }
+        }
+        if (req.method === 'PUT' && url.includes('/values/')) {
+          return { status: 200, body: 'ok', contentType: 'text/plain' }
+        }
+        if (req.method === 'POST' && url.includes('/deployments')) {
+          const project = /projects\/([^/]+)\/deployments/.exec(url)?.[1] ?? ''
+          return {
+            status: 200,
+            body: { success: true, result: { id: `dep-${project}`, url: 'u', latest_stage: { name: 'deploy', status: 'success' }, stages: [] } },
+          }
+        }
+        if (req.method === 'GET' && url.includes('/deployments')) {
+          const project = /projects\/([^/]+)\/deployments/.exec(url)?.[1] ?? ''
+          return {
+            status: 200,
+            body: { success: true, result: [{ id: `dep-${project}`, url: 'u', latest_stage: { name: 'deploy', status: 'success' }, stages: [] }] },
+          }
+        }
+        // 控制面的 DATA_HOST 已经指向数据面（dat.pages.dev）→ 不该触发同步
+        if (req.method === 'GET' && url.includes('/pages/projects/')) {
+          const name = /projects\/([^/?]+)/.exec(url)?.[1] ?? ''
+          return {
+            status: 200,
+            body: {
+              success: true,
+              result: {
+                id: name,
+                name,
+                subdomain: `${name}.pages.dev`,
+                production_branch: 'main',
+                deployment_configs: { production: { env_vars: { DATA_HOST: { value: 'dat.pages.dev' } } } },
+              },
+            },
+          }
+        }
+        return { status: 404, body: { success: false, errors: [{ code: 1, message: 'unhandled ' + req.method + ' ' + url }] } }
+      },
+      async (base) => {
+        const { deployPagesSplit } = await import('../src/pages-deploy')
+        await deployPagesSplit({
+          token: 't',
+          accountId: 'acc',
+          kvNamespaceId: 'ns-1',
+          controlProject: 'ctl',
+          dataProject: 'dat',
+          panelPath: '/p-test',
+          panelPassword: 'pw',
+          uuid: '11111111-2222-3333-4444-555555555555',
+          trojanPassword: 'tp',
+          wsPath: '/testpath12',
+          enableTrojan: true,
+          enableXhttp: false,
+          wait: { timeoutMs: 5000, intervalMs: 10 },
+          apiBase: base,
+          bundles: { control: 'export default {}', data: 'export default {}' },
+          log: () => {},
+        })
+
+        const patches = calls.filter((c) => c.method === 'PATCH')
+        // 只有控制面 + 数据面各一次 —— DATA_HOST 已一致，不该多配一次控制面
+        expect(patches.length).toBe(2)
       }
     )
   })
@@ -690,7 +1015,7 @@ describe('Pages 双项目部署流程', () => {
           bundles: { control: 'export default {}', data: 'export default {}' },
           log: () => {},
         })
-        // 3 个候选名都试过，两边各记一条 warning
+        // 3 个候选名 × 每个 3 次重试都失败，两边各记一条 warning
         expect(result.warnings.length).toBe(2)
         expect(result.warnings.every((w) => /8000119|blocked/.test(w))).toBe(true)
       }
@@ -719,8 +1044,8 @@ describe('Pages 双项目部署流程', () => {
         }
         if (req.method === 'POST' && url.includes('/deployments')) {
           deployCount++
-          // 第一次（原项目名）封禁，之后成功
-          if (deployCount === 1) {
+          // 前 3 次（原项目名重试）封禁，之后换名成功
+          if (deployCount <= 3) {
             return {
               status: 400,
               body: { success: false, errors: [{ code: 8000119, message: 'Your Pages project has been blocked.' }] },
@@ -804,6 +1129,25 @@ describe('Pages 双项目部署流程', () => {
           return {
             status: 200,
             body: { success: true, result: [{ id: `dep-${project}`, url: 'u', latest_stage: { name: 'deploy', status: 'success' }, stages: [] }] },
+          }
+        }
+        // 读单个 Pages 项目（部署向导用来核对控制面 DATA_HOST 是否指向旧域名）
+        if (req.method === 'GET' && url.includes('/pages/projects/')) {
+          const name = /projects\/([^/?]+)/.exec(url)?.[1] ?? ''
+          return {
+            status: 200,
+            body: {
+              success: true,
+              result: {
+                id: name,
+                name,
+                subdomain: `${name}.pages.dev`,
+                production_branch: 'main',
+                deployment_configs: {
+                  production: { env_vars: { DATA_HOST: { value: `${name}.pages.dev` } } },
+                },
+              },
+            },
           }
         }
         return { status: 404, body: { success: false, errors: [{ code: 1, message: 'unhandled ' + req.method + ' ' + url }] } }

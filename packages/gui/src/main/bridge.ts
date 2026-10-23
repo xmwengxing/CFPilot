@@ -72,9 +72,12 @@ interface DeployerModule {
     wsPath: string
     enableTrojan: boolean
     enableXhttp: boolean
+    /** 数据面实现：self（自研，默认）/ vendor（CFNext 原版） */
+    dataPlane?: 'vendor' | 'self'
     mode?: 'auto' | 'fresh' | 'update'
     keepCredentials?: boolean
     skipSameVersion?: boolean
+    force?: boolean
     localBuild?: string
     bundles?: { control?: string; data?: string }
     wait?: { timeoutMs: number; intervalMs: number }
@@ -131,6 +134,8 @@ export interface DeployParams {
   mode: 'auto' | 'fresh' | 'update'
   /** 强制重新部署 */
   force: boolean
+  /** 明知 KV 属于别的实例仍然继续（跳过归属校验） */
+  forceKv: boolean
   /** 更新时重新生成凭据 */
   newCredentials: boolean
   /** 控制面项目名（留空 = 随机 / 按清单） */
@@ -141,21 +146,43 @@ export interface DeployParams {
   panelPath: string
   /** WS 路径 */
   wsPath: string
+  /**
+   * 数据面实现：`self`（自研，默认）/ `vendor`（CFNext 原版）。
+   *
+   * 2026-10-23 起自研为默认 —— 同环境对照实验已确认两者可用性持平，
+   * 而自研额外提供失败分级诊断、SOCKS5/HTTP/HTTPS 代理池、
+   * DoH 优选解析与可配置的反代入口。
+   */
+  dataPlane: 'self' | 'vendor'
 }
 
-/** 执行部署，日志实时推给窗口 */
+/**
+ * 执行部署，日志实时推给窗口。
+ *
+ * KV 的选择：
+ *   1. 界面显式传入的 `kvNamespaceId`（本次部署专用，不落盘）
+ *   2. 否则用本机保存的 `kvNamespaceId`
+ *   3. 都没有 → 报错并提示去凭据页选一个或新建
+ */
 export async function runDeploy(
   win: BrowserWindow | null,
-  params: DeployParams
+  params: DeployParams,
+  kvNamespaceId?: string
 ): Promise<{ ok: boolean; error?: string }> {
   const secrets = loadSecrets()
   if (!secrets.cfToken.trim()) {
     sendLog(win, '尚未保存 Cloudflare API Token，请先填写并保存', 'err')
     return { ok: false, error: '缺少 API Token' }
   }
-  if (!secrets.kvNamespaceId.trim()) {
-    sendLog(win, '尚未保存 KV 命名空间 ID', 'err')
-    return { ok: false, error: '缺少 KV ID' }
+  const kvId = (kvNamespaceId ?? '').trim() || secrets.kvNamespaceId.trim()
+  if (!kvId) {
+    sendLog(
+      win,
+      '尚未选择 KV 命名空间。请到「Cloudflare 凭据」页点「刷新 KV 列表」，' +
+        '选一个已有的，或点「新建 KV」为本次部署单独建一个。',
+      'err'
+    )
+    return { ok: false, error: '缺少 KV 命名空间' }
   }
 
   const dist = findDistDir()
@@ -174,7 +201,7 @@ export async function runDeploy(
     const result = await deployer.deployPagesSplit({
       token: secrets.cfToken,
       accountId: secrets.accountId.trim(),
-      kvNamespaceId: secrets.kvNamespaceId.trim(),
+      kvNamespaceId: kvId,
       controlProject: params.controlProject.trim(),
       dataProject: params.dataProject.trim(),
       panelPath: params.panelPath.trim(),
@@ -184,9 +211,12 @@ export async function runDeploy(
       wsPath: params.wsPath.trim(),
       enableTrojan: true,
       enableXhttp: false,
+      // 数据面实现：self（默认）/ vendor
+      dataPlane: params.dataPlane ?? 'self',
       mode: params.mode,
       keepCredentials: !params.newCredentials,
       skipSameVersion: !params.force,
+      force: params.forceKv,
       localBuild,
       bundles: { control, data },
       log: (m: string) => sendLog(win, m),
@@ -235,18 +265,25 @@ export interface ScanParams {
 }
 
 /**
- * 自动检测账号 ID 与可用 KV。
+ * 自动检测账号。
  *
- * 账号 ID 不需要用户填：Token 本身就能列出可见账号（CLI 也是这么做的）。
- * KV 命名空间同理——没有就自动建一个。
+ * ## 为什么不再自动挑选 KV
+ *
+ * 旧实现会在账号下存在 KV 时直接复用 `namespaces[0]` 并落盘锁定，
+ * 导致：
+ *   - 可能选中别的项目（甚至用户自己的原版 CFNext）的命名空间并写坏它；
+ *   - 用户无法修改，唯一的解锁方式是「清除本机凭据」（连 Token 一起清掉）；
+ *   - 账号下已有 KV 时就永远无法为新实例新建一个。
+ *
+ * 现在只解析账号；KV 由用户在界面上显式选择（见 listKvOptions）。
  */
 export async function detectAccount(
   win: BrowserWindow | null
-): Promise<{ accountId: string; accountName: string; kvId: string }> {
+): Promise<{ accountId: string; accountName: string }> {
   const secrets = loadSecrets()
   if (!secrets.cfToken.trim()) {
     sendLog(win, '尚未保存 API Token', 'err')
-    return { accountId: '', accountName: '', kvId: '' }
+    return { accountId: '', accountName: '' }
   }
   try {
     const cfApi = loadCfApi()
@@ -255,30 +292,155 @@ export async function detectAccount(
     const accounts = await client.listAccounts()
     if (accounts.length === 0) {
       sendLog(win, '该 Token 没有可见的账号', 'err')
-      return { accountId: '', accountName: '', kvId: '' }
+      return { accountId: '', accountName: '' }
     }
     const account = accounts[0]!
     sendLog(win, `账号：${account.name}（${account.id}）`, 'ok')
 
-    // 已有 KV 就复用第一个，没有就自动建
-    let kvId = secrets.kvNamespaceId.trim()
-    if (!kvId) {
-      const namespaces = await client.listKvNamespaces(account.id)
-      if (namespaces.length > 0) {
-        kvId = namespaces[0]!.id
-        sendLog(win, `复用已有 KV：${namespaces[0]!.title}`, 'ok')
-      } else {
-        const created = await client.createKvNamespace(account.id, `cfpilot-gui-${Date.now().toString(36)}`)
-        kvId = created.id
-        sendLog(win, `已创建 KV：${created.title}`, 'ok')
-      }
-      saveSecrets({ accountId: account.id, kvNamespaceId: kvId })
-    }
+    // 账号可能换了（换了 Token），因此每次检测都同步一次账号 ID。
+    // 旧实现只在 kvNamespaceId 为空时才保存，导致换账号后仍用旧账号部署。
+    saveSecrets({ accountId: account.id })
 
-    return { accountId: account.id, accountName: account.name, kvId }
+    return { accountId: account.id, accountName: account.name }
   } catch (err) {
     sendLog(win, `检测账号失败：${err instanceof Error ? err.message : String(err)}`, 'err')
-    return { accountId: '', accountName: '', kvId: '' }
+    return { accountId: '', accountName: '' }
+  }
+}
+
+/**
+ * KV 候选列表项。
+ *
+ * `ownership` 说明这个命名空间当前归谁：
+ * - `instance`  本工具部署的实例（含清单）
+ * - `cfnext`    疑似原版 CFNext 项目占用（键不重叠，可共存）
+ * - `cfpilot`   含 CFPilot 配置但无清单（残留）
+ * - `empty`     空命名空间
+ */
+export interface KvOption {
+  id: string
+  title: string
+  ownership: 'instance' | 'cfnext' | 'cfpilot' | 'empty'
+  /** instance 时：控制面 / 数据面项目名 */
+  controlProject?: string
+  dataProject?: string
+  /** instance 时：部署时间与版本 */
+  at?: string
+  build?: string
+  /** instance 时：面板与数据面域名 */
+  controlSubdomain?: string
+  dataSubdomain?: string
+}
+
+/**
+ * 列出账号下的 KV 候选，供界面下拉选择。
+ *
+ * **不自动选中、不自动落盘** —— 归属由用户决定。
+ */
+export async function listKvOptions(
+  win: BrowserWindow | null,
+  accountId: string
+): Promise<{ options: KvOption[] }> {
+  const secrets = loadSecrets()
+  if (!secrets.cfToken.trim() || !accountId.trim()) {
+    sendLog(win, '尚未保存 API Token 或未检测账号', 'err')
+    return { options: [] }
+  }
+  try {
+    const cfApi = loadCfApi()
+    const client = new cfApi.CloudflareClient({ token: secrets.cfToken })
+    const namespaces = await client.listKvNamespaces(accountId)
+    const options: KvOption[] = []
+
+    for (const ns of namespaces) {
+      let ownership: KvOption['ownership'] = 'empty'
+      let controlProject: string | undefined
+      let dataProject: string | undefined
+      let at: string | undefined
+      let build: string | undefined
+      let controlSubdomain: string | undefined
+      let dataSubdomain: string | undefined
+
+      const manifestRaw = await client.getKvValue(accountId, ns.id, 'CFP_DEPLOY_MANIFEST')
+      if (manifestRaw) {
+        try {
+          const m = JSON.parse(manifestRaw) as {
+            controlProject?: string
+            dataProject?: string
+            at?: string
+            build?: string
+            controlSubdomain?: string
+            dataSubdomain?: string
+          }
+          ownership = 'instance'
+          controlProject = m.controlProject
+          dataProject = m.dataProject
+          at = m.at
+          build = m.build
+          controlSubdomain = m.controlSubdomain
+          dataSubdomain = m.dataSubdomain
+        } catch {
+          ownership = 'cfpilot'
+        }
+      } else {
+        const cfnext = await client.getKvValue(accountId, ns.id, 'config')
+        if (cfnext !== null) {
+          ownership = 'cfnext'
+        } else {
+          const cfpilot = await client.getKvValue(accountId, ns.id, 'CONFIG')
+          if (cfpilot !== null) ownership = 'cfpilot'
+        }
+      }
+
+      options.push({
+        id: ns.id,
+        title: ns.title,
+        ownership,
+        controlProject,
+        dataProject,
+        at,
+        build,
+        controlSubdomain,
+        dataSubdomain,
+      })
+    }
+
+    const instanceCount = options.filter((o) => o.ownership === 'instance').length
+    sendLog(
+      win,
+      `找到 ${options.length} 个 KV 命名空间，其中 ${instanceCount} 个是 CFPilot 实例`,
+      'ok'
+    )
+    return { options }
+  } catch (err) {
+    sendLog(win, `列出 KV 失败：${err instanceof Error ? err.message : String(err)}`, 'err')
+    return { options: [] }
+  }
+}
+
+/**
+ * 新建一个 KV 命名空间（用于部署新的实例）。
+ */
+export async function createKvNamespace(
+  win: BrowserWindow | null,
+  accountId: string,
+  title?: string
+): Promise<{ id: string; title: string } | null> {
+  const secrets = loadSecrets()
+  if (!secrets.cfToken.trim() || !accountId.trim()) {
+    sendLog(win, '尚未保存 API Token 或未检测账号', 'err')
+    return null
+  }
+  try {
+    const cfApi = loadCfApi()
+    const client = new cfApi.CloudflareClient({ token: secrets.cfToken })
+    const finalTitle = (title && title.trim()) || `cfpilot-gui-${Date.now().toString(36)}`
+    const created = await client.createKvNamespace(accountId, finalTitle)
+    sendLog(win, `已创建 KV：${created.title}（${created.id}）`, 'ok')
+    return created
+  } catch (err) {
+    sendLog(win, `创建 KV 失败：${err instanceof Error ? err.message : String(err)}`, 'err')
+    return null
   }
 }
 
@@ -454,10 +616,14 @@ export async function runScanJob(
 }
 
 /** 探测线上部署状态：是否存在清单、版本是否落后 */
-export async function checkDeployed(win: BrowserWindow | null): Promise<void> {
+export async function checkDeployed(
+  win: BrowserWindow | null,
+  kvNamespaceId?: string
+): Promise<void> {
   const secrets = loadSecrets()
-  if (!secrets.cfToken.trim() || !secrets.kvNamespaceId.trim()) {
-    sendLog(win, '未配置 Token 或 KV，跳过检查', 'warn')
+  const kvId = (kvNamespaceId ?? '').trim() || secrets.kvNamespaceId.trim()
+  if (!secrets.cfToken.trim() || !kvId) {
+    sendLog(win, '未配置 Token 或未选择 KV，跳过检查', 'warn')
     win?.webContents.send('deploy-status', { hasDeploy: false })
     return
   }
@@ -466,7 +632,7 @@ export async function checkDeployed(win: BrowserWindow | null): Promise<void> {
     const client = new cfApi.CloudflareClient({ token: secrets.cfToken })
     const raw = await client.getKvValue(
       secrets.accountId.trim(),
-      secrets.kvNamespaceId.trim(),
+      kvId,
       'CFP_DEPLOY_MANIFEST'
     )
     if (!raw) {

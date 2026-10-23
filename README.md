@@ -66,6 +66,12 @@ npx -y cfpilot-scanner@latest --host "你的Worker域名" --token "面板里生�
 #    面板首页会给出 Base64 / Clash / Sing-box 三种订阅地址
 ```
 
+> **订阅格式按 User-Agent 自动识别**，导入时不用手动加参数：
+> Clash Verge / Clash / mihomo 拿到 **YAML**，
+> sing-box 拿到 **JSON**，
+> v2rayN / Shadowrocket / NekoBox 等拿到 **Base64 分享链接**。
+> 也可以显式指定：`?target=clash` / `?target=singbox` / `?target=base64`。
+
 `cfpilot-deploy` 会自动完成：
 
 - 校验 API Token 权限
@@ -95,8 +101,8 @@ npx -y cfpilot-scanner@latest --host "你的Worker域名" --token "面板里生�
 1. 到 [Releases](https://github.com/xmwengxing/CFPilot/releases) 下载
    `CFPilot-<版本>-x64.exe`（安装版）或 `CFPilot-<版本>-portable.exe`（便携版）
 2. 双击运行，**不需要预先安装 Node.js**
-3. 在「Cloudflare 凭据」页填 API Token 并保存 → 点「自动检测账号与 KV」
-4. 在「一键部署」页点「开始部署」
+3. 在「Cloudflare 凭据」页填 API Token 并保存 → 点「检测账号」→ 点「刷新 KV 列表」
+4. 在 KV 下拉框里选一个（带 ● 的是你已有的实例，空的可用于部署新实例），点「开始部署」
 5. 在「本地真连接优选」页填数据面域名，跑一次优选，把结果粘贴到面板的「手动优选 IP」
 
 界面分四个页签：凭据 / 部署 / 优选 / 说明，下方是常驻运行日志。
@@ -123,14 +129,35 @@ npx -y cfpilot-scanner@latest --host "你的Worker域名" --token "面板里生�
 环境变量指定数据面域名，生成订阅时用它作为节点地址。
 
 ```bash
-# 自动创建 KV 并完成双项目部署
+# 首次部署：自动新建 KV 命名空间
 npx -y cfpilot-deploy@latest pages-split --account <账号ID> --yes
 
-# 复用已有 KV
+# 更新已有实例：自动探测到唯一的实例并复用（UUID 与 WS 路径不变，订阅地址不用改）
+npx -y cfpilot-deploy@latest pages-split --account <账号ID> --yes
+
+# 查看账号下已有哪些实例
+npx -y cfpilot-deploy@latest pages-split --account <账号ID> --list-kv
+
+# 部署第二个实例：新建独立 KV
+npx -y cfpilot-deploy@latest pages-split --account <账号ID> --new-kv --yes
+
+# 账号下有多个实例时，用 --kv 明确指定要部署哪一个
 npx -y cfpilot-deploy@latest pages-split --account <账号ID> --kv <命名空间ID> --yes
+
+# 改用 CFNext 原版数据面（默认已是自研）
+npx -y cfpilot-deploy@latest pages-split --account <账号ID> --dataplane vendor --yes
+
+# 关闭出站前的自动 DoH 解析优选 IP（只用手工配置的优选 IP）
+npx -y cfpilot-deploy@latest pages-split --account <账号ID> --resolve-preferred=false --yes
 ```
 
 部署完成后两个项目都能原地更新。
+
+> **一个 KV 命名空间只能承载一个 CFPilot 部署实例。**
+> 内核在 KV 里用的键是全局平铺的（`CONFIG` / `PANEL_PATH` / `SESSION:*` …），没有实例前缀，
+> 两个实例共用一个 KV 会互相覆盖 UUID、WS 路径与面板密码。
+> 因此向导在写入前会校验归属：目标 KV 若属于另一个实例，**部署会被中止**并提示新建。
+> 这是有意为之——写坏别人的线上项目比部署失败严重得多。
 
 ### Pages 通道的三条规则
 
@@ -149,9 +176,45 @@ npx -y cfpilot-deploy@latest pages-split --account <账号ID> --kv <命名空间
 
 ### 数据面实现说明
 
-当前数据面的 WebSocket 入站复用 [CFNext](https://github.com/PAICNI/CFNext) 的
-`wsHandler`（源码见 `packages/worker-core/src/vendor/`）。已知限制：
-**面板里配置的 SOCKS5 / HTTP 代理池不会传给数据面**，只有 `PROXYIP` 生效。
+数据面的 WebSocket 入站有两套实现，通过数据面环境变量 `DATAPLANE` 选择：
+
+| 实现 | 说明 | 代理池 | DoH 优选 IP | 反代入口 |
+|------|------|--------|------------|---------|
+| **self**（默认） | 本项目自研，失败可诊断，见 [docs/self-developed-dataplane-design.md](docs/self-developed-dataplane-design.md) | ✅ SOCKS5 / HTTP / HTTPS 全部支持 | ✅ `RESOLVE_PREFERRED=false` 可关闭 | ✅ 用户可自配，`USE_BUILTIN_RELAY=false` 可关内置表 |
+| **vendor** | 复用 [CFNext](https://github.com/PAICNI/CFNext) 的 `wsHandler`（源码见 `packages/worker-core/src/vendor/`） | ⚠️ **只有 `PROXYIP` 生效**，SOCKS5 / HTTP 代理池不会传进去 | ✅（vendor 内部实现） | ⚠️ 只能用硬编码的第三方表 |
+
+切换方式：部署时加 `--dataplane vendor`，或直接在数据面项目设置环境变量 `DATAPLANE=vendor`。
+
+> **2026-10-23 起默认改为自研**：同环境对照实验（真实 Cloudflare、真实 TLS 客户端首包、
+> 交替采样）确认两者可用性持平 —— 非 Cloudflare 网段目标均 100%，
+> Cloudflare 网段目标自研 67%~100%、vendor 73%~100%（第三方反代池本身波动）。
+> 自研另有失败分级诊断、完整代理池、可配置反代入口等能力。
+
+#### 出站诊断端点（自研专有）
+
+自研数据面提供 `GET /__diag`，返回最近 20 条**完整**的出站诊断
+（失败类型 / 原始错误 / 候选 / 多行修复建议）：
+
+```bash
+curl https://<数据面域名>/__diag
+```
+
+```json
+{
+  "ok": true,
+  "impl": "self",
+  "recent": [{
+    "at": 1792728772297,
+    "target": "example.com:443",
+    "failures": [{ "kind": "blocked", "message": "...", "candidate": "直连 example.com:443" }],
+    "summary": "出站被 Cloudflare 拒绝（...）：...\n  常见原因：...\n  → 换一个第三方 IP，或改用代理落地。"
+  }]
+}
+```
+
+> 为什么需要它：WebSocket close frame 的 reason 最多 123 字节，装不下完整诊断；
+> 超长还会被 Cloudflare 边缘**静默丢弃整个 close frame**。
+> vendor 则把异常吞成「目标不可达」，什么都不留。
 
 ---
 
@@ -179,7 +242,10 @@ CFPilot/
 | `src/protocols/xhttp.ts` | VLESS + XHTTP（stream-one）入站：一个 POST 请求承载上下行 |
 | `src/protocols/sha224.ts` | 纯 TS 的 SHA-224（WebCrypto 不支持，Trojan 口令校验必需） |
 | `src/outbound/dial.ts` | 出站拨号：并发竞速、ProxyIP 故障转移、NAT64 合成 |
+| `src/outbound/route.ts` | 出站选路：CF 网段降权、代理/直连分组、失败分级诊断 |
+| `src/outbound/doh.ts` | DoH 解析优选 IP（TXT 优选库 → A → AAAA，严格判定 + 缓存） |
 | `src/outbound/socks5.ts` / `http-proxy.ts` | SOCKS5 与 HTTP CONNECT 落地代理 |
+| `src/protocols/websocket-self.ts` | 自研 WS 数据面（`DATAPLANE=self` 时启用） |
 | `src/sub-engine.ts` | 优选池合并 + 脏数据清洗 + Base64/Clash/Sing-box 输出 |
 | `src/probe.ts` | `/__edge_probe`：WS 101 握手 + 流式下行测速 |
 | `src/auth.ts` | 面板密码 + KV 会话 + 一次性扫描令牌 |
@@ -197,7 +263,15 @@ CFPilot/
 | **节点来源** | 三个可勾选来源：**官方优选 IP**（数量 + 国家/机房多选）、**优选域名**（数量 + 自定义域名库）、**手动优选 IP**（本地真连接池 + 手填）。三源全不勾时自动 20+10；底部内嵌一键本地真连接优选 |
 | **订阅** | 三种订阅地址一键复制 + 节点预览（按来源分组） |
 | **入站配置** | UUID、Trojan 密码、三条路径、订阅域名/协议/传输方式 |
-| **高级** | ProxyIP 池、SOCKS5/HTTP 代理、NAT64、并发竞速拨号、客户端指纹、远程 `ADDAPI` / `ADDCSV` 池 |
+| **高级** | ProxyIP 池、SOCKS5/HTTP/HTTPS 代理、自定义反代入口池 + 内置表开关、NAT64、并发竞速拨号、自动 DoH 解析优选 IP、客户端指纹、远程 `ADDAPI` / `ADDCSV` 池 |
+| **入站配置** | 订阅下发的**节点形态**（VLESS+WS / VLESS+XHTTP / Trojan，可多选，默认只勾 VLESS+WS）、Trojan / XHTTP 入站开关、WS / Trojan / XHTTP 路径 |
+
+> **节点形态选择**：订阅里每个节点会按勾选的形态各生成一份。
+> 默认只勾 VLESS+WebSocket，节点数与优选池一致；
+> 勾选多种才会展开成多份。
+> XHTTP 形态只有 Xray 内核支持，Clash / mihomo / sing-box 不认这个传输 ——
+> 用这些客户端订阅时会自动跳过 XHTTP 形态。
+> 对应的入站没启用时（如 XHTTP 入站关闭），该形态也不会出现在订阅里。
 
 ### 优选池的三个内置来源
 
@@ -368,6 +442,33 @@ npx -y cfpilot-deploy@latest token --check --zone example.com
 
 ---
 
+## ECH（Encrypted Client Hello）
+
+ECH 让客户端把 TLS ClientHello 里的真实 SNI 加密，隐藏你访问的是哪个域名。
+
+**这是客户端侧的能力**：CFPilot 内核只负责把 ECH 参数写进订阅，
+由支持 ECH 的客户端（mihomo / Clash Verge、sing-box 1.13+、v2rayN 等）实际执行。
+客户端不支持时该参数会被忽略，不影响连接。
+
+**默认关闭。** 在面板「出站与抗封锁」页勾选「启用 ECH 加密」后保存即可：
+
+| 字段 | 说明 | 默认 |
+|------|------|------|
+| ECH 服务器名 | 对外隐藏的 SNI | `cloudflare-ech.com` |
+| ECH DNS | 解析 ECH 配置用的 DoH | 留空用客户端默认 |
+
+开启后订阅里会出现：
+
+- **Clash / mihomo**：每个节点带 `ech-opts: { enable: true, query-server-name: … }`，
+  并在 `dns.nameserver-policy` 里把 ECH 服务器名指向 DoH
+- **Base64 分享链接**：URL 带 `&ech=<SNI>+<DoH>`（沿用 edgetunnel 的约定）
+- **Sing-box**：出站 `tls.ech = { enabled: true, query_server_name: … }`
+
+> ECH 需要客户端能通过 DoH 查到目标域名的 ECH 记录。
+> 没有自定义域名时，客户端连的是 `*.pages.dev`，ECH 的实际收益有限。
+
+---
+
 ## 配置项与环境变量
 
 优先级：**KV(`CONFIG`) > 环境变量 > 内置默认值**。
@@ -379,10 +480,22 @@ npx -y cfpilot-deploy@latest token --check --zone example.com
 | `SCANNER_TOKEN` | — | 扫描回填令牌 |
 | `DATA_HOST` | — | 数据面域名（拆分部署时控制面用它生成订阅） |
 | `UUID` | `uuid` | VLESS UUID |
+| `WS_PATH` / `PATH` | `wsPath` | WebSocket 路径 |
+| `TROJAN_PASSWORD` | `trojanPassword` | Trojan 密码 |
+| `ENABLE_TROJAN` / `TROJAN` | `enableTrojan` | 是否启用 Trojan 入站 |
+| `ENABLE_XHTTP` / `XHTTP` | `enableXhttp` | 是否启用 XHTTP 入站 |
+| `ECH` | `ech` | 是否在订阅节点里启用 ECH（客户端侧能力，默认关闭） |
+| `ECH_HOST` | `echHost` | ECH 查询用服务器名（默认 `cloudflare-ech.com`） |
+| `ECH_DNS` | `echDns` | 自定义 ECH DNS（DoH 地址，留空用客户端默认） |
 | `PROXYIP` | `proxyIp` | ProxyIP 池（`host:port`，按直连落地语义解析） |
-| `SOCKS5` | `socks5` | SOCKS5 代理 |
-| `HTTP_PROXY` | `httpProxy` | HTTP 代理 |
+| `SOCKS5` | `socks5` | SOCKS5 代理（仅自研数据面生效） |
+| `HTTP_PROXY` | `httpProxy` | HTTP 代理（仅自研数据面生效）。支持 `https://` 前缀表示**代理服务器本身走 TLS**；可用 `#sni=域名` 显式指定 TLS 握手用的 SNI（代理地址只能写 IP 时用） |
 | `NAT64` | `nat64` | NAT64 前缀，如 `64:ff9b::` |
+| `DATAPLANE` | — | 数据面实现：`self`（默认，自研）/ `vendor`（CFNext 原版） |
+| `RESOLVE_PREFERRED` | `resolvePreferred` | 出站前自动 DoH 解析优选 IP（仅自研数据面，默认开启） |
+| `RELAY_POOL` | `relayPool` | 自定义反代入口池，每行一条（`IP` / `IP:端口` / `域名`） |
+| `USE_BUILTIN_RELAY` | `useBuiltinRelay` | 是否启用内置反代入口表（仅自研数据面，默认开启） |
+| `SUB_VARIANTS` | `subVariants` | 订阅下发的节点形态，逗号分隔（`vless-ws` / `vless-xhttp` / `trojan`），默认 `vless-ws` |
 | `ADD` | `add` | 手动优选池 |
 | `ADDAPI` | `addApi` | 远程 TXT 接口 |
 | `ADD_CSV` | `addCsv` | 远程 CSV |
@@ -400,8 +513,8 @@ KV 键：
 
 | 键 | 内容 |
 |----|------|
-| `CONFIG` | 用户配置 JSON |
-| `config` | 数据面配置（CFNext schema） |
+| `CONFIG` | 用户配置 JSON（含部署凭据 uuid / wsPath / trojanPassword） |
+| `CFP_DEPLOY_MANIFEST` | 部署清单：项目名、域名、版本、凭据。**判断 KV 归属的唯一依据** |
 | `LOCAL_PREFERRED_IPS` | 本地真连接优选结果（每行一条） |
 | `POOL_DOMAIN_LIBRARY` | 面板里自定义的优选域名库（每行一个；空 = 用内置库） |
 | `SCANNER_TOKEN` | 长期扫描令牌 |
@@ -426,7 +539,30 @@ XHTTP 需要客户端使用 Xray 内核（`type=xhttp`、`mode=stream-one`）。
 Clash / sing-box 内核不支持 XHTTP，请改用 WS 节点。
 
 **Q：数据面配了 SOCKS5 代理但不生效？**
-当前数据面只读取 `PROXYIP`，面板里的 SOCKS5 / HTTP 代理池不会传进去。详见[技术约束](#技术约束)。
+默认的 vendor 数据面只读取 `PROXYIP`，面板里的 SOCKS5 / HTTP 代理池不会传进去。
+切到自研数据面（`--dataplane self`）即可生效，详见[数据面实现说明](#数据面实现说明)。
+
+**Q：HTTPS 代理（`https://` 前缀）连不上，报「TLS 握手失败」？**
+Cloudflare 边缘的 TLS 握手**会校验证书链与主机名**，
+而且运行时**不提供指定自有 CA 的入口**（只有 `expectedServerHostname` 用于 SNI 与主机名校验）。
+所以 HTTPS 代理必须满足三条：
+
+1. **用域名配置**（不能只写 IP）——证书是签给域名的，用 IP 连接会报
+   `remote error: tls: bad certificate`；
+2. **证书由公信 CA 签发** —— 自签证书必然报
+   `remote error: tls: unknown certificate authority`；
+3. **SNI 与证书里的域名一致**。
+
+代理地址只能写 IP 时，用 `#sni=` 显式指定握手名：
+
+```
+https://user:pass@1.2.3.4:8443#sni=proxy.example.com
+```
+
+域名形式（`https://user:pass@proxy.example.com:8443`）会自动把域名用作 SNI。
+
+> ⚠️ 这三条约束来自 2026-10-23 的真机实测，
+> 详细取证见 [HANDOVER.md §0.20.13](HANDOVER.md)。
 
 **Q：免费额度 CPU 超限？**
 内核内置 Free CPU 预算保护（默认 8ms），会在订阅生成、CSV 解析等重活上提前中止。

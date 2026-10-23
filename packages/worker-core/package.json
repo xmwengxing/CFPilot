@@ -11,6 +11,11 @@
     "build": "node scripts/gen-panel.mjs && node scripts/build.mjs",
     "dev": "node scripts/gen-panel.mjs && wrangler dev --local",
     "deploy": "node scripts/gen-panel.mjs && wrangler deploy",
+    "e2e:echo": "node scripts/selfdp-e2e/echo-server.mjs",
+    "e2e:socks": "node scripts/selfdp-e2e/socks5-proxy.mjs",
+    "e2e:dev": "wrangler dev --port 8787 --ip 127.0.0.1 --local --config scripts/selfdp-e2e/wrangler.jsonc",
+    "e2e:test": "node scripts/selfdp-e2e/suite.mjs ws://127.0.0.1:8787/vl",
+    "e2e:build": "esbuild src/protocols/trojan.ts --bundle --format=esm --platform=neutral --outfile=scripts/selfdp-e2e/trojan-proto.mjs",
     "typecheck": "node scripts/gen-panel.mjs && tsc --noEmit -p tsconfig.json"
   },
   "devDependencies": {

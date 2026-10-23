@@ -8,6 +8,7 @@
 import type { Env, UserConfig } from '../types'
 import { handleEdgeProbe } from '../probe'
 import { handleWebSocket } from '../protocols/websocket'
+import { resolveDataPlaneImpl } from '../protocols/dataplane'
 import { handleXhttp } from '../protocols/xhttp'
 import { parseProxyPool, type ProxyEndpoint } from '../outbound/proxy-pool'
 import { jsonError } from '../ui/neutral'
@@ -20,6 +21,8 @@ export function collectProxies(config: UserConfig): ProxyEndpoint[] {
   // 历史上这里固定传 'socks5'，导致 BPB 风格的 ProxyIP 配置被当成 SOCKS5 握手而全部失败。
   proxies.push(...parseProxyPool(config.proxyIp, 'direct'))
   proxies.push(...parseProxyPool(config.socks5, 'socks5'))
+  // HTTP_PROXY 里的 `https://` 前缀会被 parseProxyEntry 识别为 'https' 类型
+  // （代理服务器本身走 TLS，需 connect({secureTransport:'on'})）。
   proxies.push(...parseProxyPool(config.httpProxy, 'http'))
   return proxies
 }
@@ -38,21 +41,46 @@ export async function routeDataPlane(
     return handleEdgeProbe(request)
   }
 
+  // 出站诊断端点：自研数据面专有。
+  //
+  // 完整诊断装不进 WebSocket close frame（最多 123 字节），
+  // 超长还会被 Cloudflare 边缘**静默丢弃整个 close frame**（真机实测）。
+  // 所以另辟这个端点，让「为什么连不上」能被完整看到。
+  if (url.pathname === '/__diag') {
+    const { recentDiagnostics } = await import('../protocols/websocket-self')
+    const { recentXhttpDiagnostics } = await import('../protocols/xhttp')
+    return new Response(
+      JSON.stringify(
+        {
+          ok: true,
+          impl: resolveDataPlaneImpl(env.DATAPLANE as string | undefined),
+          recent: recentDiagnostics(),
+          xhttp: recentXhttpDiagnostics(),
+        },
+        null,
+        2
+      ),
+      { status: 200, headers: { 'Content-Type': 'application/json; charset=utf-8' } }
+    )
+  }
+
   const config = await loadDataPlaneConfig(env)
   const upgrade = request.headers.get('Upgrade')?.toLowerCase()
+  // 数据面实现选择：默认 vendor（生产验证过），DATAPLANE=self 切自研
+  const impl = resolveDataPlaneImpl(env.DATAPLANE as string | undefined)
 
   if (url.pathname === config.wsPath) {
     if (upgrade !== 'websocket') {
       return jsonError('该路径需要 WebSocket 升级', 400)
     }
-    return handleWebSocket(request, 'vless', config, collectProxies(config), ctx)
+    return await handleWebSocket(request, 'vless', config, collectProxies(config), ctx, { impl })
   }
 
   if (config.enableTrojan && url.pathname === config.trojanPath) {
     if (upgrade !== 'websocket') {
       return jsonError('该路径需要 WebSocket 升级', 400)
     }
-    return handleWebSocket(request, 'trojan', config, collectProxies(config), ctx)
+    return await handleWebSocket(request, 'trojan', config, collectProxies(config), ctx, { impl })
   }
 
   if (config.enableXhttp && url.pathname === config.xhttpPath) {

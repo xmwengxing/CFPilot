@@ -58,18 +58,40 @@ interface CFPilotDeployStatus {
   dataProject?: string
 }
 
+/**
+ * KV 候选列表项。
+ *
+ * ownership 标明该命名空间当前归谁，供界面提示用户选择。
+ */
+interface CFPilotKvOption {
+  id: string
+  title: string
+  ownership: 'instance' | 'cfnext' | 'cfpilot' | 'empty'
+  controlProject?: string
+  dataProject?: string
+  at?: string
+  build?: string
+  controlSubdomain?: string
+  dataSubdomain?: string
+}
+
 interface Window {
   cfpilot: {
-    runDeploy(params: {
-      mode: 'auto' | 'fresh' | 'update'
-      force: boolean
-      newCredentials: boolean
-      controlProject: string
-      dataProject: string
-      panelPath: string
-      wsPath: string
-    }): Promise<{ ok: boolean; error?: string }>
-    checkDeployed(): Promise<void>
+    runDeploy(
+      params: {
+        mode: 'auto' | 'fresh' | 'update'
+        force: boolean
+        forceKv: boolean
+        newCredentials: boolean
+        controlProject: string
+        dataProject: string
+        panelPath: string
+        wsPath: string
+        dataPlane: 'self' | 'vendor'
+      },
+      kvNamespaceId?: string
+    ): Promise<{ ok: boolean; error?: string }>
+    checkDeployed(kvNamespaceId?: string): Promise<void>
     runScan(params: {
       host: string
       port: number
@@ -83,7 +105,11 @@ interface Window {
       speedConnections?: number
       speedDurationMs?: number
     }): Promise<{ ok: boolean; count?: number; copyable?: string; error?: string }>
-    detectAccount(): Promise<{ accountId: string; accountName: string; kvId: string }>
+    detectAccount(): Promise<{ accountId: string; accountName: string }>
+    listKvOptions(accountId: string): Promise<{
+      options: CFPilotKvOption[]
+    }>
+    createKvNamespace(accountId: string, title?: string): Promise<{ id: string; title: string } | null>
     checkEnvironment(): Promise<{ clean: boolean; findings: string[] }>
     saveCredentials(input: {
       cfToken?: string

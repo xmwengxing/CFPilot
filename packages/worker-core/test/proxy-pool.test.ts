@@ -18,6 +18,16 @@ describe('代理池解析', () => {
     expect(entry?.kind).toBe('http')
   })
 
+  it('显式 https:// 前缀解析为 HTTPS 代理（代理服务器本身走 TLS）', () => {
+    const entry = parseProxyEntry('https://1.2.3.4:8443')
+    expect(entry?.kind).toBe('https')
+  })
+
+  it('HTTP 代理配置里的裸 host:port 仍按 http 解析', () => {
+    const entry = parseProxyEntry('1.2.3.4:8080', 'http')
+    expect(entry?.kind).toBe('http')
+  })
+
   it('SOCKS5 配置里的裸 host:port 仍按 SOCKS5 解析', () => {
     const entry = parseProxyEntry('1.2.3.4:1080', 'socks5')
     expect(entry?.kind).toBe('socks5')
@@ -74,6 +84,10 @@ describe('数据面出站池汇总（逻辑与 routes/data.ts 的 collectProxies
     httpProxy: '',
     nat64: '',
     concurrentDial: true,
+    resolvePreferred: true,
+    relayPool: '',
+    useBuiltinRelay: true,
+    subVariants: 'vless-ws',
     enableTrojan: true,
     enableXhttp: true,
     subDomain: '',
@@ -83,6 +97,9 @@ describe('数据面出站池汇总（逻辑与 routes/data.ts 的 collectProxies
     tlsFragment: false,
     tlsFragmentSize: '10-20',
     tlsFragmentDelay: '10-20',
+    ech: false,
+    echHost: 'cloudflare-ech.com',
+    echDns: '',
   }
 
   it('PROXYIP 按直连落地汇总，SOCKS5/HTTP 各自按类型汇总', () => {

@@ -450,9 +450,18 @@ export function sampleDomains(count: number, pool: readonly string[] = PREFERRED
   return arr.slice(0, Math.max(0, Math.min(count, arr.length)))
 }
 
-/** 构造官方优选 IP 池 */
+/**
+ * 构造官方优选 IP 池。
+ *
+ * ## 来源优先级
+ *
+ * 1. **实测可用的精选 IP**（`CURATED_OFFICIAL_IPS`，27 个，逐个验过 WS 升级返回 101）；
+ * 2. **从实测可用网段随机采样**（`CF_IPV4_CIDRS` —— 旧表里 15 个段有 13 个完全不可用，
+ *    随机采样命中率约 1/4，订阅里大半节点是坏的，客户端测速全是 -1）。
+ *
+ * 现在两个来源都只含**实测可用**的 IP，命中率大幅提升。
+ */
 export function buildOfficialPool(count: number): NodeEntry[] {
-  // 先用实测可用的固定 IP，再回落到随机网段抽样（命中率约 1/4）
   const picked: string[] = []
   const used = new Set<string>()
   const curated = [...CURATED_OFFICIAL_IPS]
@@ -467,7 +476,8 @@ export function buildOfficialPool(count: number): NodeEntry[] {
     picked.push(ip)
   }
   if (picked.length < count) {
-    for (const ip of sampleFromCidrs(CF_IPV4_CIDRS, (count - picked.length) * 4)) {
+    // 采样倍率从 4 降到 2：网段已筛过，命中率很高，不需要多采
+    for (const ip of sampleFromCidrs(CF_IPV4_CIDRS, (count - picked.length) * 2)) {
       if (picked.length >= count) break
       if (used.has(ip)) continue
       used.add(ip)
@@ -759,6 +769,74 @@ export interface RenderResult {
   fileName: string
 }
 
+/** 订阅节点形态 */
+export type SubVariant = 'vless-ws' | 'vless-xhttp' | 'trojan'
+
+/** 所有可选形态（面板勾选项的顺序） */
+export const ALL_SUB_VARIANTS: readonly SubVariant[] = ['vless-ws', 'vless-xhttp', 'trojan']
+
+/** 形态的中文标签（面板用） */
+export const SUB_VARIANT_LABELS: Readonly<Record<SubVariant, string>> = {
+  'vless-ws': 'VLESS + WebSocket',
+  'vless-xhttp': 'VLESS + XHTTP',
+  trojan: 'Trojan',
+}
+
+/**
+ * 解析用户勾选的订阅形态。
+ *
+ * ## 为什么要有这层
+ *
+ * 老的 `subProtocol`（vless/trojan/both）× `subTransport`（ws/xhttp/both）
+ * 是两个独立开关，交叉后必然生成三种形态，节点数被**乘三**。
+ * 用户只想用 vless+ws 时也会收到 XHTTP 与 Trojan 节点 ——
+ * 而这两种形态各有前置条件（XHTTP 需 Xray 内核、Trojan 需对应端口与口令），
+ * 在客户端里表现为**大量 -1**，看起来像「节点坏了」。
+ *
+ * ## 规则
+ *
+ * 1. 只保留**已勾选**的形态；
+ * 2. 形态依赖的入站**没启用**就自动剔除
+ *    （`enableTrojan=false` → 不下发 trojan；`enableXhttp=false` → 不下发 xhttp）；
+ * 3. 一个都没剩时回落到 `vless-ws`（保证订阅不为空）。
+ */
+export function resolveSubVariants(
+  raw: string | undefined,
+  config: Pick<UserConfig, 'enableTrojan' | 'enableXhttp'>,
+  /**
+   * 该订阅格式**支持的**形态。
+   *
+   * Clash / mihomo / sing-box 都**不支持 XHTTP**（XHTTP 是 Xray 专有传输），
+   * 所以这些格式要传 `['vless-ws', 'trojan']`，
+   * 否则用户只勾 XHTTP 时会得到**空订阅**。
+   */
+  supported: readonly SubVariant[] = ALL_SUB_VARIANTS
+): SubVariant[] {
+  const wanted = String(raw ?? '')
+    .split(/[,;\s]+/)
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean) as SubVariant[]
+
+  const picked = ALL_SUB_VARIANTS.filter((v) => wanted.includes(v))
+
+  // 依赖的入站没启用 → 剔除（否则节点必然连不上）
+  const usable = picked.filter((v) => {
+    if (!supported.includes(v)) return false
+    if (v === 'trojan') return config.enableTrojan !== false
+    if (v === 'vless-xhttp') return config.enableXhttp !== false
+    return true
+  })
+
+  if (usable.length > 0) return usable
+
+  // 全被剔除 → 回落到该格式支持的**最通用**形态（保证订阅不为空）
+  const fallback = supported.includes('vless-ws') ? 'vless-ws' : supported[0]
+  return fallback ? [fallback] : ['vless-ws']
+}
+
+/** Clash / sing-box 支持的形态（都不支持 XHTTP） */
+export const WS_ONLY_VARIANTS: readonly SubVariant[] = ['vless-ws', 'trojan']
+
 /** 把节点分组（若无分组信息则整体作为一组） */
 function resolveGroups(ctx: RenderContext): PoolGroup[] {
   if (ctx.groups && ctx.groups.length > 0) return ctx.groups
@@ -777,6 +855,24 @@ function hostForUri(ip: string): string {
 }
 
 /** 生成 VLESS 分享链接 */
+/**
+ * ECH 查询参数。
+ *
+ * 参照 edgetunnel 的做法：`&ech=<SNI>+<DoH 地址>`。
+ * 客户端解析出这两个值后，用 DoH 查询目标域名的 ECH 配置，
+ * 并把 ClientHello 里的真实 SNI 加密。
+ *
+ * 默认关闭（`ech: false`），关闭时不注入任何参数。
+ */
+function echParam(ctx: RenderContext): string {
+  if (!ctx.config.ech) return ''
+  const host = ctx.config.echHost.trim() || 'cloudflare-ech.com'
+  const dns = ctx.config.echDns.trim()
+  // DoH 地址为空时用客户端默认，只带 SNI
+  const value = dns ? `${host}+${dns}` : host
+  return `&ech=${encodeURIComponent(value)}`
+}
+
 export function vlessUri(
   entry: NodeEntry,
   ctx: RenderContext,
@@ -795,7 +891,7 @@ export function vlessUri(
   const name = encodeURIComponent(label ?? nodeLabel(entry, 'vless', ctx.nodes.indexOf(entry)))
   // 协议名运行时拼接：产物里不留完整的协议 URI 特征串（部署期静态特征查杀）
   const scheme = ['vle', 'ss'].join('')
-  return `${scheme}://${ctx.config.uuid}@${hostForUri(entry.ip)}:${entry.port}?${params.toString()}#${name}`
+  return `${scheme}://${ctx.config.uuid}@${hostForUri(entry.ip)}:${entry.port}?${params.toString()}${echParam(ctx)}#${name}`
 }
 
 /** 生成 Trojan 分享链接 */
@@ -808,20 +904,51 @@ export function trojanUri(entry: NodeEntry, ctx: RenderContext, label?: string):
   params.set('path', ctx.config.trojanPath)
   const name = encodeURIComponent(label ?? nodeLabel(entry, 'trojan', ctx.nodes.indexOf(entry)))
   const scheme = ['tro', 'jan'].join('')
-  return `${scheme}://${encodeURIComponent(ctx.config.trojanPassword)}@${hostForUri(entry.ip)}:${entry.port}?${params.toString()}#${name}`
+  return `${scheme}://${encodeURIComponent(ctx.config.trojanPassword)}@${hostForUri(entry.ip)}:${entry.port}?${params.toString()}${echParam(ctx)}#${name}`
 }
 
 function yamlQuote(value: string): string {
   return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
 }
 
-/** 生成 Clash / Mihomo YAML（主组扁平，避免客户端只显示分组） */
+/**
+ * 生成 Clash / Mihomo YAML（主组扁平，避免客户端只显示分组）
+ *
+ * ## 模板为什么这样写
+ *
+ * 目标是让 **Clash Verge Rev（mihomo 内核）直接导入订阅 URL 就能用**：
+ *
+ * - **不写 `external-controller`**：Clash Verge 自己会注入并管理这个地址。
+ *   订阅里再写死一个 `127.0.0.1:9090`，会与客户端实际使用的端口冲突，
+ *   表现为导入成功但内核起不来（或抢占别的客户端的端口）。
+ * - **不写 `port` / `socks-port`**：同理，这些是客户端的本地监听设置，
+ *   由客户端自己决定；订阅里写死会覆盖用户设置。
+ * - **写 `mixed-port` 而不是分开写 port/socks-port**：mihomo 只认 `mixed-port`，
+ *   分开写的 `port`/`socks-port` 是老 Clash 的字段，新内核已不再使用。
+ * - **带 `dns` 段**：ECH 需要 DoH 解析 ECH 配置；没有 dns 段时
+ *   客户端只能用系统 DNS，部分环境解析不出 ECH 记录。
+ * - **`rules` 用 `MATCH` 收尾**：保证未被前面规则命中的流量一定走代理组。
+ */
 export function renderClash(ctx: RenderContext): string {
   const lines: string[] = []
   const proxies: string[] = []
   const allNames: string[] = []
-  const wantVless = ctx.protocol === 'vless' || ctx.protocol === 'both'
-  const wantTrojan = ctx.protocol === 'trojan' || ctx.protocol === 'both'
+  // ⚠️ Clash / mihomo **不支持 XHTTP**（XHTTP 是 Xray 专有传输），
+  // 所以 XHTTP 变体在这些格式里跳过 —— 否则客户端会把它当未知 network 而失败。
+  const variants = resolveSubVariants(ctx.config.subVariants, ctx.config, WS_ONLY_VARIANTS)
+  const wantVless = variants.some((v) => v === 'vless-ws')
+  const wantTrojan = variants.includes('trojan')
+  const useEch = ctx.config.ech
+  const echHost = ctx.config.echHost.trim() || 'cloudflare-ech.com'
+  const echDns = ctx.config.echDns.trim()
+
+  /** ECH 节点块（mihomo 的 ech-opts 语法） */
+  const echLines = (): string[] => {
+    if (!useEch) return []
+    const out = ['    ech-opts:', '      enable: true']
+    out.push(`      query-server-name: ${yamlQuote(echHost)}`)
+    return out
+  }
 
   for (const group of resolveGroups(ctx)) {
     group.entries.forEach((entry, index) => {
@@ -839,6 +966,7 @@ export function renderClash(ctx: RenderContext): string {
             `    tls: true`,
             `    servername: ${ctx.domain}`,
             `    client-fingerprint: ${ctx.config.clientFingerprint}`,
+            ...echLines(),
             `    ws-opts:`,
             `      path: ${yamlQuote(ctx.config.wsPath)}`,
             `      headers:`,
@@ -860,6 +988,7 @@ export function renderClash(ctx: RenderContext): string {
             `    tls: true`,
             `    sni: ${ctx.domain}`,
             `    client-fingerprint: ${ctx.config.clientFingerprint}`,
+            ...echLines(),
             `    ws-opts:`,
             `      path: ${yamlQuote(ctx.config.trojanPath)}`,
             `      headers:`,
@@ -871,13 +1000,40 @@ export function renderClash(ctx: RenderContext): string {
   }
 
   lines.push('# CFPilot 自动生成订阅')
-  lines.push('port: 7890')
-  lines.push('socks-port: 7891')
+  lines.push('mixed-port: 7890')
   lines.push('allow-lan: false')
   lines.push('mode: rule')
   lines.push('log-level: info')
-  lines.push('external-controller: 127.0.0.1:9090')
+  lines.push('unified-delay: true')
+  lines.push('tcp-concurrent: true')
   lines.push('')
+
+  // DNS 段：ECH 需要 DoH；即使不开 ECH 也给出更稳的解析
+  lines.push('dns:')
+  lines.push('  enable: true')
+  lines.push('  ipv6: false')
+  lines.push('  enhanced-mode: fake-ip')
+  lines.push('  fake-ip-range: 198.18.0.1/16')
+  lines.push('  default-nameserver:')
+  lines.push('    - 223.5.5.5')
+  lines.push('    - 119.29.29.29')
+  lines.push('  nameserver:')
+  lines.push('    - https://223.5.5.5/dns-query')
+  lines.push('    - https://dns.alidns.com/dns-query')
+  lines.push('  fallback:')
+  lines.push('    - 8.8.4.4')
+  lines.push('    - 1.1.1.1')
+  lines.push('  fallback-filter:')
+  lines.push('    geoip: true')
+  lines.push('    geoip-code: CN')
+  lines.push('')
+  if (useEch) {
+    // 让 ECH 的服务器名走 DoH 解析，否则客户端用系统 DNS 拿不到 ECH 记录
+    lines.push('  nameserver-policy:')
+    lines.push(`    ${yamlQuote(echHost)}: ${echDns ? yamlQuote(echDns) : 'https://223.5.5.5/dns-query'}`)
+    lines.push('')
+  }
+
   lines.push('proxies:')
   if (proxies.length === 0) lines.push('  []')
   else lines.push(...proxies)
@@ -920,8 +1076,24 @@ export function renderSingbox(ctx: RenderContext): string {
   const outbounds: unknown[] = []
   const groupTags: Array<{ tag: string; members: string[] }> = []
 
-  const wantVless = ctx.protocol === 'vless' || ctx.protocol === 'both'
-  const wantTrojan = ctx.protocol === 'trojan' || ctx.protocol === 'both'
+  // ⚠️ Clash / mihomo **不支持 XHTTP**（XHTTP 是 Xray 专有传输），
+  // 所以 XHTTP 变体在这些格式里跳过 —— 否则客户端会把它当未知 network 而失败。
+  const variants = resolveSubVariants(ctx.config.subVariants, ctx.config, WS_ONLY_VARIANTS)
+  const wantVless = variants.some((v) => v === 'vless-ws')
+  const wantTrojan = variants.includes('trojan')
+  const useEch = ctx.config.ech
+  const echHost = ctx.config.echHost.trim() || 'cloudflare-ech.com'
+
+  /**
+   * sing-box 的 ECH 配置。
+   *
+   * 参照 edgetunnel：`tls.ech = { enabled: true, query_server_name: <SNI> }`。
+   * sing-box 1.13+ 才支持该字段，旧版会忽略（不会导致解析失败）。
+   */
+  const echField = (): Record<string, unknown> => {
+    if (!useEch) return {}
+    return { ech: { enabled: true, query_server_name: echHost } }
+  }
 
   for (const group of resolveGroups(ctx)) {
     const members: string[] = []
@@ -941,6 +1113,7 @@ export function renderSingbox(ctx: RenderContext): string {
           server_name: ctx.domain,
           insecure: false,
           utls: { enabled: true, fingerprint: ctx.config.clientFingerprint },
+          ...echField(),
         },
         transport: { type: 'ws', path: ctx.config.wsPath, headers: { Host: ctx.domain } },
       })
@@ -955,6 +1128,7 @@ export function renderSingbox(ctx: RenderContext): string {
           server_name: ctx.domain,
           insecure: false,
           utls: { enabled: true, fingerprint: ctx.config.clientFingerprint },
+          ...echField(),
         },
         transport: { type: 'ws', path: ctx.config.trojanPath, headers: { Host: ctx.domain } },
       })
@@ -996,19 +1170,14 @@ export function renderSingbox(ctx: RenderContext): string {
 /** 生成 Base64 订阅（v2ray 分享链接集合） */
 export function renderBase64(ctx: RenderContext): string {
   const links: string[] = []
+  const variants = resolveSubVariants(ctx.config.subVariants, ctx.config)
   for (const group of resolveGroups(ctx)) {
     group.entries.forEach((entry, index) => {
       const label = nodeLabel(entry, 'vless', index, group.name)
-      if (ctx.protocol === 'vless' || ctx.protocol === 'both') {
-        if (ctx.transport === 'ws' || ctx.transport === 'both') {
-          links.push(vlessUri(entry, ctx, 'ws', `${label} WS`))
-        }
-        if (ctx.transport === 'xhttp' || ctx.transport === 'both') {
-          links.push(vlessUri(entry, ctx, 'xhttp', `${label} XHTTP`))
-        }
-      }
-      if (ctx.protocol === 'trojan' || ctx.protocol === 'both') {
-        links.push(trojanUri(entry, ctx, `${label} Trojan`))
+      for (const variant of variants) {
+        if (variant === 'vless-ws') links.push(vlessUri(entry, ctx, 'ws', `${label} WS`))
+        else if (variant === 'vless-xhttp') links.push(vlessUri(entry, ctx, 'xhttp', `${label} XHTTP`))
+        else links.push(trojanUri(entry, ctx, `${label} Trojan`))
       }
     })
   }

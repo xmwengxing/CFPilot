@@ -84,6 +84,13 @@ export interface PagesProject {
   domains?: string[]
   production_branch: string
   latest_deployment?: PagesDeployment
+  /** 生产环境的部署配置（含环境变量与 KV 绑定） */
+  deployment_configs?: {
+    production?: {
+      env_vars?: Record<string, { value: string }>
+      kv_namespaces?: Record<string, { namespace_id: string }>
+    }
+  }
 }
 
 /** Pages 部署 */

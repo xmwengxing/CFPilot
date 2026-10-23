@@ -43,6 +43,40 @@ describe('expandCidrs', () => {
     expect(a).toEqual(b)
   })
 
+  it('小采样时不再有每网段 64 下限（--sample 修复回归）', () => {
+    // 历史 bug：Math.max(64, ratio) 让 --sample 300 在 15+ 个网段上产出 1400+，
+    // 采样数形同虚设。现在 sample ≤ 1000 时下限为 1，总数必须贴近采样数。
+    const cidrs = [
+      '173.245.48.0/20',
+      '103.21.244.0/22',
+      '103.22.200.0/22',
+      '103.31.4.0/22',
+      '141.101.64.0/18',
+      '108.162.192.0/18',
+      '190.93.240.0/20',
+      '188.114.96.0/20',
+      '197.234.240.0/22',
+      '198.41.128.0/17',
+      '162.158.0.0/15',
+      '104.16.0.0/13',
+      '104.24.0.0/14',
+      '172.64.0.0/13',
+      '131.0.72.0/22',
+    ]
+    const list = expandCidrs(cidrs, { sample: 300, seed: 7 })
+    expect(list.length).toBeLessThanOrEqual(300)
+    expect(list.length).toBeGreaterThan(250)
+  })
+
+  it('默认大采样仍保持每网段 64 下限（覆盖均匀）', () => {
+    const list = expandCidrs(['104.16.0.0/13', '1.2.0.0/16'], { sample: 20000, seed: 3 })
+    // 两个网段都至少 64 个候选
+    const v4 = list.filter((ip) => ip.startsWith('104.'))
+    const small = list.filter((ip) => ip.startsWith('1.2.'))
+    expect(v4.length).toBeGreaterThanOrEqual(64)
+    expect(small.length).toBeGreaterThanOrEqual(64)
+  })
+
   it('忽略非法网段', () => {
     expect(expandCidrs(['garbage'])).toEqual([])
   })

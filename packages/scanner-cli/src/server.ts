@@ -52,6 +52,8 @@ export interface StartScanRequest {
   seed?: number
   /** 自动生成候选时的地址族，默认 both */
   family?: IpFamily
+  /** 国家 / 地区过滤（可多选，如 ["HK","JP"]；空 / 不传 = 全量） */
+  countries?: string[]
 }
 
 /** 候选来源：手动指定 / 请求显式携带 / 服务端自动生成 */
@@ -296,6 +298,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           host: body.host.trim(),
           port: body.port ?? 443,
           candidates: plan.candidates,
+          // 国家过滤（可多选）：不传 = 全量；无效代码在 normalizeCountryFilter 里被丢弃
+          countries: Array.isArray(body.countries) ? body.countries : undefined,
           top: body.top ?? 15,
           onProgress: (event) => broadcast(job, event),
         })

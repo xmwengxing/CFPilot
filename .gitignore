@@ -29,3 +29,8 @@ packages/worker-core/src/ui/panel.generated.ts
 
 # GUI 打包产物（图标源文件在 packages/gui/build，需保留）
 /packages/gui/release/
+.workbuddy/
+
+# 含服务器凭据的本地文档，禁止入仓库
+/迁移指令文档.txt
+/docs/迁移指令文档.txt

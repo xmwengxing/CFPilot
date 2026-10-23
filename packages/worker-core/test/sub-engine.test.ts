@@ -48,6 +48,8 @@ const config: UserConfig = {
   relayPool: '',
   useBuiltinRelay: true,
   subVariants: 'vless-ws',
+  subName: 'CFPilot',
+  subPorts: '443',
   enableTrojan: true,
   enableXhttp: true,
   subDomain: '',
@@ -290,6 +292,7 @@ describe('订阅输出', () => {
     config,
     domain: 'cfpilot.example.com',
     port: 443,
+    ports: [443],
     protocol: 'both',
     transport: 'both',
   }
@@ -343,6 +346,7 @@ describe('端到端：默认配置渲染三种订阅', () => {
       config,
       domain: 'cfpilot.example.com',
       port: 443,
+      ports: [443],
       protocol: 'both',
       transport: 'both',
     }

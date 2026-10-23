@@ -26,3 +26,4 @@ export {
   resolveSpeedMode,
 } from './speed-url'
 export type { ParsedSpeedUrl } from './speed-url'
+export { COUNTRY_COLOS, COUNTRY_NAMES, SUPPORTED_COUNTRIES, countryOfColo, isKnownCountry, normalizeCountryFilter } from './countries'

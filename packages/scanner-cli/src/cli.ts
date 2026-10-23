@@ -14,13 +14,14 @@ import { readFileSync } from 'node:fs'
 import { flagBool, flagList, flagNumber, flagString, parseArgs } from './args'
 import { BUILTIN_IPV4_CIDRS, BUILTIN_IPV6_CIDRS, readIpFile } from './ip-ranges'
 import { resolveCandidates } from './candidates'
-import { detectProxyInterference } from './net-env'
+import { detectProxyInterference, isMsysPollutedPath } from './net-env'
 import {
   DEFAULT_SPEED_URL,
   SPEED_URL_PRESETS,
   pickAvailableSpeedUrl,
 } from './speed-url'
 import { formatEntries, runScan, type ScanEvent, type ScanEntry, formatCopyable } from './scan'
+import { normalizeCountryFilter } from './countries'
 import { postResults } from './callback'
 import { BRIDGE_VERSION, DEFAULT_BRIDGE_PORT, startBridge } from './server'
 import { NAME, VERSION } from './version'
@@ -59,6 +60,8 @@ scan 选项:
   --top <n>              返回条数，默认 15
   --concurrency <n>      阶段一并发，默认 300
   --sample <n>           候选 IP 采样数，默认 20000
+  --countries <a,b>      国家 / 地区过滤（可多选，逗号分隔，如 HK,JP,SG）
+                         不选 = 全量。机房来自 101 握手响应；筛完为空会自动忽略
   --cidr <a,b>           自定义网段（可重复，用逗号分隔）
   --ip-file <path>       使用本地 IP 列表文件
   --max-latency <ms>     阶段一延迟上限，默认 0（不限）
@@ -78,17 +81,6 @@ serve 选项:
   ${NAME} scan --host cfpilot.example.com --token abc123
   ${NAME} serve
 `
-
-/**
- * 判断一个 WS 路径参数是否被 MSYS（Git-Bash）污染。
- *
- * 抽成纯函数便于测试 —— 这类「静默失败」的坑值得有回归测试守住。
- */
-export function isMsysPollutedPath(value: string): boolean {
-  const looksWindows = /^[A-Za-z]:[\\/]/.test(value) || value.includes('\\')
-  const hasMsysHint = /node_modules|bash-win32|@dsh-ops|msys/i.test(value)
-  return looksWindows || hasMsysHint
-}
 
 /**
  * 校验并归一化 WS 路径。
@@ -275,6 +267,8 @@ async function commandScan(args: ReturnType<typeof parseArgs>): Promise<void> {
   const wsPath = normalizeWsPath(flagString(args, 'path'), '/__edge_probe')
   const probePath = normalizeWsPath(flagString(args, 'probe-path'), '/__edge_probe')
   const noSpeed = flagBool(args, 'no-speed')
+  // 国家过滤：不选 = 全量。无效代码在 normalizeCountryFilter 里被丢弃
+  const countries = normalizeCountryFilter(flagList(args, 'countries'))
   const callback = noCallback
     ? ''
     : flagString(args, 'callback', token ? `https://${host}/api/v1/preferred-ips` : '')
@@ -283,6 +277,9 @@ async function commandScan(args: ReturnType<typeof parseArgs>): Promise<void> {
     process.stdout.write(`\n${NAME} v${VERSION}\n`)
     process.stdout.write(`目标域名：${host}:${port}（将作为 TLS SNI 与 HTTP Host）\n`)
     process.stdout.write(`WS 路径：${wsPath}\n`)
+    if (countries.length > 0) {
+      process.stdout.write(`国家筛选：${countries.join(' / ')}（不填则全量）\n`)
+    }
   }
 
   // 代理干扰检测：流量被代理接管时，测出来的是到代理的延迟而不是到目标 IP 的，
@@ -364,6 +361,7 @@ async function commandScan(args: ReturnType<typeof parseArgs>): Promise<void> {
     host,
     port,
     candidates,
+    countries,
     wsPath,
     probePath,
     skipSpeed,

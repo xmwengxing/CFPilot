@@ -20,6 +20,8 @@ import {
   listKvOptions,
   createKvNamespace,
   checkNetworkEnvironment,
+  detectDataPlaneHost,
+  listScanCountries,
   type DeployParams,
   type ScanParams,
 } from './bridge'
@@ -106,6 +108,10 @@ ipcMain.handle('cred:state', () => credentialsState())
 
 ipcMain.handle('scan:run', (_event, params: ScanParams) => runScanJob(mainWindow, params))
 ipcMain.handle('env:check', () => checkNetworkEnvironment(mainWindow))
+// 自动识别数据面域名（优先自定义域名，回落 pages.dev）
+ipcMain.handle('scan:detectHost', () => detectDataPlaneHost(mainWindow))
+// 优选器支持的国家列表（面板 / CLI / GUI 同源）
+ipcMain.handle('scan:countries', () => listScanCountries())
 ipcMain.handle('account:detect', () => detectAccount(mainWindow))
 ipcMain.handle('kv:list', (_event, accountId: string) => listKvOptions(mainWindow, accountId))
 ipcMain.handle('kv:create', (_event, accountId: string, title?: string) =>

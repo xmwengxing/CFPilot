@@ -656,13 +656,24 @@ export async function collectNodes(
   }
 
   // 远程池与三个勾选项无关，配了就生效
+  //
+  // ⚠️ fetch 是 I/O 等待，不消耗 CPU：期间必须 pause 预算，
+  // 否则墙钟近似会把等待时间算成 CPU（曾导致面板预览假阳性报
+  // "CPU 预算不足"，而真实订阅并不带预算，两边行为不一致）。
+  // 解析（parseApiList 等）是同步 CPU 工作，留在预算内计量。
   let addapi: NodeEntry[] = []
   const apiUrls = config.addApi
     .split(/[\n,]+/)
     .map((u) => u.trim())
     .filter((u) => /^https?:\/\//i.test(u))
   if (apiUrls.length > 0 && !budget?.exhausted) {
-    const results = await Promise.allSettled(apiUrls.map((u) => fetchText(u, timeoutMs)))
+    budget?.pause()
+    const results: PromiseSettledResult<string>[] = []
+    try {
+      results.push(...(await Promise.allSettled(apiUrls.map((u) => fetchText(u, timeoutMs)))))
+    } finally {
+      budget?.resume()
+    }
     for (const result of results) {
       if (result.status === 'fulfilled') {
         addapi = addapi.concat(parseApiList(result.value))
@@ -679,7 +690,13 @@ export async function collectNodes(
     .map((u) => u.trim())
     .filter((u) => /^https?:\/\//i.test(u))
   if (csvUrls.length > 0 && !budget?.exhausted) {
-    const results = await Promise.allSettled(csvUrls.map((u) => fetchText(u, timeoutMs)))
+    budget?.pause()
+    const results: PromiseSettledResult<string>[] = []
+    try {
+      results.push(...(await Promise.allSettled(csvUrls.map((u) => fetchText(u, timeoutMs)))))
+    } finally {
+      budget?.resume()
+    }
     for (const result of results) {
       if (result.status === 'fulfilled') {
         const parsed = parseCsvText(result.value, { dls: config.dls, maxLatency: config.maxLatency })
@@ -691,8 +708,13 @@ export async function collectNodes(
     }
   }
 
-  if (budget?.exhausted) {
-    errors.push('CPU 预算不足，已跳过部分远程拉取')
+  // 只在**真的跳过了远程拉取**时才提示——同步段的 CPU 超标才会走到这里
+  if (budget?.exhausted && (apiUrls.length > 0 || csvUrls.length > 0)) {
+    const skipped = [
+      apiUrls.length > 0 ? `ADDAPI×${apiUrls.length}` : '',
+      csvUrls.length > 0 ? `ADDCSV×${csvUrls.length}` : '',
+    ].filter(Boolean).join('、')
+    errors.push(`CPU 预算不足（已用 ${budget.elapsedMs.toFixed(1)}ms），已跳过远程拉取：${skipped}`)
   }
 
   const sourceParts = [
@@ -757,6 +779,13 @@ export interface RenderContext {
   domain: string
   /** 订阅端口（Cloudflare TLS 端口） */
   port: number
+  /**
+   * 订阅下发的端口组合（多选）。
+   *
+   * 渲染时每个条目按此列表展开（`portsForEntry` 决定是否参与）；
+   * 只勾一个端口时行为与旧的单端口完全一致。
+   */
+  ports: number[]
   /** 订阅协议 */
   protocol: 'vless' | 'trojan' | 'both'
   /** 传输方式 */
@@ -852,6 +881,47 @@ function nodeLabel(entry: NodeEntry, protocol: string, index: number, groupName 
 
 function hostForUri(ip: string): string {
   return ip.includes(':') ? `[${ip}]` : ip
+}
+
+/**
+ * 解析订阅端口组合（逗号分隔 → 去重数字数组；空 / 非法 = 只用 443）。
+ *
+ * Cloudflare 的 TLS 端口除 443 外还有 2053/2083/2087/2096/8443，
+ * 443 被针对性干扰时换端口即可恢复，因此支持多选下发。
+ */
+export function resolveSubPorts(config: UserConfig): number[] {
+  const ports = String(config.subPorts || '')
+    .split(/[\n,;\s]+/)
+    .map((p) => Number(p.trim()))
+    .filter((p) => Number.isInteger(p) && p > 0 && p <= 65535)
+  const unique = [...new Set(ports)]
+  return unique.length > 0 ? unique : [DEFAULT_NODE_PORT]
+}
+
+/**
+ * 订阅名称清洗：防注入响应头 / 文件名，限长 64。
+ *
+ * 客户端导入订阅后自动填入的名字取自 `Content-Disposition` 的 filename
+ * （Clash Verge 实测如此），因此这里不能带引号 / 反斜杠 / 换行，
+ * 也不要带扩展名（否则名称变成"CFPilot.yaml"）。
+ */
+export function sanitizeSubName(name: string): string {
+  const cleaned = String(name || '')
+    .replace(/["\\\r\n]/g, '')
+    .trim()
+    .slice(0, 64)
+  return cleaned || 'CFPilot'
+}
+
+/**
+ * 条目实际下发的端口列表。
+ *
+ * 手动池里显式写了非默认端口的条目保持原端口（那是用户的明确意图，
+ * 不应被端口乘法复制成 N 份）；其余条目按订阅端口组合各生成一份。
+ */
+function portsForEntry(entry: NodeEntry, ctx: RenderContext): number[] {
+  if (entry.port !== DEFAULT_NODE_PORT) return [entry.port]
+  return ctx.ports.length > 0 ? ctx.ports : [DEFAULT_NODE_PORT]
 }
 
 /** 生成 VLESS 分享链接 */
@@ -952,49 +1022,54 @@ export function renderClash(ctx: RenderContext): string {
 
   for (const group of resolveGroups(ctx)) {
     group.entries.forEach((entry, index) => {
-      const label = `${group.name} ${nodeLabel(entry, 'vless', index, '')}`
-      if (wantVless) {
-        allNames.push(label)
-        proxies.push(
-          [
-            `  - name: ${yamlQuote(label)}`,
-            `    type: vless`,
-            `    uuid: ${ctx.config.uuid}`,
-            `    server: ${entry.ip}`,
-            `    port: ${entry.port}`,
-            `    network: ws`,
-            `    tls: true`,
-            `    servername: ${ctx.domain}`,
-            `    client-fingerprint: ${ctx.config.clientFingerprint}`,
-            ...echLines(),
-            `    ws-opts:`,
-            `      path: ${yamlQuote(ctx.config.wsPath)}`,
-            `      headers:`,
-            `        Host: ${ctx.domain}`,
-          ].join('\n')
-        )
-      }
-      if (wantTrojan) {
-        const trojanLabel = `${label} Trojan`
-        allNames.push(trojanLabel)
-        proxies.push(
-          [
-            `  - name: ${yamlQuote(trojanLabel)}`,
-            `    type: trojan`,
-            `    password: ${yamlQuote(ctx.config.trojanPassword)}`,
-            `    server: ${entry.ip}`,
-            `    port: ${entry.port}`,
-            `    network: ws`,
-            `    tls: true`,
-            `    sni: ${ctx.domain}`,
-            `    client-fingerprint: ${ctx.config.clientFingerprint}`,
-            ...echLines(),
-            `    ws-opts:`,
-            `      path: ${yamlQuote(ctx.config.trojanPath)}`,
-            `      headers:`,
-            `        Host: ${ctx.domain}`,
-          ].join('\n')
-        )
+      const baseLabel = `${group.name} ${nodeLabel(entry, 'vless', index, '')}`
+      // 端口展开：勾了多个端口时每个端口生成一份，label 加后缀区分
+      for (const port of portsForEntry(entry, ctx)) {
+        const portSuffix = ctx.ports.length > 1 ? `:${port}` : ''
+        const label = `${baseLabel}${portSuffix}`
+        if (wantVless) {
+          allNames.push(label)
+          proxies.push(
+            [
+              `  - name: ${yamlQuote(label)}`,
+              `    type: vless`,
+              `    uuid: ${ctx.config.uuid}`,
+              `    server: ${entry.ip}`,
+              `    port: ${port}`,
+              `    network: ws`,
+              `    tls: true`,
+              `    servername: ${ctx.domain}`,
+              `    client-fingerprint: ${ctx.config.clientFingerprint}`,
+              ...echLines(),
+              `    ws-opts:`,
+              `      path: ${yamlQuote(ctx.config.wsPath)}`,
+              `      headers:`,
+              `        Host: ${ctx.domain}`,
+            ].join('\n')
+          )
+        }
+        if (wantTrojan) {
+          const trojanLabel = `${label} Trojan`
+          allNames.push(trojanLabel)
+          proxies.push(
+            [
+              `  - name: ${yamlQuote(trojanLabel)}`,
+              `    type: trojan`,
+              `    password: ${yamlQuote(ctx.config.trojanPassword)}`,
+              `    server: ${entry.ip}`,
+              `    port: ${port}`,
+              `    network: ws`,
+              `    tls: true`,
+              `    sni: ${ctx.domain}`,
+              `    client-fingerprint: ${ctx.config.clientFingerprint}`,
+              ...echLines(),
+              `    ws-opts:`,
+              `      path: ${yamlQuote(ctx.config.trojanPath)}`,
+              `      headers:`,
+              `        Host: ${ctx.domain}`,
+            ].join('\n')
+          )
+        }
       }
     })
   }
@@ -1098,40 +1173,44 @@ export function renderSingbox(ctx: RenderContext): string {
   for (const group of resolveGroups(ctx)) {
     const members: string[] = []
     group.entries.forEach((entry, index) => {
-      const label = `${group.name} ${nodeLabel(entry, 'vless', index, '')}`
-      const trojanTag = `${label} Trojan`
-      if (wantVless) members.push(label)
-      if (wantTrojan) members.push(trojanTag)
-      if (wantVless) outbounds.push({
-        type: 'vless',
-        tag: label,
-        server: entry.ip,
-        server_port: entry.port,
-        uuid: ctx.config.uuid,
-        tls: {
-          enabled: true,
-          server_name: ctx.domain,
-          insecure: false,
-          utls: { enabled: true, fingerprint: ctx.config.clientFingerprint },
-          ...echField(),
-        },
-        transport: { type: 'ws', path: ctx.config.wsPath, headers: { Host: ctx.domain } },
-      })
-      if (wantTrojan) outbounds.push({
-        type: 'trojan',
-        tag: trojanTag,
-        server: entry.ip,
-        server_port: entry.port,
-        password: ctx.config.trojanPassword,
-        tls: {
-          enabled: true,
-          server_name: ctx.domain,
-          insecure: false,
-          utls: { enabled: true, fingerprint: ctx.config.clientFingerprint },
-          ...echField(),
-        },
-        transport: { type: 'ws', path: ctx.config.trojanPath, headers: { Host: ctx.domain } },
-      })
+      const baseLabel = `${group.name} ${nodeLabel(entry, 'vless', index, '')}`
+      for (const port of portsForEntry(entry, ctx)) {
+        const portSuffix = ctx.ports.length > 1 ? `:${port}` : ''
+        const label = `${baseLabel}${portSuffix}`
+        const trojanTag = `${label} Trojan`
+        if (wantVless) members.push(label)
+        if (wantTrojan) members.push(trojanTag)
+        if (wantVless) outbounds.push({
+          type: 'vless',
+          tag: label,
+          server: entry.ip,
+          server_port: port,
+          uuid: ctx.config.uuid,
+          tls: {
+            enabled: true,
+            server_name: ctx.domain,
+            insecure: false,
+            utls: { enabled: true, fingerprint: ctx.config.clientFingerprint },
+            ...echField(),
+          },
+          transport: { type: 'ws', path: ctx.config.wsPath, headers: { Host: ctx.domain } },
+        })
+        if (wantTrojan) outbounds.push({
+          type: 'trojan',
+          tag: trojanTag,
+          server: entry.ip,
+          server_port: port,
+          password: ctx.config.trojanPassword,
+          tls: {
+            enabled: true,
+            server_name: ctx.domain,
+            insecure: false,
+            utls: { enabled: true, fingerprint: ctx.config.clientFingerprint },
+            ...echField(),
+          },
+          transport: { type: 'ws', path: ctx.config.trojanPath, headers: { Host: ctx.domain } },
+        })
+      }
     })
     if (members.length > 0) groupTags.push({ tag: group.name, members })
   }
@@ -1173,11 +1252,16 @@ export function renderBase64(ctx: RenderContext): string {
   const variants = resolveSubVariants(ctx.config.subVariants, ctx.config)
   for (const group of resolveGroups(ctx)) {
     group.entries.forEach((entry, index) => {
-      const label = nodeLabel(entry, 'vless', index, group.name)
-      for (const variant of variants) {
-        if (variant === 'vless-ws') links.push(vlessUri(entry, ctx, 'ws', `${label} WS`))
-        else if (variant === 'vless-xhttp') links.push(vlessUri(entry, ctx, 'xhttp', `${label} XHTTP`))
-        else links.push(trojanUri(entry, ctx, `${label} Trojan`))
+      const baseLabel = nodeLabel(entry, 'vless', index, group.name)
+      for (const port of portsForEntry(entry, ctx)) {
+        const portSuffix = ctx.ports.length > 1 ? `:${port}` : ''
+        const label = `${baseLabel}${portSuffix}`
+        const ported = { ...entry, port }
+        for (const variant of variants) {
+          if (variant === 'vless-ws') links.push(vlessUri(ported, ctx, 'ws', `${label} WS`))
+          else if (variant === 'vless-xhttp') links.push(vlessUri(ported, ctx, 'xhttp', `${label} XHTTP`))
+          else links.push(trojanUri(ported, ctx, `${label} Trojan`))
+        }
       }
     })
   }
@@ -1186,18 +1270,21 @@ export function renderBase64(ctx: RenderContext): string {
 
 /** 统一渲染入口 */
 export function renderSubscription(format: SubFormat, ctx: RenderContext): RenderResult {
+  // 文件名不带扩展名：客户端导入后自动填入的名字取自这里的 filename
+  // （Clash Verge 实测），带 .yaml 会让名称变成"CFPilot.yaml"。
+  const name = sanitizeSubName(ctx.config.subName)
   switch (format) {
     case 'clash':
       return {
         body: renderClash(ctx),
         contentType: 'text/yaml; charset=utf-8',
-        fileName: 'CFPilot.yaml',
+        fileName: name,
       }
     case 'singbox':
       return {
         body: renderSingbox(ctx),
         contentType: 'application/json; charset=utf-8',
-        fileName: 'CFPilot.json',
+        fileName: name,
       }
     case 'v2ray':
     case 'base64':
@@ -1205,7 +1292,7 @@ export function renderSubscription(format: SubFormat, ctx: RenderContext): Rende
       return {
         body: renderBase64(ctx),
         contentType: 'text/plain; charset=utf-8',
-        fileName: 'CFPilot.txt',
+        fileName: name,
       }
   }
 }

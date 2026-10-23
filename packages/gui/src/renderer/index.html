@@ -190,7 +190,7 @@
 <body>
   <div class="app">
     <header>
-      <div class="logo">C</div>
+      <div class="logo">CP</div>
       <div>
         <h1>CFPilot 部署与维护工具</h1>
         <div class="sub">Pages 双项目部署 · 本地真连接优选</div>
@@ -412,10 +412,17 @@
             <div class="row">
               <div class="field">
                 <label>Worker 域名</label>
-                <input type="text" id="optHost" placeholder="如 cfp-dat.pages.dev" />
+                <div class="row">
+                  <input type="text" id="optHost" placeholder="如 cfp-dat.pages.dev 或你的自定义域名" />
+                  <button class="btn btn-ghost" id="btnAutoHost" style="flex:0 0 auto">自动识别域名</button>
+                </div>
                 <p class="tip">
                   你的代理域名（<b>数据面</b>的地址）。检查更新后会自动填入。
-                  用它做 TLS SNI 与 HTTP Host，才能测出真实可用性。
+                  用它做 TLS SNI 与 HTTP Host，才能测出真实可用性。<br>
+                  <b>建议使用自定义域名</b>，避免 Cloudflare 项目提供的
+                  <code>*.pages.dev</code> 生产链接在部分网络被阻断——
+                  拿被阻断的域名测优选，结果本身就不准。
+                  点「自动识别域名」可自动填入：有自定义域名优先填它，没有则填 pages.dev。
                 </p>
               </div>
               <div class="field">
@@ -432,21 +439,25 @@
 
             <div class="row">
               <div class="field">
-                <label>端口</label>
-                <select id="optPort">
-                  <option value="443">443（推荐）</option>
-                  <option value="2053">2053</option>
-                  <option value="2083">2083</option>
-                  <option value="2087">2087</option>
-                  <option value="2096">2096</option>
-                  <option value="8443">8443</option>
+                <label>机房国家（可多选，不选 = 全量）</label>
+                <select id="optCountries" multiple size="6">
+                  <option value="">（正在加载国家列表…）</option>
                 </select>
-                <p class="tip">必须与客户端填的端口一致，否则结果无效。</p>
+                <p class="tip">
+                  按住 <code>Ctrl</code> / <code>Shift</code> 多选。只保留这些国家/地区的
+                  Cloudflare 机房；<b>不选则按采样数跑全量测试</b>。<br>
+                  筛选只影响「已通过 101 校验」的候选。采样太小可能某些国家没有候选，
+                  提示筛空时请调大「候选采样数」到 500~1000 再试。
+                </p>
               </div>
               <div class="field">
                 <label>保留条数（--top）</label>
                 <input type="number" id="optTop" value="15" min="1" max="100" />
-                <p class="tip">建议 <b>10~20</b>。太多会让订阅变长且质量下降。</p>
+                <p class="tip">
+                  建议 <b>10~20</b>。太多会让订阅变长且质量下降。<br>
+                  端口固定为 <b>443</b>——Cloudflare Pages 的 HTTPS 入口；
+                  2053 等端口在部分网络环境会被中间设备阻断，故不提供选择。
+                </p>
               </div>
             </div>
 

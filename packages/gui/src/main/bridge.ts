@@ -15,7 +15,10 @@ import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { app, type BrowserWindow } from 'electron'
 import { loadSecrets, saveSecrets, clearSecrets, hasToken } from './config-store'
-import { runLocalScan, detectProxyInterference, type ScanEvent } from './scanner'
+import { runLocalScan, detectProxyInterference, listScanCountries, type ScanEvent } from './scanner'
+
+// 国家列表与扫描逻辑同在 scanner.ts，这里转供 IPC 层使用
+export { listScanCountries }
 
 /**
  * 当前文件所在目录。
@@ -99,7 +102,16 @@ interface CfApiModule {
     listAccounts(): Promise<Array<{ id: string; name: string }>>
     listKvNamespaces(accountId: string): Promise<Array<{ id: string; title: string }>>
     createKvNamespace(accountId: string, title: string): Promise<{ id: string; title: string }>
+    listPagesProjects(accountId: string): Promise<Array<CfPagesProject>>
   }
+}
+
+/** Pages 项目（listPagesProjects 的返回项，只取 GUI 用得到的字段） */
+interface CfPagesProject {
+  name: string
+  subdomain: string
+  /** 已绑定的自定义域名列表（不含 pages.dev 子域） */
+  domains?: string[]
 }
 
 /** 定位 deploy-wizard 库文件（构建产物） */
@@ -252,12 +264,16 @@ async function readLocalBuild(dist: string): Promise<string | undefined> {
 /** 优选参数 */
 export interface ScanParams {
   host: string
-  port: number
   wsPath: string
   probePath: string
   skipSpeed: boolean
   sample: number
   top: number
+  /**
+   * 机房国家筛选（可多选，ISO 3166-1 alpha-2）。
+   * 空 / 不传 = 不筛选，按采样设置跑全量。
+   */
+  countries?: string[]
   speedMode?: 'auto' | 'probe' | 'url'
   speedUrl?: string
   speedConnections?: number
@@ -553,18 +569,27 @@ export async function runScanJob(
   const pre = await preflightScan(win, host, wsPath)
   if (pre.fatal) return { ok: false, error: '参数不合法' }
 
-  sendLog(win, `开始优选：${host}${wsPath}（端口 ${params.port}）`)
+  // 端口固定 443：Cloudflare Pages 的 HTTPS 入口就是 443，
+  // 2053 等端口在部分网络环境会被中间设备阻断，给用户选只会引入不确定性。
+  const port = 443
+  const countries = (params.countries ?? []).map((c) => c.trim().toUpperCase()).filter(Boolean)
+  if (countries.length > 0) {
+    sendLog(win, `国家筛选：${countries.join(' / ')}（只保留这些地区的机房）`)
+  }
+
+  sendLog(win, `开始优选：${host}${wsPath}（端口 ${port}）`)
 
   try {
     const result = await runLocalScan({
       host,
-      port: params.port,
+      port,
       wsPath,
       // 探针路径：用户填了就用，没填则用 CFPilot 的默认端点做「是否存在」探测
       probePath: params.probePath.trim() || '/__edge_probe',
       skipSpeed: params.skipSpeed,
       sample: params.sample,
       top: params.top,
+      countries: countries.length > 0 ? countries : undefined,
       speedMode: params.speedMode ?? 'auto',
       speedUrl: params.speedUrl,
       speedConnections: params.speedConnections,
@@ -652,6 +677,96 @@ export async function checkDeployed(
   } catch (err) {
     sendLog(win, `检查失败：${err instanceof Error ? err.message : String(err)}`, 'err')
     win?.webContents.send('deploy-status', { hasDeploy: false })
+  }
+}
+
+/**
+ * 自动识别数据面域名（供优选页「自动识别域名」按钮）。
+ *
+ * ## 优先级
+ *
+ *   1. 数据面 Pages 项目绑定的**自定义域名**（`domains` 里非 pages.dev 的条目）
+ *   2. 数据面 Pages 项目的 `<subdomain>.pages.dev`
+ *
+ * ## 为什么自定义域名优先
+ *
+ * pages.dev 是 Cloudflare 给项目提供的生产链接，在部分网络环境（尤其国内）
+ * 会因 SNI 被阻断或 QoS，拿它当优选目标本身就测不出真实可用性；
+ * 自定义域名走用户自己的 zone，是唯一推荐的做法。
+ *
+ * ## 数据来源
+ *
+ * KV 里的部署清单（`CFP_DEPLOY_MANIFEST`）记录了 `dataProject` 项目名，
+ * 再用 `listPagesProjects` 找到该项目当前的域名列表。
+ */
+export async function detectDataPlaneHost(
+  win: BrowserWindow | null
+): Promise<{ ok: boolean; host?: string; source?: 'custom' | 'pages'; error?: string }> {
+  const secrets = loadSecrets()
+  if (!secrets.cfToken.trim()) {
+    sendLog(win, '尚未保存 API Token，无法自动识别域名', 'err')
+    return { ok: false, error: '尚未保存 API Token' }
+  }
+  const accountId = secrets.accountId.trim()
+  const kvId = secrets.kvNamespaceId.trim()
+  if (!accountId || !kvId) {
+    sendLog(win, '未检测账号或未选择 KV，无法自动识别域名', 'err')
+    return { ok: false, error: '未检测账号或未选择 KV' }
+  }
+  try {
+    const cfApi = loadCfApi()
+    const client = new cfApi.CloudflareClient({ token: secrets.cfToken })
+
+    // 1) 从部署清单拿数据面项目名
+    const raw = await client.getKvValue(accountId, kvId, 'CFP_DEPLOY_MANIFEST')
+    if (!raw) {
+      sendLog(win, 'KV 里没有部署清单，请先部署或点「检查更新」', 'err')
+      return { ok: false, error: '未找到部署清单' }
+    }
+    let manifest: { dataProject?: string; dataSubdomain?: string }
+    try {
+      manifest = JSON.parse(raw) as { dataProject?: string; dataSubdomain?: string }
+    } catch {
+      sendLog(win, '部署清单不是合法 JSON', 'err')
+      return { ok: false, error: '部署清单解析失败' }
+    }
+    const dataProject = (manifest.dataProject ?? '').trim()
+    if (!dataProject) {
+      sendLog(win, '部署清单里没有数据面项目名', 'err')
+      return { ok: false, error: '清单缺少 dataProject' }
+    }
+
+    // 2) 列出 Pages 项目，找到数据面对应的那个
+    const projects = await client.listPagesProjects(accountId)
+    const project = projects.find((p) => p.name === dataProject)
+    if (!project) {
+      // 项目被删了但清单还在：退回清单里记录的子域
+      if (manifest.dataSubdomain) {
+        sendLog(win, `Pages 项目 ${dataProject} 不存在，退回清单记录的子域`, 'warn')
+        return { ok: true, host: manifest.dataSubdomain, source: 'pages' }
+      }
+      sendLog(win, `找不到 Pages 项目：${dataProject}`, 'err')
+      return { ok: false, error: `找不到 Pages 项目 ${dataProject}` }
+    }
+
+    // 3) 自定义域名优先；pages.dev 子域兜底
+    const custom = (project.domains ?? []).filter((d) => d && !d.endsWith('.pages.dev'))
+    if (custom.length > 0) {
+      sendLog(win, `识别到自定义域名：${custom[0]}`, 'ok')
+      return { ok: true, host: custom[0]!, source: 'custom' }
+    }
+    const fallback = project.subdomain ? `${project.subdomain}.pages.dev` : manifest.dataSubdomain
+    if (!fallback) {
+      sendLog(win, `项目 ${dataProject} 没有可用域名`, 'err')
+      return { ok: false, error: '项目没有可用域名' }
+    }
+    sendLog(win, `未绑定自定义域名，使用 pages.dev 域名：${fallback}`, 'warn')
+    sendLog(win, '建议尽快绑定自定义域名——pages.dev 生产链接在部分网络会被阻断', 'warn')
+    return { ok: true, host: fallback, source: 'pages' }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    sendLog(win, `自动识别域名失败：${message}`, 'err')
+    return { ok: false, error: message }
   }
 }
 

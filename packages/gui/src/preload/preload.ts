@@ -42,12 +42,13 @@ const api = {
   // 本地真连接优选
   runScan: (params: {
     host: string
-    port: number
     wsPath: string
     probePath: string
     skipSpeed: boolean
     sample: number
     top: number
+    /** 机房国家筛选（可多选，空 = 不筛选） */
+    countries?: string[]
     speedMode?: 'auto' | 'probe' | 'url'
     speedUrl?: string
     speedConnections?: number
@@ -59,6 +60,19 @@ const api = {
       copyable?: string
       error?: string
     }>,
+
+  /** 自动识别数据面域名（优先自定义域名，回落 pages.dev） */
+  detectScanHost: () =>
+    ipcRenderer.invoke('scan:detectHost') as Promise<{
+      ok: boolean
+      host?: string
+      source?: 'custom' | 'pages'
+      error?: string
+    }>,
+
+  /** 优选器支持的国家列表（与面板 / 命令行版同源） */
+  listScanCountries: () =>
+    ipcRenderer.invoke('scan:countries') as Promise<Array<{ code: string; name: string }>>,
 
   // 账号与 KV
   detectAccount: () =>

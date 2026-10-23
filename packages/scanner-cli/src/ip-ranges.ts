@@ -182,34 +182,96 @@ function bigIntToIpv6(value: bigint): string {
 /**
  * 把网段展开为候选 IP 列表。
  * 大网段按比例均匀采样，避免一次枚举几百万个地址。
+ *
+ * ## `--sample` 曾经完全失效（2026-10 修复）
+ *
+ * 两个 bug 叠加，用户传 `--sample 300` 实际拿到 1400+ 个候选：
+ *
+ * 1. **每网段写死 64 下限**：`Math.max(64, ratio)`，22 个网段 × 64 = 1400+。
+ * 2. **比例分母被 IPv6 撑爆**：`totalSize` 把 IPv6 /32（2^96 个地址）
+ *    算进分母，IPv4 网段的比例全部被稀释成 0，只能吃 64 下限。
+ *
+ * 现在的算法：
+ *   - 采样预算**按地址族分别分配**（v4 / v6 各自的比例分母只用本族总量），
+ *     混合两族时各拿一半预算——`--sample 300` 就是总共约 300 个候选；
+ *   - 每网段下限随采样规模可变：sample ≤ 1000（明确要小样本）时下限 1，
+ *     严格按比例分摊；sample > 1000（默认 20000）时下限 64，
+ *     避免小权重网段只出一两个 IP、覆盖不均；
+ *   - 想要的个数 ≥ 网段大小时退化为全量枚举（step 永不为 0）；
+ *   - 最后按预算收口：每网段保底 1 个会让总数略超，从计数最大的网段
+ *     依次减 1 压回预算内（网段数超过预算时如实保留每网段 1 个）。
  */
 export function expandCidrs(cidrs: string[], options: IpRangeOptions = {}): string[] {
   const sample = options.sample ?? 20000
   const random = makeRandom(options.seed ?? 0x5eed)
   const parsed = cidrs.map(parseCidr).filter((c): c is ParsedCidr => c !== null)
   if (parsed.length === 0) return []
-
-  const totalSize = parsed.reduce((sum, c) => sum + c.size, 0n)
-  const out: string[] = []
-
-  for (const cidr of parsed) {
-    if (sample <= 0 || cidr.size <= 2000n) {
-      // 小网段全量枚举
+  if (sample <= 0) {
+    // 不限制：全量枚举
+    const all: string[] = []
+    for (const cidr of parsed) {
       for (let i = 0n; i < cidr.size; i++) {
         const value = cidr.base + i
-        out.push(cidr.family === 4 ? bigIntToIpv4(value) : bigIntToIpv6(value))
+        all.push(cidr.family === 4 ? bigIntToIpv4(value) : bigIntToIpv6(value))
       }
-      continue
     }
-    const ratio = Number(totalSize === 0n ? 1n : (cidr.size * BigInt(sample)) / totalSize)
-    const count = Math.max(64, Math.min(20000, ratio))
-    const step = Number(cidr.size / BigInt(count))
-    const offset = Math.floor(random() * step)
-    for (let i = 0; i < count; i++) {
-      const offsetValue = BigInt(offset + Math.floor(i * step))
-      if (offsetValue >= cidr.size) break
-      const value = cidr.base + offsetValue
-      out.push(cidr.family === 4 ? bigIntToIpv4(value) : bigIntToIpv6(value))
+    return all
+  }
+
+  const minPerCidr = sample <= 1000 ? 1 : 64
+  const out: string[] = []
+
+  // 按地址族分组：比例分母只用本族总量，避免 IPv6 /32 把 IPv4 比例稀释成 0
+  for (const family of [4, 6] as const) {
+    const group = parsed.filter((c) => c.family === family)
+    if (group.length === 0) continue
+    const familyTotal = group.reduce((sum, c) => sum + c.size, 0n)
+    if (familyTotal === 0n) continue
+    // 混合两族时各拿一半预算，保证总数≈sample；单族时拿全量
+    // 注意：必须先算布尔值再走三元——`sample / bool ? a : b` 会因 / 优先级高于 ?: 而恒为真
+    const hasOtherFamily = parsed.some((c) => c.family !== family)
+    const familyBudget = Math.max(1, Math.round(hasOtherFamily ? sample / 2 : sample))
+
+    // 第一步：按比例算出每个网段「想要的个数」
+    const plans = group.map((cidr) => {
+      const ratio = Number((cidr.size * BigInt(familyBudget)) / familyTotal)
+      const wanted = Math.max(minPerCidr, Math.min(20000, ratio))
+      return { cidr, count: Math.min(Number(cidr.size), wanted) }
+    })
+
+    // 第二步：下限（每网段至少 1 个）会让总数略微超出预算，
+    // 从计数最大的网段每次减 1，直到总数回到预算内。
+    // 每个网段至少保留 1 个——网段数本身就超过预算时（如 --sample 5 配 15 个网段）
+    // 无法再压，此时如实超出，保证每个网段都有代表。
+    let familySum = plans.reduce((sum, p) => sum + p.count, 0)
+    while (familySum > familyBudget) {
+      let target: { cidr: ParsedCidr; count: number } | null = null
+      for (const plan of plans) {
+        if (plan.count > 1 && (!target || plan.count > target.count)) target = plan
+      }
+      if (!target) break
+      target.count -= 1
+      familySum -= 1
+    }
+
+    // 第三步：按计划生成 IP
+    for (const { cidr, count } of plans) {
+      if (count >= Number(cidr.size)) {
+        // 全量枚举（想要的个数不少于网段大小）
+        for (let i = 0n; i < cidr.size; i++) {
+          const value = cidr.base + i
+          out.push(family === 4 ? bigIntToIpv4(value) : bigIntToIpv6(value))
+        }
+        continue
+      }
+      const step = Math.floor(Number(cidr.size) / count)
+      const offset = Math.floor(random() * step)
+      for (let i = 0; i < count; i++) {
+        const offsetValue = BigInt(offset + Math.floor(i * step))
+        if (offsetValue >= cidr.size) break
+        const value = cidr.base + offsetValue
+        out.push(family === 4 ? bigIntToIpv4(value) : bigIntToIpv6(value))
+      }
     }
   }
 

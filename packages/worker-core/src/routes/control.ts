@@ -10,11 +10,14 @@ import type { Env, UserConfig } from '../types'
 import type { Store } from '../store'
 import { LOCAL_IPS_KEY } from '../config'
 import type { RenderContext, SubFormat } from '../sub-engine'
-import { collectNodes, renderSubscription } from '../sub-engine'
+import { collectNodes, renderSubscription, resolveSubPorts, sanitizeSubName } from '../sub-engine'
 import { handleEdgeProbe } from '../probe'
 import { getPanelHtml } from '../ui/panel'
 import { jsonError } from '../ui/neutral'
-import { getStore, getConfig, getAuth, invalidateConfig, resolveFormat, resolveFormatByUserAgent } from './shared'
+import { getStore, getConfig, getAuth, invalidateConfig, resolveFormat, resolveFormatByUserAgent, normalizeNodeDomain } from './shared'
+
+// 从 shared 再导出：历史 import 路径（含测试）保持不变，同时避免 api.ts ↔ control.ts 循环依赖
+export { normalizeNodeDomain } from './shared'
 
 type ApiModule = typeof import('../api')
 let apiModule: ApiModule | null = null
@@ -24,41 +27,7 @@ async function loadApi(): Promise<ApiModule> {
 }
 
 /**
- * 把「节点域名」配置规范化成裸域名。
- *
- * ## 为什么需要（2026-10-23 真机踩坑）
- *
- * `DATA_HOST` / `subDomain` 的值会被**原样**用作订阅节点里的
- * `sni` / `host` / `servername` / Clash `Host` 头。
- * 用户在面板里很容易顺手填成完整 URL（`https://xxx.pages.dev/`），
- * 于是 SNI 变成 `https://xxx.pages.dev/` —— TLS 握手必败，
- * 且**没有任何报错**（客户端只表现为「全部节点连不上」）。
- *
- * 部署向导写的一直是裸域名（`result.data.subdomain`），
- * 所以这个坑只在**用户手改**时出现；这里兜底，防再犯。
- */
-export function normalizeNodeDomain(value: string): string {
-  let text = String(value ?? '').trim()
-  if (!text) return text
-  // 去掉 scheme（http:// / https://，大小写不敏感）
-  text = text.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, '')
-  // 去掉路径 / query / hash（第一个 / ? # 起都不要）
-  text = text.replace(/[/?#].*$/, '')
-  // 去掉用户信息（user@host 形式不会出现，防御而已）
-  const at = text.lastIndexOf('@')
-  if (at >= 0) text = text.slice(at + 1)
-  // 去掉端口（host:port → host；IPv6 [addr]:port → addr）
-  if (text.startsWith('[')) {
-    const end = text.indexOf(']')
-    if (end > 0) text = text.slice(1, end)
-  } else {
-    const first = text.indexOf(':')
-    if (first >= 0 && text.indexOf(':', first + 1) < 0) text = text.slice(0, first)
-  }
-  return text.trim()
-}
-
-/** 订阅输出 */
+ * 订阅输出 */
 async function handleSubscription(
   request: Request,
   url: URL,
@@ -95,6 +64,7 @@ async function handleSubscription(
     config,
     domain,
     port: 443,
+    ports: resolveSubPorts(config),
     protocol: config.subProtocol,
     transport: config.subTransport,
   }
@@ -106,7 +76,8 @@ async function handleSubscription(
       'Content-Type': rendered.contentType,
       'Cache-Control': 'no-store',
       'Content-Disposition': `inline; filename="${rendered.fileName}"`,
-      'Profile-Title': 'CFPilot',
+      // 部分客户端（如 Shadowrocket）优先读 Profile-Title 作为订阅名
+      'Profile-Title': sanitizeSubName(config.subName),
       'Subscription-Userinfo': '',
     },
   })

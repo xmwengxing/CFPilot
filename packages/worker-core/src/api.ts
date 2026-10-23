@@ -27,6 +27,7 @@ import { collectNodes, parseLocalList } from './sub-engine'
 import { CF_IPV4_CIDRS, COUNTRY_NAMES, PREFERRED_DOMAINS, SUPPORTED_COUNTRIES } from './data/pools'
 import { randomHex } from './util'
 import { CpuBudget } from './budget'
+import { normalizeNodeDomain } from './routes/shared'
 
 export const API_PREFIX = '/api/v1'
 
@@ -133,10 +134,15 @@ export async function handleApi(
   if (path === '/status' && method === 'GET') {
     const localIps = await loadLocalIps(store)
     const parsed = parseLocalList(localIps)
+    // 节点域名 = 订阅里实际下发的 SNI / Host：subDomain > DATA_HOST > 面板域名。
+    // 拆分部署时它与面板域名不同，面板概览与本地优选命令都必须用它。
+    const nodeDomain = normalizeNodeDomain(config.subDomain || env.DATA_HOST || url.hostname)
     return json({
       ok: true,
       panelPath: auth.panelPath,
       domain: url.hostname,
+      nodeDomain,
+      dataHost: env.DATA_HOST ?? '',
       colo: (request as unknown as { cf?: { colo?: string } }).cf?.colo ?? 'UNK',
       localIps: parsed.length,
       generatedPassword: auth.generatedPassword,
@@ -174,9 +180,11 @@ export async function handleApi(
   }
 
   if (path === '/nodes' && method === 'GET') {
-    const budget = new CpuBudget(8)
+    // 预算建在 KV 读**之后**：墙钟近似含 I/O 等待，建早了会把等待算成 CPU，
+    // 预览永远显示"CPU 预算不足"（远程 fetch 期间另有 pause/resume 保护）。
     const localIps = await loadLocalIps(store)
     const domainPool = await loadDomainLibrary(store)
+    const budget = new CpuBudget(8)
     const result = await collectNodes(config, localIps, {
       budget,
       domainPool: domainPool.length > 0 ? domainPool : undefined,

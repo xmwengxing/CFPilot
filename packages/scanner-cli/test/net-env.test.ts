@@ -11,8 +11,7 @@
 import { describe, expect, it } from 'vitest'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
-import { isFakeIp, isPortListening, detectProxyInterference, PROXY_PORTS } from '../src/net-env'
-import { isMsysPollutedPath } from '../src/cli'
+import { isFakeIp, isPortListening, detectProxyInterference, PROXY_PORTS, isMsysPollutedPath } from '../src/net-env'
 
 describe('isFakeIp', () => {
   it('识别 198.18.0.0/15 段（Clash fake-ip 默认池）', () => {

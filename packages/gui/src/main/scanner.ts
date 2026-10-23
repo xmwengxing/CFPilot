@@ -53,6 +53,11 @@ export interface ScanOptions {
   sample: number
   /** 保留条数 */
   top: number
+  /**
+   * 机房国家筛选（可多选）。
+   * 空 / 不传 = 不筛选，按采样设置跑全量。
+   */
+  countries?: string[]
   /** 测速方式：auto（默认，按目标是否提供探针端点决定）/ probe / url */
   speedMode?: 'auto' | 'probe' | 'url'
   /** 公开测速地址（url 模式） */
@@ -88,6 +93,10 @@ interface ScannerLib {
   /** 预检并挑选可用的公开测速地址 */
   pickAvailableSpeedUrl: (candidates: string[]) => Promise<string>
   SPEED_URL_PRESETS: Array<{ url: string; label: string }>
+  /** 受支持的国家代码列表（供 GUI 国家多选框） */
+  SUPPORTED_COUNTRIES: readonly string[]
+  /** 国家中文显示名 */
+  COUNTRY_NAMES: Record<string, string>
 }
 
 /** 定位 scanner 库文件（构建产物） */
@@ -171,6 +180,7 @@ export async function runLocalScan(options: ScanOptions): Promise<{
     speedDurationMs: options.speedDurationMs,
     speedLimit: options.speedLimit,
     top: options.top,
+    countries: options.countries,
     onProgress: report,
   })
 
@@ -196,4 +206,18 @@ export async function detectProxyInterference(host?: string): Promise<{
     return { clean: true, findings: [] }
   }
   return await lib.detectProxyInterference(host)
+}
+
+/**
+ * 列出优选器支持的国家（供 GUI 的国家多选框）。
+ *
+ * 直接复用 scanner-cli 的 countries 模块 —— 与面板、命令行版同一张表，
+ * 避免三边漂移。旧版 scanner-lib 没有这些导出时返回空列表，
+ * 渲染层据此隐藏多选框（向后兼容）。
+ */
+export async function listScanCountries(): Promise<Array<{ code: string; name: string }>> {
+  const lib = loadScannerLib()
+  if (!Array.isArray(lib.SUPPORTED_COUNTRIES)) return []
+  const names = lib.COUNTRY_NAMES ?? {}
+  return lib.SUPPORTED_COUNTRIES.map((code) => ({ code, name: names[code] ?? code }))
 }

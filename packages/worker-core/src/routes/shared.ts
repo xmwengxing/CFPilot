@@ -74,6 +74,41 @@ export function resolveFormat(value: string | null): SubFormat {
 }
 
 /**
+ * 把「节点域名」配置规范化成裸域名。
+ *
+ * ## 为什么需要（2026-10-23 真机踩坑）
+ *
+ * `DATA_HOST` / `subDomain` 的值会被**原样**用作订阅节点里的
+ * `sni` / `host` / `servername` / Clash `Host` 头。
+ * 用户在面板里很容易顺手填成完整 URL（`https://xxx.pages.dev/`），
+ * 于是 SNI 变成 `https://xxx.pages.dev/` —— TLS 握手必败，
+ * 且**没有任何报错**（客户端只表现为「全部节点连不上」）。
+ *
+ * 部署向导写的一直是裸域名（`result.data.subdomain`），
+ * 所以这个坑只在**用户手改**时出现；这里兜底，防再犯。
+ */
+export function normalizeNodeDomain(value: string): string {
+  let text = String(value ?? '').trim()
+  if (!text) return text
+  // 去掉 scheme（http:// / https://，大小写不敏感）
+  text = text.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, '')
+  // 去掉路径 / query / hash（第一个 / ? # 起都不要）
+  text = text.replace(/[/?#].*$/, '')
+  // 去掉用户信息（user@host 形式不会出现，防御而已）
+  const at = text.lastIndexOf('@')
+  if (at >= 0) text = text.slice(at + 1)
+  // 去掉端口（host:port → host；IPv6 [addr]:port → addr）
+  if (text.startsWith('[')) {
+    const end = text.indexOf(']')
+    if (end > 0) text = text.slice(1, end)
+  } else {
+    const first = text.indexOf(':')
+    if (first >= 0 && text.indexOf(':', first + 1) < 0) text = text.slice(0, first)
+  }
+  return text.trim()
+}
+
+/**
  * 按 User-Agent 推断订阅格式。
  *
  * ## 为什么必须有这一步

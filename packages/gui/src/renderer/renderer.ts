@@ -269,6 +269,7 @@
       'btnKvNew',
       'btnKvSave',
       'btnKvManual',
+      'btnAutoHost',
     ]) {
       const el = document.getElementById(id) as HTMLButtonElement | null
       if (el) el.disabled = busy
@@ -323,6 +324,49 @@
   }
 
   /* ---------------- 优选 ---------------- */
+
+  /** 读取国家多选框的选中值（空数组 = 不筛选，跑全量） */
+  function readOptCountries(): string[] {
+    const sel = $sel('optCountries')
+    const out: string[] = []
+    for (const opt of Array.from(sel.selectedOptions)) {
+      const value = opt.value.trim()
+      if (value) out.push(value)
+    }
+    return out
+  }
+
+  /**
+   * 填充国家多选框。
+   *
+   * 列表走 IPC 从 scanner-lib 取（与面板、命令行版同一张表）。
+   * 旧版 scanner-lib 没有该导出时返回空列表，此时禁用多选框并提示全量测试。
+   */
+  async function fillCountryOptions(): Promise<void> {
+    const sel = $sel('optCountries')
+    sel.innerHTML = ''
+    let list: Array<{ code: string; name: string }> = []
+    try {
+      list = await window.cfpilot.listScanCountries()
+    } catch {
+      list = []
+    }
+    if (list.length === 0) {
+      const opt = document.createElement('option')
+      opt.value = ''
+      opt.textContent = '（国家列表不可用，将直接全量测试）'
+      sel.appendChild(opt)
+      sel.disabled = true
+      return
+    }
+    for (const c of list) {
+      const opt = document.createElement('option')
+      opt.value = c.code
+      opt.textContent = `${c.name}（${c.code}）`
+      sel.appendChild(opt)
+    }
+  }
+
   function renderScanResult(payload: {
     entries: Array<{ ip: string; port: number; colo: string; latency: number; speed: number }>
     copyable: string
@@ -371,12 +415,13 @@
       try {
         const result = await window.cfpilot.runScan({
           host,
-          port: Number($('optPort').value),
+          // 端口固定 443：Pages 的 HTTPS 入口，2053 等端口在部分网络会被阻断
           wsPath: path,
           probePath,
           skipSpeed: $('optNoSpeed').checked,
           sample: Number($('optSample').value) || 300,
           top: Number($('optTop').value) || 15,
+          countries: readOptCountries(),
           speedMode: speedUrl ? 'url' : 'auto',
           speedUrl,
           speedConnections: Number($('optSpeedConns').value) || 3,
@@ -397,6 +442,28 @@
       const text = $('scanOut').textContent ?? ''
       if (!text || text.includes('还没有结果')) { log('还没有可复制的结果', 'warn'); return }
       copy(text)
+    })
+
+    // 自动识别域名：有自定义域名优先填它，没有则填 pages.dev
+    document.getElementById('btnAutoHost')!.addEventListener('click', async () => {
+      log('自动识别数据面域名…')
+      try {
+        const result = await window.cfpilot.detectScanHost()
+        if (result.ok && result.host) {
+          $('optHost').value = result.host
+          if (result.source === 'custom') {
+            log(`已填入自定义域名：${result.host}`, 'ok')
+          } else {
+            log(`已填入 pages.dev 域名：${result.host}`, 'warn')
+            log('该实例没有绑定自定义域名。建议绑定后再优选——', 'warn')
+            log('pages.dev 生产链接在部分网络环境会被阻断，测出来的结果不可信。', 'warn')
+          }
+        } else {
+          log('自动识别失败：' + (result.error ?? '未知错误'), 'err')
+        }
+      } catch (err) {
+        log('自动识别异常：' + (err instanceof Error ? err.message : String(err)), 'err')
+      }
     })
 
     document.getElementById('btnEnvCheck')!.addEventListener('click', async () => {
@@ -552,6 +619,7 @@
     bindPush()
     await refreshCredState()
     renderKvOptions()
+    void fillCountryOptions()
     log('CFPilot GUI 已就绪')
     log('凭据只保存在本机，不会上传')
   })

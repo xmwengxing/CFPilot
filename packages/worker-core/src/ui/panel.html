@@ -153,7 +153,7 @@
 <body>
 <div id="app" class="wrap hidden">
   <header class="top">
-    <div class="logo">CF<small>PILOT</small></div>
+    <div class="logo">CP</div>
     <div>
       <h1>CFPilot 管理面板</h1>
       <p>Cloudflare 边缘代理微内核 · 真连接优选</p>
@@ -209,15 +209,6 @@
               <label>数量（1–200）</label>
               <input id="officialCount" type="number" min="1" max="200" step="1" />
             </div>
-          </div>
-          <div class="field" style="margin-bottom:0">
-            <label>国家 / 地区（多选，机房未知的条目会被排除）</label>
-            <div class="chips" id="countryChips"></div>
-            <p class="muted" style="margin:8px 0 0;line-height:1.6">
-              说明：优选 IP 的<strong>机房要连接后才知道</strong>，随机生成的 IP 无法预设地区。
-              选了国家后，只有「已知机房」的条目会被保留（本地扫描结果、带机房标注的远程池）。
-              想让国家筛选真正生效，请先跑一次本地真连接优选。
-            </p>
           </div>
         </div>
       </div>
@@ -328,6 +319,15 @@
             </div>
             <p class="muted" style="margin:4px 0 0">必须与客户端里填的端口一致，否则优选结果无效。默认 443。</p>
           </div>
+          <div class="field">
+            <label>--countries <span class="muted">国家 / 地区（可多选，Ctrl/⌘ 点击）</span></label>
+            <select id="optCountries" multiple size="6" style="width:100%"></select>
+            <p class="muted" style="margin:4px 0 0">
+              不选 = 全量测试。选中后只保留机房落在这些国家 / 地区的 IP<br />
+              （机房信息来自 WebSocket 101 握手响应，未识别机房的候选会被丢弃）。<br />
+              想要某个地区的结果又选不出来，就把采样数调到 500~1000 再试。
+            </p>
+          </div>
           <label class="chk"><input type="checkbox" id="optNoCallback" /> --no-callback（只扫描不回填）</label>
           <p class="muted" style="margin:4px 0 12px">勾选后不会把结果写回 KV，适合只想拿一份 IP 列表的用户。</p>
           <div class="row end"><button class="ghost" id="btnRebuildCmd">重新生成命令</button></div>
@@ -405,6 +405,22 @@
         <div class="field"><label>Trojan-WS 路径</label><input id="cfgTrojanPath" placeholder="/trojan" /></div>
         <div class="field"><label>XHTTP 路径</label><input id="cfgXhttpPath" placeholder="/xhttp" /></div>
         <div class="field"><label>订阅域名（留空 = 当前 Worker 域名）</label><input id="cfgSubDomain" placeholder="例如 cfpilot.example.com" /></div>
+        <div class="field"><label>订阅名称（客户端导入后显示的名字）</label><input id="cfgSubName" placeholder="CFPilot" maxlength="64" /></div>
+      </div>
+      <div class="field">
+        <label>订阅节点端口（可多选，每个 IP 按勾选端口各生成一个节点）</label>
+        <div class="row" style="gap:18px;flex-wrap:wrap;margin-top:4px">
+          <label class="chk" style="width:auto"><input type="checkbox" name="subPort" value="443" style="width:auto" checked /> 443（推荐）</label>
+          <label class="chk" style="width:auto"><input type="checkbox" name="subPort" value="2053" style="width:auto" /> 2053</label>
+          <label class="chk" style="width:auto"><input type="checkbox" name="subPort" value="2083" style="width:auto" /> 2083</label>
+          <label class="chk" style="width:auto"><input type="checkbox" name="subPort" value="2087" style="width:auto" /> 2087</label>
+          <label class="chk" style="width:auto"><input type="checkbox" name="subPort" value="2096" style="width:auto" /> 2096</label>
+          <label class="chk" style="width:auto"><input type="checkbox" name="subPort" value="8443" style="width:auto" /> 8443</label>
+        </div>
+        <p class="tip">
+          443 被针对性干扰时，勾上备用端口即可（Cloudflare 的 TLS 端口都直通 Worker）。<br />
+          手动优选 IP 里显式写了 <code>IP:端口</code> 的条目保持原端口，不参与端口乘法。
+        </p>
       </div>
       <div class="field">
         <label>订阅下发的节点形态（可多选）</label>
@@ -640,8 +656,11 @@
   }
 
   function renderStatus(s) {
+    // 拆分部署时面板域名 ≠ 节点域名：订阅里下发的 SNI / Host 用的是节点域名
+    // （subDomain > DATA_HOST > 面板域名）。两行都展示，避免用户拿错域名。
     var items = [
-      ['Worker 域名', location.hostname],
+      ['面板域名', location.hostname],
+      ['节点域名（数据面）', s.nodeDomain || s.domain || location.hostname],
       ['边缘机房', s.colo || 'UNK'],
       ['本地优选 IP', s.localIps + ' 条'],
       ['版本', s.version]
@@ -658,6 +677,12 @@
     $('cfgTrojanPath').value = c.trojanPath || '';
     $('cfgXhttpPath').value = c.xhttpPath || '';
     $('cfgSubDomain').value = c.subDomain || '';
+    $('cfgSubName').value = c.subName || 'CFPilot';
+    // 订阅端口多选
+    var ports = String(c.subPorts || '443').split(/[,\s]+/).filter(Boolean);
+    Array.prototype.forEach.call(document.querySelectorAll('input[name="subPort"]'), function (cb) {
+      cb.checked = ports.indexOf(cb.value) >= 0;
+    });
     // 订阅形态（多选）。兼容旧的 subProtocol/subTransport：
     // 老配置里 protocol=both + transport=both 相当于勾了全部三种。
     var variants = String(c.subVariants || '').split(/[,;\s]+/).filter(Boolean);
@@ -701,7 +726,6 @@
     $('poolManual').checked = !!c.poolManual;
     $('officialCount').value = c.officialCount || 20;
     $('domainCount').value = c.domainCount || 10;
-    state.selected = (c.poolCountries || '').split(/[,\s]+/).filter(Boolean).map(function (x) { return x.toUpperCase(); });
     syncSourceCards();
     renderCountries();
   }
@@ -714,12 +738,14 @@
   }
 
   function renderCountries() {
-    var box = $('countryChips');
-    if (!box) return;
-    if (!state.countries.length) { box.innerHTML = '<span class="muted">加载中…</span>'; return; }
-    box.innerHTML = state.countries.map(function (c) {
-      var on = state.selected.indexOf(c.code) >= 0;
-      return '<span class="chip' + (on ? ' on' : '') + '" data-code="' + c.code + '">' + esc(c.name) + ' ' + c.code + '</span>';
+    var sel = $('optCountries');
+    if (!sel) return;
+    if (!state.countries.length) {
+      sel.innerHTML = '<option value="">（加载中…）</option>';
+      return;
+    }
+    sel.innerHTML = state.countries.map(function (c) {
+      return '<option value="' + esc(c.code) + '">' + esc(c.name) + ' ' + esc(c.code) + '</option>';
     }).join('');
   }
 
@@ -824,18 +850,31 @@
   /** 读取参数表单 */
   function readOpts() {
     var portEl = document.querySelector('input[name="optPort"]:checked');
+    var countries = [];
+    var sel = $('optCountries');
+    if (sel) {
+      Array.prototype.forEach.call(sel.selectedOptions || [], function (opt) {
+        if (opt.value) countries.push(opt.value);
+      });
+    }
     return {
       token: ($('optToken').value || '').trim(),
       top: Math.max(1, Math.min(100, Number($('optTop').value) || 15)),
       sample: Math.max(10, Math.min(20000, Number($('optSample').value) || 300)),
       port: portEl ? portEl.value : '443',
+      countries: countries,
       noCallback: $('optNoCallback').checked,
     };
   }
 
+  /** 本地优选的目标域名：优先数据面域名（订阅里实际下发的那个） */
+  function scanHost() {
+    return (state.status && state.status.nodeDomain) || location.hostname;
+  }
+
   /** 生成命令；withToken=false 时不带 --token 与 --callback */
   function buildCmd(token, withToken) {
-    var host = location.hostname;
+    var host = scanHost();
     var o = readOpts();
     var parts = ['npx -y cfpilot-scanner@latest'];
     parts.push('--host "' + host + '"');
@@ -845,6 +884,7 @@
     }
     if (o.noCallback || !withToken) parts.push('--no-callback');
     parts.push('--port ' + o.port);
+    if (o.countries.length) parts.push('--countries ' + o.countries.join(','));
     parts.push('--top ' + o.top);
     parts.push('--sample ' + o.sample);
     return parts.join(' ');
@@ -875,8 +915,9 @@
     var o = readOpts();
     prepareScan().then(function (token) {
       var payload = {
-        host: location.hostname,
+        host: scanHost(),
         port: Number(o.port),
+        countries: o.countries,
         token: token,
         callback: location.origin + '/api/v1/preferred-ips',
         top: o.top,
@@ -957,16 +998,6 @@
       $(id).addEventListener('change', syncSourceCards);
     });
 
-    $('countryChips').addEventListener('click', function (e) {
-      var chip = e.target.closest('.chip');
-      if (!chip) return;
-      var code = chip.getAttribute('data-code');
-      var idx = state.selected.indexOf(code);
-      if (idx >= 0) state.selected.splice(idx, 1);
-      else state.selected.push(code);
-      renderCountries();
-    });
-
     $('btnSavePool').addEventListener('click', function () {
       var domains = $('domainLib').value.split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean);
       api('/api/v1/pool/library', { method: 'PUT', body: JSON.stringify({ domains: domains }) })
@@ -978,7 +1009,9 @@
             poolManual: $('poolManual').checked,
             officialCount: Number($('officialCount').value || 20),
             domainCount: Number($('domainCount').value || 10),
-            poolCountries: state.selected.join(','),
+            // 国家筛选已从订阅侧移除（只作用于优选器的 --countries），
+            // 这里显式清空，防止旧配置里的 poolCountries 继续过滤订阅。
+            poolCountries: '',
             add: $('cfgAdd').value
           }, '节点来源已保存');
         });
@@ -987,6 +1020,10 @@
     $('btnPreview').addEventListener('click', loadNodes);
 
     $('btnSaveInbound').addEventListener('click', function () {
+      var subPorts = Array.prototype.map.call(
+        document.querySelectorAll('input[name="subPort"]:checked'),
+        function (cb) { return cb.value; }
+      ).join(',');
       saveConfig({
         uuid: $('cfgUuid').value.trim(),
         trojanPassword: $('cfgTrojan').value.trim(),
@@ -994,6 +1031,8 @@
         trojanPath: $('cfgTrojanPath').value.trim(),
         xhttpPath: $('cfgXhttpPath').value.trim(),
         subDomain: $('cfgSubDomain').value.trim(),
+        subName: $('cfgSubName').value.trim() || 'CFPilot',
+        subPorts: subPorts || '443',
         subVariants: [
           $('cfgVarVlessWs').checked ? 'vless-ws' : '',
           $('cfgVarVlessXhttp').checked ? 'vless-xhttp' : '',
@@ -1055,6 +1094,8 @@
     Array.prototype.forEach.call(document.querySelectorAll('input[name="optPort"]'), function (radio) {
       radio.addEventListener('change', renderCmds);
     });
+    var countrySel = $('optCountries');
+    if (countrySel) countrySel.addEventListener('change', renderCmds);
     // 进入页面时先把免令牌命令渲染出来
     renderCmds();
     $('btnRefreshSub').addEventListener('click', function () { refreshSubLinks(); loadNodes(); });

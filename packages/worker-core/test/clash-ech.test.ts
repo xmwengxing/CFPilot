@@ -29,6 +29,8 @@ function makeConfig(over: Partial<UserConfig> = {}): UserConfig {
     relayPool: '',
     useBuiltinRelay: true,
     subVariants: 'vless-ws',
+    subName: 'CFPilot',
+    subPorts: '443',
     enableTrojan: true, enableXhttp: true,
     subDomain: '', subProtocol: 'both', subTransport: 'ws',
     clientFingerprint: 'chrome',
@@ -48,6 +50,7 @@ function makeCtx(over: Partial<UserConfig> = {}): RenderContext {
     config: makeConfig(over),
     domain: 'cfpilot.example.com',
     port: 443,
+    ports: [443],
     protocol: 'both',
     transport: 'ws',
   }

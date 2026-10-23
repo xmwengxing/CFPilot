@@ -194,6 +194,28 @@ export interface UserConfig {
    * 默认只勾 `vless-ws`（兼容性最好，Clash Verge / mihomo / v2rayN 都支持）。
    */
   subVariants: string
+  /**
+   * 订阅名称：客户端导入订阅后自动填入的名字（如 Clash Verge 的配置名）。
+   *
+   * 历史上文件名写死 `CFPilot.yaml`，部分客户端会把**扩展名也带进名称**
+   * （导入后显示"CFPilot.yaml"）。这里允许自定义，且渲染时不再附加扩展名。
+   * 仅影响展示名，不影响协议内容。
+   */
+  subName: string
+  /**
+   * 订阅节点下发的端口（多选，逗号分隔）。
+   *
+   * Cloudflare 的 TLS 端口除 443 外还有 2053/2083/2087/2096/8443，
+   * 部分网络环境 443 被针对性干扰时换端口即可恢复。
+   *
+   * 语义：
+   *   - 每个「自动池」条目（官方 IP / 优选域名 / 远程池）按勾选的端口各生成一份；
+   *   - 「手动池」里显式写了 `IP:端口` 的条目保持原端口，不参与乘法
+   *     （用户手动指定即意图，避免被乘成 N 份）。
+   *
+   * 留空或解析失败 = 只用 443。
+   */
+  subPorts: string
   /** 客户端指纹 */
   clientFingerprint: string
   /**

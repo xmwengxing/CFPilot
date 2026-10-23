@@ -149,3 +149,16 @@ export async function detectProxyInterference(host?: string): Promise<NetEnvResu
 
   return { clean: findings.length === 0, findings }
 }
+
+/**
+ * 判断一个 WS 路径参数是否被 MSYS（Git-Bash）污染。
+ *
+ * 抽成纯函数便于测试 —— 这类「静默失败」的坑值得有回归测试守住。
+ * 放在 net-env 而不是 cli.ts：测试 import cli.ts 会触发其模块级 main()，
+ * 导致 vitest 进程被 process.exit 掉。
+ */
+export function isMsysPollutedPath(value: string): boolean {
+  const looksWindows = /^[A-Za-z]:[\\/]/.test(value) || value.includes('\\')
+  const hasMsysHint = /node_modules|bash-win32|@dsh-ops|msys/i.test(value)
+  return looksWindows || hasMsysHint
+}

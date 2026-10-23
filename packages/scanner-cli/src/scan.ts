@@ -29,6 +29,7 @@ import {
   type DownloadResult,
 } from './true-probe'
 import { parseSpeedUrl, withBytes, schemeForPort, DEFAULT_SPEED_URL } from './speed-url'
+import { countryOfColo, normalizeCountryFilter } from './countries'
 
 export interface ScanOptions {
   /** Worker 域名（作为 SNI / Host） */
@@ -37,6 +38,14 @@ export interface ScanOptions {
   port: number
   /** 候选 IP 列表 */
   candidates: string[]
+  /**
+   * 国家 / 地区过滤（可多选，如 ['HK','JP']；空 / 不传 = 全量）。
+   *
+   * 机房信息来自阶段二的 101 握手响应，因此在 wsOk 之后过滤：
+   * 只让匹配地区的候选进入测速，避免把测速额度浪费在不需要的地区。
+   * 筛完为空时**忽略该筛选**（不阻断），并提示调大采样数。
+   */
+  countries?: string[]
   /** 阶段一并发 */
   concurrency?: number
   /** 阶段一超时（ms） */
@@ -100,6 +109,10 @@ export interface ScanSummary {
     wsOk: number
     speedOk: number
     elapsedMs: number
+    /** 生效的国家筛选（空 = 未筛选或筛选被忽略） */
+    countries: string[]
+    /** 国家筛选后进入测速的候选数（未筛选时 = wsOk） */
+    wsFiltered: number
   }
 }
 
@@ -206,7 +219,39 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   })
 
   const wsOk = probeResults.filter((r) => r.probe.ok)
-  const stage2 = wsOk.sort((a, b) => a.latency - b.latency).slice(0, speedLimit)
+
+  // ---- 国家 / 地区过滤（可选，作用于已识别机房的候选）----
+  //
+  // 为什么放在这里：机房（colo）只有 101 握手响应里才有，TCP 阶段无从得知。
+  // 筛完为空说明采样不足或该地区候选太少——此时忽略筛选而不是返回空结果，
+  // 与订阅侧 filterByCountries 的回落语义保持一致。
+  const countryFilter = normalizeCountryFilter(options.countries ?? [])
+  let wsFiltered = wsOk
+  let appliedCountries: string[] = []
+  if (countryFilter.length > 0 && wsOk.length > 0) {
+    const matched = wsOk.filter((r) => countryFilter.includes(countryOfColo(r.probe.colo || '')))
+    if (matched.length > 0) {
+      wsFiltered = matched
+      appliedCountries = countryFilter
+      report({
+        type: 'progress',
+        stage: 2,
+        done: wsOk.length,
+        total: wsOk.length,
+        message: `国家筛选 ${countryFilter.join('/')}：保留 ${matched.length}/${wsOk.length}，进入测速`,
+      })
+    } else {
+      report({
+        type: 'progress',
+        stage: 2,
+        done: wsOk.length,
+        total: wsOk.length,
+        message: `国家筛选 ${countryFilter.join('/')} 后无候选，已忽略（采样太小？调到 500~1000 再试）`,
+      })
+    }
+  }
+
+  const stage2 = wsFiltered.sort((a, b) => a.latency - b.latency).slice(0, speedLimit)
 
   // ---- 阶段三：真实下行测速（可用 --no-speed 跳过） ----
   //
@@ -299,6 +344,8 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
       wsOk: wsOk.length,
       speedOk: entries.length,
       elapsedMs: Date.now() - started,
+      countries: appliedCountries,
+      wsFiltered: wsFiltered.length,
     },
   }
   report({ type: 'done', count: entries.length })

@@ -94,6 +94,8 @@ const baseConfig = {
   relayPool: '',
   useBuiltinRelay: true,
   subVariants: 'vless-ws',
+  subName: 'CFPilot',
+  subPorts: '443',
 } as unknown as Parameters<typeof handleXhttp>[1]
 
 function setupDial() {

@@ -88,6 +88,8 @@ describe('数据面出站池汇总（逻辑与 routes/data.ts 的 collectProxies
     relayPool: '',
     useBuiltinRelay: true,
     subVariants: 'vless-ws',
+    subName: 'CFPilot',
+    subPorts: '443',
     enableTrojan: true,
     enableXhttp: true,
     subDomain: '',

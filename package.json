@@ -1,6 +1,6 @@
 {
   "name": "cfpilot",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "CFPilot — Cloudflare Workers 代理微内核 + 真连接优选面板 + 本地优选器 + 中文部署向导",
@@ -37,6 +37,8 @@
     "test:watch": "vitest",
     "dev": "npm run dev -w @cfpilot/worker-core",
     "verify": "npm run build && npm run typecheck && npm run test",
+    "version:sync": "node scripts/sync-version.mjs",
+    "version:bump": "node scripts/bump-version.mjs",
     "clean": "node scripts/clean.mjs"
   },
   "devDependencies": {

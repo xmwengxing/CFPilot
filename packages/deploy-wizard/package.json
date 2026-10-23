@@ -1,6 +1,6 @@
 {
   "name": "cfpilot-deploy",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "CFPilot 全中文部署向导：自动创建 KV、部署 Worker 内核、绑定自定义域名",
   "license": "MIT",
   "author": "CFPilot Contributors",
@@ -30,7 +30,7 @@
   "scripts": {
     "build": "node scripts/build.mjs && node scripts/sync-asset.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "node ../../scripts/sync-version.mjs packages/deploy-wizard && npm run build"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

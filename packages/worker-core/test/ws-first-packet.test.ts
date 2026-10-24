@@ -16,14 +16,9 @@ import { describe, expect, it, vi } from 'vitest'
 // 可控拨号：返回的 promise 由测试手动 resolve，模拟「拨号进行中」
 const dialMock = vi.hoisted(() => vi.fn())
 
-/**
- * 把可控拨号注入 `globalThis.__cfpDial`。
- *
- * `websocket-self` 现在**不静态 import** `outbound/dial`（静态依赖会让
- * Workers 通道 isolate 启动失败，HTTP 522），改为从 `globalThis.__cfpDial`
- * 取拨号函数 —— 所以测试也必须走这条路径注入 mock。
- */
-;(globalThis as { __cfpDial?: unknown }).__cfpDial = dialMock
+vi.mock('../src/outbound/dial', () => ({
+  dial: dialMock,
+}))
 
 const { handleWebSocket } = await import('../src/protocols/websocket-self')
 

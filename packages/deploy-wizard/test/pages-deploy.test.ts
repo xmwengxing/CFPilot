@@ -550,6 +550,25 @@ describe('部署清单与更新模式', () => {
     })
   })
 
+  it('把面板密码随结果带回（否则部署后查不到密码）', async () => {
+    const mock = fullMock()
+    await withMockServer(mock.handler, async (base) => {
+      const { deployPagesSplit } = await import('../src/pages-deploy')
+      const result = await deployPagesSplit({
+        ...baseOptions,
+        // 留空让向导随机生成密码，模拟 GUI 首次部署的真实场景
+        panelPassword: '',
+        apiBase: base,
+        bundles: { control: 'x', data: 'x' },
+        wait: { timeoutMs: 500, intervalMs: 10 },
+        log: () => {},
+      })
+      expect(result.panelPassword).toBeTruthy()
+      // 与写进 KV 清单、控制面环境变量的是同一个值
+      expect(result.panelPassword).toBe(JSON.parse(mock.kv.get('CFP_DEPLOY_MANIFEST')).credentials.panelPassword)
+    })
+  })
+
   it('版本相同时跳过部署', async () => {
     const mock = fullMock({ existingManifest: oldManifest })
     await withMockServer(mock.handler, async (base) => {

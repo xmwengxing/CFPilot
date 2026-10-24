@@ -32,6 +32,8 @@ declare module '../../deploy-wizard/src/pages-deploy' {
     panelPath?: string
     uuid?: string
     wsPath?: string
+    /** 实际生效的控制面面板密码（首次部署时随机生成） */
+    panelPassword?: string
     warnings: string[]
   }>
 }
@@ -89,9 +91,19 @@ interface Window {
         wsPath: string
         dataPlane: 'self' | 'vendor'
       },
-      kvNamespaceId?: string
-    ): Promise<{ ok: boolean; error?: string }>
-    checkDeployed(kvNamespaceId?: string): Promise<void>
+      kvNamespaceId?: string    ): Promise<{
+      ok: boolean
+      error?: string
+      /** 控制面面板完整地址（含面板路径） */
+      panelUrl?: string
+      /** 面板密码（首次部署时随机生成） */
+      panelPassword?: string
+      /** 数据面域名 */
+      dataUrl?: string
+      uuid?: string
+      wsPath?: string
+    }>
+  checkDeployed(kvNamespaceId?: string): Promise<void>
     runScan(params: {
       host: string
       wsPath: string

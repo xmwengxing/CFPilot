@@ -127,6 +127,13 @@ export interface PagesSplitDeployResult {
   uuid?: string
   /** 实际生效的 WS 路径 */
   wsPath?: string
+  /**
+   * 实际生效的控制面面板密码。
+   *
+   * 首次部署时是随机生成的，不返回给调用方就只能自己去 KV 里翻 ——
+   * GUI 曾因此部署成功后不显示密码。
+   */
+  panelPassword?: string
   warnings: string[]
 }
 
@@ -647,6 +654,7 @@ export async function deployPagesSplit(
       result.panelPath = effective.panelPath
       result.uuid = effective.uuid
       result.wsPath = effective.wsPath
+      result.panelPassword = effective.panelPassword
       return result
     }
     if (manifest.build && options.localBuild && manifest.build !== options.localBuild) {
@@ -694,6 +702,7 @@ export async function deployPagesSplit(
   result.panelPath = effective.panelPath
   result.uuid = effective.uuid
   result.wsPath = effective.wsPath
+  result.panelPassword = effective.panelPassword
 
   /* ---------------- 1. 创建两个 Pages 项目 ---------------- */
   for (const [label, name] of [

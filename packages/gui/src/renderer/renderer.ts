@@ -308,6 +308,14 @@
         )
         const status = document.getElementById('deployStatus')!
         status.textContent = result.ok ? '✅ 部署完成' : '❌ 部署失败：' + (result.error ?? '')
+
+        // 成功时把「马上要用的东西」集中再报一次：面板地址与密码。
+        // 密码是部署时随机生成的，不在这里显示就只能去 KV 清单里翻。
+        if (result.ok) {
+          log('── 部署成功 ──', 'ok')
+          if (result.panelUrl) log('面板地址：' + result.panelUrl, 'ok')
+          if (result.panelPassword) log('面板密码：' + result.panelPassword, 'ok')
+        }
       } catch (err) {
         log('部署异常：' + (err instanceof Error ? err.message : String(err)), 'err')
         document.getElementById('deployStatus')!.textContent = '❌ 部署异常'

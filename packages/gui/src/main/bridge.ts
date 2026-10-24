@@ -91,6 +91,8 @@ interface DeployerModule {
     panelPath?: string
     uuid?: string
     wsPath?: string
+    /** 实际生效的面板密码（首次部署时随机生成） */
+    panelPassword?: string
     warnings: string[]
   }>
 }
@@ -169,6 +171,28 @@ export interface DeployParams {
 }
 
 /**
+ * 部署结果。
+ *
+ * 成功时把用户真正要用的东西（面板地址 / 密码 / UUID / WS 路径）一并带回：
+ * 这些值有相当一部分是部署时随机生成的（尤其是面板密码），
+ * 不返回给渲染层就只能自己去 KV 的部署清单里翻。
+ */
+export interface DeployOutcome {
+  ok: boolean
+  error?: string
+  /** 控制面面板完整地址（含面板路径） */
+  panelUrl?: string
+  /** 面板密码（首次部署时随机生成） */
+  panelPassword?: string
+  /** 数据面域名 */
+  dataUrl?: string
+  /** VLESS UUID */
+  uuid?: string
+  /** WS 路径 */
+  wsPath?: string
+}
+
+/**
  * 执行部署，日志实时推给窗口。
  *
  * KV 的选择：
@@ -180,7 +204,7 @@ export async function runDeploy(
   win: BrowserWindow | null,
   params: DeployParams,
   kvNamespaceId?: string
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<DeployOutcome> {
   const secrets = loadSecrets()
   if (!secrets.cfToken.trim()) {
     sendLog(win, '尚未保存 Cloudflare API Token，请先填写并保存', 'err')
@@ -234,15 +258,30 @@ export async function runDeploy(
       log: (m: string) => sendLog(win, m),
     })
 
-    sendLog(win, `控制面：https://${result.control.subdomain}${result.panelPath ?? ''}`, 'ok')
-    sendLog(win, `数据面：https://${result.data.subdomain}`, 'ok')
+    const panelUrl = `https://${result.control.subdomain}${result.panelPath ?? ''}`
+    sendLog(win, `控制面：${panelUrl}`)
+    sendLog(win, `数据面：https://${result.data.subdomain}`)
     if (result.uuid) sendLog(win, `UUID：${result.uuid}`)
     if (result.wsPath) sendLog(win, `WS 路径：${result.wsPath}`)
+    if (result.panelPassword) sendLog(win, `面板密码：${result.panelPassword}`)
 
     if (result.warnings.length > 0) {
       for (const w of result.warnings) sendLog(win, w, 'warn')
     }
-    return { ok: true }
+
+    // 明确的成功横幅：把用户真正要用的东西（面板地址 + 密码）集中放在最后，
+    // 不用自己去日志里翻，也不用去 KV 里查密码。
+    sendLog(win, '── 部署成功 ──', 'ok')
+    sendLog(win, `面板地址：${panelUrl}`, 'ok')
+    if (result.panelPassword) sendLog(win, `面板密码：${result.panelPassword}`, 'ok')
+    return {
+      ok: true,
+      panelUrl,
+      panelPassword: result.panelPassword,
+      uuid: result.uuid,
+      wsPath: result.wsPath,
+      dataUrl: `https://${result.data.subdomain}`,
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     sendLog(win, `部署失败：${message}`, 'err')

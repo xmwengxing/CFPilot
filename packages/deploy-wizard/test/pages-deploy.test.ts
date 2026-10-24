@@ -240,6 +240,29 @@ describe('部署参数校验', () => {
     ).rejects.toThrow(/项目名/)
   })
 
+  it('项目名留空时生成随机名（GUI 可选输入框场景）', async () => {
+    const { deployPagesSplit } = await import('../src/pages-deploy')
+    await withMockServer(
+      () => ({ status: 200, body: { success: true, result: [] } }),
+      async (base) => {
+        const result = await deployPagesSplit({
+          ...baseOptions,
+          controlProject: '',
+          dataProject: '',
+          apiBase: base,
+          bundles: { control: 'x', data: 'x' },
+          wait: { timeoutMs: 500, intervalMs: 10 },
+          log: () => {},
+        })
+        // 不抛「参数不合法」，且两个名字都被填成合法的 Pages 项目名
+        for (const name of [result.control.name, result.data.name]) {
+          expect(name).toMatch(/^[a-z0-9][a-z0-9-]{0,57}$/)
+        }
+        expect(result.control.name).not.toBe(result.data.name)
+      }
+    )
+  })
+
   it('拒绝非法 WS 路径', async () => {
     const { deployPagesSplit } = await import('../src/pages-deploy')
     // 缺前导斜杠、含大写、含空格、只有斜杠都不合法

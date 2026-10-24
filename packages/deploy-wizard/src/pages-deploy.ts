@@ -33,7 +33,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { CloudflareClient, CloudflareError, type PagesDeployment } from './cf-api'
-import { randomPanelPath, randomPassword, randomWsPath } from './utils'
+import { randomPanelPath, randomPassword, randomWorkerName, randomWsPath } from './utils'
 
 export interface PagesSplitDeployOptions {
   token: string
@@ -516,10 +516,14 @@ function validateOptions(options: PagesSplitDeployOptions): string[] {
   }
 
   // 项目名只允许小写字母数字与连字符（Pages 要求）
+  //
+  // 留空是合法的：更新模式按清单取名，首次部署在 deployPagesSplit 里
+  // 生成随机名（GUI 的项目名输入框就是可留空的）。
   for (const [label, name] of [
     ['控制面项目名', options.controlProject],
     ['数据面项目名', options.dataProject],
   ] as const) {
+    if (!name) continue
     if (!/^[a-z0-9][a-z0-9-]{0,57}$/.test(name)) {
       problems.push(`${label} 含非法字符：${JSON.stringify(name)}（只允许小写字母、数字、连字符）`)
     }
@@ -653,6 +657,17 @@ export async function deployPagesSplit(
   } else {
     log('· 未检测到已有部署，进入首次部署模式')
   }
+
+  // 项目名兜底：更新模式已在上面按清单填好；走到这里仍为空的
+  // （首次部署 + 调用方留空，如 GUI 的可选项目名输入框）生成随机名，
+  // 策略与 CLI 一致（randomWorkerName：无特征字符，防风控）。
+  //
+  // 必须在归属校验之前完成 —— assertKvOwnership 用 controlName 与清单比对，
+  // 传空串会被误判成「另一个实例占用」。
+  if (!controlName) controlName = randomWorkerName()
+  if (!dataName) dataName = randomWorkerName()
+  result.control.name = controlName
+  result.data.name = dataName
 
   /* ---------------- 0b. 归属校验（写入任何键之前） ---------------- */
 

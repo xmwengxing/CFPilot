@@ -24,6 +24,8 @@ export interface ScanEntry {
   port: number
   colo: string
   latency: number
+  /** TLS 握手耗时（ms）—— 客户端能否连上主要看这个 */
+  tlsMs: number
   speed: number
 }
 

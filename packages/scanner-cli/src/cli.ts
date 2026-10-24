@@ -58,13 +58,19 @@ scan 选项:
   --speed-duration <ms>  测速时长，默认 6000
   --no-speed             跳过测速，只按延迟排序
   --top <n>              返回条数，默认 15
-  --concurrency <n>      阶段一并发，默认 300
+  --concurrency <n>      阶段一 TCP 并发，默认 300
+  --tls-concurrency <n>  阶段一 TLS 握手并发，默认 64
+                          TLS 握手是 CPU 密集型操作，过高会让本机成为瓶颈
   --sample <n>           候选 IP 采样数，默认 20000
+                          建议 3000 起：阶段一按 TLS 握手耗时筛选，而握手快慢
+                          与 TCP 延迟几乎无关（实测 TCP 9ms 的 IP 可能要 3.5 秒），
+                          采样小了根本碰不到握手快的 IP
   --countries <a,b>      国家 / 地区过滤（可多选，逗号分隔，如 HK,JP,SG）
                          不选 = 全量。机房来自 101 握手响应；筛完为空会自动忽略
   --cidr <a,b>           自定义网段（可重复，用逗号分隔）
   --ip-file <path>       使用本地 IP 列表文件
-  --max-latency <ms>     阶段一延迟上限，默认 0（不限）
+  --max-latency <ms>     阶段一 TCP 延迟上限，默认 0（不限）
+  --tls-timeout <ms>     阶段一 TLS 握手超时，默认 4000
   --probe-limit <n>      进入 101 校验的候选数，默认 120
   --speed-limit <n>      进入测速的候选数，默认 30
   --speed-bytes <n>      测速字节数，默认 5242880
@@ -225,15 +231,18 @@ function printTable(entries: ScanEntry[]): void {
     process.stdout.write('\n没有通过全部校验的节点。\n')
     return
   }
-  process.stdout.write('\n排名  地址                     机房   延迟(ms)  下行(MB/s)\n')
-  process.stdout.write('─'.repeat(58) + '\n')
+  // TLS 握手耗时放在最前：它决定导入客户端后会不会 -1
+  // （真机实测 TCP 延迟 8~40ms 无区分度，TLS 握手 768ms~3531ms 相差 4.6 倍）
+  process.stdout.write('\n排名  地址                     机房   TLS(ms)  TCP(ms)  下行(MB/s)\n')
+  process.stdout.write('─'.repeat(66) + '\n')
   entries.forEach((entry, index) => {
     const rank = String(index + 1).padStart(2, ' ')
     const address = `${entry.ip}:${entry.port}`.padEnd(24, ' ')
     const colo = (entry.colo || 'UNK').padEnd(6, ' ')
+    const tls = String(entry.tlsMs).padStart(7, ' ')
     const latency = String(entry.latency).padStart(7, ' ')
     const speed = entry.speed.toFixed(1).padStart(9, ' ')
-    process.stdout.write(`${rank}   ${address} ${colo} ${latency}  ${speed}\n`)
+    process.stdout.write(`${rank}   ${address} ${colo} ${tls} ${latency}  ${speed}\n`)
   })
 }
 
@@ -367,6 +376,8 @@ async function commandScan(args: ReturnType<typeof parseArgs>): Promise<void> {
     skipSpeed,
     concurrency: flagNumber(args, 'concurrency', 300),
     tcpTimeoutMs: flagNumber(args, 'timeout', 1200),
+    tlsConcurrency: flagNumber(args, 'tls-concurrency', 64),
+    tlsTimeoutMs: flagNumber(args, 'tls-timeout', 4000),
     maxLatencyMs: flagNumber(args, 'max-latency', 0),
     probeLimit: flagNumber(args, 'probe-limit', 120),
     probeTimeoutMs: flagNumber(args, 'probe-timeout', 3000),

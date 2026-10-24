@@ -1,10 +1,10 @@
 # CFPilot 项目交接文档
 
-> 最后更新：2026-10-23 晚　｜　仓库：`https://github.com/xmwengxing/CFPilot.git`
-> 分支：`main`　｜　最新提交：`f7b0366`　｜　**全仓统一版本：0.3.0**（版本政策见 §0.3）
-> npm：`cfpilot-scanner@0.3.0` / `cfpilot-deploy@0.3.0` **均已发布**
+> 最后更新：2026-10-24 晚　｜　仓库：`https://github.com/xmwengxing/CFPilot.git`
+> 分支：`main`　｜　**全仓统一版本：0.3.2**（版本政策见 §0.3）
+> npm：`cfpilot-scanner@0.3.2` / `cfpilot-deploy@0.3.2`（待发布）
 > 图形化工具最新 release：`gui-v0.1.4`（`CFPilot-0.1.4-x64.exe` / `-portable.exe`）；
-> 下一次发版按新版本政策打 tag `gui-v0.3.0`
+> 下一次发版按新版本政策打 tag `gui-v0.3.2`
 
 ---
 
@@ -14,7 +14,9 @@
 
 CFPilot 已是一个**功能完整、经真机验证**的 Cloudflare 代理微内核 + 真连接优选面板：
 自研数据面为默认实现（vendor CFNext 可回退），四条交付路径全部就绪
-（GUI exe / 两个 npm 包 / 线上部署 / CI），全仓测试 **39 个文件 / 381 个用例全绿**。
+（GUI exe / 两个 npm 包 / 线上部署 / CI），全仓测试 **39 个文件 / 386 个用例全绿**。
+
+**部署形态唯一 = Pages 双项目**（Workers 双脚本形态已于 2026-10-24 归档，见 §0.22）。
 
 ### 0.2 交付物状态
 
@@ -141,6 +143,77 @@ check-host 多国节点全 500、同脚本自定义域 200 / workers.dev 500、
 
 **验证 Workers 相关行为必须走自定义域名**；早前「跨账号 fetch 1101/522 的噪声」
 大概率就是它，当年 workers.dev 因本机 DNS 污染从未被真正验证过。
+
+---
+
+## 0.23 优选器 -1 根因修复：TLS 握手筛选（2026-10-24）
+
+### 0.23.1 问题现象
+
+用户反馈：用本项目自研数据面部署后，把随机生成的 WS 路径填进 GUI 优选，
+选出的 IP **回填到 V2rayN 后一半以上延迟 -1**；优选器自己测速时都有速度
+（0.1~0.3 MB/s），IPv6 曾达到 50 MB/s。
+
+### 0.23.2 根因：TCP 延迟没有区分度，TLS 握手才有
+
+真机实测（电信千兆，两个不同网络环境，结论一致）：
+
+| 指标 | 实测范围 | 区分度 |
+|------|---------|--------|
+| TCP 建连延迟 | 8~40ms | **几乎没有**（都在同一数量级） |
+| TLS 握手耗时 | 768ms ~ 3531ms | **相差 4.6 倍** |
+
+**两者相关系数接近 0** —— TCP 9ms 的 IP，TLS 握手可能要 3.5 秒。
+
+旧实现阶段一只按 TCP 延迟排序，于是选出「TCP 快但 TLS 慢」的 IP。
+客户端建立连接必须做**完整 TLS 握手**，超过其超时就是 **-1**。
+（VLESS 全链路实测 1.8~3.2 秒，其中 TLS 握手占 1.3~2.7 秒。）
+
+> 顺带排除的疑点：优选器测速慢（0.1~0.5 MB/s）是**网络链路本身被限制**
+> （8 连接并发也只到 2 MB/s，CF 官方测速站完全不通），
+> 不是代码问题；它与「-1」也是两件事 —— 慢但仍然可用。
+
+### 0.23.3 修复内容
+
+| 文件 | 改动 |
+|------|------|
+| `packages/scanner-cli/src/true-probe.ts` | **新增 `probeTlsHandshake()`**：只做 TLS 握手、不发数据，返回握手耗时与 ALPN |
+| `packages/scanner-cli/src/scan.ts` | 阶段一追加 **TLS 握手筛选**，以握手耗时为主排序键、TCP 延迟为次键；`ScanEntry` / `ScanSummary` 增加 `tlsMs` / `tlsOk` |
+| `packages/scanner-cli/src/candidates.ts` | 桥接服务默认采样数 **300 → 3000**（采样小了碰不到握手快的 IP） |
+| `packages/scanner-cli/src/cli.ts` | 新增 `--tls-concurrency` / `--tls-timeout`；结果表格新增 `TLS(ms)` 列 |
+| `packages/scanner-cli/src/scanner-lib.ts` | 导出 `probeTlsHandshake` / `TlsProbeResult` |
+| `packages/gui/src/renderer/index.html` | 候选采样数默认 **300 → 3000**（上限 50000）；结果表格新增 `TLS握手(ms)` 列 |
+| `packages/gui/src/renderer/renderer.ts` | 同上；采样数回退值同步改 3000 |
+| `packages/gui/src/{preload,globals.d.ts,main/scanner}.ts` | `ScanEntry` 增加 `tlsMs` |
+| `packages/scanner-cli/test/scan.test.ts` | 新增 3 个用例锁定排序规则（TLS 优先 / 失败剔除 / 同值退化 TCP） |
+
+### 0.23.4 修复效果（真机实测）
+
+同一域名、同一口径跑 CLI（`--sample 800`）：
+
+```
+排名  地址                     机房   TLS(ms)  TCP(ms)  下行(MB/s)
+ 1   172.70.203.210:443       LAX        822     635        0.5
+ 2   104.20.208.34:443        LAX        851     188        0.5
+ 3   172.68.73.44:443         LAX        869     572        0.5
+ 4   172.71.127.42:443        LAX        912     654        0.5
+ 5   172.67.239.128:443       LAX        865     556        0.4
+```
+
+选出的 IP TLS 握手 **822~912ms**；修复前随机采样中位数 **1255ms**、最差 **3531ms**。
+
+### 0.23.5 关于「测速链接通用化」
+
+用户担心此前为通用性加入的**公开测速地址**（`speed.cloudflare.com` 等）
+影响了优选质量。核查结论：
+
+- `speed-url.ts` 的 `url` 模式**只作用于已通过 101 校验的 IP**，
+  不会产出「速度快但不能服务你的域名」的结果（这点设计是对的）；
+- 但实测该地址在部分网络下**完全不可用**（0 字节），
+  此时 `resolveSpeedMode` 会自动回落到 `probe` 模式（走项目自己的 `/__edge_probe`）；
+- 本次 -1 与测速链接无关，根因是阶段一缺 TLS 握手筛选（见 §0.23.2）。
+
+因此**未改动测速链接的通用性设计**，只修复阶段一排序。
 
 ---
 

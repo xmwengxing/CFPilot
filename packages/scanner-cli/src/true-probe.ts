@@ -23,6 +23,33 @@ export interface WsProbeResult {
   error?: string
 }
 
+/**
+ * TLS 握手探测结果。
+ *
+ * ## 为什么单列一个指标（2026-10-24 真机定位的 -1 根因）
+ *
+ * 实测（电信千兆，两个不同网络环境）：
+ *
+ * | 指标 | 实测范围 | 区分度 |
+ * |------|---------|--------|
+ * | TCP 建连延迟 | 8~40ms | **几乎没有**（都在同一个数量级） |
+ * | TLS 握手耗时 | 768ms ~ 3531ms | **极大**（相差 4.6 倍） |
+ *
+ * 两者的**相关系数接近 0**：TCP 9ms 的 IP，TLS 可能 3.5 秒。
+ *
+ * 因此只按 TCP 延迟排序（旧行为）会选出一批「TCP 快但 TLS 慢」的 IP，
+ * 客户端建立连接需要完整 TLS 握手，超过超时就是 **-1**。
+ * 这正是「优选出来有速度、导入客户端一半以上 -1」的根因。
+ */
+export interface TlsProbeResult {
+  ip: string
+  /** TLS 握手完成耗时（ms）；-1 表示握手失败/超时 */
+  tlsMs: number
+  /** 协商到的 ALPN（http/1.1 才能走 WS） */
+  alpn?: string
+  error?: string
+}
+
 export interface DownloadResult {
   ok: boolean
   bytes: number
@@ -158,6 +185,72 @@ export function probeWs101(
         finish({ ok: false, colo: '', status: 0, error: '响应异常' })
       }
     })
+  })
+}
+
+/**
+ * 探测候选 IP 的 TLS 握手耗时。
+ *
+ * ## 用途
+ *
+ * 阶段一用：TCP 建连快不代表 TLS 握手快（实测两者相关系数接近 0），
+ * 而客户端能否用这个 IP 取决于**完整 TLS 握手**能否在超时内完成。
+ * 因此阶段一在 TCP 初筛后追加这一项，作为主要排序键。
+ *
+ * ## 实现要点
+ *
+ * - **只做握手、不发数据**：`tls.connect()` 的回调触发即视为握手完成，
+ *   立刻 destroy，不产生额外请求。
+ * - **ALPN 固定 http/1.1**：与 `probeWs101` 保持一致；
+ *   协商不到 http/1.1 的 IP 走不了 WS，直接判失败。
+ * - **超时单独给**：握手超时通常远大于 TCP 超时，默认 4 秒。
+ */
+export function probeTlsHandshake(
+  ip: string,
+  port: number,
+  host: string,
+  timeoutMs = 4000
+): Promise<TlsProbeResult> {
+  return new Promise((resolve) => {
+    const started = Date.now()
+    let settled = false
+
+    // 注意：finish 的参数**不含** ip —— resolve 时统一补上，
+    // 否则 `{ ip, ...result }` 里的 ip 会被 result.ip 覆盖（TS2783）。
+    const finish = (result: Omit<TlsProbeResult, 'ip' | 'tlsMs'> & { tlsMs?: number }): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      try {
+        socket.destroy()
+      } catch {
+        /* 已销毁 */
+      }
+      resolve({ ip, tlsMs: result.tlsMs ?? Date.now() - started, ...result })
+    }
+
+    const socket = tls.connect(
+      {
+        host: ip,
+        port,
+        servername: host,
+        rejectUnauthorized: false,
+        ALPNProtocols: ['http/1.1'],
+      },
+      () => {
+        // 握手完成。ALPN 没协商到 http/1.1 就无法升级 WS，判失败。
+        const alpn = socket.alpnProtocol
+        if (alpn && alpn !== 'http/1.1') {
+          finish({ error: `ALPN=${alpn}` })
+          return
+        }
+        finish({ tlsMs: Date.now() - started, alpn: alpn || undefined })
+      }
+    )
+
+    const timer = setTimeout(() => finish({ error: 'TLS 握手超时' }), timeoutMs)
+    socket.setTimeout(timeoutMs, () => finish({ error: 'TLS 连接超时' }))
+    socket.on('error', (err: Error) => finish({ error: err.message }))
   })
 }
 

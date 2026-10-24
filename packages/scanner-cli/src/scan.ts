@@ -1,9 +1,27 @@
 /**
  * 三阶真连接扫描器
  *
- * 阶段一：高并发 TCP 握手初筛（只保留能建连且延迟够低的 IP）
+ * 阶段一：TCP 握手初筛（只保留能建连的 IP）
+ * 阶段一之二分：**TLS 握手筛选**（只保留握手快的 IP）← 2026-10-24 新增，-1 根因修复
  * 阶段二：强制携带用户域名作为 TLS SNI / HTTP Host，验证是否返回 101 Switching Protocols
  * 阶段三：**只对通过 101 校验的 IP** 测量真实下行速度
+ *
+ * ## 为什么必须有 TLS 握手筛选（2026-10-24 真机定位）
+ *
+ * 电信千兆环境下实测（两个不同网络，结论一致）：
+ *
+ * | 指标 | 实测范围 | 区分度 |
+ * |------|---------|--------|
+ * | TCP 建连延迟 | 8~40ms | **几乎没有** |
+ * | TLS 握手耗时 | 768ms ~ 3531ms | **相差 4.6 倍** |
+ *
+ * 两者**相关系数接近 0**：TCP 9ms 的 IP，TLS 握手可能要 3.5 秒。
+ *
+ * 旧实现只按 TCP 延迟排序，于是选出「TCP 快但 TLS 慢」的 IP ——
+ * 客户端建立连接必须做完整 TLS 握手，超过其超时就是 **-1**。
+ * 这就是「优选器测出来都有速度、导入客户端一半以上 -1」的根因。
+ *
+ * 修复后阶段一以 **TLS 握手耗时为主排序键**，TCP 延迟只作次键。
  *
  * ## 为什么阶段三必须先过阶段二
  *
@@ -23,10 +41,12 @@
 import * as net from 'node:net'
 import {
   probeWs101,
+  probeTlsHandshake,
   measureDownload,
   measureThroughput,
   type WsProbeResult,
   type DownloadResult,
+  type TlsProbeResult,
 } from './true-probe'
 import { parseSpeedUrl, withBytes, schemeForPort, DEFAULT_SPEED_URL } from './speed-url'
 import { countryOfColo, normalizeCountryFilter } from './countries'
@@ -50,9 +70,21 @@ export interface ScanOptions {
   concurrency?: number
   /** 阶段一超时（ms） */
   tcpTimeoutMs?: number
+  /**
+   * 阶段一 TLS 握手探测并发。
+   * 默认 64 —— TLS 握手是 CPU 密集型操作，并发过高会让本机成为瓶颈。
+   */
+  tlsConcurrency?: number
+  /** 阶段一 TLS 握手超时（ms），默认 4000 */
+  tlsTimeoutMs?: number
   /** 阶段一保留的最大延迟（ms），0 表示不限 */
   maxLatencyMs?: number
-  /** 进入阶段二的候选数量 */
+  /**
+   * 进入阶段二的候选数量。
+   *
+   * 注意：现在阶段一会先按 **TLS 握手耗时**排序再截取，
+   * 因此这个值越大越有机会覆盖到「TLS 快」的 IP。
+   */
   probeLimit?: number
   /** 阶段二并发 */
   probeConcurrency?: number
@@ -98,6 +130,8 @@ export interface ScanEntry {
   port: number
   colo: string
   latency: number
+  /** TLS 握手耗时（ms）—— 客户端能否连上主要看这个 */
+  tlsMs: number
   speed: number
 }
 
@@ -106,6 +140,8 @@ export interface ScanSummary {
   stats: {
     candidates: number
     tcpOk: number
+    /** 完成 TLS 握手的候选数 */
+    tlsOk: number
     wsOk: number
     speedOk: number
     elapsedMs: number
@@ -167,6 +203,8 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   const started = Date.now()
   const concurrency = options.concurrency ?? 300
   const tcpTimeoutMs = options.tcpTimeoutMs ?? 1200
+  const tlsConcurrency = options.tlsConcurrency ?? 64
+  const tlsTimeoutMs = options.tlsTimeoutMs ?? 4000
   const maxLatencyMs = options.maxLatencyMs ?? 0
   const probeLimit = options.probeLimit ?? 120
   const probeConcurrency = options.probeConcurrency ?? 24
@@ -200,7 +238,39 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
 
   const tcpOk = tcpResults.filter((r) => r.ok)
   const filtered = maxLatencyMs > 0 ? tcpOk.filter((r) => r.latency <= maxLatencyMs) : tcpOk
-  const stage1 = filtered.sort((a, b) => a.latency - b.latency).slice(0, probeLimit)
+
+  // ---- 阶段一之二分：TLS 握手筛选（-1 根因修复）----
+  //
+  // 真机实测（电信千兆，两个网络环境）：TCP 延迟集中在 8~40ms（无区分度），
+  // 而 TLS 握手耗时 768ms~3531ms（相差 4.6 倍），两者相关系数接近 0。
+  // 只按 TCP 排序会选出「TCP 快但 TLS 慢」的 IP —— 客户端做完整 TLS 握手
+  // 超过超时就是 -1，这正是「优选有速度、导入一半以上 -1」的根因。
+  //
+  // 因此这里对 TCP 通过的候选追加 TLS 握手探测，并以**握手耗时**作为
+  // 阶段一的主排序键；TCP 延迟只作次键（两者都通过时优先握手快的）。
+  report({ type: 'stage', stage: 1, name: 'TLS 握手筛选', total: filtered.length })
+  let tlsDone = 0
+  const tlsResults = await pool(filtered, tlsConcurrency, async (item) => {
+    const probe: TlsProbeResult = await probeTlsHandshake(item.ip, options.port, options.host, tlsTimeoutMs)
+    tlsDone++
+    if (tlsDone % 200 === 0 || tlsDone === filtered.length) {
+      report({
+        type: 'progress',
+        stage: 1,
+        done: tlsDone,
+        total: filtered.length,
+        message: `TLS 握手 ${tlsDone}/${filtered.length}${probe.tlsMs > 0 ? ` ${probe.tlsMs}ms` : ' ✗'}`,
+      })
+    }
+    return { ...item, tls: probe }
+  })
+
+  const tlsOk = tlsResults.filter((r) => r.tls.tlsMs > 0)
+
+  // 主排序键：TLS 握手耗时（升序）；次键：TCP 延迟
+  const stage1 = tlsOk
+    .sort((a, b) => a.tls.tlsMs - b.tls.tlsMs || a.latency - b.latency)
+    .slice(0, probeLimit)
 
   // ---- 阶段二：WebSocket 101 真连接校验 ----
   report({ type: 'stage', stage: 2, name: 'WebSocket 101 真连接校验', total: stage1.length })
@@ -251,7 +321,11 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
     }
   }
 
-  const stage2 = wsFiltered.sort((a, b) => a.latency - b.latency).slice(0, speedLimit)
+  // 阶段二的截断同样改为「TLS 握手优先」——101 校验通过的候选里，
+  // 握手快的对客户端更友好（延迟 -1 的主因就是握手慢）。
+  const stage2 = wsFiltered
+    .sort((a, b) => a.tls.tlsMs - b.tls.tlsMs || a.latency - b.latency)
+    .slice(0, speedLimit)
 
   // ---- 阶段三：真实下行测速（可用 --no-speed 跳过） ----
   //
@@ -261,6 +335,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
     ip: string
     ok: boolean
     latency: number
+    tls: TlsProbeResult
     probe: WsProbeResult
     speed?: number
   }>
@@ -327,9 +402,14 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
       port: options.port,
       colo: r.probe.colo || 'UNK',
       latency: r.latency,
+      tlsMs: r.tls.tlsMs,
       speed: r.speed ? Number(r.speed.toFixed(2)) : 0,
     }))
-    .sort((a, b) => (options.skipSpeed ? a.latency - b.latency : b.speed - a.speed || a.latency - b.latency))
+    .sort((a, b) =>
+      options.skipSpeed
+        ? a.tlsMs - b.tlsMs || a.latency - b.latency
+        : b.speed - a.speed || a.tlsMs - b.tlsMs || a.latency - b.latency
+    )
     .slice(0, top)
 
   for (const entry of entries) {
@@ -341,6 +421,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
     stats: {
       candidates: candidates.length,
       tcpOk: tcpOk.length,
+      tlsOk: tlsOk.length,
       wsOk: wsOk.length,
       speedOk: entries.length,
       elapsedMs: Date.now() - started,

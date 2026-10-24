@@ -464,10 +464,12 @@
             <div class="row">
               <div class="field">
                 <label>候选采样数（--sample）</label>
-                <input type="number" id="optSample" value="300" min="10" max="20000" />
+                <input type="number" id="optSample" value="3000" min="100" max="50000" />
                 <p class="tip">
-                  建议 <b>200~500</b>。太小可能吃不到好 IP，太大会让第一阶段等很久。<br>
-                  第一次测新项目建议调到 <b>500~1000</b>，确认路径对了再降回来。
+                  建议 <b>3000 起</b>。阶段一要按 <b>TLS 握手耗时</b>筛选，
+                  而 TLS 握手快慢和 TCP 延迟几乎无关（实测 TCP 9ms 的 IP，
+                  TLS 可能要 3.5 秒）—— 采样小了根本碰不到握手快的 IP。<br>
+                  第一次测新网络建议 <b>5000~10000</b>，确认能选出低延迟 IP 再降回来。
                 </p>
               </div>
               <div class="field">
@@ -537,7 +539,7 @@
               <button class="btn btn-ghost" id="btnCopyResult">复制结果</button>
             </div>
             <table id="scanTable" hidden>
-              <thead><tr><th>#</th><th>地址</th><th>机房</th><th>延迟(ms)</th><th>下行(MB/s)</th></tr></thead>
+              <thead><tr><th>#</th><th>地址</th><th>机房</th><th>TLS握手(ms)</th><th>TCP(ms)</th><th>下行(MB/s)</th></tr></thead>
               <tbody></tbody>
             </table>
           </div>

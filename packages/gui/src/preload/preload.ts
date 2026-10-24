@@ -149,7 +149,7 @@ const api = {
   },
   onScanResult: (
     cb: (payload: {
-      entries: Array<{ ip: string; port: number; colo: string; latency: number; speed: number }>
+      entries: Array<{ ip: string; port: number; colo: string; latency: number; tlsMs: number; speed: number }>
       copyable: string
       stats: Record<string, number>
       skippedSpeed?: boolean
@@ -158,7 +158,7 @@ const api = {
     const listener = (
       _e: Electron.IpcRendererEvent,
       payload: {
-        entries: Array<{ ip: string; port: number; colo: string; latency: number; speed: number }>
+        entries: Array<{ ip: string; port: number; colo: string; latency: number; tlsMs: number; speed: number }>
         copyable: string
         stats: Record<string, number>
         skippedSpeed?: boolean

@@ -21,8 +21,14 @@ export type IpFamily = 'v4' | 'v6' | 'both'
 export const DEFAULT_CANDIDATE_SAMPLE = 20000
 /** 默认随机种子（与 CLI --seed 默认值一致） */
 export const DEFAULT_CANDIDATE_SEED = 24301
-/** 本地桥接服务未指定采样数时的默认值（面板一键优选优先保证速度） */
-export const DEFAULT_BRIDGE_SAMPLE = 300
+/**
+ * 本地桥接服务未指定采样数时的默认值。
+ *
+ * 2026-10-24 从 300 提到 3000：阶段一新增 TLS 握手筛选后，
+ * 采样量直接决定能否碰到「握手快」的 IP —— 实测 TCP 9ms 的 IP
+ * TLS 握手可能要 3.5 秒，两者几乎无关，300 个候选里往往一个都快不了。
+ */
+export const DEFAULT_BRIDGE_SAMPLE = 3000
 
 export interface CandidateOptions {
   /** 采样上限，0 = 不限制；默认 20000 */

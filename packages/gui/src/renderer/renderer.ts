@@ -376,7 +376,7 @@
   }
 
   function renderScanResult(payload: {
-    entries: Array<{ ip: string; port: number; colo: string; latency: number; speed: number }>
+    entries: Array<{ ip: string; port: number; colo: string; latency: number; tlsMs: number; speed: number }>
     copyable: string
     skippedSpeed?: boolean
   }): void {
@@ -389,7 +389,9 @@
       const tr = document.createElement('tr')
       // 跳过测速时速度本就是 0，显示 — 而不是 0，避免误解成「测出来是 0」
       const speed = payload.skippedSpeed ? '—' : String(e.speed)
-      const cells = [String(i + 1), e.ip + ':' + e.port, e.colo, String(e.latency), speed]
+      // TLS 握手耗时是「导入后会不会 -1」的关键指标，放在最前面
+      const tls = e.tlsMs > 0 ? String(e.tlsMs) : '—'
+      const cells = [String(i + 1), e.ip + ':' + e.port, e.colo, tls, String(e.latency), speed]
       for (const c of cells) {
         const td = document.createElement('td')
         td.textContent = c
@@ -400,7 +402,7 @@
     table.hidden = payload.entries.length === 0
 
     // 表头也标明速度列是否有效
-    const speedHead = table.querySelectorAll('th')[4]
+    const speedHead = table.querySelectorAll('th')[5]
     if (speedHead) speedHead.textContent = payload.skippedSpeed ? '下行(已跳过)' : '下行(MB/s)'
   }
 
@@ -427,7 +429,7 @@
           wsPath: path,
           probePath,
           skipSpeed: $('optNoSpeed').checked,
-          sample: Number($('optSample').value) || 300,
+          sample: Number($('optSample').value) || 3000,
           top: Number($('optTop').value) || 15,
           countries: readOptCountries(),
           speedMode: speedUrl ? 'url' : 'auto',

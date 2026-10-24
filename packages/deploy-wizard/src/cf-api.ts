@@ -534,6 +534,47 @@ export class CloudflareClient {
   }
 
   /* ---------------------------------------------------------------- */
+  /* Workers 脚本（worker-split 部署形态使用）                          */
+  /* ---------------------------------------------------------------- */
+
+  /** 列出账号下所有 Worker 脚本名 */
+  async listScriptNames(accountId: string): Promise<string[]> {
+    const result = await this.request<Array<{ id?: string; name?: string }>>(
+      'GET',
+      `/accounts/${encodeURIComponent(accountId)}/workers/scripts`
+    )
+    return (result ?? []).map((item) => item.id ?? item.name ?? '').filter(Boolean)
+  }
+
+  /**
+   * 删除一个 Worker 脚本。
+   *
+   * 只在「换名重建」的清理路径里用；404 视为已删除（幂等）。
+   */
+  async deleteScript(accountId: string, scriptName: string): Promise<void> {
+    try {
+      await this.request(
+        'DELETE',
+        `/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(scriptName)}`
+      )
+    } catch (err) {
+      if (err instanceof CloudflareError && err.status === 404) return
+      throw err
+    }
+  }
+
+  /** 列出账号下已绑定的 Worker 自定义域名 */
+  async listWorkerDomains(accountId: string): Promise<WorkerDomain[]> {
+    return await this.request('GET', `/accounts/${encodeURIComponent(accountId)}/workers/domains`)
+  }
+
+  /** 按主机名查找 Worker 自定义域名绑定；不存在返回 null */
+  async findWorkerDomain(accountId: string, hostname: string): Promise<WorkerDomain | null> {
+    const list = await this.listWorkerDomains(accountId)
+    return list.find((item) => item.hostname === hostname) ?? null
+  }
+
+  /* ---------------------------------------------------------------- */
   /* Pages                                                             */
   /* ---------------------------------------------------------------- */
 

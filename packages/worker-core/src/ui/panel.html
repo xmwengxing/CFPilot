@@ -178,6 +178,10 @@
       <div class="stat" id="statusBox"></div>
     </div>
     <div class="card">
+      <h2><span class="dot"></span>部署形态</h2>
+      <div class="stat" id="deployShapeBox"></div>
+    </div>
+    <div class="card">
       <h2><span class="dot"></span>当前订阅构成</h2>
       <p class="hint">下面是订阅里实际会生成的节点来源分布。点「节点来源」可调整。</p>
       <div class="summary-bar" id="overviewSummary"></div>
@@ -668,6 +672,41 @@
     $('statusBox').innerHTML = items.map(function (it) {
       return '<div class="item"><div class="k">' + esc(it[0]) + '</div><div class="v">' + esc(it[1]) + '</div></div>';
     }).join('');
+    renderDeployShape(s);
+  }
+
+  /**
+   * 部署形态提示。
+   *
+   * 控制面在两种形态下是同一份产物，因此这里只按「节点域名 vs 面板域名」
+   * 做启发式判断，不硬编码结论：
+   *   · 域名不同 → 拆分部署（Pages 双项目 或 Workers 双脚本）
+   *   · 域名相同 → 单项目
+   *
+   * 之所以要提示，是因为两种拆分形态的**更新方式完全不同**：
+   *   · Pages：数据面承载流量后原地重部署会被 8000119 持久拒绝，
+   *     必须「新建项目 + 切 DATA_HOST + 重发控制面」；
+   *   · Workers：原地重复更新实测 5/5 成功，直接重跑部署即可。
+   */
+  function renderDeployShape(s) {
+    var box = $('deployShapeBox');
+    if (!box) return;
+    var node = s.nodeDomain || s.domain || '';
+    var panel = location.hostname;
+    var split = !!node && node !== panel;
+    var rows = split
+      ? [['部署形态', '拆分部署（控制面 + 数据面分离）'], ['控制面', panel], ['数据面', node]]
+      : [['部署形态', '单项目（控制面与数据面同域）']];
+    box.innerHTML = rows.map(function (it) {
+      return '<div class="item"><div class="k">' + esc(it[0]) + '</div><div class="v">' + esc(it[1]) + '</div></div>';
+    }).join('') +
+      '<p class="hint" style="margin:10px 0 0;line-height:1.9">' +
+      (split
+        ? '更新内核时：<b>Pages 双项目</b>的数据面承载流量后无法原地重部署（8000119），' +
+          '需走「新建项目 + 切 DATA_HOST + 重发控制面」（部署向导已自动完成）；' +
+          '<b>Workers 双脚本</b>可直接原地重部署（实测更稳）。'
+        : '当前是单项目形态，直接重跑部署即可更新。') +
+      '</p>';
   }
 
   function fillConfig(c) {

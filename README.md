@@ -162,6 +162,32 @@ npx -y cfpilot-deploy@latest pages-split --account <账号ID> --resolve-preferre
 > 因此向导在写入前会校验归属：目标 KV 若属于另一个实例，**部署会被中止**并提示新建。
 > 这是有意为之——写坏别人的线上项目比部署失败严重得多。
 
+### Workers 双脚本部署（实验性）
+
+除 Pages 之外，还可以把两个产物部署成**两个 Worker 脚本**（`worker-split`）。
+
+| 维度 | Pages 双项目（默认） | Workers 双脚本（实验性） |
+|------|---------------------|------------------------|
+| 数据面能否运行 | ✅ 真机 5/5 正常 | ❌ 真机 5/5 返回 522 |
+| 原地重复更新 | ❌ 承载流量后持久拒绝（8000119） | ✅ 5/5 全部成功 |
+| 更新操作 | 新建项目 + 切 DATA_HOST + 重发控制面（向导自动） | 直接重跑同一条命令 |
+
+```bash
+# 首次部署
+npx -y cfpilot-deploy@latest worker-split --account <账号ID> --yes
+
+# 更新：直接重跑即可，不会触发 8000119
+npx -y cfpilot-deploy@latest worker-split --account <账号ID> --kv <命名空间ID> --yes
+```
+
+> ⚠️ **数据面在 Workers 上跑不起来**（返回 522，isolate 启动即失败）。
+> 已排除体积、`cloudflare:sockets` 导入、`compatibility_date`、minify、账号差异等因素，
+> 精确触发点是自研数据面 `websocket-self` 里的 `dial()` 出站调用块。
+> **控制面（面板 / 订阅 / 探针）完全可用**；需要稳定数据面请继续用 Pages。
+> 向导在部署结束后会主动探测数据面，失败时明确告警。
+>
+> ⚠️ 两种形态**不能共用同一个 KV**，向导会检测并拒绝（`--force-kv` 可强推）。
+
 ### Pages 通道的三条规则
 
 1. **顺序不能反**：先建项目 → 设环境变量 / 绑 KV → **最后才部署**。
@@ -377,7 +403,8 @@ npx -y cfpilot-scanner@latest serve
 
 ```bash
 npx -y cfpilot-deploy@latest init                              # Worker 单项目
-npx -y cfpilot-deploy@latest pages-split                       # Pages 双项目（推荐）
+npx -y cfpilot-deploy@latest pages-split                       # Pages 双项目（默认推荐）
+npx -y cfpilot-deploy@latest worker-split                      # Workers 双脚本（实验性）
 npx -y cfpilot-deploy@latest token --token <API_TOKEN>        # 仅校验 Token
 npx -y cfpilot-deploy@latest token --check --zone example.com # 逐项探测权限
 ```
@@ -400,6 +427,15 @@ npx -y cfpilot-deploy@latest token --check --zone example.com # 逐项探测权�
 | 分类 | 权限项 | 用途 |
 |---|---|---|
 | Developer Platform | **Pages** → Edit | 创建项目、配置变量、触发部署 |
+
+**`worker-split` 额外需要**
+
+| 分类 | 权限项 | 用途 |
+|---|---|---|
+| Developer Platform | **Workers Scripts** → Edit | 上传两个脚本、开启 workers.dev 子域路由（上面「必需」里已含） |
+
+> `worker-split` 不需要 Pages 权限；反之 `pages-split` 也不需要额外权限。
+> 两种形态都只用「必需」那三项，再加可选的域名相关权限。
 
 **只有绑定自定义域名才需要**（只用 `*.pages.dev` / `*.workers.dev` 可跳过）
 

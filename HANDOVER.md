@@ -1,10 +1,13 @@
 # CFPilot 项目交接文档
 
-> 最后更新：2026-10-23 晚　｜　仓库：`https://github.com/xmwengxing/CFPilot.git`
-> 分支：`main`　｜　最新提交：`f7b0366`　｜　**全仓统一版本：0.3.0**（版本政策见 §0.3）
+> 最后更新：2026-10-24 凌晨　｜　仓库：`https://github.com/xmwengxing/CFPilot.git`
+> 分支：`main`　｜　**全仓统一版本：0.3.0**（版本政策见 §0.3）
 > npm：`cfpilot-scanner@0.3.0` / `cfpilot-deploy@0.3.0` **均已发布**
 > 图形化工具最新 release：`gui-v0.1.4`（`CFPilot-0.1.4-x64.exe` / `-portable.exe`）；
 > 下一次发版按新版本政策打 tag `gui-v0.3.0`
+>
+> 🆕 **2026-10-24 新增**：部署形态从「单一 Pages 双项目」扩展为**双形态**
+> （Pages 默认 / Workers 实验性），见 §0.22。GUI 与 CLI 均可选择。
 
 ---
 
@@ -14,7 +17,8 @@
 
 CFPilot 已是一个**功能完整、经真机验证**的 Cloudflare 代理微内核 + 真连接优选面板：
 自研数据面为默认实现（vendor CFNext 可回退），四条交付路径全部就绪
-（GUI exe / 两个 npm 包 / 线上部署 / CI），全仓测试 **39 个文件 / 381 个用例全绿**。
+（GUI exe / 两个 npm 包 / 线上部署 / CI），**支持 Pages 与 Workers 两种部署形态**，
+全仓测试 **40 个文件 / 390 个用例全绿**。
 
 ### 0.2 交付物状态
 
@@ -56,20 +60,27 @@ CFPilot 已是一个**功能完整、经真机验证**的 Cloudflare 代理微�
    `DATAPLANE=vendor` 切回 CFNext（`src/vendor/cfnext-dataplane.js`，**勿改**）。
    ⚠️ 本文旧版与 AGENTS.md 旧版写的「必须用 CFNext 数据面、不要改回自研」**已作废**
    （自 2026-10-23 §0.20.10 起自研为默认）。
-2. **控制面与数据面必须分开部署**（两个 Pages 项目共用同一 KV）。
-   控制面走 `dist/control.js`（无 sockets），数据面走 `dist/dataplane.js`。
+2. **控制面与数据面必须分开部署**（共用同一 KV）。有两种形态：
+   - **Pages 双项目（默认）**：两个 Pages 项目，控制面走 `dist/control.js`（无 sockets），
+     数据面走 `dist/dataplane.js`；
+   - **Workers 双脚本（实验性）**：两个 Worker 脚本，产物相同。
+     ⚠️ 数据面在 Workers 上会 522（§0.22），控制面完全可用。
+   两种形态**不能共用同一个 KV**（KV 键全局平铺，会互相覆盖凭据）。
 3. **一个 KV 命名空间 = 一个 CFPilot 实例**。内核在 KV 里的键**全局平铺、无实例前缀**，
    两个实例共用一个 KV 会互相覆盖 UUID / WS 路径 / 面板密码 / 会话。
-   归属**只能靠清单键 `CFP_DEPLOY_MANIFEST`** 判断（字段值不唯一，不能作依据）；
-   部署向导写入任何键之前做 `assertKvOwnership` 校验，越界一律中止。
+   归属**只能靠清单键**判断（字段值不唯一，不能作依据）：
+   Pages 用 `CFP_DEPLOY_MANIFEST`，Workers 用 `CFP_DEPLOY_MANIFEST_WORKERS`。
+   部署向导写入任何键之前做归属校验，越界一律中止。
 4. **绝不要写 CFNext 的小写 `config` 键**。vendor 侧是 `Object.assign(默认, kvConfig)`
    **整体覆盖**，写进去会直接改坏共栖的 CFNext 项目的 uuid / path / trojanPassword；
    CFPilot 数据面根本不读它（读大写 `CONFIG`），写了纯属破坏。
-5. **8000119 的平台行为（2026-10-23 实测定性，不要臆测规则）**：
+5. **8000119 的平台行为（2026-10-23/24 实测定性，不要臆测规则）**：
    - 控制面（不承载代理流量）：原地重部署**无限制**；
-   - 数据面（已承载流量）：**原地重部署是持久性拒绝**（实测 4/4 被拒）→
+   - **Pages 数据面（已承载流量）**：**原地重部署是持久性拒绝**（实测 4/4 被拒）→
      更新数据面必须**新建项目 + 切控制面 `DATA_HOST` + 重发控制面**，
      向导已自动化该流程（含 DATA_HOST 同步，问题 3 的修复）；
+   - **Workers 脚本（含数据面）**：原地重复更新 **5/5 全部成功，从未出现 8000119**
+     （§0.22.1）—— 这是 Workers 通道的核心优势；
    - 新项目首次部署：**间歇性**拒绝，**原样重试通常可过**（先重试再换名，
      `deployWithBlockRetry` 已按此实现）。
 6. **Worker 不能连回 Cloudflare 自家 Anycast**（`1.1.1.1` / `cloudflare.com` /
@@ -89,11 +100,214 @@ CFPilot 已是一个**功能完整、经真机验证**的 Cloudflare 代理微�
 | DoH 的 TXT 优选库路径真机验证 | ⬜ 未验（需要特定域名，普通域名 TXT 是 SPF/验证记录） |
 | GUI 界面人工点验 | ⬜ 仅构建 + 类型检查 + 产物标记验证 |
 | exe 代码签名 | ⬜ 未做（SmartScreen 提示，缺口 9） |
-| 数据面内核更新到最新版 | ⬠ 受 8000119 限制停在上一版内核；本批（§0.21）改动全在控制面侧，功能不受影响；下次更新走「新建项目」流程 |
+| 数据面内核更新到最新版 | ⬜ 已解除 8000119 限制 —— Workers 通道可原地更新（§0.22），但数据面在 Workers 上 522；**仍建议 Pages 新建项目流程**（§0.19.4） |
+| **Workers 数据面 522 触发点** | ⬜ **未解决**。已排除体积/sockets/账号/KV/vendor/relay 域名等因素；触发点是 `websocket-self` 的 `dial()` 调用块（§0.22.3）。可尝试的下一步：把 `outbound/*` 全部内联进单一入口文件（edgetunnel 形态） |
+| **单 Worker 合并部署** | ⬜ 技术上 `dist/worker.js` 已支持，但真机仍 522（同上）；不建议作为默认形态（§0.22.7） |
 
 ---
 
-## 0.21 阶段二优化批次 + 版本统一（2026-10-23 晚，本文最新结论）
+## 0.22 双部署形态：Pages（默认）+ Workers（实验性）（2026-10-24）
+
+用户要求「把单 worker 部署改成双 worker 部署，并测试是否可行；若 worker 更新更稳定
+就把默认改成 worker 模式」。**结论：Workers 的更新确实更稳，但数据面跑不通，
+因此 Workers 作为实验性选项保留，默认仍是 Pages。**
+
+### 0.22.1 真机实验：60+ 轮对照，两个账号
+
+| 对照项 | Pages 通道 | Workers 通道 |
+|--------|-----------|-------------|
+| 同一份数据面产物能否运行 | **5/5 → 200 ✅** | **5/5 → 522 ❌** |
+| 原地重复更新 | 承载流量后**持久拒绝**（8000119） | **5/5 全部成功**，无 8000119 |
+
+同一账号、同一时刻、**同一字节内容**（`wsSelf.js`，26.2 KB），
+Pages `_worker.js` 5/5 返回 `wsSelf4`，Workers 自定义域名 5/5 返回 522。
+
+### 0.22.2 已排除的假设（都不是原因）
+
+| 假设 | 实验 | 结论 |
+|------|------|------|
+| 体积超限 | 260KB 纯合法脚本（4000 个函数） | 200 ✅ 排除 |
+| 静态 `cloudflare:sockets` | 只 import 不调用 / 真调用 | 200 ✅ 排除 |
+| 动态 `import("cloudflare"+":sockets")` | 拼接式 + 字面量式 | 200 ✅ 排除 |
+| `compatibility_date` | 无 / 2024 / 2025 / 2026 | 全 522，排除 |
+| minify | minify on / off | 全 522，排除 |
+| 账号状态 | 备用**干净账号**（0 项目 0 脚本） | 同样 522，排除 |
+| KV 绑定 | 无绑定 / 双绑定 KV+K | 全 522，排除 |
+| 模块级 API | `new Map` / `TextEncoder` / `WebSocketPair` 等逐个单测 | 上传即被拒或 200，均正常 |
+| esbuild target | es2019 / es2020 / es2022 | 全 522，排除 |
+
+### 0.22.3 精确触发点（含控制面可用证据）
+
+**数据面 522 的触发条件**：`protocols/websocket-self.ts` 里的 **`dial()` 出站调用块**。
+
+- 把 `dialed = await dial({...})` 换成桩 → **立即恢复 200**（7.5KB 产物 → 200）
+- 保留 `import { dial }` 但不调用 → 仍 522
+- 逐条删除 `handleWebSocket` 函数体的顶层语句，只有删掉含 dial 调用的那段才恢复 200
+
+而 `outbound/dial.ts` **单独**打包（18.5KB）在 Workers 上完全正常（200）。
+两者组合才失败 —— 这是 Workers 运行时的一条尚未查清的边界，不是我们的代码 bug。
+
+**已排除**（都不是原因）：体积（28.5KB 纯填充 → 200）、静态/动态 sockets 导入、
+`compatibility_date`、minify、账号状态、KV 绑定、模块级 API、esbuild target、
+vendor 232KB、内置反代域名（`cmliussss` 字样）、`relay` 模块单独引入。
+
+### 0.22.3b Workers 通道的最终能力边界（真机实测）
+
+| 能力 | Workers 通道 | 说明 |
+|------|-------------|------|
+| 控制面：面板 HTML | ✅ 200（41KB 完整面板） | 与 Pages 无差异 |
+| 控制面：订阅（Base64/Clash/Sing-box） | ✅ 200 | UA 协商同样生效 |
+| 控制面：探针 `__edge_probe` | ✅ 200（流式测速正常） | — |
+| 控制面：原地重复更新 | ✅ **5/5 全部成功，无 8000119** | **核心优势** |
+| 数据面：VLESS-WS / Trojan-WS / XHTTP | ❌ 522（isolate 启动失败） | 触发点见 §0.22.3 |
+
+**结论**：Workers 通道适合「只想要面板 + 订阅 + 长期可更新」的用户；
+需要稳定数据面（真代理）仍应使用默认的 Pages 双项目。
+
+### 0.22.3c 为 Workers 通道做的代码改造
+
+| 文件 | 改动 | 目的 |
+|------|------|------|
+| `packages/worker-core/src/outbound/dial.ts` | 新增 `setConnectOverride()` / `hasConnectOverride()`；`getConnect()` 优先用注入实现 | Workers 用 `request.fetcher.connect` 代替 `cloudflare:sockets` |
+| `packages/worker-core/src/entry-data-self.ts` | **新增**。纯自研数据面入口（零 vendor，39.8KB） | 含 vendor 的产物在 Workers 上 522；本产物同时注入 connect 与 dial |
+| `packages/worker-core/src/index.ts` | `installConnect()` 注入 connect + dial | 合并版同样支持 Workers |
+| `packages/worker-core/src/entry-data.ts` | `installConnect()` 同上 | — |
+| `packages/worker-core/src/protocols/websocket-self.ts` | `resolveDial()` 运行时取 dial，**去掉静态 import** | 静态依赖是 522 触发条件之一 |
+| `packages/worker-core/src/routes/data.ts` | `resolveWsHandler(impl)` 按实现动态取处理器 | `self` 时不再静态引入 vendor |
+| `packages/worker-core/scripts/build.mjs` | `vendorSocketsShim` + `stripSocketsFallback` 插件；新增 `dataplane-self.js` 产物目标 | 构建期剥离 sockets 静态/动态引用 |
+| `packages/deploy-wizard/src/worker-deploy.ts` | 默认加载 `dataplane-self.js`（缺失时回落通用产物并告警） | Workers 通道默认用纯自研产物 |
+
+> ⚠️ 上述改造**不影响 Pages 通道**：`dataplane.js`（含 vendor）仍按原样构建，
+> `dataplane-self.js` 只被 `worker-split` 使用。Pages 通道行为与 0.3.0 完全一致。
+
+> ⚠️ 复现要点：**必须用自定义域名或 workers.dev 访问**。
+> 本机 `workers.dev` DNS 被污染，无法直连验证；跨账号 fetch 也会拿到 1101/522，
+> 因此结论只依赖「同一账号、同一时刻、同一份字节、不同通道」的对照。
+
+### 0.22.4 实现内容
+
+| 文件 | 改动 |
+|------|------|
+| `packages/deploy-wizard/src/worker-deploy.ts` | **新增**。Workers 双脚本部署，含 KV 归属校验、清单、原地更新、数据面健康探测 |
+| `packages/deploy-wizard/src/cf-api.ts` | 新增 `listScriptNames` / `deleteScript` / `listWorkerDomains` / `findWorkerDomain` |
+| `packages/deploy-wizard/src/cli.ts` | 新增 `worker-split` 子命令 + 完整中文帮助；`--list-kv` 同时展示两种形态 |
+| `packages/deploy-wizard/src/deployer-lib.ts` | 导出 `deployWorkerSplit` 等供 GUI 复用 |
+| `packages/gui/src/main/bridge.ts` | `runDeploy` 按 `deployMode` 分流；`DeployerModule` 加 Workers 签名 |
+| `packages/gui/src/preload/preload.ts` | `runDeploy` 参数加 `deployMode` / `controlHostname` / `dataHostname` / `zoneId` |
+| `packages/gui/src/globals.d.ts` | 同步渲染层类型 |
+| `packages/gui/src/renderer/index.html` | 部署方式单选 + Workers 警示框 + 自定义域名/Zone ID 输入；「说明」页加双形态对比 |
+| `packages/gui/src/renderer/renderer.ts` | `readDeployMode()` / `applyDeployMode()`，字段文案随形态切换 |
+| `packages/worker-core/src/ui/panel.html` | 概览新增「部署形态」卡片，按「节点域名 ≠ 面板域名」启发式判断，并提示两种形态的更新差异 |
+| `packages/worker-core/src/entry-data-self.ts` | **新增**。Workers 专用纯自研数据面入口（零 vendor） |
+| `packages/worker-core/src/outbound/dial.ts` | 新增 connect 注入能力（`setConnectOverride`） |
+| `packages/worker-core/scripts/build.mjs` | sockets shim / 剥离插件 + `dataplane-self.js` 产物目标 |
+| `packages/deploy-wizard/test/worker-deploy.test.ts` | **新增** 9 个用例（部署顺序 / 清单隔离 / 凭据沿用 / 版本跳过 / KV 互斥 / 参数校验 / 归属判定） |
+
+### 0.22.5 关键设计决策
+
+1. **清单键分离**：Workers 清单写 `CFP_DEPLOY_MANIFEST_WORKERS`，
+   Pages 清单仍是 `CFP_DEPLOY_MANIFEST` —— 两者互不覆盖，`--list-kv` 可同时展示。
+2. **KV 互斥**：`inspectWorkerKvOwnership` 检测到 Pages 清单时**直接拒绝**
+   （两种形态共用一套 KV 键会互相覆盖凭据），`--force-kv` 可强推。
+3. **部署后主动探测**：上传完成后 GET 数据面 `/__diag`，
+   失败就明确告警「Workers 通道已知限制」并指引改用 pages-split ——
+   不让用户自己发现订阅里节点全不通。
+4. **默认 Pages**：GUI 默认选中 Pages，CLI 默认子命令仍是 `pages-split`。
+
+### 0.22.6 实测输出（主账号自定义域名，`worker-split` 全流程）
+
+```
+· 未检测到 Workers 部署，进入首次部署模式
+· KV 归属校验通过：空命名空间
+✅ 数据面已上传：ty9p3e99
+✅ 控制面已上传：vst4xkp7y
+✅ 控制面已开启 workers.dev 子域路由
+✅ 数据面已开启 workers.dev 子域路由
+✅ 部署凭据已写入 KV（uuid / WS 路径 / Trojan 密码已生效）
+正在探测数据面可访问性（约 15 秒）…
+⚠ 数据面探测未通过 —— 见告警说明（Workers 通道已知限制）
+· 已记录 Workers 部署清单，下次更新会自动识别同源脚本
+```
+
+随后连续两次 `--force` 原地更新：**两次都成功，UUID / WS 路径不变，无 8000119**。
+
+### 0.22.7 三个同类项目的源码调研结论（2026-10-24）
+
+用户要求研究「为何 edgetunnel / cfnew / CFNext 能稳定部署 Worker，能否合并面板与数据面」。
+
+**下载并逐行比对了三份明文源码**，结论如下：
+
+| 项目 | 大小 | sockets 导入方式 | 部署形态 | 在 Workers 上的实测 |
+|------|------|-----------------|---------|-------------------|
+| **edgetunnel** | 5.0MB | **完全不 import**，用 `request.fetcher.connect()` | 单 Worker | ✅ 200（404 是因为路径） |
+| **cfnew** | 37KB | `import{connect}from"cloudflare:sockets"`（静态） | 单 Worker | ✅ **200** |
+| **CFNext** | 352KB | `import{connect as t}from"cloudflare:sockets"`（静态） | 单 Worker | ❌ **522** |
+| **CFPilot dataplane** | 247KB | 静态 + 动态混合 | 单/双 Worker | ❌ **522** |
+
+**关键发现**：
+
+1. **cfnew 证明「静态 sockets 导入 + 单 Worker」本身可以在 Workers 上跑通**
+   （37KB → 200），所以 522 不是「用了 sockets」或「合并了面板与数据面」造成的。
+2. **CFNext 352KB → 522**，与我们的 247KB 产物同样失败。
+   结合「28.5KB 纯填充 → 200」与「cfnew 37KB → 200」，
+   **体积也不是原因**（37KB 与 247KB 之间有明确的临界差异，但纯填充到 28.5KB 仍正常）。
+3. **edgetunnel 是唯一完全不用 `cloudflare:sockets` 的项目**，
+   全部出站走 `request.fetcher.connect(options, init)` —— 这也是本次改造采用的方式。
+
+**「能否合并面板与数据面成单 Worker」的结论**：
+
+- 技术上**已经可以**：`dist/worker.js`（合并版，296KB）就是单 Worker 产物，
+  且已完成 sockets 剥离改造（构建脚本对全部产物生效）。
+- 但真机实测合并版在 Workers 上仍 522（与 dataplane 同因，见 §0.22.3）。
+- 因此**当前不建议**把单 Worker 作为默认交付形态；
+  Pages 双项目仍是唯一真机验证稳定的形态。
+- 若将来要支持单 Worker，前置条件是解决 §0.22.3 的触发点。
+
+**为什么 edgetunnel 稳定**：它把 `request.fetcher.connect` 包装成
+`(options, init) => fetcher.connect(...)` 的连接器，自研 `TlsClient` 在裸 TCP 上做 TLS，
+**整个产物里没有任何 `cloudflare:sockets` 字样**。本项目的 `setConnectOverride`
+改造正是向这个形态靠拢；剩余差距在 §0.22.3 的触发点上。
+
+### 0.22.8 「能否直接用 cfnew 的内核」调研结论（2026-10-24）
+
+用户提议「拆 cfnew 的数据面直接用，自研暂时归档」。下载源码 + README + 变量表
+逐行分析后，**结论是不可行**，原因是架构根本不同：
+
+| 维度 | cfnew | CFPilot |
+|------|-------|---------|
+| 内核大小 | 37KB（压缩成 2 行） | 控制面 57KB + 数据面 248KB |
+| 面板 | **外部独立网站**（cfnew.xy.kg / 自建 Vercel） | 内置在 Worker 里 |
+| 内核职责 | 只做「代理转发 + 配置接口」 | 数据面 + 面板 + 订阅 + 优选池 + 探针 |
+| 配置存储 | KV 的 **`c` 键**（小写），环境变量全单字母（`u`=UUID、`C`=KV 绑定名） | KV 的 **`CONFIG` 键**（大写），环境变量大写命名 |
+| 协议 | VLESS-WS / Trojan-WS / VLESS-XHTTP | 同左 + SOCKS5/HTTP/HTTPS 代理池 + 反代入口 |
+
+**具体冲突**：
+
+1. **键名不兼容**：cfnew 读 KV `c` 键，我们读 `CONFIG`。直接混用会同时写坏两套配置
+   （且 `c` 与我们的键不重叠，但适配层要完整翻译 32 个配置项）。
+2. **能力缺口**：cfnew 内核**没有**面板渲染、订阅生成、优选池、探针 `/__edge_probe`、
+   `/__diag` 诊断 —— 这些是 CFPilot 的核心价值，全在我们的控制面侧。
+3. **它是「外部面板」模式**：把控制台剥离到 Vercel 才换来 37KB 的单 Worker。
+   我们的是「内置面板」模式，两者不是同一架构。
+
+**cfnew 能跑通的真正原因**（重要）：它**不是**因为技术更先进，而是因为
+**功能被大幅裁减** —— 37KB 内核 + 外部面板。这恰好印证了 §0.22.7 的发现：
+cfnew 37KB → 200，而 CFNext 352KB → 522、我们 247KB → 522，
+**体积/功能密度才是关键变量**（28.5KB 纯填充 → 200，说明不是纯体积，
+而是「代理相关代码密度」）。
+
+**最终决策（用户确认，方案A）**：保持现状。Workers 通道数据面标记为暂不可用，
+自研数据面**不归档**，Pages 双项目仍是唯一真机验证稳定的形态。
+
+> 若将来要解锁 Workers 数据面，可行路径有两条（按预期工作量排序）：
+> 1. **把 `outbound/*` 全部内联进单一入口文件**（完全复刻 edgetunnel 形态），
+>    消除模块间静态依赖 —— 本次已确认「静态 dial 依赖」是触发条件之一；
+> 2. 以 cfnew 为参考重写一个**极简数据面**（只保留三种入站 + 直连），
+>    作为 `DATAPLANE=minimal` 选项，牺牲代理池/反代/诊断换 Workers 兼容性。
+
+---
+
+## 0.21 阶段二优化批次 + 版本统一（2026-10-23 晚）
 
 用户一批 8 项反馈优化（提交 `68d4f47`，34 文件 +1072/-239；GUI `gui-v0.1.4` 已发布），
 加版本体系统一（提交 `f7b0366`）。
@@ -929,9 +1143,9 @@ SOCKS5 / HTTP / HTTPS 代理 / 反代入口多种出站，四层优选池订阅�
 |------|------|------|
 | `packages/worker-core` | ✅ 功能完成 | 边缘内核 + 中文面板。产物体积：合并版 294KB / 控制面 56KB / 数据面 247KB |
 | `packages/scanner-cli` | ✅ **npm 已发布 0.3.0** | 三阶真连接扫描器 + 国家筛选 + 本地桥接服务 |
-| `packages/deploy-wizard` | ✅ **npm 已发布 0.3.0** | 全中文部署向导（Pages 双项目），含 KV 归属校验 / 版本跳过 / DATA_HOST 同步 |
+| `packages/deploy-wizard` | ✅ **npm 已发布 0.3.0** | 全中文部署向导（**Pages 双项目** + **Workers 双脚本**），含 KV 归属校验 / 版本跳过 / DATA_HOST 同步 / 数据面健康探测 |
 | `packages/gui` | ✅ 已发布 exe（最新 release v0.1.4） | Electron 图形化工具；包版本 0.3.0，下次 tag `gui-v0.3.0` |
-| 单元测试 | ✅ **39 个文件 / 381 个用例全绿** | 协议 / 鉴权 / 订阅清洗 / CF API / Pages 部署 / 优选 / 选路 / DoH / 反代 / 代理 / ECH / 数据面切换 / UA 协商 / 环境检测 / 采样 / 国家 |
+| 单元测试 | ✅ **40 个文件 / 390 个用例全绿** | 协议 / 鉴权 / 订阅清洗 / CF API / Pages 部署 / **Workers 部署** / 优选 / 选路 / DoH / 反代 / 代理 / ECH / 数据面切换 / UA 协商 / 环境检测 / 采样 / 国家 |
 | CI | ✅ **全绿** | 类型检查 → 单测 → 构建 → 资产一致性 → GUI 构建 |
 | 真实端到端部署 | ✅ **已验证** | Pages 双项目 + 三种入站 + 代理池 + 反代入口 + 面板 + 订阅 + 优选全部真机实测通过 |
 | 版本体系 | ✅ **统一 0.3.0** | 根 package.json 单一版本源，`npm run version:bump` 一键升级 |
@@ -940,19 +1154,36 @@ SOCKS5 / HTTP / HTTPS 代理 / 反代入口多种出站，四层优选池订阅�
 
 ### 部署形态
 
+**两种形态，共用同一份内核产物与同一套 KV 键约定**（但不能共用同一个 KV）。
+
 ```
+形态 A：Pages 双项目（默认，推荐）
 控制面 Pages（无 sockets）           数据面 Pages（自研实现，vendor 可回退）
   面板 / 订阅 / 探针 / 诊断     ←→    VLESS / Trojan-WS / XHTTP 入站
         │                            │
         └──── 共用同一 KV ───────────┘
-             （配置、优选池、凭据、部署清单）
+             （配置、优选池、凭据、清单 CFP_DEPLOY_MANIFEST）
+
+形态 B：Workers 双脚本（实验性）
+控制面 Worker（无 sockets）          数据面 Worker（自研实现）
+        │                            │
+        └──── 共用同一 KV ───────────┘
+             （配置、优选池、凭据、清单 CFP_DEPLOY_MANIFEST_WORKERS）
 ```
+
+| 维度 | Pages 双项目 | Workers 双脚本 |
+|------|-------------|---------------|
+| 数据面能否运行 | ✅ 真机 5/5 正常 | ❌ 真机 5/5 返回 522（§0.22） |
+| 原地重复更新 | ❌ 承载流量后持久拒绝（8000119） | ✅ 5/5 全部成功 |
+| 更新操作 | 新建项目 + 切 DATA_HOST + 重发控制面（向导自动） | 直接重跑同一条命令 |
+| 默认 | ✅ 是 | ⬜ 需显式选择 |
 
 - 控制面通过环境变量 `DATA_HOST` 指向数据面域名，生成订阅时用作 `sni`/`host`
   （数据面换名后由向导自动同步，见 §0.20.12 问题 3）
 - 数据面默认走自研实现（`src/outbound/*` + `src/protocols/websocket-self.ts`），
   `DATAPLANE=vendor` 回退 CFNext `wsHandler`
-- 部署清单写在 KV 的 `CFP_DEPLOY_MANIFEST` 键，是识别同源项目与 KV 归属的**唯一依据**
+- 部署清单是识别同源项目与 KV 归属的**唯一依据**：
+  Pages → `CFP_DEPLOY_MANIFEST`；Workers → `CFP_DEPLOY_MANIFEST_WORKERS`
 
 ---
 
@@ -1184,7 +1415,7 @@ npx -y cfpilot-deploy@latest pages-split --token "$TOKEN"
 # 更新已有实例：自动探测到唯一的实例并复用（UUID 与 WS 路径不变）
 npx -y cfpilot-deploy@latest pages-split --token "$TOKEN"
 
-# 查看账号下有哪些实例（KV、项目名、域名、部署时间）
+# 查看账号下有哪些实例（KV、项目名、域名、部署时间；两种形态都会列出）
 npx -y cfpilot-deploy@latest pages-split --token "$TOKEN" --list-kv
 
 # 部署第二个实例：新建独立 KV（一个 KV 只能承载一个实例）
@@ -1193,6 +1424,27 @@ npx -y cfpilot-deploy@latest pages-split --token "$TOKEN" --new-kv
 # 账号下有多个实例时，必须用 --kv 明确指定
 npx -y cfpilot-deploy@latest pages-split --token "$TOKEN" --kv <namespace-id>
 ```
+
+### 部署（Workers 双脚本 · 实验性）
+
+```bash
+# 首次部署（数据面可能 522，控制面完全可用；详见 §0.22）
+npx -y cfpilot-deploy@latest worker-split --token "$TOKEN"
+
+# 更新：直接重跑同一条命令 —— Workers 原地更新实测 5/5 成功，不会触发 8000119
+npx -y cfpilot-deploy@latest worker-split --token "$TOKEN" --kv <namespace-id>
+
+# 绑自定义域名（三个参数要一起给）
+npx -y cfpilot-deploy@latest worker-split --token "$TOKEN" --kv <id> \
+  --control-host panel.example.com --data-host node.example.com \
+  --zone-id <zone-id>
+
+# 强制重传（忽略版本跳过）
+npx -y cfpilot-deploy@latest worker-split --token "$TOKEN" --kv <id> --force
+```
+
+> ⚠️ Workers 与 Pages 两种形态**不能共用同一个 KV**，向导会检测并拒绝（`--force-kv` 可强推）。
+> ⚠️ 部署结束后向导会主动探测数据面 `/__diag`，失败时明确告警并指引改用 `pages-split`。
 
 ### 图形化工具
 
@@ -1270,6 +1522,9 @@ git tag gui-v0.3.1 && git push origin gui-v0.3.1
 | 本地桥接服务 | `packages/scanner-cli/src/server.ts` |
 | 测速地址预设与预检 | `packages/scanner-cli/src/speed-url.ts` |
 | **Pages 双项目部署流程** | `packages/deploy-wizard/src/pages-deploy.ts`（清单、版本跳过、DATA_HOST 同步、换名重试都在这里） |
+| **Workers 双脚本部署流程** | `packages/deploy-wizard/src/worker-deploy.ts`（独立清单键、原地更新、数据面健康探测） |
+| 部署形态选择（GUI） | `packages/gui/src/renderer/index.html`（`name="deployMode"`）+ `renderer.ts` 的 `applyDeployMode()` |
+| 面板「部署形态」卡片 | `packages/worker-core/src/ui/panel.html` 的 `renderDeployShape()` |
 | CF API 封装 | `packages/deploy-wizard/src/cf-api.ts` |
 | 部署向导 CLI | `packages/deploy-wizard/src/cli.ts` |
 | GUI 主进程与桥接 / 域名识别 | `packages/gui/src/main/bridge.ts` |

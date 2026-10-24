@@ -19,6 +19,14 @@ const api = {
       panelPath: string
       wsPath: string
       dataPlane: 'self' | 'vendor'
+      /** 部署方式：pages（默认，推荐）/ workers（实验性，更新更稳但数据面可能 522） */
+      deployMode?: 'pages' | 'workers'
+      /** Workers 模式：控制面自定义域名（可选） */
+      controlHostname?: string
+      /** Workers 模式：数据面自定义域名（可选） */
+      dataHostname?: string
+      /** Workers 模式：绑定自定义域名所需的 zone ID */
+      zoneId?: string
     },
     kvNamespaceId?: string
   ) => ipcRenderer.invoke('deploy:run', params, kvNamespaceId),

@@ -193,7 +193,7 @@
       <div class="logo">CP</div>
       <div>
         <h1>CFPilot 部署与维护工具</h1>
-        <div class="sub">Pages 双项目部署 · 本地真连接优选</div>
+        <div class="sub">Pages / Workers 双形态部署 · 本地真连接优选</div>
       </div>
     </header>
 
@@ -317,8 +317,33 @@
           <div class="card">
             <h2>🚀 一键部署</h2>
             <p class="desc">
-              Pages 双项目：控制面（面板 + 订阅 + 探针）+ 数据面（代理入站），共用同一个 KV。
+              两种部署形态，共用同一个 KV。默认 <b>Pages 双项目</b>（数据面已验证稳定）。
             </p>
+
+            <div class="field">
+              <label>部署方式</label>
+              <div class="radios">
+                <label class="chk"><input type="radio" name="deployMode" value="pages" checked /> Pages 双项目（推荐）</label>
+                <label class="chk"><input type="radio" name="deployMode" value="workers" /> Workers 双脚本（实验性）</label>
+              </div>
+              <p class="tip" id="deployModeHint">
+                <b>Pages 双项目</b>：控制面（面板 + 订阅 + 探针）+ 数据面（代理入站）两个 Pages 项目，共用同一个 KV。
+                数据面已验证稳定，是默认形态。<br>
+                <span style="color:var(--warn)">⚠ 数据面承载流量后，Pages 的原地重部署会被平台持久拒绝（8000119），
+                更新时需要「新建项目 + 切 DATA_HOST + 重发控制面」—— 工具会自动完成。</span>
+              </p>
+            </div>
+
+            <div class="warnbox" id="workersNotice" hidden style="margin-bottom:14px">
+              <b>⚠ Workers 通道为实验性，请先读完再选</b><br><br>
+              <b>优点</b>：原地重复更新<b>真机实测 5/5 全部成功</b>，从未出现 8000119 ——
+              更新链路明显比 Pages 稳定，不需要迁移流程。<br><br>
+              <b>限制</b>：同一份数据面产物，在 Pages 上 5/5 正常，而在 Workers 上
+              <b>5/5 返回 522</b>（isolate 启动即失败）。已排除体积、sockets 导入、
+              compatibility_date、minify、账号差异等因素，触发点是自研数据面的 dial 出站调用块。<br><br>
+              → <b>控制面（面板 / 订阅 / 探针）完全可用</b>；<br>
+              → <b>数据面在部分环境无法启动</b>。需要稳定数据面请继续用 Pages。
+            </div>
 
             <div class="field">
               <label>部署模式</label>
@@ -341,22 +366,43 @@
                 <span class="k">命名空间</span><span class="v" id="deployKv">—</span>
               </p>
               <p class="tip">
-                在「Cloudflare 凭据」页选择。选错或没选会在这里提示，不会带着错的 KV 部署。
+                在「Cloudflare 凭据」页选择。选错或没选会在这里提示，不会带着错的 KV 部署。<br>
+                <b>一个 KV 只能承载一个实例</b>，且 Pages 与 Workers 两种形态不能共用同一个 KV。
               </p>
             </div>
 
             <div class="row">
               <div class="field">
-                <label>控制面项目名（可选）</label>
+                <label id="controlNameLabel">控制面项目名（可选）</label>
                 <input type="text" id="controlProject" placeholder="留空 = 随机或按清单" />
-                <p class="tip">控制面承载面板、订阅与探针，客户端不连它。</p>
+                <p class="tip" id="controlNameHint">控制面承载面板、订阅与探针，客户端不连它。</p>
               </div>
               <div class="field">
-                <label>数据面项目名（可选）</label>
+                <label id="dataNameLabel">数据面项目名（可选）</label>
                 <input type="text" id="dataProject" placeholder="留空 = 随机或按清单" />
-                <p class="tip">数据面是代理转发层，<b>客户端连的就是它</b>。</p>
+                <p class="tip" id="dataNameHint">数据面是代理转发层，<b>客户端连的就是它</b>。</p>
               </div>
             </div>
+
+            <div class="row" id="workerHostRow" hidden>
+              <div class="field">
+                <label>控制面自定义域名（可选）</label>
+                <input type="text" id="controlHostname" placeholder="如 panel.example.com" />
+              </div>
+              <div class="field">
+                <label>数据面自定义域名（可选）</label>
+                <input type="text" id="dataHostname" placeholder="如 node.example.com" />
+              </div>
+              <div class="field">
+                <label>Zone ID（绑自定义域名时必填）</label>
+                <input type="text" id="zoneId" placeholder="域名概览页右下角" />
+              </div>
+            </div>
+            <p class="tip" id="workerHostHint" hidden style="margin-top:-6px;margin-bottom:14px">
+              Workers 模式默认用 <code>&lt;脚本名&gt;.&lt;子域&gt;.workers.dev</code>。
+              要绑自定义域名就把三个都填上：域名必须属于同一个 zone，Zone ID 在该域名的
+              Cloudflare 概览页右下角可以看到。留空则只用 workers.dev。
+            </p>
 
             <div class="row">
               <div class="field">
@@ -563,6 +609,28 @@
               <b>部署多个实例</b><br>
               一个 KV 只能承载一个实例。要在同一账号下跑多个，
               点「新建 KV」给每个实例各建一个，然后分别选对应的 KV 部署。
+            </div>
+          </div>
+
+          <div class="card">
+            <h2>🔀 两种部署形态怎么选</h2>
+            <div class="links">
+              <b>Pages 双项目（默认，推荐）</b><br>
+              控制面与数据面各一个 Pages 项目，共用同一个 KV。<br>
+              <span style="color:var(--ok)">数据面真机验证稳定</span>，是日常使用的默认形态。<br>
+              <span style="color:var(--warn)">⚠ 数据面承载流量后，原地重部署会被平台持久拒绝（8000119）；
+              更新时要走「新建项目 + 切 DATA_HOST + 重发控制面」——工具已自动完成，无需你操心。</span><br><br>
+
+              <b>Workers 双脚本（实验性）</b><br>
+              控制面与数据面各一个 Worker 脚本，同样共用 KV。<br>
+              <span style="color:var(--ok)">原地重复更新真机 5/5 全部成功，从不触发 8000119</span> ——
+              更新链路明显比 Pages 稳。<br>
+              <span style="color:var(--warn)">⚠ 但同一份数据面产物在 Workers 上会 5/5 返回 522（isolate 启动失败），
+              在 Pages 上 5/5 正常。控制面完全可用，数据面在部分环境起不来。</span><br><br>
+
+              <b>结论</b>：想要<b>稳定数据面</b> → 选 Pages；<br>
+              只关心<b>面板/订阅长期可更新</b>、或数据面暂时用不到 → 可以试 Workers。<br>
+              两者不能共用同一个 KV（内核的 KV 键是全局平铺的）。
             </div>
           </div>
 

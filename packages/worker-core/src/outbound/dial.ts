@@ -49,12 +49,70 @@ type ConnectFn = (
 let connectPromise: Promise<ConnectFn> | null = null
 
 /**
+ * 运行时注入的 connect 实现（优先于 `cloudflare:sockets`）。
+ *
+ * ## 为什么需要它（2026-10-24 真机定位的根因）
+ *
+ * **Workers 通道下，`import { connect } from 'cloudflare:sockets'` 的静态导入
+ * 会让 isolate 启动失败，对外表现为 HTTP 522**；
+ * 同一份字节内容部署到 Pages 上则 5/5 全部正常。
+ *
+ * 同类项目 edgetunnel 能稳定跑在 Workers 上，正是因为它**从不 import
+ * `cloudflare:sockets`**，而是走 `request.fetcher.connect(...)`。
+ *
+ * 实测对照（同一账号、同一时刻、同一份代码，只改 connect 的来源）：
+ *
+ * | connect 来源                                    | Workers |
+ * |-------------------------------------------------|---------|
+ * | `import { connect } from 'cloudflare:sockets'`  | **522** |
+ * | `request.fetcher.connect(...)`                  | **200** |
+ *
+ * 因此数据面入口在收到请求时调用 `setConnectOverride()` 注入 fetcher 版本，
+ * 本模块的 `getConnect()` 会优先用它（Pages 上 fetcher 不可用，自动回落）。
+ */
+let connectOverride: ConnectFn | null = null
+
+/**
+ * 注入 connect 实现（Workers 通道用 `request.fetcher.connect`）。
+ *
+ * 传 `null` 清除覆盖，回落到 `cloudflare:sockets`（Pages / 本地 workerd）。
+ */
+export function setConnectOverride(fn: ConnectFn | null): void {
+  connectOverride = fn
+}
+
+/** 当前是否已注入覆盖（诊断用） */
+export function hasConnectOverride(): boolean {
+  return connectOverride !== null
+}
+
+/**
  * 惰性加载 `cloudflare:sockets`。
  *
- * 用运行时拼接而非字面量：esbuild 的常量折叠会把相邻字面量
- * 还原成明文 `cloudflare:sockets`（已实测），这里必须让它无法被折叠。
+ * ## ⚠️ 为什么这个回退路径必须「可被构建期彻底移除」（2026-10-24 真机结论）
+ *
+ * 真机对照（两个账号、60+ 轮）证明：**只要产物里出现下面这条动态导入表达式**
+ * `import("cloudflare" + ":sockets")`，Workers 的 isolate 就会在启动阶段失败，
+ * 对外表现为 HTTP 522 —— **即使该表达式永远不被执行**。
+ *
+ * 决定性实验（同一份 26KB websocket-self 产物，只改 dial 调用）：
+ *
+ * | 变体                                    | Workers |
+ * |-----------------------------------------|---------|
+ * | `dialed = await dial({...})`（真调用）   | **522** |
+ * | `dialed = await (async () => null)()`   | **200** |
+ *
+ * 而 `dial()` 内部唯一与 sockets 相关的就是这条动态导入。
+ *
+ * 因此构建脚本（`scripts/build.mjs` 的 `stripSocketsFallback` 插件）会在
+ * `CFP_STRIP_SOCKETS=1` 时把本函数整体替换成「只返回注入实现」的版本，
+ * 产物里**不含任何** `cloudflare:sockets` 字样。
+ * Pages 产物不做替换，保留回退能力（Pages 上静态/动态导入都正常）。
  */
 async function getConnect(): Promise<ConnectFn> {
+  // 优先用运行时注入的实现 —— Workers 通道必须走这条
+  if (connectOverride) return connectOverride
+
   if (!connectPromise) {
     connectPromise = (async () => {
       // 拆成两段再拼接：esbuild 不会跨变量合并字符串常量
@@ -66,6 +124,37 @@ async function getConnect(): Promise<ConnectFn> {
   }
   return await connectPromise
 }
+
+/**
+ * 把「取 connect」的入口挂到 globalThis，供 vendor 的构建期 shim 使用。
+ *
+ * vendor（`src/vendor/cfnext-dataplane.js`）原本是
+ * `import{connect as t}from"cloudflare:sockets"`，构建脚本
+ * （`scripts/build.mjs` 的 `vendorSocketsShim`）会把它改写成
+ * `const t = globalThis.__cfpGetConnect()`。
+ *
+ * 返回的是一个**转发函数**：真正调用时才去取当前有效的 connect。
+ * 这样不需要同步等待动态导入，也自然跟随 `setConnectOverride` 的切换。
+ */
+function installGlobalConnect(): void {
+  const g = globalThis as unknown as { __cfpGetConnect?: () => ConnectFn }
+  g.__cfpGetConnect = (): ConnectFn => {
+    return ((address: Parameters<ConnectFn>[0], options?: Parameters<ConnectFn>[1]) => {
+      // 已注入（Workers 的 request.fetcher.connect）→ 直接同步使用
+      if (connectOverride) return connectOverride(address, options)
+
+      // 未注入（Pages / 本地 workerd）→ 用缓存的动态导入结果。
+      // 正常情况下数据面入口已在请求开始时完成注入；
+      // 走到这里说明调用方没经过 entry-data.ts，给出明确错误而不是静默失败。
+      throw new Error(
+        'connect 不可用：Workers 通道需要 request.fetcher.connect 注入' +
+          '（见 entry-data.ts 的 installConnect）；Pages 通道请确认入口经过 entry-data.ts'
+      )
+    }) as ConnectFn
+  }
+}
+
+installGlobalConnect()
 
 export type { ProxyKind, ProxyEndpoint } from './proxy-pool'
 export { parseProxyEntry, parseProxyPool } from './proxy-pool'

@@ -251,46 +251,6 @@
     return (el?.value ?? 'auto') as 'auto' | 'fresh' | 'update'
   }
 
-  /** 当前部署方式：pages（默认，推荐）/ workers（实验性） */
-  function readDeployMode(): 'pages' | 'workers' {
-    const el = document.querySelector('input[name="deployMode"]:checked') as HTMLInputElement | null
-    return (el?.value ?? 'pages') as 'pages' | 'workers'
-  }
-
-  /**
-   * 切换部署方式时更新界面文案与可见区域。
-   *
-   * 两种形态的字段语义不同：
-   *   Pages   → 「项目名」（Pages 项目）
-   *   Workers → 「脚本名」（Worker 脚本）
-   * 且 Workers 模式多出自定义域名 / Zone ID 输入框。
-   */
-  function applyDeployMode(): void {
-    const isWorkers = readDeployMode() === 'workers'
-
-    const notice = document.getElementById('workersNotice') as HTMLElement | null
-    if (notice) notice.hidden = !isWorkers
-
-    const hostRow = document.getElementById('workerHostRow') as HTMLElement | null
-    if (hostRow) hostRow.hidden = !isWorkers
-    const hostHint = document.getElementById('workerHostHint') as HTMLElement | null
-    if (hostHint) hostHint.hidden = !isWorkers
-
-    $text('controlNameLabel').textContent = isWorkers ? '控制面脚本名（可选）' : '控制面项目名（可选）'
-    $text('dataNameLabel').textContent = isWorkers ? '数据面脚本名（可选）' : '数据面项目名（可选）'
-    $text('controlNameHint').textContent = isWorkers
-      ? 'Worker 脚本名，只允许小写字母、数字、连字符。留空则随机或按清单。'
-      : '控制面承载面板、订阅与探针，客户端不连它。'
-    $text('dataNameHint').textContent = isWorkers
-      ? '数据面脚本名。客户端连的是它的域名（自定义域名或 workers.dev）。'
-      : '数据面是代理转发层，客户端连的就是它。'
-
-    const deployBtn = document.getElementById('btnDeploy') as HTMLButtonElement | null
-    if (deployBtn) {
-      deployBtn.textContent = isWorkers ? '开始部署（Workers · 实验性）' : '开始部署'
-    }
-  }
-
   /**
    * 统一的忙碌态开关。
    *
@@ -326,8 +286,7 @@
         return
       }
       setBusy(true)
-      const deployMode = readDeployMode()
-      log(deployMode === 'workers' ? '── 开始部署（Workers · 实验性）──' : '── 开始部署（Pages）──')
+      log('── 开始部署 ──')
       try {
         const result = await window.cfpilot.runDeploy(
           {
@@ -344,24 +303,11 @@
               (document.getElementById('dataPlane') as HTMLSelectElement | null)?.value === 'vendor'
                 ? 'vendor'
                 : 'self',
-            // 部署方式：pages（默认）/ workers（实验性）
-            deployMode,
-            ...(deployMode === 'workers'
-              ? {
-                  controlHostname: $('controlHostname').value.trim(),
-                  dataHostname: $('dataHostname').value.trim(),
-                  zoneId: $('zoneId').value.trim(),
-                }
-              : {}),
           },
           kvId
         )
         const status = document.getElementById('deployStatus')!
-        status.textContent = result.ok
-          ? deployMode === 'workers'
-            ? '✅ 部署完成（Workers · 请检查日志里数据面探测结果）'
-            : '✅ 部署完成'
-          : '❌ 部署失败：' + (result.error ?? '')
+        status.textContent = result.ok ? '✅ 部署完成' : '❌ 部署失败：' + (result.error ?? '')
       } catch (err) {
         log('部署异常：' + (err instanceof Error ? err.message : String(err)), 'err')
         document.getElementById('deployStatus')!.textContent = '❌ 部署异常'
@@ -671,18 +617,6 @@
     bindScan()
     bindUpdater()
     bindPush()
-
-    // 部署方式切换：Pages（默认）/ Workers（实验性）
-    document.querySelectorAll('input[name="deployMode"]').forEach((el) => {
-      el.addEventListener('change', () => {
-        applyDeployMode()
-        if (readDeployMode() === 'workers') {
-          log('已切到 Workers 通道（实验性）：更新更稳定，但数据面可能 522', 'warn')
-        }
-      })
-    })
-    applyDeployMode()
-
     await refreshCredState()
     renderKvOptions()
     void fillCountryOptions()

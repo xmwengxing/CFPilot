@@ -16,45 +16,38 @@ CFPilot 是一个运行在 Cloudflare Workers 上的**代理微内核 + 真连�
 
 ## 1. 不可动摇的架构铁律
 
+> ⚠️ **部署形态唯一 = Pages 双项目**（2026-10-24 立）。
+> Workers 双脚本形态曾作为实验性选项存在（提交 `3c0fa3c`），当日已**全线归档**
+> （`archive/workers-deploy/`）：数据面在 Workers 上 522 无解，
+> 且**实验用干净账号在少量部署后被 Cloudflare 封禁**（交接文档 §0.22）。
+> **禁止**在 CLI / GUI / 文档 / 面板中重新引入 Workers 部署形态；
+> 任何「用 Workers 避免 8000119」的提议一律拒绝（封号风险 >> 更新便利）。
+
 1. **配置优先级**：`KV (CONFIG) > 环境变量 > 内置默认值`。
    任何新增配置项都必须同时支持这三层，并在 `packages/worker-core/src/config.ts` 中登记。
 2. **一个 KV 命名空间 = 一个 CFPilot 部署实例**。
    内核在 KV 里用的键是**全局平铺、没有实例前缀**的
    （`CONFIG` / `PANEL_PATH` / `ADMIN_PW_HASH` / `LOCAL_PREFERRED_IPS` /
-   `SESSION:*` / `SCANNER_TOKEN` / `CFP_DEPLOY_MANIFEST` / `CFP_DEPLOY_MANIFEST_WORKERS`），
+   `SESSION:*` / `SCANNER_TOKEN` / `CFP_DEPLOY_MANIFEST`），
    两个实例共用一个 KV 会互相覆盖 UUID、WS 路径、面板密码与会话。
-   部署向导必须在**写入任何键之前**校验 KV 归属（`assertKvOwnership` /
-   `inspectWorkerKvOwnership`），越界写入一律中止。
-   判断归属**只能靠清单键**——标题、UUID、路径等字段值都不唯一，不能作为依据：
-   Pages 形态用 `CFP_DEPLOY_MANIFEST`，Workers 形态用 `CFP_DEPLOY_MANIFEST_WORKERS`。
-   **两种形态不能共用同一个 KV**（键名完全相同，必然互相覆盖）。
+   部署向导必须在**写入任何键之前**校验 KV 归属（`assertKvOwnership`），越界写入一律中止。
+   判断归属**只能靠清单键 `CFP_DEPLOY_MANIFEST`**——标题、UUID、路径等字段值都不唯一，不能作为依据。
 3. **绝不要写 CFNext 的小写 `config` 键**。
    那是 CFNext 原版的配置键，vendor 侧是 `Object.assign(默认, kvConfig)` **整体覆盖**：
    往里写会直接改坏共栖的 CFNext 项目的 uuid / path / trojanPassword。
    CFPilot 自己的数据面**不读**这个键（它读大写 `CONFIG`），写了纯属破坏。
-4. **部署形态：Pages 是默认，Workers 是实验性**（2026-10-24 立）。
-   - **Pages 双项目**（`pages-split`）：**默认推荐**，数据面真机验证稳定。
-     数据面承载流量后原地重部署会被 8000119 **持久拒绝**，
-     更新必须走「新建项目 + 切 `DATA_HOST` + 重发控制面」（向导已自动化）。
-   - **Workers 双脚本**（`worker-split`）：**实验性**。
-     优势是原地重复更新真机 **5/5 全部成功**（无 8000119）；
-     限制是同一份数据面产物在 Workers 上 **5/5 返回 522**（isolate 启动即失败），
-     精确触发点是 `websocket-self` 里的 `dial()` 出站调用块。
-     → **控制面完全可用，数据面在部分环境不可用**。
-     → 新增功能时不要假设「Workers 形态一定能跑数据面」。
-   - 任何文档/UI 提到 Workers 形态时，**必须同时说明 522 限制**，不得只讲更新更稳。
-5. **内核体积预算**：Worker 打包产物 **必须 ≤ 80KB**（`packages/worker-core/scripts/build.mjs` 会在超限时告警）。
+4. **内核体积预算**：Worker 打包产物 **必须 ≤ 80KB**（`packages/worker-core/scripts/build.mjs` 会在超限时告警）。
    不要把第三方大依赖塞进 `worker-core`；面板必须是零框架的单文件 HTML。
-6. **探针端点不可删除**：`/__edge_probe` 必须始终提供
+5. **探针端点不可删除**：`/__edge_probe` 必须始终提供
    「WebSocket 101 握手校验」与「流式下行测速」两项能力，这是 CFPilot 的核心价值。
-7. **优选 IP 解析器必须容错**：兼容裸 IP、`IP:Port`、`IP:Port#备注`、`[IPv6]:Port#备注`、
+6. **优选 IP 解析器必须容错**：兼容裸 IP、`IP:Port`、`IP:Port#备注`、`[IPv6]:Port#备注`、
    优选域名，以及 CloudflareSpeedTest 风格的 `result.csv` 原文。
    清洗逻辑集中在 `packages/worker-core/src/sub-engine.ts`，禁止在别处重复实现。
-8. **数据面与控制面分离**：`worker-core` 只处理代理与订阅；面板只是它的一个 HTTP 端点。
+7. **数据面与控制面分离**：`worker-core` 只处理代理与订阅；面板只是它的一个 HTTP 端点。
    不要在 `worker-core` 里引入 Node API（`node:*`），Workers 运行时不支持。
-9. **零运行时依赖**：`scanner-cli` 与 `deploy-wizard` 不得引入第三方运行时依赖，
+8. **零运行时依赖**：`scanner-cli` 与 `deploy-wizard` 不得引入第三方运行时依赖，
    必须能被 `npx -y` 秒级拉起。开发期依赖（esbuild/typescript）只允许出现在 `devDependencies`。
-10. **Worker 不能连回 Cloudflare 自家的 Anycast 入口**。
+9. **Worker 不能连回 Cloudflare 自家的 Anycast 入口**。
    实测 `1.1.1.1` / `cloudflare.com` / `104.16.0.1` 一律被拒（报 `TCP Loop detected`），
    而第三方 IP 的 443 完全可用。
    因此出站选路**必须**把 Cloudflare 网段的候选降权（见 `src/outbound/route.ts`），
@@ -63,53 +56,53 @@ CFPilot 是一个运行在 Cloudflare Workers 上的**代理微内核 + 真连�
    （实测 `example.com` → `172.66.147.243` / `104.20.23.154`），
    把域名丢给 `connect()` 让运行时自己解析，必然连回 CF Anycast 被拒。
    这种情况必须把**域名直连也降权**，优先用解析出的第三方 IP 建连。
-11. **协议响应头必须在出站建连之前回**。
+10. **协议响应头必须在出站建连之前回**。
     VLESS/Trojan 的协议响应头（`[0,0]`）表示「入站已建立」，
     认证通过后**立即**回，之后出站在后台进行；失败用 close 1011 + 分级原因告知。
     早前实现是「先 await 出站成功再回响应头」，
     在 workerd 上直接报 `Workers runtime canceled this request because it detected that your Worker's code had hung`
     （出站稍慢客户端就等不到响应头）。
     vendor（CFNext）与 BPB 都是先回响应头。
-12. **代理候选与直连候选必须互斥**，不能放进同一个竞速池。
+11. **代理候选与直连候选必须互斥**，不能放进同一个竞速池。
     用户显式配置代理是为了让流量从指定出口出去；
     同池竞速会让直连先成功而**静默绕过代理** —— 出口 IP 与预期不符且无任何报错。
     现语义对齐 edgetunnel：有代理只走代理，代理全失败抛错。
-13. **VLESS / Trojan over WebSocket 是 TLS 透传代理，Worker 不终结出站 TLS**。
+12. **VLESS / Trojan over WebSocket 是 TLS 透传代理，Worker 不终结出站 TLS**。
     TLS 有两层：第一层「客户端 → CF 边缘」由客户端发起、CF 边缘终结；
     第二层「Worker → 目标站」由客户端与目标站直接完成，Worker 只透传字节。
     若 Worker 自己终结 TLS，会破坏端到端 TLS 语义（证书校验 / SNI / 指纹全部错位）。
     `secureTransport: 'on'` 的**唯一**正确用途是「代理服务器本身是 HTTPS」。
-14. **Cloudflare 网段目标只能靠「反代入口」打通**。
+13. **Cloudflare 网段目标只能靠「反代入口」打通**。
     目标解析到 CF 网段时，直连与优选 IP 都会被拒（TCP Loop）——
     降权之后**没有任何可用候选**，必须经第三方反代按 **SNI** 转发出去。
     反代入口的解析**必须按需进行**（无条件预解析会拖慢每一次出站）、
     **缓存必须短**（30 秒级 —— 内置入口指向动态轮换的 IP 池，长缓存会拿到失效 IP）、
     候选**地区要分散**（按当前边缘机房 colo 优先，其次轮转其余地区）。
     用户可在面板自配入口（`relayPool`），自配入口不依赖任何第三方。
-15. **WebSocket close reason 必须截断到 123 字节**（RFC 6455 §5.5.1）。
+14. **WebSocket close reason 必须截断到 123 字节**（RFC 6455 §5.5.1）。
     超长时 **Cloudflare 边缘会静默丢弃整个 close frame** ——
     客户端表现为「一直连着但永远等不到关闭」（真机实测挂起 45s+），
     而本地 workerd 宽容地照发、能正常关闭。**这个差异只有真机能暴露。**
     截断必须按**字节**算，且省略号本身占 3 字节 —— 追加省略号后还要再检查一次。
-16. **代理握手必须有超时**。
+15. **代理握手必须有超时**。
     代理连上但不回应协议时，无超时的读取会**永远挂起**，
     数据面既不报错也不关闭，客户端一直连着。
     `outbound/socks5.ts` 与 `outbound/http-proxy.ts` 的握手读取都必须带超时。
-17. **完整诊断要有独立出口**。
+16. **完整诊断要有独立出口**。
     close reason 装不下多行诊断（且超长会被丢弃），
     所以自研数据面提供 `GET /__diag` 端点返回最近 20 条完整诊断。
     vendor 把异常吞成「目标不可达」，什么都不留 —— 这是自研的核心优势。
-18. **socket 的写流不能 `close()`**。
+17. **socket 的写流不能 `close()`**。
     `cloudflare:sockets` 的 writable 一旦 `close()` 就等于**关闭整个 TCP 连接**
     （目标站收到 RST，来不及把响应发回来）——
     症状是「握手成功但永远收不到数据」，客户端侧表现为延迟 -1。
     转发到 socket 时只 `releaseLock()`，不 `close()`
     （见 `budget.ts` 的 `relay(..., closeTarget)`）。
-19. **ReadableStream 的 `start` 不能 `async` 承载整个数据流**。
+18. **ReadableStream 的 `start` 不能 `async` 承载整个数据流**。
     `start` 返回的 Promise 未完成时 `pull` 不会被调用，
     而消费者会一直等 —— 表现为「响应头到了，后续数据永远不来」。
     `start` 只做初始化并立即返回，数据在 `pull` 里按需读取。
-20. **优选 IP 网段必须实测筛过**。
+19. **优选 IP 网段必须实测筛过**。
     Cloudflare 的 IPv4 空间里大部分是区域/租户专用分配，
     对普通站点没有配置（400 或超时）。
     实测（`curl --resolve` + WS 升级校验）：
@@ -118,20 +111,20 @@ CFPilot 是一个运行在 Cloudflare Workers 上的**代理微内核 + 真连�
     `198.41`、`108.162`、`141.101`、`173.245`、`103.21/22/31`、
     `190.93`、`197.234`、`131.0.72` 实测 0/8。
     **改这张表前先用实测数据说话**，别照抄。
-21. **Cloudflare Workers 的 `connect()` 不支持 IPv6 出站**。
+20. **Cloudflare Workers 的 `connect()` 不支持 IPv6 出站**。
     实测（真实 Pages 部署，VLESS 入站 → 出站到 IPv6 字面量目标）：
     `2607:f8b0::200e`、`2a00:1450:...`、`2606:4700::1111` 全部**无任何响应**，
     而同一时刻 IPv4 目标正常返回。
     → 依赖「代理落地」的功能（`socks5` / `httpProxy` / `proxyIp`）时，
     代理服务器**必须有 IPv4 公网地址**，IPv6-only 的机器不可用。
     → 也不必是海外：实测边缘 → 国内 IP（baidu / qq.com / 腾讯 DNSPod）**都通**。
-22. **DoH 优选库必须整体判定**。
+21. **DoH 优选库必须整体判定**。
     目标域名的 TXT 绝大多数不是优选库（实测 `example.com` 是 `"v=spf1 -all"`，
     `www.cloudflare.com` 是域名验证记录）。
     若「从记录里挑出形似 IP 的片段」，SPF 里的 `ip4:1.2.3.4` 会被误当优选 IP，
     所有出站被悄悄导向该 IP 且**没有任何报错**。
     要求整条记录全是 IP / host:port 才认，否则退回 A / AAAA。
-23. **`connect(address, options)` 是两个参数，`options` 是第二个**。
+22. **`connect(address, options)` 是两个参数，`options` 是第二个**。
     `secureTransport` 属于 `SocketOptions`（第二个参数），
     塞进第一个参数（`SocketAddress`）里**不会报错，但运行时完全看不到它** ——
     socket 实际是明文，表现为「TLS 静默失效」。
@@ -143,7 +136,7 @@ CFPilot 是一个运行在 Cloudflare Workers 上的**代理微内核 + 真连�
     - 放对位置且用 `'starttls'` + `startTls()` → 进入 TLS 握手阶段。
     **定位 TLS 问题前，先打印 `socket.secureTransport` 确认选项真的生效了**
     （它会返回 `"off" | "on" | "starttls"`）。
-24. **Cloudflare 边缘的 TLS 会校验证书链 + 主机名，且无法指定自有 CA**。
+23. **Cloudflare 边缘的 TLS 会校验证书链 + 主机名，且无法指定自有 CA**。
     workerd 的 TLS 能力只有 `TlsOptions = { expectedServerHostname?: string }` ——
     没有 `ca` / `rejectUnauthorized` / 自定义信任链的入口。
     实测（真实 Pages + 阿里云 Go TLS 代理）：
@@ -154,12 +147,12 @@ CFPilot 是一个运行在 Cloudflare Workers 上的**代理微内核 + 真连�
     用 `#sni=example.com` 显式指定握手名（见 `outbound/proxy-pool.ts`）。
     → 结论：`'on'` 与 `'starttls'` **都校验证书**，
     区别只在 `'on'` 会在 `opened` 阶段就失败、`'starttls'` 能进到握手阶段。
-25. **HTTPS 代理用 `starttls` + `startTls()`，不要用 `secureTransport: 'on'`**。
+24. **HTTPS 代理用 `starttls` + `startTls()`，不要用 `secureTransport: 'on'`**。
     `'on'` 在真机上 `socket.opened` 直接 reject，拿不到可诊断的 TLS 错误；
     `'starttls'` 能进到握手阶段，失败信息更具体。
     ⚠️ `startTls()` 返回**新** socket，原 socket 已被关闭 ——
     必须换用新 socket 的 readable / writable。
-26. **测试代理服务端要支持 TLS 1.3**。
+25. **测试代理服务端要支持 TLS 1.3**。
     Cloudflare 边缘的 `startTls()` 只发 TLS 1.3 ClientHello。
     CentOS 7 的 OpenSSL 1.0.2k / Python 3.6 **不支持 TLS 1.3** ——
     握手会永远挂起，表现为「大量 ESTABLISHED 连接堆积、Recv-Q 有数据但服务端不读」，
@@ -167,7 +160,7 @@ CFPilot 是一个运行在 Cloudflare Workers 上的**代理微内核 + 真连�
     排查「TLS 握手卡住」时先确认服务端 TLS 版本：
     `openssl version` + `python3 -c "import ssl; print(ssl.OPENSSL_VERSION)"`。
     需要 TLS 1.3 时用 Go 写一个静态编译的代理（`CGO_ENABLED=0 GOOS=linux go build`）。
-27. **Pages 部署 `_worker.js` 的 metadata 不能带 `compatibility_date`**。
+26. **Pages 部署 `_worker.js` 的 metadata 不能带 `compatibility_date`**。
     Pages Advanced Mode 与 Workers 的 metadata 结构不同，
     多带 `compatibility_date` 会让 Pages **忽略 `_worker.js`**，
     表现为「部署成功、HTTP 200，但返回默认 Welcome 页」。
@@ -176,10 +169,10 @@ CFPilot 是一个运行在 Cloudflare Workers 上的**代理微内核 + 真连�
     顺序必须是「建项目 → 设变量（PATCH）→ 部署」；
     且 PATCH 会自动触发一次部署，之后再 POST `/deployments` 就是二次部署 →
     触发 `8000119`（账号级风控判定，同名重试通常能过）。
-28. **Pages 的 WS 路径要用 `WS_PATH`，且值带前导斜杠**。
+27. **Pages 的 WS 路径要用 `WS_PATH`，且值带前导斜杠**。
     `PATH` 是 Pages 的保留名，值不带 `/` 也会导致路径不匹配。
     参考 `config.ts`：`wsPath: text(env.WS_PATH || env.PATH, DEFAULT_CONFIG.wsPath)`。
-29. **本地 workerd 拒绝连私有 IP**（`127.0.0.1` / `192.168.x` / `10.x`），
+28. **本地 workerd 拒绝连私有 IP**（`127.0.0.1` / `192.168.x` / `10.x`），
     报「proxy request failed, cannot connect to the specified address」——
     与真机上的「CF 网段被拒」是同一个错误文案，**极易混淆**。
     验证出站链路要么用**公网 IP**的目标，要么用真机。

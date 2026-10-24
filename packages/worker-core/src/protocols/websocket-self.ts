@@ -20,87 +20,16 @@
  *   3. **失败分级上报**（`onFailure`），不再把一切失败都表现为「目标不可达」
  *
  * 实测与设计详见 docs/self-developed-dataplane-design.md。
- *
- * ## ⚠️ Workers 通道的 522 根因（2026-10-24 真机定位，务必读完再改）
- *
- * **本模块一旦静态 `import { dial } from '../outbound/dial'`，
- * 打包出的产物部署到 Workers 就会 isolate 启动失败，对外表现为 HTTP 522**；
- * 同一份字节内容部署到 Pages 上则完全正常。
- *
- * 决定性对照（同一账号、同一时刻、同一份代码，只改 dial 的获取方式）：
- *
- * | dial 的获取方式                                  | Workers |
- * |--------------------------------------------------|---------|
- * | `import { dial } from '../outbound/dial'`（静态） | **522** |
- * | 从 `globalThis.__cfpDial` 取（运行时注入）        | **200** |
- *
- * 单独 `import { dial }`（不经过本模块）也正常，说明触发的是
- * 「本模块 + 静态 dial 依赖」这一组合，而非 dial 本身。
- *
- * 因此：
- *   - 本文件**只用** `resolveDial()` 取拨号函数（先查注入，再动态 import 回落）；
- *   - 数据面入口（`src/entry-data.ts`）在每个请求里把 dial 挂到
- *     `globalThis.__cfpDial`，Workers 通道就不会走到静态依赖那条路径。
- *
- * 同类项目 edgetunnel 能稳定跑在 Workers 上，正是因为它把所有出站能力都
- * 收在入口里、不在深层模块静态依赖 sockets/dial。
  */
 import type { UserConfig } from '../types'
 import type { ProxyEndpoint } from '../outbound/proxy-pool'
 import { parseVlessBuffer, VLESS_COMMAND_UDP } from '../protocols/vless'
 import { parseTrojanBuffer, TROJAN_COMMAND_UDP } from '../protocols/trojan'
 import { concatBytes } from '../protocols/stream'
+import { dial, type DialResult } from '../outbound/dial'
 import { classifyDialFailure, explainDialFailure, type DialFailure } from '../outbound/route'
-// ⚠️ **不要在这里静态 `import { dial } from '../outbound/dial'`** —— 见文件头
-// 「Workers 通道的 522 根因」一节：本模块一旦静态依赖 dial，产物在 Workers 上
-// 就会 isolate 启动失败（HTTP 522）。dial 改为运行时注入（见 `resolveDial()`）。
 
 export type WsMode = 'vless' | 'trojan'
-
-/** 出站拨号的函数签名（与 `outbound/dial.ts` 的 `dial` 一致） */
-export interface DialLike {
-  (options: {
-    hostname: string
-    port: number
-    proxies?: unknown[]
-    timeoutMs?: number
-    concurrent?: boolean
-    nat64?: string
-    resolvePreferred?: boolean
-    relayPool?: { userEntries?: string; useBuiltin?: boolean; colo?: string }
-    onFailure?: (failure: DialFailure) => void
-  }): Promise<{
-    readable: ReadableStream<Uint8Array>
-    writable: WritableStream<Uint8Array>
-    via?: string
-    endpoint?: string
-  } | null>
-}
-
-/**
- * 取当前生效的拨号函数（**只**用入口注入的实现）。
- *
- * ## 为什么不做「动态 import 回落」
- *
- * 实测：只要本模块的产物里**存在** `import('../outbound/dial')` 这条表达式，
- * 哪怕它永不执行，Workers 的 isolate 也会在启动阶段失败（HTTP 522）。
- * 对照（同一份代码，只改这一处）：
- *
- * | resolveDial 的实现                    | Workers |
- * |---------------------------------------|---------|
- * | 注入 + `await import('../outbound/dial')` 回落 | **522** |
- * | **只查注入，不 import**                | **200** |
- *
- * 因此本函数**只**读 `globalThis.__cfpDial`。入口（`src/entry-data.ts` /
- * `src/index.ts`）会在每个请求里注入 dial；`outbound/dial` 只在那**一层**
- * 被引用，深层模块保持零依赖 —— 这正是 edgetunnel 稳定跑在 Workers 上的做法。
- *
- * 拿不到注入时返回 null，上层会给出明确诊断（而不是静默失败）。
- */
-function resolveDial(): DialLike | null {
-  const injected = (globalThis as unknown as { __cfpDial?: DialLike }).__cfpDial
-  return typeof injected === 'function' ? injected : null
-}
 
 /** 单次拨号超时（ms） */
 const DIAL_TIMEOUT_MS = 5000
@@ -237,14 +166,7 @@ export async function handleWebSocket(
   // 攒包缓冲：协议头可能跨多个数据帧
   let buffer = new Uint8Array(0)
   let established = false
-  // 拨号结果（与 `outbound/dial.ts` 的 DialResult 形状一致，此处内联声明
-  // 是为了避免静态依赖 —— 静态 import 会让 Workers 通道 522，详见文件头）
-  let dialed: {
-    readable: ReadableStream<Uint8Array>
-    writable: WritableStream<Uint8Array>
-    via?: string
-    endpoint?: string
-  } | null = null
+  let dialed: DialResult | null = null
   let writer: WritableStreamDefaultWriter<Uint8Array> | null = null
   let firstPacketTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -408,17 +330,8 @@ export async function handleWebSocket(
     // 出站：失败分级上报，便于定位（不再一律表现为「目标不可达」）
     const failures: DialFailure[] = []
     let dialError: unknown = null
-    // ⚠️ 拨号函数**运行时**取，绝不静态/动态 import 本模块的 dial ——
-    // 依赖会让 Workers 通道 522（真机对照见 `resolveDial()` 上方的说明）
-    const dialFn = resolveDial()
-    if (!dialFn) {
-      const detail = '出站拨号不可用：Workers 通道需要入口注入 dial（见 entry-data.ts）'
-      recordDiagnostics(`${target.hostname}:${target.port}`, failures, detail)
-      closeWith(1011, detail)
-      return
-    }
     try {
-      dialed = await dialFn({
+      dialed = await dial({
         hostname: target.hostname,
         port: target.port,
         proxies,

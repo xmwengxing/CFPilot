@@ -93,47 +93,6 @@ interface DeployerModule {
     wsPath?: string
     warnings: string[]
   }>
-
-  /**
-   * Workers 双脚本部署（实验性通道）。
-   *
-   * 与 Pages 版的关键差别：**可以原地重复更新**（真机 5/5 成功，无 8000119），
-   * 但数据面在部分环境会返回 522（isolate 启动失败）。
-   */
-  deployWorkerSplit(options: {
-    token: string
-    accountId: string
-    kvNamespaceId: string
-    controlScript: string
-    dataScript: string
-    panelPath: string
-    panelPassword: string
-    uuid: string
-    trojanPassword: string
-    wsPath: string
-    enableTrojan: boolean
-    enableXhttp: boolean
-    dataPlane?: 'vendor' | 'self'
-    resolvePreferred?: boolean
-    mode?: 'auto' | 'fresh' | 'update'
-    keepCredentials?: boolean
-    skipSameVersion?: boolean
-    force?: boolean
-    localBuild?: string
-    controlHostname?: string
-    dataHostname?: string
-    zoneId?: string
-    bundles?: { control?: string; data?: string }
-    log?: (m: string) => void
-  }): Promise<{
-    control: { name: string; host: string; devHost: string }
-    data: { name: string; host: string; devHost: string }
-    panelPath?: string
-    uuid?: string
-    wsPath?: string
-    dataProbeOk?: boolean
-    warnings: string[]
-  }>
 }
 
 /** Cloudflare API 客户端（同上，运行时加载） */
@@ -207,20 +166,6 @@ export interface DeployParams {
    * DoH 优选解析与可配置的反代入口。
    */
   dataPlane: 'self' | 'vendor'
-  /**
-   * 部署方式。
-   *
-   * - `pages`（默认）：Pages 双项目。数据面已验证稳定，是推荐形态。
-   * - `workers`（实验性）：Workers 双脚本。**原地重复更新显著更稳**
-   *   （真机 5/5 成功、无 8000119），但数据面在部分环境会 522。
-   */
-  deployMode?: 'pages' | 'workers'
-  /** Workers 模式下：控制面自定义域名（可选，需同时给 zoneId） */
-  controlHostname?: string
-  /** Workers 模式下：数据面自定义域名（可选，需同时给 zoneId） */
-  dataHostname?: string
-  /** Workers 模式下：绑定自定义域名所需的 zone ID */
-  zoneId?: string
 }
 
 /**
@@ -263,51 +208,6 @@ export async function runDeploy(
     ])
 
     const deployer = await loadDeployer()
-
-    if (params.deployMode === 'workers') {
-      sendLog(win, '部署方式：Workers 双脚本（实验性）', 'warn')
-      sendLog(win, '  优点：原地重复更新更稳定，不会触发 8000119')
-      sendLog(win, '  限制：数据面在部分环境会返回 522（控制面不受影响）', 'warn')
-      sendLog(win, '开始部署（日志来自部署向导）…')
-
-      const workerResult = await deployer.deployWorkerSplit({
-        token: secrets.cfToken,
-        accountId: secrets.accountId.trim(),
-        kvNamespaceId: kvId,
-        controlScript: params.controlProject.trim(),
-        dataScript: params.dataProject.trim(),
-        panelPath: params.panelPath.trim(),
-        panelPassword: secrets.panelPassword,
-        uuid: '',
-        trojanPassword: '',
-        wsPath: params.wsPath.trim(),
-        enableTrojan: true,
-        enableXhttp: false,
-        dataPlane: params.dataPlane ?? 'self',
-        mode: params.mode,
-        keepCredentials: !params.newCredentials,
-        skipSameVersion: !params.force,
-        force: params.forceKv,
-        localBuild,
-        controlHostname: params.controlHostname?.trim() || undefined,
-        dataHostname: params.dataHostname?.trim() || undefined,
-        zoneId: params.zoneId?.trim() || undefined,
-        bundles: { control, data },
-        log: (m: string) => sendLog(win, m),
-      })
-
-      sendLog(win, `控制面：https://${workerResult.control.host}${workerResult.panelPath ?? ''}`, 'ok')
-      sendLog(win, `数据面：https://${workerResult.data.host}`, 'ok')
-      if (workerResult.uuid) sendLog(win, `UUID：${workerResult.uuid}`)
-      if (workerResult.wsPath) sendLog(win, `WS 路径：${workerResult.wsPath}`)
-      if (workerResult.dataProbeOk === false) {
-        sendLog(win, '⚠ 数据面探测未通过 —— Workers 通道的已知限制，控制面不受影响', 'warn')
-      }
-      for (const w of workerResult.warnings) sendLog(win, w, 'warn')
-      return { ok: true }
-    }
-
-    sendLog(win, '部署方式：Pages 双项目（推荐）')
     sendLog(win, '开始部署（日志来自部署向导）…')
 
     const result = await deployer.deployPagesSplit({

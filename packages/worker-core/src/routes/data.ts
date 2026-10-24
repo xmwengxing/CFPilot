@@ -7,35 +7,12 @@
  */
 import type { Env, UserConfig } from '../types'
 import { handleEdgeProbe } from '../probe'
+import { handleWebSocket } from '../protocols/websocket'
 import { resolveDataPlaneImpl } from '../protocols/dataplane'
 import { handleXhttp } from '../protocols/xhttp'
 import { parseProxyPool, type ProxyEndpoint } from '../outbound/proxy-pool'
 import { jsonError } from '../ui/neutral'
 import { loadDataPlaneConfig } from './control'
-
-/**
- * 按实现选择取 WS 处理器。
- *
- * ⚠️ **不要在模块顶层静态 import `protocols/websocket`**：它会把 vendor
- *（`vendor/cfnext-dataplane.js`，232KB）一起打进产物 —— 真机实测
- * 该组合在 Workers 通道会 isolate 启动失败（HTTP 522），Pages 通道正常。
- *
- * 因此：
- *   - `self`（默认）→ 直接用自研的 `websocket-self`（零 vendor 依赖）；
- *   - `vendor`      → 动态 import `protocols/websocket`（只有显式切回才加载 vendor）。
- *
- * 这样默认产物既能在 Pages 上正常工作，也能在 Workers 上跑起来。
- */
-async function resolveWsHandler(impl: 'self' | 'vendor'): Promise<
-  (typeof import('../protocols/websocket-self'))['handleWebSocket']
-> {
-  if (impl === 'self') {
-    const mod = await import('../protocols/websocket-self')
-    return mod.handleWebSocket
-  }
-  const mod = await import('../protocols/websocket')
-  return mod.handleWebSocket as unknown as (typeof import('../protocols/websocket-self'))['handleWebSocket']
-}
 
 /** 汇总出站代理池 */
 export function collectProxies(config: UserConfig): ProxyEndpoint[] {
@@ -96,16 +73,14 @@ export async function routeDataPlane(
     if (upgrade !== 'websocket') {
       return jsonError('该路径需要 WebSocket 升级', 400)
     }
-    const handler = await resolveWsHandler(impl)
-    return await handler(request, 'vless', config, collectProxies(config), ctx)
+    return await handleWebSocket(request, 'vless', config, collectProxies(config), ctx, { impl })
   }
 
   if (config.enableTrojan && url.pathname === config.trojanPath) {
     if (upgrade !== 'websocket') {
       return jsonError('该路径需要 WebSocket 升级', 400)
     }
-    const handler = await resolveWsHandler(impl)
-    return await handler(request, 'trojan', config, collectProxies(config), ctx)
+    return await handleWebSocket(request, 'trojan', config, collectProxies(config), ctx, { impl })
   }
 
   if (config.enableXhttp && url.pathname === config.xhttpPath) {

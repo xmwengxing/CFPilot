@@ -56,6 +56,8 @@ scan 选项:
   --speed-conns <n>      测速并发连接数，默认 3
                          单条 TCP 连接受拥塞窗口限制，多连接更接近真实带宽
   --speed-duration <ms>  测速时长，默认 6000
+  --retries <n>           每个探测的尝试次数（含首次），默认 2
+                          真机偶发失败率 3~5%，重试取第一次成功的结果
   --no-verify            阶段二只做 101 握手，跳过响应体校验
                           （默认校验：发 PING 并验证数据面回 {"pong":true}）
   --no-speed             跳过测速，只按延迟排序
@@ -380,6 +382,7 @@ async function commandScan(args: ReturnType<typeof parseArgs>): Promise<void> {
     skipSpeed,
     verifyPayload,
     concurrency: flagNumber(args, 'concurrency', 300),
+    retries: flagNumber(args, 'retries', 2),
     tcpTimeoutMs: flagNumber(args, 'timeout', 1200),
     tlsConcurrency: flagNumber(args, 'tls-concurrency', 64),
     tlsTimeoutMs: flagNumber(args, 'tls-timeout', 4000),

@@ -66,6 +66,80 @@ describe('TLS 握手筛选（-1 根因修复）', () => {
   })
 })
 
+describe('探测重试（withRetry 语义）', () => {
+  /**
+   * 复刻 scan.ts 的 withRetry 逻辑。
+   *
+   * 金丝雀：源码改了重试语义，这里会失败，提醒同步。
+   * 真机背景：偶发失败率 3~5%（TLS 抖动 / 运营商瞬时丢包），
+   * 一次定生死会白丢好 IP。
+   */
+  const withRetry = async <T>(
+    attempts: number,
+    fn: () => Promise<T>,
+    isOk: (r: T) => boolean = (r) => (r as { ok?: boolean }).ok === true
+  ): Promise<T> => {
+    const total = Math.max(1, Math.floor(attempts))
+    let last: T
+    for (let i = 0; i < total; i++) {
+      last = await fn()
+      if (isOk(last)) return last
+    }
+    return last!
+  }
+
+  it('首次成功不再重试', async () => {
+    let calls = 0
+    const r = await withRetry(3, async () => { calls++; return { ok: true, v: 1 } })
+    expect(r).toEqual({ ok: true, v: 1 })
+    expect(calls).toBe(1)
+  })
+
+  it('失败后重试，取第一次成功的结果', async () => {
+    let calls = 0
+    const r = await withRetry(3, async () => {
+      calls++
+      return calls < 3 ? { ok: false, v: calls } : { ok: true, v: 'success' }
+    })
+    expect(r).toEqual({ ok: true, v: 'success' })
+    expect(calls).toBe(3)
+  })
+
+  it('全部失败时返回最后一次结果', async () => {
+    let calls = 0
+    const r = await withRetry(3, async () => { calls++; return { ok: false, v: calls } })
+    expect(r).toEqual({ ok: false, v: 3 })
+    expect(calls).toBe(3)
+  })
+
+  it('attempts=1 等价于不重试', async () => {
+    let calls = 0
+    const r = await withRetry(1, async () => { calls++; return { ok: false, v: 0 } })
+    expect(r.ok).toBe(false)
+    expect(calls).toBe(1)
+  })
+
+  it('attempts=0 / 负数被规整为 1', async () => {
+    let calls = 0
+    await withRetry(0, async () => { calls++; return { ok: false } })
+    expect(calls).toBe(1)
+    calls = 0
+    await withRetry(-5, async () => { calls++; return { ok: false } })
+    expect(calls).toBe(1)
+  })
+
+  it('自定义成功判定（TLS 探测用 tlsMs > 0）', async () => {
+    let calls = 0
+    const r = await withRetry<{ tlsMs: number }>(
+      3,
+      async () => { calls++; return { tlsMs: calls < 2 ? -1 : 500 } },
+      (x) => x.tlsMs > 0
+    )
+    expect(r.tlsMs).toBe(500)
+    expect(calls).toBe(2)
+  })
+})
+
 describe('阶段二严格校验（响应体内容校验）', () => {
   /**
    * 复刻 scan.ts 阶段二的保留规则。

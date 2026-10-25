@@ -27,7 +27,7 @@ describe('反代入口解析', () => {
 
   it('IP 字面量直接可用，无需解析', async () => {
     const result = await resolveRelayEntry('1.2.3.4')
-    expect(result).toEqual([{ ip: '1.2.3.4', port: 443, label: '1.2.3.4' }])
+    expect(result).toEqual([{ ip: '1.2.3.4', port: 443, label: '1.2.3.4', regionCode: '??' }])
   })
 
   it('IP 带端口时按给定端口', async () => {

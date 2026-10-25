@@ -146,6 +146,63 @@ check-host 多国节点全 500、同脚本自定义域 200 / workers.dev 500、
 
 ---
 
+## 0.28 借鉴 cfnew 的六项优选/订阅增强（2026-10-25）
+
+用户要求研究 cfnew（`_worker.js` 37KB + cfnew-panel 205KB）并借鉴其能力。
+逐行读完两侧源码后落地 6 项（第 5 项运营商标注经确认暂缓）。
+
+### 0.28.1 调研修正：cfnew 没有「内置官方优选 IP 源」
+
+上次报告曾推测 `tist.ini` 是 IP 源，**此次读 panel 源码后修正**：
+
+| 文件 | 实际用途 |
+|------|----------|
+| `tist.ini`（64 行） | **Clash 分流规则 + 代理组配置**（ACL4SSR 风格），`远程配置网址` 在 engine.mjs 里只注入面板 HTML 的「重置配置」按钮 |
+| cfnew `_worker.js` | `优选地址源 = 有效配置.yxURL \|\| ''` —— **默认空**，IP 全来自用户手填 `yx` 或自配 `yxURL` |
+| cfnew-panel `preferred.mjs` | `probePreferred()` 是**服务器侧探测**（验 body 恰为 `hello` + 取 cf-ray colo），不产生新 IP |
+
+即 cfnew 的「速度快 + 识别落地国家」= 用户用外部工具扫 IP 填进去 + 内核里的
+`regionCode` 邻接排序。**没有可一键搬过来的内置 IP 源。**
+
+### 0.28.2 落地的六项
+
+| # | 能力 | 实现 | 测试 |
+|---|------|------|------|
+| 1 | **反代入口 regionCode + 地区邻接排序** | `relay.ts` 新增 `REGION_ADJACENCY`（美↔日韩新、欧↔欧）/ `rankRegions()` / `sortEndpointsByRegion()`；`RelayEndpoint` 加 `regionCode`；`collectRelayEndpoints` 对内置部分重排（用户自配不参与） | 25 |
+| 2 | **`GET /region` 端点** | 数据面新增只读端点，返回 `colo` / `region` / `relayPreference`（不碰 KV，放在 `loadDataPlaneConfig` 之前） | 随路由测试 |
+| 3 | **CSV 优选列表解析增强** | `sub-engine.ts` 的 `parseCsvText` 增加：TLS 列过滤（`false`/`否`/`no`/`0` 丢弃）、国家/城市列（remark 优先级：城市 > 国家 > 机房码）、无表头时的中文列启发式（含「市省州区县」或长度>3 → 城市，否则国家） | 16 |
+| 4 | **公网地址校验** | `net-env.ts` 新增 `isPublicAddress()`（RFC1918 / CGNAT 100.64/10 / 链路本地 / 组播 / fake-ip 198.18/15 / IPv6 只放行 2000::/3）；`normalizeCandidateList` 对字面量 IP 过滤（域名不过滤） | 21 |
+| 6 | **探测重试** | `scan.ts` 新增 `withRetry()`，三个阶段（TCP / TLS / WS）都包一层；默认 `--retries 2`，取第一次成功的结果。真机偶发失败率 3~5%，一次定生死会白丢好 IP | 6 |
+| 7 | **分流规则内置（方案 A）** | `assets/route-profiles.ini`（5.2KB，文件名避开敏感字眼）→ `gen-route-profile.mjs` gzip+base64 内联成 `route-profile.generated.ts`（1.9KB）→ `renderClash` 消费。KV 的 `ROUTE_PROFILE` 可覆盖 | 23 |
+
+### 0.28.3 关键实现细节
+
+**反代排序为什么要「用户自配不参与重排」**：用户显式指定入口即表示最可信，
+地区重排只作用于内置部分（`collectRelayEndpoints` 里用 `userCount` 切开）。
+
+**CSV 的 TLS 列为什么「空值不丢」**：有些导出工具留空该列，
+只有明确的 `false`/`否`/`no`/`0` 才判不支持（比 cfnew 的 `!== 'true'` 宽松）。
+
+**ini 的 `ruleset=` 为什么用 `RULE-SET`**：Clash 原生支持远端规则集，
+`name` 取 URL 最后一段去扩展名。ini 指向 ACL4SSR 等公共 list，
+因此**分流数据永远是最新的**，只有分组结构固定 —— 这正是选方案 A 的理由。
+
+**emoji 前缀去重**（真机发现的回归）：ini 里的 `♻️ 自动选择` 与我们生成的
+`自动选择` 只比精确名会漏，导致订阅出现两个等价 url-test 组。
+现在按「剥掉前导非字母数字」后的名字比对。
+
+### 0.28.4 已知限制
+
+- **IPv6 候选不过滤私网**：`normalizeCandidateList` 里 IPv6 字面量也走了
+  `isPublicAddress`，但 DoH 解析出的域名不在过滤范围（无法在此层解析）。
+- **运营商标注（第 5 项）暂缓**：依赖「IP 源带运营商标注」，而 cfnew 的那个源
+  默认为空；我们自己的官方池是随机抽样、无运营商信息。已与用户确认暂不做。
+- **ini 的 load-balance 正则未翻译**：Clash 的 `filter` 是「名称包含」匹配，
+  而 subconverter 的 `(港|HK|hk)` 是完整正则 —— 误判比不过滤更糟，
+  因此国家组统一挂主组，让组内竞速自己挑。
+
+---
+
 ## 0.27 收尾：版本 0.4.0、exe 打包阻塞（2026-10-25）
 
 ### 0.27.1 已完成并提交

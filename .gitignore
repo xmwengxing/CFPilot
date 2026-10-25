@@ -16,6 +16,7 @@ coverage/
 *.tsbuildinfo
 packages/deploy-wizard/assets/*.map
 packages/worker-core/src/ui/panel.generated.ts
+packages/worker-core/src/route-profile.generated.ts
 .freebuff/
 
 # 本机部署诊断与临时产物

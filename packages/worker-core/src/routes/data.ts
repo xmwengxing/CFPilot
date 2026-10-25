@@ -64,6 +64,36 @@ export async function routeDataPlane(
     )
   }
 
+  // 出口地区端点（借鉴 cfnew 的 `GET /region`）。
+  //
+  // 报告当前请求落在哪个边缘机房、推断出哪个国家/地区，
+  // 以及反代入口的地区优先级。用途：
+  //   - 用户想知道「我的流量从哪出国」
+  //   - 排查「为什么这个地区连不上」（反代入口按地区选）
+  //
+  // ⚠️ 只读 GET 且不触碰 KV，因此放在 loadDataPlaneConfig 之前 ——
+  // 避免为一个纯诊断请求付出一次 KV 读取。
+  if (url.pathname === '/region' && request.method === 'GET') {
+    const { coloToCountry, rankRegions } = await import('../outbound/relay')
+    const colo = (request as unknown as { cf?: { colo?: string } }).cf?.colo ?? ''
+    const region = colo ? coloToCountry(colo) : ''
+    return new Response(
+      JSON.stringify(
+        {
+          ok: true,
+          colo,
+          region,
+          // 反代入口的地区优先级：当前地区 → 邻接 → 其余
+          relayPreference: region ? rankRegions(region) : [],
+          timestamp: new Date().toISOString(),
+        },
+        null,
+        2
+      ),
+      { status: 200, headers: { 'Content-Type': 'application/json; charset=utf-8' } }
+    )
+  }
+
   const config = await loadDataPlaneConfig(env)
   const upgrade = request.headers.get('Upgrade')?.toLowerCase()
   // 数据面实现选择：默认 vendor（生产验证过），DATAPLANE=self 切自研

@@ -48,6 +48,85 @@ export interface RelayEndpoint {
   port: number
   /** 展示用描述（来自哪个入口） */
   label: string
+  /** 地区码（HK / US / SG …）；未知时为 '??' */
+  regionCode: string
+}
+
+/** 未知地区码（排序时排最后） */
+export const UNKNOWN_REGION = '??'
+
+/**
+ * 从入口字符串推断地区码。
+ *
+ * 只认内置表里的域名（`BUILTIN_RELAY_REGION`），其余（用户自配域名 / IP）
+ * 一律返回未知 —— 我们无法可靠推断一个陌生域名挂在哪个地区。
+ */
+export function regionOfEntry(entry: string): string {
+  const text = entry.trim().toLowerCase()
+  // 去掉可能的端口后缀再匹配
+  const bare = text.replace(/:\d{1,5}$/, '')
+  return BUILTIN_RELAY_REGION[bare] ?? UNKNOWN_REGION
+}
+
+/**
+ * 地区邻接表（借鉴 cfnew 的 `nn()`）。
+ *
+ * 用途：**按当前地区优先，其次地理/线路上邻近的地区**，
+ * 最后才是其余地区。邻接比「按表顺序轮转」更符合实际：
+ * 美国用户走新加坡反代通常比走芬兰快。
+ *
+ * 只覆盖有内置入口的地区；未列出的地区走「本地区 → 其余」。
+ */
+export const REGION_ADJACENCY: Readonly<Record<string, readonly string[]>> = {
+  US: ['SG', 'JP', 'KR'],
+  SG: ['JP', 'KR', 'US'],
+  JP: ['SG', 'KR', 'US'],
+  KR: ['JP', 'SG', 'US'],
+  DE: ['NL', 'GB', 'SE', 'FI'],
+  SE: ['DE', 'NL', 'FI', 'GB'],
+  NL: ['DE', 'GB', 'SE', 'FI'],
+  FI: ['SE', 'DE', 'NL', 'GB'],
+  GB: ['DE', 'NL', 'SE', 'FI'],
+}
+
+/** 参与邻接排序的地区全集（顺序即「其余」的兜底顺序） */
+export const REGION_ORDER: readonly string[] = ['US', 'SG', 'JP', 'KR', 'DE', 'SE', 'NL', 'FI', 'GB']
+
+/**
+ * 按「当前地区 → 邻近 → 其余」对地区码排序（借鉴 cfnew 的 `rn()`）。
+ *
+ * @param current 当前地区码（通常由边缘机房 colo 推出）；空表示未知
+ */
+export function rankRegions(current: string | undefined | null): string[] {
+  const cur = (current ?? '').trim().toUpperCase()
+  if (!cur) return [...REGION_ORDER]
+  const adjacent = REGION_ADJACENCY[cur] ?? []
+  const rest = REGION_ORDER.filter((r) => r !== cur && !adjacent.includes(r))
+  return [cur, ...adjacent, ...rest]
+}
+
+/**
+ * 按当前地区优先 + 邻接排序，重排反代入口候选。
+ *
+ * 稳定排序：同地区内保持传入顺序（用户自配的在前）。
+ */
+export function sortEndpointsByRegion(
+  endpoints: readonly RelayEndpoint[],
+  currentRegion: string | undefined | null
+): RelayEndpoint[] {
+  const rank = rankRegions(currentRegion)
+  const rankOf = (code: string): number => {
+    const idx = rank.indexOf(code)
+    return idx >= 0 ? idx : rank.length
+  }
+  return endpoints
+    .map((e, i) => ({ e, i }))
+    .sort((x, y) => {
+      const rx = rankOf(x.e.regionCode)
+      const ry = rankOf(y.e.regionCode)
+      return rx !== ry ? rx - ry : x.i - y.i
+    })
+    .map((x) => x.e)
 }
 
 /**
@@ -311,7 +390,13 @@ export async function resolveRelayEntry(
 
   let out: RelayEndpoint[] = []
   if (isIpv4(hostPart) || isIpv6(hostPart)) {
-    out = [{ ip: hostPart, port: Number.isInteger(port) && port > 0 ? port : defaultPort, label: text }]
+    // 字面量入口：地区未知（除非它正好是内置表里的域名，字面量不是）
+    out = [{
+      ip: hostPart,
+      port: Number.isInteger(port) && port > 0 ? port : defaultPort,
+      label: text,
+      regionCode: regionOfEntry(text),
+    }]
   } else {
     try {
       const resolved = await resolveEndpointIps(hostPart, port, {
@@ -323,6 +408,7 @@ export async function resolveRelayEntry(
         ip: r.hostname,
         port: r.port,
         label: `${hostPart} → ${r.hostname}`,
+        regionCode: regionOfEntry(text),
       }))
     } catch {
       out = []
@@ -371,14 +457,14 @@ export function selectRelayDomains(
 ): string[] {
   const current = coloToCountry(colo)
 
-  // 地区排序：当前机房所在国家排最前，其余按 BUILTIN_RELAY_REGION 的键顺序
+  // 地区排序：当前机房所在国家 → 地理/线路邻近 → 其余。
+  // 邻接关系见 REGION_ADJACENCY（借鉴 cfnew）。
+  const rank = rankRegions(current)
   const regionRank = (domain: string): number => {
     const region = BUILTIN_RELAY_REGION[domain]
-    if (!region) return 999
-    if (region === current) return 0
-    const keys = Object.keys(BUILTIN_RELAY_REGION)
-    const idx = keys.findIndex((d) => BUILTIN_RELAY_REGION[d] === region)
-    return idx + 1
+    if (!region) return rank.length + 1
+    const idx = rank.indexOf(region)
+    return idx >= 0 ? idx : rank.length
   }
 
   return BUILTIN_RELAY_DOMAINS.map((d, i) => ({ d, i, rank: regionRank(d) }))
@@ -453,7 +539,9 @@ export async function collectRelayEndpoints(options: RelayPoolOptions = {}): Pro
   ])
 
   // 顺序：先用户自配，再内置
+  const userStart = out.length
   for (let i = 0; i < userEntries.length; i++) push(batches[i]!)
+  const userCount = out.length - userStart
 
   // ⚠️ **内置候选按「地区分散」交错排列**。
   //
@@ -468,7 +556,17 @@ export async function collectRelayEndpoints(options: RelayPoolOptions = {}): Pro
     }
   }
 
-  return out
+  // 最后按「当前地区 → 邻接 → 其余」重排**内置部分**。
+  //
+  // 上面的交错只保证「前几个候选覆盖多个地区」，顺序仍是表顺序
+  // （HK → JP → SG → US → …）。加上这步后，与美国机房相邻的地区
+  // （SG/JP/KR）会排到欧洲地区（DE/GB/SE/NL/FI）前面 —— 更符合实际线路
+  // （借鉴 cfnew 的 REGION_ADJACENCY）。
+  //
+  // ⚠️ 用户自配部分**不参与重排**：用户显式指定即表示最可信，保持原样在最前。
+  const head = out.slice(0, userCount)
+  const tail = sortEndpointsByRegion(out.slice(userCount), coloToCountry(options.colo))
+  return [...head, ...tail]
 }
 
 /** 清空解析缓存（测试用） */

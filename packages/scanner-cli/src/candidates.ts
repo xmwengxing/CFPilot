@@ -13,6 +13,7 @@ import {
   fetchCloudflareCidrs,
   readIpFile,
 } from './ip-ranges'
+import { isPublicAddress } from './net-env'
 
 /** 地址族：仅 IPv4 / 仅 IPv6 / 两者都要 */
 export type IpFamily = 'v4' | 'v6' | 'both'
@@ -112,6 +113,14 @@ export async function resolveCandidates(opts: CandidateOptions = {}): Promise<st
  *
  * 兼容裸 IP、IP:Port、IP:Port#备注、[IPv6]:Port#备注、CSV 行；
  * 保留原始顺序并去重。
+ *
+ * ## 私网/保留地址过滤（2026-10-25 新增）
+ *
+ * 借鉴 cfnew 的 `isPublicAddress`：把 `127.0.0.1` / `192.168.x` / `10.x` /
+ * `100.64.x`（CGNAT）/ `198.18.x`（fake-ip）/ 组播等**非公网地址**剔除。
+ *
+ * 为什么：这些地址连上去会以不同方式失败（拒绝 / 超时 / 连到自己的路由器），
+ * 白白浪费一次探测；用户粘贴的列表尤其容易混进它们。
  */
 export function normalizeCandidateList(input: readonly unknown[] | undefined): string[] {
   if (!Array.isArray(input) || input.length === 0) return []
@@ -123,6 +132,14 @@ export function normalizeCandidateList(input: readonly unknown[] | undefined): s
   for (const ip of readIpFile(lines.join('\n'))) {
     if (seen.has(ip)) continue
     seen.add(ip)
+    // 只对**字面量 IP** 做公网校验：域名不在此处解析（会在探测时由
+    // TLS connect 的目标地址决定），无脑过滤会把用户显式给的域名也删掉。
+    // 判定：纯数字加点 = IPv4；含冒号 = IPv6；其余 = 域名。
+    const isIpv4Literal = /^\d{1,3}(\.\d{1,3}){3}$/.test(ip)
+    const isIpv6Literal = ip.includes(':')
+    if (isIpv4Literal || isIpv6Literal) {
+      if (!isPublicAddress(ip)) continue
+    }
     out.push(ip)
   }
   return out

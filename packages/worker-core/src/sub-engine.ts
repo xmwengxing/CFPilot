@@ -18,6 +18,7 @@ import { isIpv4, isIpv6 } from './protocols/address'
 import { base64Encode } from './util'
 import { CpuBudget } from './budget'
 import { CF_IPV4_CIDRS, CURATED_OFFICIAL_IPS, PREFERRED_DOMAINS, countryOfColo, isKnownCountry } from './data/pools'
+import { renderRouteSections } from './route-profile'
 
 export type { SubFormat }
 
@@ -182,6 +183,8 @@ export interface CsvParseResult {
   filtered: number
   /** 是否识别到表头 */
   hasHeader: boolean
+  /** 因 TLS=false 被丢弃的条数（客户端到边缘必须 TLS） */
+  tlsDropped: number
 }
 
 const IP_HEADER_KEYS = ['ip地址', 'ip 地址', 'ip', '地址', '服务器', 'server', 'host']
@@ -189,6 +192,22 @@ const PORT_HEADER_KEYS = ['端口', 'port']
 const SPEED_HEADER_KEYS = ['下载速度', '速度', 'speed', 'download']
 const LATENCY_HEADER_KEYS = ['平均延迟', '延迟', 'latency', 'delay', '响应时间', 'rtt']
 const COLO_HEADER_KEYS = ['colo', '机房', '数据中心', '地区', 'region']
+/**
+ * 国家 / 城市列表头键（借鉴 cfnew 的 `normalizePreferredList`）。
+ *
+ * 用途：把国家/城市填进 remark —— 用户在客户端里能直接看到
+ * 「🇺🇸 洛杉矶」这样的节点名，比裸 IP 或三字母机房码更直观。
+ */
+const COUNTRY_HEADER_KEYS = ['国家', 'country', '国别']
+const CITY_HEADER_KEYS = ['城市', 'city']
+/**
+ * TLS 列表头键（借鉴 cfnew）。
+ *
+ * CloudflareSpeedTest 的 CSV 有一列 `TLS`（true/false），
+ * 表示该 IP 是否支持 TLS 握手。`false` 的行对 VLESS-WS 无用
+ * （客户端到边缘必须是 TLS），直接丢弃。
+ */
+const TLS_HEADER_KEYS = ['tls', '是否支持tls', '支持tls']
 
 function matchHeader(header: string, keys: string[]): number {
   const normalized = header.trim().toLowerCase().replace(/[（(].*?[)）]/g, '')
@@ -237,8 +256,13 @@ export function parseCsvText(text: string, options: CsvParseOptions = {}): CsvPa
   let speedIndex = -1
   let latencyIndex = -1
   let coloIndex = -1
+  let countryIndex = -1
+  let cityIndex = -1
+  let tlsIndex = -1
+  /** 因 TLS=false 被丢弃的条数 */
+  let tlsDropped = 0
 
-  if (lines.length === 0) return { entries, filtered, hasHeader }
+  if (lines.length === 0) return { entries, filtered, hasHeader, tlsDropped }
 
   const firstCells = splitCsvLine(lines[0]!)
   const firstLooksLikeIp = firstCells.some((c) => isIpv4(c.trim()) || isIpv6(c.trim()))
@@ -257,6 +281,9 @@ export function parseCsvText(text: string, options: CsvParseOptions = {}): CsvPa
     speedIndex = findColumn(firstCells, SPEED_HEADER_KEYS)
     latencyIndex = findColumn(firstCells, LATENCY_HEADER_KEYS)
     coloIndex = findColumn(firstCells, COLO_HEADER_KEYS)
+    countryIndex = findColumn(firstCells, COUNTRY_HEADER_KEYS)
+    cityIndex = findColumn(firstCells, CITY_HEADER_KEYS)
+    tlsIndex = findColumn(firstCells, TLS_HEADER_KEYS)
     start = 1
   }
 
@@ -264,11 +291,24 @@ export function parseCsvText(text: string, options: CsvParseOptions = {}): CsvPa
     const cells = splitCsvLine(lines[i]!)
     if (cells.length === 0) continue
 
+    // TLS 列：明确为 false 的行直接丢弃（客户端到边缘必须 TLS）。
+    // 借鉴 cfnew：`tlsIndex >= 0 && fields[tlsIndex]?.toLowerCase() !== 'true'` → 跳过。
+    // 这里稍宽松：空值不丢（有些导出工具不填这一列），只有明确的 false/no/0 才丢。
+    if (hasHeader && tlsIndex >= 0 && cells[tlsIndex]) {
+      const tlsCell = cells[tlsIndex]!.trim().toLowerCase()
+      if (tlsCell === 'false' || tlsCell === 'no' || tlsCell === '0' || tlsCell === '否') {
+        tlsDropped++
+        continue
+      }
+    }
+
     let ip = ''
     let port = DEFAULT_NODE_PORT
     let speed = 0
     let latency = 0
     let colo = ''
+    let country = ''
+    let city = ''
 
     if (hasHeader) {
       if (ipIndex < 0) continue
@@ -280,6 +320,8 @@ export function parseCsvText(text: string, options: CsvParseOptions = {}): CsvPa
       if (speedIndex >= 0 && cells[speedIndex]) speed = parseNumber(cells[speedIndex]!)
       if (latencyIndex >= 0 && cells[latencyIndex]) latency = parseNumber(cells[latencyIndex]!)
       if (coloIndex >= 0 && cells[coloIndex]) colo = cells[coloIndex]!.trim()
+      if (countryIndex >= 0 && cells[countryIndex]) country = cells[countryIndex]!.trim()
+      if (cityIndex >= 0 && cells[cityIndex]) city = cells[cityIndex]!.trim()
     } else {
       // 无表头启发式：
       //   2 个数值列 → [下载速度, 延迟]
@@ -317,21 +359,47 @@ export function parseCsvText(text: string, options: CsvParseOptions = {}): CsvPa
         (c, index) => index !== ipCell && c.trim() && !/[\d.]/.test(c) && /[a-zA-Z]/.test(c)
       )
       if (coloCell) colo = coloCell.trim()
+
+      // 无表头时的国家/城市启发式：非 IP、非数字、且不是机房码（三字母）的
+      // 文本列，优先当作国家或城市。
+      //
+      // ⚠️ 只在 colo 没取到时用，避免把 colo 覆盖掉。
+      if (!colo) {
+        const textCell = cells.find(
+          (c, index) =>
+            index !== ipCell &&
+            c.trim() &&
+            !/[\d.]/.test(c) &&
+            /[\u4e00-\u9fa5]/.test(c) // 含中文 → 很可能是国家/城市名
+        )
+        if (textCell) {
+          const value = textCell.trim()
+          // 含「市」「省」「州」或长度 > 3 → 城市；否则按国家处理
+          if (/[市省州区县]/.test(value) || value.length > 3) city = value
+          else country = value
+        }
+      }
     }
 
     if (!ip) continue
     const clean = cleanIpLine(ip.includes(':') && !ip.includes(' ') ? ip : `${ip}:${port}`)
     if (!clean) continue
 
+    // remark 优先级：城市 > 国家 > 机房码。
+    // 借鉴 cfnew 的 `nameIndex` 选择顺序（国家/城市/数据中心取第一个非空）。
+    const remark = city || country || colo
+    // country 兜底：有国家列用国家列；否则按 colo 推断
+    const countryCode = country || countryOfColo(colo.toUpperCase())
+
     const entry: NodeEntry = {
       ip: clean.ip,
       port: clean.port,
-      remark: colo,
+      remark,
       colo: colo.toUpperCase(),
       latency,
       speed,
       source: 'addcsv',
-      country: countryOfColo(colo.toUpperCase()),
+      country: countryCode,
     }
     entries.push(entry)
   }
@@ -346,7 +414,7 @@ export function parseCsvText(text: string, options: CsvParseOptions = {}): CsvPa
   })
   filtered = entries.length - kept.length
 
-  return { entries: kept, filtered, hasHeader }
+  return { entries: kept, filtered, hasHeader, tlsDropped }
 }
 
 /** 拆分 CSV 行（支持引号包裹） */
@@ -790,6 +858,13 @@ export interface RenderContext {
   protocol: 'vless' | 'trojan' | 'both'
   /** 传输方式 */
   transport: 'ws' | 'xhttp' | 'both'
+  /**
+   * 分流规则配置原文（route-profile ini）。
+   *
+   * 由调用方（控制面路由）从 KV 的 `ROUTE_PROFILE` 键或内置配置解出后传入。
+   * 空字符串 = 不使用分流规则（只输出裸节点 + 基础组）。
+   */
+  routeProfile?: string
 }
 
 export interface RenderResult {
@@ -1109,6 +1184,21 @@ export function renderClash(ctx: RenderContext): string {
     lines.push('')
   }
 
+  // 分流规则与附加代理组：来自 route-profile ini（内置或 KV 覆盖）。
+  //
+  // 借鉴 cfnew 的做法：订阅自带 ACL4SSR 风格的分流规则与代理组，
+  // 用户导入后 YouTube / Netflix / OpenAI 等自动走代理，不用自己找规则。
+  //
+  // ini 里的 `ruleset=` 指向公共远端 list（ACL4SSR 等），
+  // 因此**分流数据永远是新的**，只有「用哪些 list + 怎么分组」固定。
+  //
+  // ⚠️ 必须在写 proxy-groups **之前**算好：ini 里定义的组要并进
+  // proxy-groups 段（Clash 要求所有组都在这个键下）。
+  const route = renderRouteSections(ctx.routeProfile ?? '', {
+    mainGroup: 'CFPilot',
+    autoGroup: '自动选择',
+  })
+
   lines.push('proxies:')
   if (proxies.length === 0) lines.push('  []')
   else lines.push(...proxies)
@@ -1138,9 +1228,15 @@ export function renderClash(ctx: RenderContext): string {
     lines.push('    proxies:')
     for (const name of allNames) lines.push(`      - ${yamlQuote(name)}`)
   }
+  // ini 定义的附加代理组（挂在 CFPilot / 自动选择 之下）
+  if (route.groups.length > 0) {
+    lines.push('')
+    lines.push(...route.groups)
+  }
   lines.push('')
   lines.push('rules:')
   lines.push('  - GEOIP,CN,DIRECT')
+  if (route.rules.length > 0) lines.push(...route.rules)
   lines.push('  - MATCH,CFPilot')
   lines.push('')
   return lines.join('\n')

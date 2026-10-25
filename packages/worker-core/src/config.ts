@@ -10,6 +10,13 @@ export const LOCAL_IPS_KEY = 'LOCAL_PREFERRED_IPS'
 export const SCANNER_TOKEN_KEY = 'SCANNER_TOKEN'
 /** KV 中热更新的优选域名库（每行一个域名；为空则用内置库） */
 export const POOL_DOMAIN_KEY = 'POOL_DOMAIN_LIBRARY'
+/**
+ * KV 中的分流规则配置（route-profile ini 原文）。
+ *
+ * 为空时用内置配置（构建期内联的 assets/route-profiles.ini）。
+ * 用户想换一套分组时，在面板「订阅」页或直接写 KV 覆盖。
+ */
+export const ROUTE_PROFILE_KEY = 'ROUTE_PROFILE'
 export const ONE_TIME_TOKEN_PREFIX = 'ONETIME:'
 export const SESSION_PREFIX = 'SESSION:'
 export const PANEL_PATH_KEY = 'PANEL_PATH'

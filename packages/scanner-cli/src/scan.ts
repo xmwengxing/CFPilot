@@ -72,6 +72,13 @@ export interface ScanOptions {
   /** 阶段一超时（ms） */
   tcpTimeoutMs?: number
   /**
+   * 每个探测的尝试次数（含首次），默认 2。
+   *
+   * 真机实测偶发失败率 3~5%（本地 TLS 抖动 / 运营商瞬时丢包），
+   * 一次定生死会白丢好 IP。重试取**第一次成功**的结果。
+   */
+  retries?: number
+  /**
    * 阶段一 TLS 握手探测并发。
    * 默认 64 —— TLS 握手是 CPU 密集型操作，并发过高会让本机成为瓶颈。
    */
@@ -209,11 +216,42 @@ async function pool<T, R>(
   return out
 }
 
+/**
+ * 带重试的执行器（借鉴 cfnew 的「多候选逐个尝试」思路）。
+ *
+ * ## 为什么需要
+ *
+ * 真机实测：同一 IP 连续探测，偶发失败率约 3~5%（本地 TLS 抖动、
+ * 运营商链路瞬时丢包）。早期实现一次定生死，把这些偶发失败当成
+ * 「IP 不可用」，白丢一批好 IP。
+ *
+ * cfnew 的 `probePreferred` 对域名目标会 `addresses.slice(0, 4)` 逐个试；
+ * 我们面对的是「已知 IP 列表」，等价做法是**对同一个 IP 重试几次**，
+ * 取第一次成功的结果（延迟取成功那次，不是平均值）。
+ *
+ * @param attempts 总尝试次数（含首次），≥1
+ * @param isOk 判定「本次是否算成功」；默认看 `ok === true`
+ */
+async function withRetry<T>(
+  attempts: number,
+  fn: () => Promise<T>,
+  isOk: (result: T) => boolean = (r) => (r as { ok?: boolean }).ok === true
+): Promise<T> {
+  const total = Math.max(1, Math.floor(attempts))
+  let last: T
+  for (let i = 0; i < total; i++) {
+    last = await fn()
+    if (isOk(last)) return last
+  }
+  return last!
+}
+
 /** 执行三阶扫描 */
 export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   const started = Date.now()
   const concurrency = options.concurrency ?? 300
   const tcpTimeoutMs = options.tcpTimeoutMs ?? 1200
+  const retries = options.retries ?? 2
   const tlsConcurrency = options.tlsConcurrency ?? 64
   const tlsTimeoutMs = options.tlsTimeoutMs ?? 4000
   const maxLatencyMs = options.maxLatencyMs ?? 0
@@ -233,7 +271,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   report({ type: 'stage', stage: 1, name: 'TCP 握手初筛', total: candidates.length })
   let done = 0
   const tcpResults = await pool(candidates, concurrency, async (ip) => {
-    const result = await tcpPing(ip, options.port, tcpTimeoutMs)
+    const result = await withRetry(retries, () => tcpPing(ip, options.port, tcpTimeoutMs))
     done++
     if (done % 500 === 0 || done === candidates.length) {
       report({
@@ -262,7 +300,12 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   report({ type: 'stage', stage: 1, name: 'TLS 握手筛选', total: filtered.length })
   let tlsDone = 0
   const tlsResults = await pool(filtered, tlsConcurrency, async (item) => {
-    const probe: TlsProbeResult = await probeTlsHandshake(item.ip, options.port, options.host, tlsTimeoutMs)
+    // TLS 探测的「成功」判定是 tlsMs > 0（它没有 ok 字段）
+    const probe = await withRetry<TlsProbeResult>(
+      retries,
+      () => probeTlsHandshake(item.ip, options.port, options.host, tlsTimeoutMs),
+      (r) => r.tlsMs > 0
+    )
     tlsDone++
     if (tlsDone % 200 === 0 || tlsDone === filtered.length) {
       report({
@@ -313,12 +356,8 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   const probeResults = await pool(stage1, probeConcurrency, async (item) => {
     const probeFn = strictProbe ? probeWsPing : probeWs101
     const probePath = strictProbe ? strictProbePath : options.wsPath ?? '/__edge_probe'
-    const result: WsProbeResult = await probeFn(
-      item.ip,
-      options.port,
-      options.host,
-      probeTimeoutMs,
-      probePath
+    const result: WsProbeResult = await withRetry(retries, () =>
+      probeFn(item.ip, options.port, options.host, probeTimeoutMs, probePath)
     )
     probeDone++
     if (result.pongVerified) verifiedCount++

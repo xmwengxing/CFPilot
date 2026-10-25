@@ -101,6 +101,82 @@ export function isFakeIp(ip: string): boolean {
 }
 
 /**
+ * 判断是否为**公网可路由**地址（借鉴 cfnew 的 `isPublicAddress`）。
+ *
+ * ## 为什么需要
+ *
+ * 优选器要测的是「本机直连某个公网 IP 的真实质量」。
+ * 若候选里混进私网/保留地址（`127.0.0.1`、`192.168.x`、`10.x`、`100.64.x` …），
+ * 连接会以不同方式失败（拒绝 / 超时 / 连到自己的路由器），
+ * 表现为「这个 IP 不可用」—— 但结论毫无意义，白白浪费一次探测。
+ *
+ * 用户粘贴的列表、远程 API 返回的列表都可能含这类地址。
+ *
+ * ## 覆盖的保留段
+ *
+ * IPv4：
+ *   - `0.0.0.0/8`      本网络
+ *   - `10.0.0.0/8`     私网
+ *   - `127.0.0.0/8`    环回
+ *   - `169.254.0.0/16` 链路本地
+ *   - `172.16.0.0/12`  私网
+ *   - `192.168.0.0/16` 私网
+ *   - `100.64.0.0/10`  CGNAT（运营商级 NAT）
+ *   - `198.18.0.0/15`  基准测试（含 Clash/Mihomo 的 fake-ip）
+ *   - `224.0.0.0/4`    组播
+ *   - `240.0.0.0/4`    保留
+ *
+ * IPv6：只放行全局单播 `2000::/3`（排除文档段 `2001:db8::/32` 等）。
+ *
+ * @param ip 点分十进制 IPv4 或冒号分隔 IPv6
+ */
+export function isPublicAddress(ip: string): boolean {
+  const value = ip.trim()
+  if (!value) return false
+
+  // IPv4
+  if (!value.includes(':')) {
+    const parts = value.split('.')
+    if (parts.length !== 4) return false
+    const nums: number[] = []
+    for (const p of parts) {
+      if (!/^\d{1,3}$/.test(p)) return false
+      const n = Number(p)
+      if (n > 255) return false
+      nums.push(n)
+    }
+    const [a, b] = nums as [number, number, number, number]
+    if (a === 0) return false // 0.0.0.0/8 本网络
+    if (a === 10) return false // 10.0.0.0/8 私网
+    if (a === 127) return false // 127.0.0.0/8 环回
+    if (a >= 224) return false // 224.0.0.0/4 组播 + 240.0.0.0/4 保留
+    if (a === 169 && b === 254) return false // 链路本地
+    if (a === 172 && b >= 16 && b <= 31) return false // 172.16.0.0/12
+    if (a === 192 && b === 168) return false // 192.168.0.0/16
+    if (a === 100 && b >= 64 && b <= 127) return false // 100.64.0.0/10 CGNAT
+    if (a === 198 && (b === 18 || b === 19)) return false // 198.18.0.0/15 fake-ip
+    return true
+  }
+
+  // IPv4-mapped IPv6（::ffff:1.2.3.4）
+  const lower = value.toLowerCase()
+  if (lower.startsWith('::ffff:') && lower.includes('.')) {
+    return isPublicAddress(lower.slice(7))
+  }
+
+  // IPv6：只放行全局单播 2000::/3（即首字节 0x20~0x3f）
+  const groups = lower.split(':')
+  if (groups.length < 3) return false
+  const first = groups[0]!
+  if (!/^[0-9a-f]{1,4}$/.test(first)) return false
+  const firstByte = Number.parseInt(first.slice(0, 2).padEnd(2, '0'), 16)
+  if (firstByte < 0x20 || firstByte > 0x3f) return false
+  // 文档 / 基准测试段
+  if (lower.startsWith('2001:db8:')) return false
+  return true
+}
+
+/**
  * 检测本机网络环境。
  *
  * @param host 可选：待测域名。给了就顺带做 fake-ip 解析检查。

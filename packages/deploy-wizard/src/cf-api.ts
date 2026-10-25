@@ -635,6 +635,53 @@ export class CloudflareClient {
     })
   }
 
+  /**
+   * 列出 Pages 项目绑定的**全部**自定义域名（含 `initializing` 等未生效状态）。
+   *
+   * ## 为什么不直接用 `project.domains`
+   *
+   * 真机实测（2026-10-25）：刚绑定的域名在 `initializing` 期间**不出现在**
+   * `GET /pages/projects/<name>` 的 `domains` 数组里 —— 只有 `active` 的才列出。
+   *
+   * 而 8000119 换名重建是随时可能发生的：若此时用户刚绑了一个还没生效的域名，
+   * 用 `project.domains` 就会漏掉它 → 新项目没继承域名 → 用户订阅地址失效。
+   *
+   * `/domains` 子接口会返回所有状态，因此迁移时应以它为准。
+   */
+  async listPagesDomains(accountId: string, name: string): Promise<string[]> {
+    try {
+      const result = await this.request<Array<{ name?: string }>>(
+        'GET',
+        `/accounts/${accountId}/pages/projects/${name}/domains`
+      )
+      if (!Array.isArray(result)) return []
+      return result
+        .map((d) => (typeof d?.name === 'string' ? d.name : ''))
+        .filter((d) => d.length > 0)
+    } catch {
+      // 项目不存在 / 权限不足 / 接口变更：返回空，由调用方回落到 project.domains
+      return []
+    }
+  }
+
+  /**
+   * 从 Pages 项目解绑自定义域名。
+   *
+   * ## 为什么迁移前必须先解绑（2026-10-25 真机踩坑）
+   *
+   * Pages 的同一个自定义域名**同时只能挂在一个项目上**。
+   * 直接把域名加到新项目会报：
+   * `You have already added this custom domain. Select another custom domain...`
+   *
+   * 因此「迁域名」的正确顺序是：**旧项目解绑 → 新项目绑定**。
+   */
+  async removePagesDomain(accountId: string, name: string, domain: string): Promise<void> {
+    await this.request(
+      'DELETE',
+      `/accounts/${accountId}/pages/projects/${name}/domains/${encodeURIComponent(domain)}`
+    )
+  }
+
   /** 删除 Pages 项目 */
   async deletePagesProject(accountId: string, name: string): Promise<void> {
     await this.request('DELETE', `/accounts/${accountId}/pages/projects/${name}`)

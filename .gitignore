@@ -33,5 +33,4 @@ packages/worker-core/src/route-profile.generated.ts
 .workbuddy/
 
 # 含服务器凭据的本地文档，禁止入仓库
-/迁移指令文档.txt
-/docs/迁移指令文档.txt
+/docs/key.txt

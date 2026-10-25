@@ -1221,3 +1221,332 @@ describe('Pages 双项目部署流程', () => {
     )
   })
 })
+
+/**
+ * 8000119 换名重建后的收尾（2026-10-25 新增，用户反馈的两个痛点）。
+ *
+ * 1. **自定义域名自动迁移** —— 旧项目绑的域名迁到新项目，
+ *    否则用户订阅里的地址全部失效（以前要用户手动迁移）。
+ * 2. **删除旧项目** —— 否则每次更新都留一个孤立项目，账号下越积越多。
+ *
+ * 顺序要求：先迁域名、确认成功，再删旧项目 ——
+ * 反序删会让域名在一段时间内指向不存在的项目。
+ */
+describe('8000119 换名后的域名迁移与旧项目清理', () => {
+  /** 记录 mock 收到的请求，便于断言调用顺序 */
+  interface Recorded {
+    method: string
+    url: string
+    body?: string
+  }
+
+  /**
+   * 构造一个「更新模式 + 旧项目有自定义域名 + 数据面换名成功」的场景。
+   *
+   * 关键 mock 行为：
+   *   - KV 清单返回旧项目名 `dat-old`（带自定义域名 `cf.example.com`）
+   *   - `dat-old` 的部署请求返回 8000119（模拟持久封禁）
+   *   - 换名后的新项目部署成功
+   */
+  async function runScenario(options: {
+    /** 域名迁移是否失败（模拟 API 报错） */
+    domainFails?: boolean
+    /** 旧项目是否绑了自定义域名 */
+    hasDomain?: boolean
+  }): Promise<{ calls: Recorded[]; warnings: string[] }> {
+    const calls: Recorded[] = []
+    const { hasDomain = true, domainFails = false } = options
+    // 换名后的新项目名（由向导随机生成，这里从请求里抓）
+    let newDataProject = ''
+
+    let warnings: string[] = []
+    await withMockServer(
+      (req) => {
+        const url = req.url
+        calls.push({ method: req.method, url, body: req.body })
+
+        // 建项目
+        if (req.method === 'POST' && url.endsWith('/pages/projects')) {
+          const name = JSON.parse(req.body).name
+          return {
+            status: 200,
+            body: { success: true, result: { id: name, name, subdomain: `${name}.pages.dev`, domains: [`${name}.pages.dev`] } },
+          }
+        }
+        if (req.method === 'PATCH') return { status: 200, body: { success: true, result: {} } }
+
+        // KV：清单返回旧项目
+        if (req.method === 'GET' && url.includes('/values/CFP_DEPLOY_MANIFEST')) {
+          return {
+            status: 200,
+            body: JSON.stringify({
+              v: 1,
+              kvNamespaceId: 'ns-1',
+              controlProject: 'ctl',
+              dataProject: 'dat-old',
+              controlSubdomain: 'ctl.pages.dev',
+              dataSubdomain: 'dat-old.pages.dev',
+              dataCustomDomain: hasDomain ? 'cf.example.com' : undefined,
+              build: 'old',
+              at: '2026-10-24T00:00:00.000Z',
+              credentials: {
+                panelPath: '/p-test',
+                panelPassword: 'pw',
+                uuid: 'u',
+                trojanPassword: 'tp',
+                wsPath: '/testpath12',
+              },
+            }),
+            contentType: 'text/plain',
+          }
+        }
+        if (req.method === 'GET' && url.includes('/values/')) {
+          return { status: 404, body: { success: false, errors: [{ code: 1, message: 'not found' }] } }
+        }
+        if (req.method === 'PUT' && url.includes('/values/')) {
+          return { status: 200, body: 'ok', contentType: 'text/plain' }
+        }
+
+        // 读项目：旧项目带自定义域名
+        if (req.method === 'GET' && /pages\/projects\/[^/]+$/.test(url)) {
+          const name = url.split('/').pop()!
+          const domains = [`${name}.pages.dev`]
+          if (name === 'dat-old' && hasDomain) domains.push('cf.example.com')
+          return { status: 200, body: { success: true, result: { id: name, name, subdomain: `${name}.pages.dev`, domains } } }
+        }
+
+        // 部署：旧数据面项目必被拒（8000119）；其余成功
+        if (req.method === 'POST' && url.includes('/deployments')) {
+          const project = url.split('/pages/projects/')[1]!.split('/')[0]!
+          if (project === 'dat-old') {
+            return {
+              status: 400,
+              body: { success: false, errors: [{ code: 8000119, message: 'Your Pages project has been blocked.' }] },
+            }
+          }
+          if (project.startsWith('dat-') && project !== 'dat-old') newDataProject = project
+          return {
+            status: 200,
+            body: { success: true, result: { id: `dep-${project}`, url: `https://${project}.pages.dev`, latest_stage: { name: 'deploy', status: 'success' } } },
+          }
+        }
+
+        // 读部署状态
+        if (req.method === 'GET' && url.includes('/deployments')) {
+          return {
+            status: 200,
+            body: { success: true, result: [{ id: 'dep-x', latest_stage: { name: 'deploy', status: 'success' } }] },
+          }
+        }
+
+        // 迁移域名：POST /pages/projects/<name>/domains
+        if (req.method === 'POST' && url.includes('/domains')) {
+          if (domainFails) {
+            return { status: 400, body: { success: false, errors: [{ code: 8000015, message: 'domain already in use' }] } }
+          }
+          return { status: 200, body: { success: true, result: {} } }
+        }
+
+        // 删除项目
+        if (req.method === 'DELETE' && url.includes('/pages/projects/')) {
+          return { status: 200, body: { success: true, result: {} } }
+        }
+
+        return { status: 404, body: { success: false, errors: [{ code: 1, message: 'x' }] } }
+      },
+      async (base) => {
+        const { deployPagesSplit } = await import('../src/pages-deploy')
+        const result = await deployPagesSplit({
+          token: 't',
+          accountId: 'acc',
+          kvNamespaceId: 'ns-1',
+          controlProject: 'ctl',
+          dataProject: 'dat',
+          panelPath: '',
+          panelPassword: '',
+          uuid: '',
+          trojanPassword: '',
+          wsPath: '',
+          enableTrojan: true,
+          enableXhttp: false,
+          wait: { timeoutMs: 3000, intervalMs: 10 },
+          apiBase: base,
+          bundles: { control: 'export default {}', data: 'export default {}' },
+          log: () => {},
+        })
+        warnings = result.warnings
+        // 暴露抓到的换名结果供断言
+        ;(globalThis as Record<string, unknown>).__newDataProject = newDataProject
+      }
+    )
+    return { calls, warnings }
+  }
+
+  it('换名成功后把旧项目的自定义域名迁到新项目', async () => {
+    const { calls } = await runScenario({ hasDomain: true })
+    const newName = (globalThis as Record<string, unknown>).__newDataProject as string
+    expect(newName).toBeTruthy()
+    // 必须有一次「给新项目加域名」的调用，且域名是 cf.example.com
+    const addDomain = calls.find((c) => c.method === 'POST' && c.url.includes(`/projects/${newName}/domains`))
+    expect(addDomain).toBeTruthy()
+    expect(addDomain!.body ?? '').toContain('cf.example.com')
+  })
+
+  it('域名迁移成功后删除旧项目', async () => {
+    const { calls } = await runScenario({ hasDomain: true })
+    const deleted = calls.filter((c) => c.method === 'DELETE' && c.url.includes('/projects/'))
+    expect(deleted.map((c) => c.url.split('/').pop())).toContain('dat-old')
+  })
+
+  it('域名迁移顺序：旧项目解绑 → 新项目绑定 → 删旧项目', async () => {
+    // ⚠️ 真机踩坑（2026-10-25）：Pages 的同一自定义域名同时只能挂一个项目，
+    // 直接绑到新项目会报 `You have already added this custom domain`。
+    // 因此必须先解绑旧项目。三步顺序都不能变。
+    const { calls } = await runScenario({ hasDomain: true })
+    const newName = (globalThis as Record<string, unknown>).__newDataProject as string
+
+    const unbindIdx = calls.findIndex(
+      (c) => c.method === 'DELETE' && c.url.includes('/projects/dat-old/domains/')
+    )
+    const bindIdx = calls.findIndex(
+      (c) => c.method === 'POST' && c.url.includes(`/projects/${newName}/domains`)
+    )
+    const delIdx = calls.findIndex(
+      (c) => c.method === 'DELETE' && c.url.includes('/projects/dat-old') && !c.url.includes('/domains/')
+    )
+
+    expect(unbindIdx).toBeGreaterThan(-1)
+    expect(bindIdx).toBeGreaterThan(-1)
+    expect(delIdx).toBeGreaterThan(-1)
+    // 解绑必须在绑定之前，绑定必须在删项目之前
+    expect(unbindIdx).toBeLessThan(bindIdx)
+    expect(bindIdx).toBeLessThan(delIdx)
+  })
+
+  it('域名迁移失败时不删旧项目（旧项目还挂着唯一入口）', async () => {
+    const { calls, warnings } = await runScenario({ hasDomain: true, domainFails: true })
+    const deleted = calls.filter((c) => c.method === 'DELETE' && c.url.includes('/projects/'))
+    expect(deleted.map((c) => c.url.split('/').pop())).not.toContain('dat-old')
+    // 且必须给出可操作的告警
+    expect(warnings.some((w) => /域名迁移失败|手动.*改绑/.test(w))).toBe(true)
+  })
+
+  it('旧项目没绑自定义域名时直接删除，不发域名迁移请求', async () => {
+    const { calls } = await runScenario({ hasDomain: false })
+    const addDomain = calls.find((c) => c.method === 'POST' && c.url.includes('/domains'))
+    expect(addDomain).toBeFalsy()
+    const deleted = calls.filter((c) => c.method === 'DELETE' && c.url.includes('/projects/'))
+    expect(deleted.map((c) => c.url.split('/').pop())).toContain('dat-old')
+  })
+})
+
+/**
+ * 自定义域名读取：必须用 `/domains` 子接口（2026-10-25 真机踩坑）。
+ *
+ * `GET /pages/projects/<name>` 的 `domains` 数组**只列 active 的域名** ——
+ * 刚绑定的域名在 `initializing` 期间不在里面。
+ *
+ * 若换名重建恰好发生在这个窗口，用 `project.domains` 就会漏掉该域名
+ * → 新项目没继承它 → 用户订阅地址失效。
+ * 因此迁移读取必须以 `/domains` 子接口为准。
+ */
+describe('自定义域名读取以 /domains 子接口为准', () => {
+  it('域名在 initializing（不在 project.domains）时仍能识别并迁移', async () => {
+    let newDataProject = ''
+    let sawDomainsSubroute = false
+
+    await withMockServer(
+      (req) => {
+        const url = req.url
+
+        if (req.method === 'POST' && url.endsWith('/pages/projects')) {
+          const name = JSON.parse(req.body).name
+          return { status: 200, body: { success: true, result: { id: name, name, subdomain: `${name}.pages.dev`, domains: [`${name}.pages.dev`] } } }
+        }
+        if (req.method === 'PATCH') return { status: 200, body: { success: true, result: {} } }
+
+        if (req.method === 'GET' && url.includes('/values/CFP_DEPLOY_MANIFEST')) {
+          return {
+            status: 200,
+            body: JSON.stringify({
+              v: 1,
+              kvNamespaceId: 'ns-1',
+              controlProject: 'ctl',
+              dataProject: 'dat-old',
+              controlSubdomain: 'ctl.pages.dev',
+              dataSubdomain: 'dat-old.pages.dev',
+              build: 'old',
+              at: '2026-10-24T00:00:00.000Z',
+              credentials: { panelPath: '/p-test', panelPassword: 'pw', uuid: 'u', trojanPassword: 'tp', wsPath: '/testpath12' },
+            }),
+            contentType: 'text/plain',
+          }
+        }
+        if (req.method === 'GET' && url.includes('/values/')) {
+          return { status: 404, body: { success: false, errors: [{ code: 1, message: 'nf' }] } }
+        }
+        if (req.method === 'PUT' && url.includes('/values/')) {
+          return { status: 200, body: 'ok', contentType: 'text/plain' }
+        }
+
+        // 关键：/domains 子接口返回 initializing 的域名
+        if (req.method === 'GET' && url.endsWith('/pages/projects/dat-old/domains')) {
+          sawDomainsSubroute = true
+          return {
+            status: 200,
+            body: { success: true, result: [{ name: 'dat-old.pages.dev' }, { name: 'pending.example.com', status: 'initializing' }] },
+          }
+        }
+
+        // project.domains 故意只返回 pages.dev（模拟 initializing 不在列表里）
+        if (req.method === 'GET' && /pages\/projects\/[^/]+$/.test(url)) {
+          const name = url.split('/').pop()!
+          return { status: 200, body: { success: true, result: { id: name, name, subdomain: `${name}.pages.dev`, domains: [`${name}.pages.dev`] } } }
+        }
+
+        if (req.method === 'POST' && url.includes('/deployments')) {
+          const project = url.split('/pages/projects/')[1]!.split('/')[0]!
+          if (project === 'dat-old') {
+            return { status: 400, body: { success: false, errors: [{ code: 8000119, message: 'blocked' }] } }
+          }
+          if (project.startsWith('dat-') && project !== 'dat-old') newDataProject = project
+          return { status: 200, body: { success: true, result: { id: `dep-${project}`, url: `https://${project}.pages.dev`, latest_stage: { name: 'deploy', status: 'success' } } } }
+        }
+        if (req.method === 'GET' && url.includes('/deployments')) {
+          return { status: 200, body: { success: true, result: [{ id: 'd', latest_stage: { name: 'deploy', status: 'success' } }] } }
+        }
+        if (req.method === 'POST' && url.includes('/domains')) {
+          return { status: 200, body: { success: true, result: {} } }
+        }
+        if (req.method === 'DELETE' && url.includes('/pages/projects/')) {
+          return { status: 200, body: { success: true, result: {} } }
+        }
+        return { status: 404, body: { success: false, errors: [{ code: 1, message: 'x' }] } }
+      },
+      async (base) => {
+        const { deployPagesSplit } = await import('../src/pages-deploy')
+        await deployPagesSplit({
+          token: 't',
+          accountId: 'acc',
+          kvNamespaceId: 'ns-1',
+          controlProject: 'ctl',
+          dataProject: 'dat',
+          panelPath: '',
+          panelPassword: '',
+          uuid: '',
+          trojanPassword: '',
+          wsPath: '',
+          enableTrojan: true,
+          enableXhttp: false,
+          wait: { timeoutMs: 3000, intervalMs: 10 },
+          apiBase: base,
+          bundles: { control: 'export default {}', data: 'export default {}' },
+          log: () => {},
+        })
+      }
+    )
+
+    expect(sawDomainsSubroute).toBe(true)
+    expect(newDataProject).toBeTruthy()
+  })
+})

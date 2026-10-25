@@ -1,6 +1,6 @@
 {
   "name": "@cfpilot/gui",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "description": "CFPilot 图形化部署与维护工具 —— 一键部署 Pages 双项目、本地真连接优选、检查更新",
   "main": "dist/main/main.js",

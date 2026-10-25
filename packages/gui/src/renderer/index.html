@@ -369,16 +369,6 @@
                 <input type="text" id="wsPath" placeholder="如 /k7m2x9q4w8" />
                 <p class="tip">代理的 WebSocket 路径。留空则随机生成或沿用已有值。</p>
               </div>
-              <div class="field">
-                <label>数据面实现</label>
-                <select id="dataPlane">
-                  <option value="self">自研（默认）—— 失败可诊断、支持 SOCKS5/HTTP/HTTPS 代理池</option>
-                  <option value="vendor">CFNext 原版 —— 第三方项目原实现</option>
-                </select>
-                <p class="tip">
-                  两者在同一环境下的实测可用性已持平；自研额外提供失败分级诊断、代理池、DoH 优选解析与可配置反代入口。
-                </p>
-              </div>
             </div>
 
             <label class="chk" style="margin-bottom:8px">

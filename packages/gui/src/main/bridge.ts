@@ -75,8 +75,6 @@ interface DeployerModule {
     wsPath: string
     enableTrojan: boolean
     enableXhttp: boolean
-    /** 数据面实现：self（自研，默认）/ vendor（CFNext 原版） */
-    dataPlane?: 'vendor' | 'self'
     mode?: 'auto' | 'fresh' | 'update'
     keepCredentials?: boolean
     skipSameVersion?: boolean
@@ -160,14 +158,6 @@ export interface DeployParams {
   panelPath: string
   /** WS 路径 */
   wsPath: string
-  /**
-   * 数据面实现：`self`（自研，默认）/ `vendor`（CFNext 原版）。
-   *
-   * 2026-10-23 起自研为默认 —— 同环境对照实验已确认两者可用性持平，
-   * 而自研额外提供失败分级诊断、SOCKS5/HTTP/HTTPS 代理池、
-   * DoH 优选解析与可配置的反代入口。
-   */
-  dataPlane: 'self' | 'vendor'
 }
 
 /**
@@ -247,8 +237,6 @@ export async function runDeploy(
       wsPath: params.wsPath.trim(),
       enableTrojan: true,
       enableXhttp: false,
-      // 数据面实现：self（默认）/ vendor
-      dataPlane: params.dataPlane ?? 'self',
       mode: params.mode,
       keepCredentials: !params.newCredentials,
       skipSameVersion: !params.force,

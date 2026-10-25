@@ -18,7 +18,6 @@ const api = {
       dataProject: string
       panelPath: string
       wsPath: string
-      dataPlane: 'self' | 'vendor'
     },
     kvNamespaceId?: string
   ) => ipcRenderer.invoke('deploy:run', params, kvNamespaceId),

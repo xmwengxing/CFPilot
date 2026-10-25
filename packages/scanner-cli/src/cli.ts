@@ -56,6 +56,8 @@ scan 选项:
   --speed-conns <n>      测速并发连接数，默认 3
                          单条 TCP 连接受拥塞窗口限制，多连接更接近真实带宽
   --speed-duration <ms>  测速时长，默认 6000
+  --no-verify            阶段二只做 101 握手，跳过响应体校验
+                          （默认校验：发 PING 并验证数据面回 {"pong":true}）
   --no-speed             跳过测速，只按延迟排序
   --top <n>              返回条数，默认 15
   --concurrency <n>      阶段一 TCP 并发，默认 300
@@ -276,6 +278,8 @@ async function commandScan(args: ReturnType<typeof parseArgs>): Promise<void> {
   const wsPath = normalizeWsPath(flagString(args, 'path'), '/__edge_probe')
   const probePath = normalizeWsPath(flagString(args, 'probe-path'), '/__edge_probe')
   const noSpeed = flagBool(args, 'no-speed')
+  // 阶段二是否做响应体内容校验（默认做；--no-verify 关闭）
+  const verifyPayload = !flagBool(args, 'no-verify')
   // 国家过滤：不选 = 全量。无效代码在 normalizeCountryFilter 里被丢弃
   const countries = normalizeCountryFilter(flagList(args, 'countries'))
   const callback = noCallback
@@ -374,6 +378,7 @@ async function commandScan(args: ReturnType<typeof parseArgs>): Promise<void> {
     wsPath,
     probePath,
     skipSpeed,
+    verifyPayload,
     concurrency: flagNumber(args, 'concurrency', 300),
     tcpTimeoutMs: flagNumber(args, 'timeout', 1200),
     tlsConcurrency: flagNumber(args, 'tls-concurrency', 64),

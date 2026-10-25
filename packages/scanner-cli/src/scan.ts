@@ -41,6 +41,7 @@
 import * as net from 'node:net'
 import {
   probeWs101,
+  probeWsPing,
   probeTlsHandshake,
   measureDownload,
   measureThroughput,
@@ -100,6 +101,14 @@ export interface ScanOptions {
   speedBytes?: number
   /** 阶段二校验的 WebSocket 路径（默认 /__edge_probe；对接其它项目时填它的 WS 路径） */
   wsPath?: string
+  /**
+   * 阶段二是否做**响应体内容校验**（默认 true）。
+   *
+   * CFPilot 数据面的 `/__edge_probe` 支持 PING → `{"pong":true,...}`，
+   * 因此可以比单纯 101 握手多验一层：确认数据面真的在响应。
+   * 关掉它（`false`）则退回纯 101 校验，用于对接没有该机制的第三方项目。
+   */
+  verifyPayload?: boolean
   /** probe 模式的测速路径（默认 /__edge_probe） */
   probePath?: string
   /** 测速方式：probe = 目标项目探针端点；url = 公开测速地址。默认 probe */
@@ -143,6 +152,8 @@ export interface ScanSummary {
     /** 完成 TLS 握手的候选数 */
     tlsOk: number
     wsOk: number
+    /** 通过响应体内容校验（PING→PONG）的候选数；未开启校验时为 0 */
+    verified: number
     speedOk: number
     elapsedMs: number
     /** 生效的国家筛选（空 = 未筛选或筛选被忽略） */
@@ -272,23 +283,52 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
     .sort((a, b) => a.tls.tlsMs - b.tls.tlsMs || a.latency - b.latency)
     .slice(0, probeLimit)
 
-  // ---- 阶段二：WebSocket 101 真连接校验 ----
-  report({ type: 'stage', stage: 2, name: 'WebSocket 101 真连接校验', total: stage1.length })
+  // ---- 阶段二：WebSocket 101 + 响应体内容校验 ----
+  //
+  // 2026-10-25 起默认走「严格模式」（`probeWsPing`）：
+  // 不只握手，还发送 PING 并校验数据面回的 `{"pong":true,...}`。
+  // 这样「101 通但数据面不响应」的 IP 会在这一层被拦掉，
+  // 不会带着虚假的希望进入测速、也不会出现在最终结果里。
+  //
+  // `--no-verify` 可退回纯 101 校验（对接第三方项目时用，
+  // 因为它们没有 CFPilot 的 PING 机制）。
+  const strictProbe = options.verifyPayload !== false
+  report({
+    type: 'stage',
+    stage: 2,
+    name: strictProbe ? 'WS 101 + 响应体校验' : 'WebSocket 101 校验',
+    total: stage1.length,
+  })
   let probeDone = 0
+  let verifiedCount = 0
   const probeResults = await pool(stage1, probeConcurrency, async (item) => {
-    const result: WsProbeResult = await probeWs101(item.ip, options.port, options.host, probeTimeoutMs, options.wsPath ?? '/__edge_probe')
+    const probeFn = strictProbe ? probeWsPing : probeWs101
+    const result: WsProbeResult = await probeFn(
+      item.ip,
+      options.port,
+      options.host,
+      probeTimeoutMs,
+      options.wsPath ?? '/__edge_probe'
+    )
     probeDone++
+    if (result.pongVerified) verifiedCount++
     report({
       type: 'progress',
       stage: 2,
       done: probeDone,
       total: stage1.length,
-      message: `101 校验 ${probeDone}/${stage1.length}${result.ok ? ` ✓ ${result.colo}` : ''}`,
+      message: strictProbe
+        ? `101+PING 校验 ${probeDone}/${stage1.length}${result.ok ? ` ✓ ${result.colo}` : result.pongVerified === false ? ' ✗ 无响应' : ''}`
+        : `101 校验 ${probeDone}/${stage1.length}${result.ok ? ` ✓ ${result.colo}` : ''}`,
     })
     return { ...item, probe: result }
   })
 
-  const wsOk = probeResults.filter((r) => r.probe.ok)
+  // 严格模式下，只保留**通过内容校验**的候选。
+  // 非严格模式（第三方项目）退化为只看 101。
+  const wsOk = strictProbe
+    ? probeResults.filter((r) => r.probe.ok && r.probe.pongVerified === true)
+    : probeResults.filter((r) => r.probe.ok)
 
   // ---- 国家 / 地区过滤（可选，作用于已识别机房的候选）----
   //
@@ -423,6 +463,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
       tcpOk: tcpOk.length,
       tlsOk: tlsOk.length,
       wsOk: wsOk.length,
+      verified: verifiedCount,
       speedOk: entries.length,
       elapsedMs: Date.now() - started,
       countries: appliedCountries,

@@ -1,10 +1,10 @@
 # CFPilot 项目交接文档
 
-> 最后更新：2026-10-24 晚　｜　仓库：`https://github.com/xmwengxing/CFPilot.git`
-> 分支：`main`　｜　**全仓统一版本：0.3.2**（版本政策见 §0.3）
-> npm：`cfpilot-scanner@0.3.2` / `cfpilot-deploy@0.3.2`（待发布）
-> 图形化工具最新 release：`gui-v0.1.4`（`CFPilot-0.1.4-x64.exe` / `-portable.exe`）；
-> 下一次发版按新版本政策打 tag `gui-v0.3.2`
+> 最后更新：2026-10-25　｜　仓库：`https://github.com/xmwengxing/CFPilot.git`
+> 分支：`main`　｜　**全仓统一版本：0.4.0**（版本政策见 §0.3）
+> npm：`cfpilot-scanner@0.4.0` / `cfpilot-deploy@0.4.0` **待发布**（需用户 F2A）
+> 图形化工具：`CFPilot-0.4.0-x64.zip` 已构建（见 §0.27 打包问题）
+> 待打 tag：`gui-v0.4.0`
 
 ---
 
@@ -143,6 +143,78 @@ check-host 多国节点全 500、同脚本自定义域 200 / workers.dev 500、
 
 **验证 Workers 相关行为必须走自定义域名**；早前「跨账号 fetch 1101/522 的噪声」
 大概率就是它，当年 workers.dev 因本机 DNS 污染从未被真正验证过。
+
+---
+
+## 0.27 收尾：版本 0.4.0、exe 打包阻塞（2026-10-25）
+
+### 0.27.1 已完成并提交
+
+| 提交 | 内容 |
+|------|------|
+| `0c94e9c` | 优选器 TLS 握手筛选（§0.23） |
+| `adfaeea` | 数据面出站假活修复（§0.24） |
+| `d974f05` | 阶段二响应体内容校验（§0.25） |
+| `67bf08e` | 候选按网段可用率加权 + 内容校验改用探针端点（§0.26） |
+| `1bea4c1` | 网段按权重区拆分 + 162.159 改低权重 + 默认采样数 6556 |
+
+**版本已升至 0.4.0**（`npm run version:bump -- 0.4.0` 全量同步 5 个包）。
+测试 42 文件 / 424 用例全绿。
+
+### 0.27.2 ⚠️ exe 打包被环境阻塞（未解决）
+
+**现象**：`electron-builder --win nsis/portable` 必然失败：
+
+```
+!tempfile: Unable to create temporary file!
+Error in macro _Switch on macroline 8
+!include: error in script: "assistedInstaller.nsh" on line 75
+```
+
+**已排除**（都不是原因）：
+- NSIS 缓存损坏 → 删缓存重下载后仍失败
+- 压缩率（maximum / normal）→ 改后仍失败
+- `TEMP` / `TMP` 环境变量被 MSYS 污染（`/tmp`）→ 设成 Windows 路径后
+  electron-builder 的 `mkdtemp` 好了，但 **makensis 内部仍失败**
+- `@` 特殊字符产物名 → 0.3.x 时代同样带 `@` 却能构建
+
+**最小复现**（与项目无关，证明是 makensis 本身的问题）：
+
+```nsi
+!include "MUI2.nsh"
+!tempfile TMPF        ← 就这一行，直接报 Unable to create temporary file
+```
+
+即使用 `cmd /c` 启动（绕开 MSYS API 转换层）也失败。
+**结论**：`makensis.exe 3.0.4.1` 在这台机器上无法创建临时文件
+（疑似 Windows 11 26300 或安全软件的 API 兼容问题）。
+**换机器 / 修 NSIS 后可恢复正常打包**，代码侧无需改动。
+
+### 0.27.3 当前可用产物
+
+`packages/gui/release/CFPilot-0.4.0-x64.zip`（111MB）—— 已验证内容完整：
+
+```
+CFPilot.exe                                          ✅
+resources/app.asar                                   ✅
+resources/app.asar.unpacked/dist/main/scanner-lib.js ✅
+resources/app.asar.unpacked/worker-core/dist/dataplane.js ✅
+```
+
+解压即用（绿色版），但**不是理想交付格式**（用户期待单文件 exe）。
+
+### 0.27.4 待用户操作
+
+1. **推送**：`git push origin main`（本地已提交，网络不稳定未推成）
+2. **npm 发布**（需 F2A）：
+   ```bash
+   npm run build -w cfpilot-scanner
+   npm run build -w cfpilot-deploy
+   cd packages/scanner-cli && npm publish
+   cd ../deploy-wizard && npm publish
+   ```
+3. **GUI release**：tag `gui-v0.4.0`（CI 会校验 tag 与根版本一致）。
+   若本机仍打不出 exe，需换机器打包或在 CI 上构建。
 
 ---
 

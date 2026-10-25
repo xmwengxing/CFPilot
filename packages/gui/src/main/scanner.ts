@@ -47,6 +47,14 @@ export interface ScanOptions {
   port: number
   /** 阶段二校验的 WS 路径 */
   wsPath: string
+  /**
+   * 阶段二是否做响应体内容校验（默认 true）。
+   *
+   * CFPilot 数据面支持 PING → `{"pong":true,...}`，因此可以比 101 握手
+   * 多验一层，把「101 通但数据面不响应」的 IP 拦在测速之前。
+   * 传 false 退回纯 101 校验（对接第三方项目时用）。
+   */
+  verifyPayload?: boolean
   /** probe 模式的测速路径 */
   probePath: string
   /** 是否跳过测速 */
@@ -174,6 +182,7 @@ export async function runLocalScan(options: ScanOptions): Promise<{
     port: options.port,
     candidates,
     wsPath: options.wsPath,
+    verifyPayload: options.verifyPayload,
     probePath: options.probePath,
     skipSpeed: options.skipSpeed,
     speedMode,

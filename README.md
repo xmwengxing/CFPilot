@@ -44,10 +44,10 @@ CFPilot 的解法是**「三阶真连接握手校验」**：
 阶段一  并发 TCP 握手初筛 + TLS 握手筛选
                                        →  过滤掉根本连不上的 IP，
                                          并优先保留 TLS 握手快的 IP
-阶段二  用【你自己的 Worker 域名】作为 TLS SNI 与 HTTP Host，
-         请求 /__edge_probe 并要求返回 101 Switching Protocols
-                                      →  一次性淘汰 Enterprise 专属 IP、被阻断 IP、SNI 不匹配的 IP
-阶段三  仅对通过 101 校验的 IP 请求 /__edge_probe?bytes=5MB
+阶段二  WS 101 握手 + 响应体内容校验（发 PING 验 PONG）
+         用【你自己的 Worker 域名】作为 TLS SNI 与 HTTP Host
+                                       →  拦掉「101 通但数据面不响应」的假活 IP
+阶段三  仅对通过两层校验的 IP 请求 /__edge_probe?bytes=5MB
                                       →  在自己的域名下测真实下行速度，不再借用第三方 CDN
 ```
 
@@ -338,7 +338,7 @@ npx -y cfpilot-scanner@latest scan --host "cfpilot.example.com" --path /vless --
 
 ### 测速支持任意项目
 
-测速**只对已通过 101 校验的 IP 生效** —— 这是避免「速度快但导入客户端全是 -1」的关键。
+测速**只对通过两层校验的 IP 生效** —— 这是避免「速度快但导入客户端全是 -1」的关键。
 
 | 测速方式 | 适用 | 说明 |
 |---------|------|------|
@@ -378,10 +378,11 @@ npx -y cfpilot-scanner@latest serve
 | `--no-callback` | — | 只扫描不回填 |
 | `--top` | `15` | 返回条数 |
 | `--sample` | `20000` | 候选 IP 采样数（按地址族分别分配预算，小样本时严格按比例收敛） |
-| `--countries` | — | 机房国家筛选，逗号分隔（如 `HK,JP,SG`）。只作用于已通过 101 校验的候选；不传 = 全量 |
+| `--countries` | — | 机房国家筛选，逗号分隔（如 `HK,JP,SG`）。只作用于已通过两层校验的候选；不传 = 全量 |
 | `--cidr` | — | 自定义网段（逗号分隔） |
 | `--ip-file` | — | 使用本地 IP 列表文件 |
 | `--max-latency` | `0` | 阶段一延迟上限（ms） |
+| `--no-verify` | — | 阶段二只做 101 握手，跳过响应体内容校验（对接非 CFPilot 项目时用） |
 | `--probe-limit` | `120` | 进入 101 校验的候选数 |
 | `--speed-limit` | `30` | 进入测速的候选数 |
 | `--seed` | `24301` | 采样随机种子（同种子结果可复现） |

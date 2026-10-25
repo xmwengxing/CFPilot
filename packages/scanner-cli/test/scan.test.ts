@@ -66,6 +66,44 @@ describe('TLS 握手筛选（-1 根因修复）', () => {
   })
 })
 
+describe('阶段二严格校验（响应体内容校验）', () => {
+  /**
+   * 复刻 scan.ts 阶段二的保留规则。
+   *
+   * 金丝雀：源码改了过滤条件，这里会失败，提醒同步。
+   */
+  const keepOk = (
+    results: Array<{ ip: string; ok: boolean; pongVerified?: boolean }>,
+    strict: boolean
+  ): string[] =>
+    (strict
+      ? results.filter((r) => r.ok && r.pongVerified === true)
+      : results.filter((r) => r.ok)
+    ).map((r) => r.ip)
+
+  const sample = [
+    { ip: '1.1.1.1', ok: true, pongVerified: true }, // 101 + PONG ✅
+    { ip: '2.2.2.2', ok: true, pongVerified: false }, // 101 通但数据面不响应 ❌
+    { ip: '3.3.3.3', ok: false, pongVerified: false }, // 101 就没过 ❌
+    { ip: '4.4.4.4', ok: true, pongVerified: undefined }, // 非 CFPilot，退化 101 ✅
+  ]
+
+  it('严格模式只保留通过内容校验的（拦掉假活 IP）', () => {
+    // 4.4.4.4 的 pongVerified 是 undefined，严格模式下被排除
+    expect(keepOk(sample, true)).toEqual(['1.1.1.1'])
+  })
+
+  it('宽松模式（--no-verify）保留所有 101 通过的', () => {
+    expect(keepOk(sample, false)).toEqual(['1.1.1.1', '2.2.2.2', '4.4.4.4'])
+  })
+
+  it('关键守护：101 通但无响应的 IP 绝不能进严格模式结果', () => {
+    const result = keepOk(sample, true)
+    expect(result).not.toContain('2.2.2.2')
+    expect(result).not.toContain('3.3.3.3')
+  })
+})
+
 describe('parseArgs', () => {
   it('解析子命令与长参数', () => {
     const args = parseArgs(['scan', '--host', 'example.com', '--top=20', '--no-callback'])

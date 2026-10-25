@@ -405,8 +405,9 @@
           <div class="card">
             <h2>⚡ 本地真连接优选</h2>
             <p class="desc">
-              用你自己的域名做 TLS SNI + WebSocket 101 握手校验，
-              只保留<b>真正能连通</b>的 Cloudflare IP。跑完直接得到可粘贴的 IP 列表。
+              用你自己的域名做 <b>TLS 握手</b> + <b>WebSocket 101</b> +
+              <b>响应体内容</b>三层校验，只保留<b>真正能连通且数据面在响应</b>的
+              Cloudflare IP。跑完直接得到可粘贴的 IP 列表。
             </p>
 
             <div class="row">
@@ -509,10 +510,16 @@
               <input type="checkbox" id="optNoCallback" checked /> 不回填面板，只输出列表
             </label>
             <p class="tip" style="margin-top:6px">
+              <b>阶段二会做两层校验</b>（借鉴 CFData-WEB 的「链路复验」）：<br>
+              · 第一层 WebSocket <b>101 握手</b> —— 排除 Enterprise 专属 IP、SNI 阻断<br>
+              · 第二层 <b>响应体内容校验</b> —— 发 PING 并验证数据面回
+              <code>{"pong":true,...}</code>，把「101 通但数据面不响应」的假活 IP 拦掉<br><br>
               <b>测速已支持任意项目</b>，不再需要手动跳过：<br>
               · 目标有 CFPilot 探针端点 → 走项目自身路径测速（最忠实）<br>
               · 其它项目 → 自动改用<b>公开测速地址</b>测速<br>
-              两种方式都<b>只对已通过 101 校验的 IP 测速</b>，所以不会选出连不上的 IP。<br><br>
+              两种方式都<b>只对通过两层校验的 IP 测速</b>，所以不会选出连不上的 IP。<br><br>
+              对接<b>非 CFPilot 项目</b>时，第二层校验可能全部不通过 ——
+              此时用命令行加 <code>--no-verify</code> 退回纯 101 校验。<br><br>
               勾选「跳过测速」才会退化为纯延迟排序（速度列显示 —）。
               勾选「不回填」时结果只在下方显示，复制到面板「手动优选 IP」框即可。
             </p>

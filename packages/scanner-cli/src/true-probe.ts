@@ -21,6 +21,15 @@ export interface WsProbeResult {
   colo: string
   status: number
   error?: string
+  /**
+   * 是否通过了**响应体内容校验**（PING → PONG）。
+   *
+   * `undefined` 表示这次探测没做内容校验（只握手里）。
+   * `true` / `false` 表示做了并通过 / 未通过。
+   */
+  pongVerified?: boolean
+  /** 探针回带的机房（PONG 里的 colo，比 cf-ray 更可靠） */
+  probeColo?: string
 }
 
 /**
@@ -183,6 +192,265 @@ export function probeWs101(
       }
       if (received.length > 4096) {
         finish({ ok: false, colo: '', status: 0, error: '响应异常' })
+      }
+    })
+  })
+}
+
+/* ------------------------------------------------------------------ *
+ * WS 帧编解码（最小实现，只覆盖探测需要的 binary/text 帧）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 构造客户端 WS 帧（必须掩码，RFC 6455 §5.3）。
+ *
+ * @param opcode 帧类型：1 = text，2 = binary。
+ *   ⚠️ 给 CFPilot 数据面发 PING 必须传 **1（text）** ——
+ *   数据面用 `typeof event.data === 'string'` 判定，binary 帧会被当空串忽略。
+ */
+function encodeWsFrame(payload: Uint8Array, opcode = 0x02): Buffer {
+  const mask = crypto.randomBytes(4)
+  const masked = Buffer.alloc(payload.length)
+  for (let i = 0; i < payload.length; i++) {
+    masked[i] = payload[i]! ^ mask[i % 4]!
+  }
+  let header: Buffer
+  if (payload.length < 126) {
+    header = Buffer.from([0x80 | opcode, 0x80 | payload.length])
+  } else if (payload.length < 65536) {
+    header = Buffer.alloc(4)
+    header[0] = 0x80 | opcode
+    header[1] = 0xfe
+    header.writeUInt16BE(payload.length, 2)
+  } else {
+    header = Buffer.alloc(10)
+    header[0] = 0x80 | opcode
+    header[1] = 0xff
+    header.writeBigUInt64BE(BigInt(payload.length), 2)
+  }
+  return Buffer.concat([header, mask, masked])
+}
+
+interface DecodedFrame {
+  opcode: number
+  payload: Buffer
+}
+
+/**
+ * 从缓冲区解析服务端 WS 帧（服务端帧不带掩码）。
+ *
+ * 返回 `null` 表示数据还不够一帧；否则返回帧与剩余字节。
+ */
+function decodeWsFrame(buf: Buffer): { frame: DecodedFrame; rest: Buffer } | null {
+  if (buf.length < 2) return null
+  const opcode = buf[0]! & 0x0f
+  const len7 = buf[1]! & 0x7f
+  let offset: number
+  let payloadLen: number
+  if (len7 < 126) {
+    offset = 2
+    payloadLen = len7
+  } else if (len7 === 126) {
+    if (buf.length < 4) return null
+    offset = 4
+    payloadLen = buf.readUInt16BE(2)
+  } else {
+    if (buf.length < 10) return null
+    offset = 10
+    payloadLen = Number(buf.readBigUInt64BE(2))
+  }
+  if (buf.length < offset + payloadLen) return null
+  const frame: DecodedFrame = {
+    opcode,
+    payload: Buffer.from(buf.subarray(offset, offset + payloadLen)),
+  }
+  // subarray 会收窄成 Buffer<ArrayBufferLike>，这里显式拷贝成 Buffer<ArrayBuffer>
+  const rest: Buffer = Buffer.from(buf.subarray(offset + payloadLen))
+  return { frame, rest }
+}
+
+/**
+ * 阶段二（严格版）：WS 101 握手 + **响应体内容校验**。
+ *
+ * ## 为什么在 101 之外还要验内容（2026-10-25 新增）
+ *
+ * 借鉴 CFData-WEB 的「链路复验」思路：它不只做 TLS 握手，
+ * 还解析响应体、校验其中的标记字段（`probe` / `ip`）。
+ *
+ * 我们此前的 `probeWs101` **只握手、不发任何数据**，因此无法分辨：
+ *
+ * - IP 能服务我们的域名，数据面真的在干活 ✅
+ * - IP 到 CF 边缘通，但**数据面对该请求不响应** ❌（漏网 → 客户端 -1）
+ *
+ * CFPilot 数据面的 `/__edge_probe` 内置了 PING/PONG：
+ * 客户端发文本 `PING`，服务端回 `{"pong":true,"colo":"XXX","clientIp":"..."}`。
+ * 这个现成机制正是「响应体内容校验」的钩子 —— 此前 scanner 从未用过。
+ *
+ * ## 判定规则
+ *
+ * 1. 必须 101 握手成功；
+ * 2. 发送 `PING` 后必须收到一个 **text/binary 帧**；
+ * 3. 帧内容必须是 JSON 且 `pong === true`。
+ *
+ * 三条全过才判 `ok`，`pongVerified = true`。
+ * 这样「101 通但数据面不响应」的 IP 会在阶段二被拦掉，不会进入测速、
+ * 也不会出现在最终结果里。
+ *
+ * ## 兼容性
+ *
+ * 目标不是 CFPilot（没有 `/__edge_probe` 的 PING）时，退化为纯 101 校验
+ * （`pongVerified = undefined`），不阻断通用场景。
+ */
+export function probeWsPing(
+  ip: string,
+  port: number,
+  host: string,
+  timeoutMs = 5000,
+  path = '/__edge_probe'
+): Promise<WsProbeResult> {
+  return new Promise((resolve) => {
+    const started = Date.now()
+    const key = crypto.randomBytes(16).toString('base64')
+    let settled = false
+    let handshakeDone = false
+    // 显式标注为 Buffer（不带 ArrayBuffer 泛型约束），
+    // 否则 Buffer.alloc(0) 推断出的 Buffer<ArrayBuffer> 与后续赋值不兼容
+    let buf: Buffer = Buffer.alloc(0)
+    let receivedText = ''
+
+    const finish = (result: Omit<WsProbeResult, 'latencyMs'>): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      try {
+        socket.destroy()
+      } catch {
+        /* 已销毁 */
+      }
+      resolve({ ...result, latencyMs: Date.now() - started })
+    }
+
+    const request = [
+      `GET ${path} HTTP/1.1`,
+      `Host: ${host}`,
+      `Upgrade: websocket`,
+      `Connection: Upgrade`,
+      `Sec-WebSocket-Key: ${key}`,
+      `Sec-WebSocket-Version: 13`,
+      `User-Agent: ${USER_AGENT}`,
+      '',
+      '',
+    ].join('\r\n')
+
+    const socket = tls.connect(
+      {
+        host: ip,
+        port,
+        servername: host,
+        rejectUnauthorized: false,
+        ALPNProtocols: ['http/1.1'],
+      },
+      () => {
+        socket.write(request)
+      }
+    )
+
+    const timer = setTimeout(() => {
+      finish({
+        ok: false,
+        colo: '',
+        status: 0,
+        error: handshakeDone ? 'PING 超时（数据面未响应）' : '握手超时',
+        pongVerified: handshakeDone ? false : undefined,
+      })
+    }, timeoutMs)
+
+    socket.setTimeout(timeoutMs, () => {
+      finish({
+        ok: false,
+        colo: '',
+        status: 0,
+        error: handshakeDone ? 'PING 超时（数据面未响应）' : '连接超时',
+        pongVerified: handshakeDone ? false : undefined,
+      })
+    })
+
+    socket.on('error', (err: Error) => {
+      finish({
+        ok: false,
+        colo: '',
+        status: 0,
+        error: err.message,
+        pongVerified: handshakeDone ? false : undefined,
+      })
+    })
+
+    socket.on('data', (chunk: Buffer) => {
+      buf = Buffer.concat([buf, chunk])
+
+      if (!handshakeDone) {
+        const lineEnd = buf.indexOf('\r\n\r\n')
+        if (lineEnd < 0) {
+          if (buf.length > 8192) finish({ ok: false, colo: '', status: 0, error: '响应头异常' })
+          return
+        }
+        const head = buf.slice(0, lineEnd).toString('latin1')
+        const statusLine = head.split('\r\n')[0] ?? ''
+        const statusMatch = /^HTTP\/1\.[01]\s+(\d{3})/.exec(statusLine)
+        const status = statusMatch ? Number(statusMatch[1]) : 0
+        const colo = extractColo(head)
+        buf = buf.subarray(lineEnd + 4)
+
+        if (status !== 101) {
+          finish({ ok: false, colo, status, error: `HTTP ${status}` })
+          return
+        }
+        handshakeDone = true
+        // 101 成功 → 立刻发 PING，触发数据面的响应体校验。
+        //
+        // ⚠️ 必须是 **text 帧（opcode 1）**：数据面的判定是
+        // `typeof event.data === 'string' ? event.data : ''`，
+        // binary 帧（opcode 2）会被当成空字符串直接忽略（真机实测 8/8 全部超时）。
+        socket.write(encodeWsFrame(new TextEncoder().encode('PING'), 0x01))
+      }
+
+      // 解析服务端帧
+      for (;;) {
+        const decoded = decodeWsFrame(buf)
+        if (!decoded) break
+        buf = decoded.rest
+        const { opcode, payload } = decoded.frame
+        // 8 = close：数据面主动关闭，说明没打算回 PONG
+        if (opcode === 8) {
+          const code = payload.length >= 2 ? payload.readUInt16BE(0) : 1005
+          finish({
+            ok: false,
+            colo: '',
+            status: 101,
+            error: `WS 关闭（code ${code}）`,
+            pongVerified: false,
+          })
+          return
+        }
+        // 1 = text，2 = binary：这就是 PONG
+        if (opcode === 1 || opcode === 2) {
+          receivedText += payload.toString('utf8')
+          try {
+            const parsed = JSON.parse(receivedText) as { pong?: unknown; colo?: unknown }
+            if (parsed.pong === true) {
+              finish({
+                ok: true,
+                colo: typeof parsed.colo === 'string' ? parsed.colo.toUpperCase() : '',
+                status: 101,
+                pongVerified: true,
+                probeColo: typeof parsed.colo === 'string' ? parsed.colo.toUpperCase() : undefined,
+              })
+              return
+            }
+          } catch {
+            /* 可能还没收全，继续等 */
+          }
+        }
       }
     })
   })

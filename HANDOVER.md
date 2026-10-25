@@ -146,6 +146,94 @@ check-host 多国节点全 500、同脚本自定义域 200 / workers.dev 500、
 
 ---
 
+## 0.25 优选器阶段二新增「响应体内容校验」（2026-10-25）
+
+### 0.25.1 动机：借鉴 CFData-WEB 的链路复验
+
+用户提议「在 CFData-WEB 基础上二开」。克隆并逐行读完其 Go 源码
+（`combined_refactor/`，10,605 行）后确认：**它的速度优势来自探针是公共 CF 服务**
+（`probe.609909.xyz`），测的是「CF 边缘可达性」而非「能否服务你的域名」，
+所以它优选出的 IP 在用户项目里几乎全 -1。**不值得整体二开**（全面重构 + 双技术栈）。
+
+但它的**链路复验机制**值得借鉴（`checkReallinkCandidate`）：
+
+```go
+// 不只 TLS 握手，还解析响应体并校验标记字段
+tlsConn := tls.Client(conn, &tls.Config{ServerName: probeHost})
+// 发 GET /，解析 JSON，要求：
+payload.Probe 含 "cfdata"   // 标记
+payload.IP    是有效 IP     // 内容
+```
+
+CFPilot 数据面的 `/__edge_probe` **早已内置 PING/PONG**，正是同一思路的现成钩子，
+但 scanner 从未用过。
+
+### 0.25.2 修复前的盲区
+
+`probeWs101` **只握手、不发任何数据**，因此无法分辨：
+
+| 情况 | 101 | 数据面实际 |
+|------|-----|-----------|
+| IP 能服务我们的域名，数据面在干活 | ✅ | 正常响应 |
+| **IP 到 CF 边缘通，但数据面对该请求不响应** | ✅ | **静默无响应** |
+
+后者会带着虚假的希望进入测速、出现在最终结果里，导入客户端后 -1。
+
+### 0.25.3 实现
+
+`true-probe.ts` 新增 `probeWsPing()`：
+
+1. WS 101 握手（与原 `probeWs101` 相同）
+2. 发送 **text 帧** `PING`
+3. 解析服务端帧，要求 JSON 且 `pong === true`
+4. 三条全过才判 `ok`，并标记 `pongVerified = true`
+
+`scan.ts` 阶段二默认走严格模式；`--no-verify`（或 `verifyPayload: false`）退回纯 101。
+
+### 0.25.4 ⚠️ 踩坑：PING 必须用 text 帧
+
+第一版用 **binary 帧（opcode 2）**发 PING，真机实测 **8/8 全部 PING 超时**。
+
+根因：数据面的判定是
+
+```ts
+const data = typeof event.data === 'string' ? event.data : ''
+if (data === 'PING' || data === 'ping') { ... }
+```
+
+**binary 帧的 `event.data` 是 ArrayBuffer，不是 string**，被当成空串忽略。
+改用 text 帧（opcode 1）后 **8/8 全部通过**。
+
+这个坑已用单元测试守住（`probe-ping.test.ts` 断言 opcode 必须是 1）。
+
+### 0.25.5 真机验证
+
+用户域名 `cfpilot.shijingtian.de5.net`，8 个候选 IP：
+
+```
+严格校验（101 + PING）:  8/8 ✅  pong=true, colo=LAX, 729~2036ms
+纯 101 握手（旧行为）:   8/8 ✅
+差值（被拦掉的假活 IP）:  0 个
+```
+
+这批 IP 都是真活的，所以差值 0 —— 机制已验证可用，当前场景没抓到漏网 IP。
+真正的价值在于：**采样数放大后（3000+）必然混入假活 IP，那时这层校验会拦住它们**。
+
+### 0.25.6 改动清单
+
+| 文件 | 改动 |
+|------|------|
+| `packages/scanner-cli/src/true-probe.ts` | 新增 `encodeWsFrame` / `decodeWsFrame` / `probeWsPing`；`WsProbeResult` 加 `pongVerified` / `probeColo` |
+| `packages/scanner-cli/src/scan.ts` | 阶段二默认严格校验；`ScanOptions` 加 `verifyPayload`；`stats` 加 `verified` |
+| `packages/scanner-cli/src/cli.ts` | 新增 `--no-verify` |
+| `packages/scanner-cli/src/scanner-lib.ts` | 导出 `probeWsPing` |
+| `packages/gui/src/main/scanner.ts` | `ScanOptions` 加 `verifyPayload` 并透传 |
+| `packages/gui/src/renderer/index.html` | 优选页描述改为「三层校验」；补充机制说明与 `--no-verify` 提示 |
+| `packages/scanner-cli/test/probe-ping.test.ts` | **新增** 12 个用例（帧编解码 / text 帧金丝雀 / PONG 判定 / close 识别） |
+| `packages/scanner-cli/test/scan.test.ts` | 新增 3 个用例锁定阶段二保留规则 |
+
+---
+
 ## 0.24 出站「假活」修复：下行无数据自动切反代（2026-10-25）
 
 ### 0.24.1 问题现象

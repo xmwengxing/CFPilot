@@ -146,6 +146,104 @@ check-host 多国节点全 500、同脚本自定义域 200 / workers.dev 500、
 
 ---
 
+## 0.29 vendor 完全移除 + 向导两项修复（2026-10-25）
+
+用户要求「只做项 1（完全移除 vendor），回退也不再需要」，并反馈向导两个痛点。
+本次全部真机验证通过。
+
+### 0.29.1 vendor 完全移除：数据面 250KB → 43.4KB
+
+`vendor/cfnext-dataplane.js`（351.7KB 源码）此前静态 import 进数据面，
+占产物 **77%**，让 `dataplane.js` 长期超 80KB 预算（250KB）。
+
+**移除后的产物体积**：
+
+| 产物 | 移除前 | 移除后 | 变化 |
+|------|--------|--------|------|
+| `dataplane.js` | 250.0 KB ❌ | **43.4 KB** ✅ | **-83%** |
+| `control.js` | 61.8 KB | 61.8 KB | 不变 |
+| `worker.js` | 286.1 KB | **95.9 KB** | -66% |
+
+**改动清单**：
+
+| 文件 | 改动 |
+|------|------|
+| `src/protocols/websocket.ts` | **删除**（vendor 分发层，不再需要） |
+| `src/vendor/` | **删除**（含 `cfnext-dataplane.js` / `.d.ts`） |
+| `src/protocols/dataplane.ts` | **删除**（`resolveDataPlaneImpl` 无意义了） |
+| `src/routes/data.ts` | 直接 `import { handleWebSocket } from '../protocols/websocket-self'`；`/__diag` 固定返回 `impl: 'self'` |
+| `scripts/build.mjs` | `NO_STATIC_SOCKETS` 从只有 `control.js` 扩到**全部三个产物** |
+| `deploy-wizard/src/pages-deploy.ts` | 删 `dataPlane` 选项与 `DATAPLANE` 环境变量注入 |
+| `deploy-wizard/src/cli.ts` | 删 `--dataplane` 参数 |
+| `test/dataplane-switch.test.ts` | **删除**（被测函数已移除） |
+| `scripts/selfdp-e2e/` | **删除**（实验残留） |
+
+> 附带收益：vendor 里的 `cloudflare:sockets` 静态 import 一并消失，
+> 数据面的风控特征面更小。
+
+### 0.29.2 向导问题 1：自定义域名自动迁移
+
+**用户反馈**：8000119 换名重建后，自定义域名要手动迁移，否则订阅全失效。
+
+**实现**（`pages-deploy.ts` 的 `migrateAndCleanup`）：
+
+```
+1. 旧项目解绑域名   ← 必须！Pages 的同一域名同时只能挂一个项目
+2. 新项目绑定域名
+3. 删除旧项目
+```
+
+**真机踩到的两个坑**：
+
+1. **`project.domains` 只列 active 域名** —— 刚绑的域名在 `initializing`
+   期间不在里面。若此时换名，会漏掉该域名。
+   → 改用 `GET /pages/projects/<name>/domains` 子接口（返回所有状态）。
+2. **直接绑到新项目会报 `You have already added this custom domain`** ——
+   必须先解绑旧项目。第一版漏了这步，真机 100% 失败。
+
+**清单新增字段**：`dataCustomDomain`（自定义域名不随项目名变化，
+记下来才能在换名后自动迁移）。
+
+**保护逻辑**：域名迁移失败时**不删旧项目**（旧项目还挂着用户唯一入口），
+并给出「请手动改绑」的告警。
+
+### 0.29.3 向导问题 2：自动删除被替换的旧项目
+
+**用户反馈**：多次更新后旧项目不断增多，成为孤立项目。
+
+**实现**：`migrateAndCleanup` 的最后一步 `deletePagesProject(oldProject)`。
+只在「新名 ≠ 旧名」时执行（原地更新不删）。
+
+### 0.29.4 真机验证（账号 `70ec011b…`，4 轮更新）
+
+```
+第 1 轮（首次部署）：数据面 43.4KB 部署成功；控制面 8000119 → 同名重试成功
+第 2 轮（更新）：数据面 8000119 ×3 → 换名 odzddizkv-6j8x
+                  ✅ 已删除被替换的旧数据面项目：odzddizkv
+                  ⚠ 域名迁移失败（旧项目未解绑）→ 保护逻辑生效，旧项目保留
+第 3 轮（修复后）：✅ 已删除旧项目（但域名挂在更早的遗留项目上，未触发迁移）
+第 4 轮（干净状态）：✅ 解绑 → ✅ 迁移 → ✅ 删除旧项目 → ✅ DATA_HOST 同步
+```
+
+**最终状态**：项目数 3（控制面 + 数据面 + cfnext），**无孤立项目**，
+自定义域名 `test-dp.xmdongyao.de5.net` 已迁到当前数据面。
+
+**新端点验证**（`/region`，本次新增）：
+
+```json
+{"ok":true,"colo":"SIN","region":"SG","relayPreference":["SG","JP","KR","US",...]}
+```
+
+### 0.29.5 已知限制
+
+- **域名生效需要 CNAME 配置**：`initializing`/`pending` 状态下域名不可用，
+  迁移逻辑只负责「换个项目绑定」，DNS 仍需用户配置（这是 Pages 的机制，不是向导能代劳的）。
+- **8000119 依然存在**：数据面首次部署成功，但**更新时 100% 命中**
+  （4 轮全部如此）。移除 vendor 缩小了产物体积，但**没有消除这个平台行为**。
+  缓解手段仍是「换名重建 + 域名自动迁移 + 删旧项目」，现已全自动。
+
+---
+
 ## 0.28 借鉴 cfnew 的六项优选/订阅增强（2026-10-25）
 
 用户要求研究 cfnew（`_worker.js` 37KB + cfnew-panel 205KB）并借鉴其能力。

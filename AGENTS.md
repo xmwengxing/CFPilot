@@ -38,6 +38,12 @@ CFPilot 是一个运行在 Cloudflare Workers 上的**代理微内核 + 真连�
    CFPilot 自己的数据面**不读**这个键（它读大写 `CONFIG`），写了纯属破坏。
 4. **内核体积预算**：Worker 打包产物 **必须 ≤ 80KB**（`packages/worker-core/scripts/build.mjs` 会在超限时告警）。
    不要把第三方大依赖塞进 `worker-core`；面板必须是零框架的单文件 HTML。
+   **vendor（CFNext 的 `wsHandler`，351.7KB）已于 2026-10-25 完全移除** ——
+   它占数据面产物 77%，让 `dataplane.js` 长期停在 250KB。
+   移除后：`dataplane.js` 43.4KB / `control.js` 61.8KB / `worker.js` 95.9KB，
+   三个产物**全部**通过「无静态 `cloudflare:sockets` 导入」校验。
+   数据面只有自研一套实现（`protocols/websocket-self.ts`），**不再有回退实现**；
+   想加第三方实现前先掂量体积与风控面。
 5. **探针端点不可删除**：`/__edge_probe` 必须始终提供
    「WebSocket 101 握手校验」与「流式下行测速」两项能力，这是 CFPilot 的核心价值。
 6. **优选 IP 解析器必须容错**：兼容裸 IP、`IP:Port`、`IP:Port#备注`、`[IPv6]:Port#备注`、

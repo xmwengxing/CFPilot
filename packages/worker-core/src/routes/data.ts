@@ -4,11 +4,17 @@
  * 与控制面分开部署时，这个 worker **只做转发**，不含面板与订阅。
  * 真机实测：控制面与数据面拆开后，两边都能在 Pages 上原地更新；
  * 合并成一个 bundle 会被 Cloudflare 判定为完整代理服务并在二次部署时封禁（8000119）。
+ *
+ * ## 只有一套数据面实现（2026-10-25）
+ *
+ * vendor（CFNext 的 `wsHandler`）已于 2026-10-25 **完全移除**：
+ * 它占产物体积 77%（250KB 里 193KB），让数据面长期超出 80KB 预算，
+ * 且自带 `cloudflare:sockets` 静态 import。自研实现（`websocket-self.ts`）
+ * 覆盖 VLESS-WS / Trojan-WS / XHTTP + 代理池 + 分级诊断，早已是生产默认。
  */
 import type { Env, UserConfig } from '../types'
 import { handleEdgeProbe } from '../probe'
-import { handleWebSocket } from '../protocols/websocket'
-import { resolveDataPlaneImpl } from '../protocols/dataplane'
+import { handleWebSocket } from '../protocols/websocket-self'
 import { handleXhttp } from '../protocols/xhttp'
 import { parseProxyPool, type ProxyEndpoint } from '../outbound/proxy-pool'
 import { jsonError } from '../ui/neutral'
@@ -53,7 +59,8 @@ export async function routeDataPlane(
       JSON.stringify(
         {
           ok: true,
-          impl: resolveDataPlaneImpl(env.DATAPLANE as string | undefined),
+          // 只有一套实现了（vendor 已于 2026-10-25 移除），固定返回 self
+          impl: 'self',
           recent: recentDiagnostics(),
           xhttp: recentXhttpDiagnostics(),
         },
@@ -96,21 +103,19 @@ export async function routeDataPlane(
 
   const config = await loadDataPlaneConfig(env)
   const upgrade = request.headers.get('Upgrade')?.toLowerCase()
-  // 数据面实现选择：默认 vendor（生产验证过），DATAPLANE=self 切自研
-  const impl = resolveDataPlaneImpl(env.DATAPLANE as string | undefined)
 
   if (url.pathname === config.wsPath) {
     if (upgrade !== 'websocket') {
       return jsonError('该路径需要 WebSocket 升级', 400)
     }
-    return await handleWebSocket(request, 'vless', config, collectProxies(config), ctx, { impl })
+    return await handleWebSocket(request, 'vless', config, collectProxies(config), ctx)
   }
 
   if (config.enableTrojan && url.pathname === config.trojanPath) {
     if (upgrade !== 'websocket') {
       return jsonError('该路径需要 WebSocket 升级', 400)
     }
-    return await handleWebSocket(request, 'trojan', config, collectProxies(config), ctx, { impl })
+    return await handleWebSocket(request, 'trojan', config, collectProxies(config), ctx)
   }
 
   if (config.enableXhttp && url.pathname === config.xhttpPath) {

@@ -128,7 +128,6 @@ ${NAME} pages-split —— Pages 双项目部署（控制面 + 数据面）
   --mode <mode>          部署模式：auto（默认，自动判断）/ fresh（强制首次）/ update（强制更新）
   --force                忽略版本检查，强制重新部署
   --force-kv             跳过 KV 归属校验（明知该 KV 属于别的实例仍然继续）
-  --dataplane <impl>     数据面实现：self（默认，自研）/ vendor（CFNext 原版）
   --resolve-preferred=false
                           关闭出站前自动 DoH 解析优选 IP（默认开启）
   --new-credentials      更新部署时也重新生成 UUID / WS 路径 / 面板凭据
@@ -161,7 +160,7 @@ ${NAME} pages-split —— Pages 双项目部署（控制面 + 数据面）
 
 产物来源:
   packages/worker-core/dist/control.js  控制面（面板 + 订阅 + 探针，无 sockets）
-  packages/worker-core/dist/dataplane.js 数据面（VLESS/Trojan-WS，CFNext 实现）
+  packages/worker-core/dist/dataplane.js 数据面（VLESS/Trojan-WS/XHTTP，自研实现）
 
 部署顺序（不可调换）:
   1. 创建两个 Pages 项目
@@ -322,7 +321,6 @@ async function runPagesSplit(args: ReturnType<typeof parseArgs>): Promise<void> 
     keepCredentials,
     skipSameVersion,
     force: flagBool(args, 'force-kv'),
-    dataPlane: (flagString(args, 'dataplane') || 'self') as 'vendor' | 'self',
     // 默认开启；`--resolve-preferred=false` 可关闭
     resolvePreferred: args.flags['resolve-preferred'] === undefined
       ? true

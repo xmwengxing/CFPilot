@@ -33,12 +33,11 @@ const TARGETS = [
  * （1101 且 Observability 无事件）。因此自研出站代码改用动态导入
  * （见 outbound/dial.ts 的 getConnect()）。
  *
- * 但数据面（dataplane.js）整体复用 vendor/cfnext-dataplane.js，
- * 该文件自身静态导入 sockets 且**在真实 Cloudflare 上工作正常**——
- * 说明静态导入并非绝对不可用，还与运行环境有关。
- * 因此断言只覆盖控制面，数据面按原样构建。
+ * vendor（CFNext 的 `wsHandler`）已于 2026-10-25 **完全移除** ——
+ * 它占数据面产物体积 77% 且自带 sockets 静态 import。现在所有产物
+ * 都是纯自研代码，因此断言覆盖**全部**产物。
  */
-const NO_STATIC_SOCKETS = new Set(['control.js'])
+const NO_STATIC_SOCKETS = new Set(['worker.js', 'control.js', 'dataplane.js'])
 
 mkdirSync(outDir, { recursive: true })
 

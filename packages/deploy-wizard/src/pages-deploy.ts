@@ -73,19 +73,6 @@ export interface PagesSplitDeployOptions {
    */
   keepCredentials?: boolean
   /**
-   * 数据面实现：`vendor`（默认，生产验证过）或 `self`（自研）。
-   *
-   * 注入数据面的 `DATAPLANE` 环境变量。
-   * 见 docs/self-developed-dataplane-design.md。
-   */
-  /**
-   * 数据面实现：`self`（自研，缺省）/ `vendor`（CFNext 原版）。
-   *
-   * 不传则**不注入** `DATAPLANE` 环境变量，由内核用自己的缺省值
-   * （当前缺省为自研，见 `protocols/dataplane.ts`）。
-   */
-  dataPlane?: 'vendor' | 'self'
-  /**
    * 出站前是否自动 DoH 解析优选 IP（注入 `RESOLVE_PREFERRED`）。
    *
    * 默认 true（内核侧也是 true）。设为 false 可关闭自动解析，
@@ -162,6 +149,14 @@ export interface DeployManifest {
   controlSubdomain: string
   /** 数据面域名 */
   dataSubdomain: string
+  /**
+   * 绑定在数据面上的**自定义域名**（如 `cfpilot.example.com`）。
+   *
+   * 为什么必须记：8000119 换名重建后项目名和 `*.pages.dev` 都会变，
+   * 但自定义域名是用户资产、不会跟着变 —— 记下来才能在换名后
+   * 自动把它迁到新项目（否则用户订阅里的地址全部失效）。
+   */
+  dataCustomDomain?: string
   /** 上次部署的构建版本 */
   build: string
   /** 上次部署时间（ISO） */
@@ -625,10 +620,19 @@ export async function deployPagesSplit(
   let controlName = options.controlProject
   let dataName = options.dataProject
 
+  /**
+   * 部署前的旧数据面项目名（更新模式才有）。
+   *
+   * 用于 8000119 换名重建后的收尾：迁自定义域名 + 删旧项目。
+   * 必须在被 manifest 覆盖**之前**捕获，否则两边相等就判断不出「换过名」。
+   */
+  let previousDataProject = ''
+
   if (manifest && mode !== 'fresh') {
     log(`· 检测到已有部署（${manifest.at}），进入更新模式`)
     controlName = manifest.controlProject
     dataName = manifest.dataProject
+    previousDataProject = manifest.dataProject
     result.control.name = controlName
     result.data.name = dataName
     result.control.subdomain = manifest.controlSubdomain
@@ -796,7 +800,38 @@ export async function deployPagesSplit(
   //
   //    因此「原地更新」对数据面不可用。妥协方案：命中 8000119 时
   //    自动换一个新的随机项目名重新部署，保证上游有更新时仍能上线。
-  //    旧项目不会被删除（用户可能还绑着自定义域名），由用户自行迁移。
+  //
+  //    换名后的两件收尾（2026-10-25 新增，均为用户反馈的痛点）：
+  //      1. **自定义域名自动迁移** —— 旧项目上绑的域名迁到新项目，
+  //         否则用户订阅里的地址全部失效（以前要用户手动迁移）；
+  //      2. **删除旧项目** —— 否则每次更新都留一个孤立项目，
+  //         账号下越积越多（以前要用户手动清理）。
+  //
+  // 读取旧项目的自定义域名。
+  //
+  // ⚠️ **必须用 `/domains` 子接口，不能用 `project.domains`**（真机实测）：
+  // 刚绑定的域名在 `initializing` 期间不会出现在 `project.domains` 里，
+  // 只有 `active` 的才列出。若此时恰好触发 8000119 换名，就会漏掉该域名
+  // → 新项目没继承它 → 用户订阅地址失效。
+  let dataCustomDomain = ''
+  if (previousDataProject) {
+    const isCustom = (d: string): boolean => typeof d === 'string' && !d.endsWith('.pages.dev')
+    try {
+      // 1) 优先 `/domains`（含未生效状态）
+      const all = await client.listPagesDomains(options.accountId, previousDataProject)
+      dataCustomDomain = all.find(isCustom) ?? ''
+      // 2) 回落 `project.domains`（旧版 API 或 /domains 不可用时）
+      if (!dataCustomDomain) {
+        const prev = await client.getPagesProject(options.accountId, previousDataProject)
+        const domains: string[] = Array.isArray(prev.domains) ? prev.domains : []
+        dataCustomDomain = domains.find(isCustom) ?? ''
+      }
+      if (dataCustomDomain) log(`· 旧数据面项目 ${previousDataProject} 绑定了自定义域名 ${dataCustomDomain}，将自动迁移`)
+    } catch {
+      /* 旧项目读不到就不迁移（可能已被删） */
+    }
+  }
+
   const dataAttempt = await deployWithBlockRetry({
     client,
     accountId: options.accountId,
@@ -809,6 +844,8 @@ export async function deployPagesSplit(
     wait,
     log,
     warnings,
+    oldProject: previousDataProject,
+    customDomain: dataCustomDomain,
   })
   if (dataAttempt) {
     result.data.name = dataAttempt.project ?? options.dataProject
@@ -881,6 +918,8 @@ export async function deployPagesSplit(
       dataProject: result.data.name,
       controlSubdomain: result.control.subdomain,
       dataSubdomain: result.data.subdomain,
+      // 自定义域名：本次迁过来的，或旧项目上原有的（下次更新还要靠它迁移）
+      dataCustomDomain: dataCustomDomain || manifest?.dataCustomDomain || '',
       build: options.localBuild ?? 'unknown',
       at: new Date().toISOString(),
       credentials: {
@@ -963,8 +1002,6 @@ async function configureProject(
           PATH: { value: effective.wsPath },
           ENABLE_TROJAN: { value: options.enableTrojan ? 'true' : 'false' },
           ENABLE_XHTTP: { value: options.enableXhttp ? 'true' : 'false' },
-          // 数据面实现选择：vendor（默认）/ self（自研）
-          ...(options.dataPlane ? { DATAPLANE: { value: options.dataPlane } } : {}),
           // 出站前自动 DoH 解析优选 IP（自研数据面用；默认开启）
           ...(options.resolvePreferred === undefined
             ? {}
@@ -1008,6 +1045,16 @@ async function deployWithBlockRetry(params: {
   wait: { timeoutMs: number; intervalMs: number }
   log: (m: string) => void
   warnings: string[]
+  /**
+   * 被替换掉的旧项目名（更新部署时才有）。
+   *
+   * 用于两件收尾工作：
+   *   1. 把旧项目上的自定义域名迁到新项目（否则用户订阅地址全失效）；
+   *   2. 迁移成功后删除旧项目（否则每次更新都留一个孤立项目）。
+   */
+  oldProject?: string
+  /** 需要迁移的自定义域名（旧项目上绑定的） */
+  customDomain?: string
 }): Promise<DeployAttemptResult | null> {
   const { client, accountId, preferredName, code, label, result, options, effective, wait, log, warnings } = params
   if (!code) {
@@ -1016,6 +1063,61 @@ async function deployWithBlockRetry(params: {
   }
 
   const slot = label === '数据面' ? result.data : result.control
+
+  /**
+   * 收尾：迁移自定义域名 + 删除旧项目。
+   *
+   * 只在**确实换了项目**（新名 ≠ 旧名）时执行。
+   *
+   * ## 顺序（真机实测得出，不能改）
+   *
+   * ```
+   * 1. 旧项目解绑域名   ← 必须！Pages 的同一域名同时只能挂一个项目
+   * 2. 新项目绑定域名
+   * 3. 删除旧项目
+   * ```
+   *
+   * 跳过第 1 步会报 `You have already added this custom domain`
+   * （2026-10-25 真机踩到）；第 3 步必须在第 2 步之后，
+   * 否则域名会在一段时间内指向不存在的项目。
+   */
+  const migrateAndCleanup = async (newName: string): Promise<void> => {
+    const oldName = params.oldProject
+    if (!oldName || oldName === newName) return
+
+    // 1) 迁移自定义域名：先解绑旧的，再绑新的
+    const domain = params.customDomain
+    if (domain) {
+      // 1a) 旧项目解绑（失败不阻断：可能本来就没绑在这上面）
+      try {
+        await client.removePagesDomain(accountId, oldName, domain)
+        log(`· 已从旧项目 ${oldName} 解绑域名 ${domain}`)
+      } catch {
+        /* 解绑失败继续尝试绑定，让真正的错误在下一步暴露 */
+      }
+
+      // 1b) 新项目绑定
+      try {
+        await client.addPagesDomain(accountId, newName, domain)
+        log(`✅ ${label}自定义域名已迁移到新项目：${domain}`)
+      } catch (err) {
+        warnings.push(
+          `自定义域名迁移失败（${domain} → ${newName}）：${err instanceof Error ? err.message : String(err)}\n` +
+            `  → 请手动到 Cloudflare 控制台把该域名改绑到 ${newName}，否则订阅地址会失效。`
+        )
+        // 迁移失败就别删旧项目 —— 旧项目还挂着用户唯一的访问入口
+        return
+      }
+    }
+
+    // 2) 删除旧项目（域名已迁走或本来就没有）
+    try {
+      await client.deletePagesProject(accountId, oldName)
+      log(`✅ 已删除被替换的旧${label}项目：${oldName}`)
+    } catch (err) {
+      warnings.push(`删除旧${label}项目失败（${oldName}）：${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
 
   // 候选项目名：首选原名，失败后再换随机名。
   const candidates = [preferredName]
@@ -1054,6 +1156,8 @@ async function deployWithBlockRetry(params: {
           } catch {
             /* subdomain 取不到不影响主流程 */
           }
+          // 换名成功：迁域名、删旧项目
+          await migrateAndCleanup(name)
           return { project: name, subdomain: slot.subdomain, deploymentId: deployment.id }
         }
         warnings.push(`${label}部署未确认成功（项目 ${name}，状态：${final?.latest_stage?.status ?? '未知'}）`)

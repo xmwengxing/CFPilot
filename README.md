@@ -38,6 +38,69 @@ npx -y cfpilot-deploy@latest init        # Worker 单项目（实验阶段，不
 > ⚠️ **务必绑定自定义域名**。`*.workers.dev` / `*.pages.dev` 在部分网络环境下会被直接阻断，
 > 优选再准也救不回来。
 
+<details>
+<summary><b>手动部署（不通过命令行，直接从本仓库下载压缩包上传）</b></summary>
+
+<br>
+
+如果命令行部署受阻，可以用本仓库根目录的两份压缩包，在 Cloudflare 控制台手动上传。
+
+| 文件 | 用途 |
+|------|------|
+| [`CFPilot-dataplane.zip`](CFPilot-dataplane.zip) | 数据面（纯转发） |
+| [`CFPilot-control.zip`](CFPilot-control.zip) | 控制面（面板与订阅） |
+
+> 两份包随每次构建自动更新，与本仓库代码保持一致。
+
+#### 第 1 步：创建 KV 命名空间
+
+Cloudflare 控制台 → **存储和数据库 → KV** → 创建命名空间，记下**命名空间 ID**。
+
+#### 第 2 步：部署数据面
+
+1. **Workers 和 Pages → 创建 → Pages → 上传资产**
+2. 项目名随意（建议用普通名称，如 `blog-assets-sync`）
+3. 上传 `CFPilot-dataplane.zip`
+4. 部署完成后**记下项目域名**（形如 `xxx.pages.dev`）
+5. **设置 → 变量和密钥**，添加：
+
+   | 名称 | 值 |
+   |------|-----|
+   | `UUID` | 你自己的 UUID（任意 36 位标准格式） |
+   | `WS_PATH` | 自定义路径，如 `/abc123` |
+   | `ENABLE_TROJAN` | `true` 或 `false` |
+   | `ENABLE_XHTTP` | `true` 或 `false` |
+
+6. **设置 → 函数 → KV 命名空间绑定**：变量名 `KV` → 第 1 步的命名空间
+7. **重新上传一次**（绑定与变量只对之后的部署生效）
+
+#### 第 3 步：部署控制面
+
+1. 另建一个 Pages 项目，上传 `CFPilot-control.zip`
+2. **设置 → 变量和密钥**，添加：
+
+   | 名称 | 值 |
+   |------|-----|
+   | `UUID` | 与数据面相同 |
+   | `WS_PATH` | 与数据面相同 |
+   | `DATA_HOST` | 第 2 步记下的**数据面域名** |
+   | `PANEL_PATH` | 面板路径，如 `/mypanel` |
+   | `ADMIN_PASSWORD` | 面板登录密码 |
+
+3. **设置 → 函数 → KV 命名空间绑定**：`KV` → 同一个命名空间
+4. **重新上传一次**
+
+#### 第 4 步：访问
+
+打开 `https://<控制面域名><PANEL_PATH>`，用 `ADMIN_PASSWORD` 登录。
+订阅地址：`https://<控制面域名>/sub/<UUID>`
+
+#### 更新时
+
+新建 Pages 项目 → 上传新版 zip → 把控制面的 `DATA_HOST` 改成新数据面域名 → 删除旧项目。
+
+</details>
+
 ### 2. 本地优选
 
 ```bash
@@ -156,8 +219,9 @@ ECH 把 TLS ClientHello 里的真实 SNI 加密，隐藏你访问的是哪个域
 ⑤ 跑优选时是否关了代理工具。
 
 **Q：配了 SOCKS5 代理但不生效？**
-那是数据面走了 vendor 实现（只读 `PROXYIP`）。部署时加 `--dataplane self` 切回自研即可
-（自研是默认，只有显式切过才会这样）。
+检查这几项：① 代理地址是否可公网访问（`127.0.0.1` / `192.168.x` 这类地址数据面连不到）；
+② 代理是否支持 TLS 1.3（HTTPS 代理需要）；③ 代理服务器是否有 **IPv4** 公网地址
+（数据面的出站只支持 IPv4）。
 
 **Q：面板打不开 / 404？**
 面板路径是部署时随机生成的，向导终端里打印过。忘了可以用
@@ -201,15 +265,17 @@ TCP 9ms 的 IP 握手可能要 3.5 秒，客户端超时就是 `-1`。
 为什么候选要按可用率加权：Cloudflare 的 IPv4 空间大部分是区域/租户专用分配，
 真机实测 6 个官方网段 **0% 可用**。按网段大小平均分配预算会让一半以上候选来自这些废段。
 
-### 数据面：两套实现
+### 数据面
 
-| 实现 | 说明 | 代理池 | DoH 优选 | 反代入口 |
-|------|------|--------|----------|----------|
-| **self**（默认） | 本项目自研 | SOCKS5 / HTTP / HTTPS 全支持 | 可开关 | 用户可自配 + 内置表 |
-| **vendor** | 复用 CFNext 的 `wsHandler` | 仅 `PROXYIP` | vendor 内部 | 硬编码第三方表 |
+单一自研实现，无第三方内核依赖（产物 43KB）。
 
-自研另有失败分级诊断、可配置反代入口、竞速顺序可复现等能力。切换：
-部署时加 `--dataplane vendor`，或在数据面项目设 `DATAPLANE=vendor`。
+| 能力 | 支持情况 |
+|------|----------|
+| 入站协议 | VLESS-WS / Trojan-WS / VLESS-XHTTP |
+| 出站代理池 | SOCKS5 / HTTP / HTTPS 全支持 |
+| DoH 优选解析 | 可开关 |
+| 反代入口 | 用户可自配 + 内置表 |
+| 故障诊断 | 失败分级 + `GET /__diag` 查看完整原因 |
 
 ### 仓库结构
 
@@ -247,7 +313,6 @@ CFPilot/
 | `SOCKS5` / `HTTP_PROXY` | 落地代理（仅自研数据面）。`https://` 前缀表示代理本身走 TLS，可用 `#sni=域名` 指定握手名 |
 | `NAT64` | NAT64 前缀，如 `64:ff9b::` |
 | `RELAY_POOL` / `USE_BUILTIN_RELAY` | 自定义反代入口池 / 内置表开关 |
-| `DATAPLANE` | `self`（默认）/ `vendor` |
 | `RESOLVE_PREFERRED` | 出站前自动 DoH 解析优选 IP（默认开） |
 | `SUB_VARIANTS` | 下发的节点形态，逗号分隔，默认 `vless-ws` |
 | `OFFICIAL_IP_COUNT` / `PREFERRED_DOMAIN_COUNT` | 内置来源数量（默认 20 / 10） |

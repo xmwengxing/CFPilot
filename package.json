@@ -30,7 +30,8 @@
     "node": ">=20.10.0"
   },
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present && node scripts/make-pages-zip.mjs",
+    "zip:pages": "node scripts/make-pages-zip.mjs",
     "build:worker": "npm run build -w @cfpilot/worker-core",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "vitest run",

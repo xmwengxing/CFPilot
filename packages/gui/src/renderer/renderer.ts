@@ -299,10 +299,6 @@
             panelPath: $('panelPath').value.trim(),
             wsPath: $('wsPath').value.trim(),
             // 数据面实现：self（默认）/ vendor
-            dataPlane:
-              (document.getElementById('dataPlane') as HTMLSelectElement | null)?.value === 'vendor'
-                ? 'vendor'
-                : 'self',
           },
           kvId
         )

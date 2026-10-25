@@ -89,7 +89,6 @@ interface Window {
         dataProject: string
         panelPath: string
         wsPath: string
-        dataPlane: 'self' | 'vendor'
       },
       kvNamespaceId?: string    ): Promise<{
       ok: boolean

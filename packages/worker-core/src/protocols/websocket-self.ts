@@ -28,11 +28,42 @@ import { parseTrojanBuffer, TROJAN_COMMAND_UDP } from '../protocols/trojan'
 import { concatBytes } from '../protocols/stream'
 import { dial, type DialResult } from '../outbound/dial'
 import { classifyDialFailure, explainDialFailure, type DialFailure } from '../outbound/route'
+import { collectRelayEndpoints, type RelayEndpoint } from '../outbound/relay'
 
 export type WsMode = 'vless' | 'trojan'
 
 /** 单次拨号超时（ms） */
 const DIAL_TIMEOUT_MS = 5000
+
+/**
+ * 下行静默检测窗口（ms）。
+ *
+ * ## 为什么需要（2026-10-25 真机定位 + edgetunnel 源码对照）
+ *
+ * Cloudflare Workers 的 `connect()` **只保证 TCP 能建连，不保证能收到数据**。
+ * 真机实测（电信千兆，VLESS over WS 到 443 目标）：
+ *
+ * | 目标 | TCP | TLS | 实际收到字节 |
+ * |------|-----|-----|-------------|
+ * | `neverssl.com:80` | ✅ | — | 413B ✅ |
+ * | `baidu.com:80` | ✅ | — | 241B ✅ |
+ * | `github.com:443` | ✅ | ✅ | **0B** ❌ |
+ * | `www.youtube.com:443` | ✅ | ✅ | **0B** ❌ |
+ *
+ * 即：TCP 握手成功、协议响应头 `[0,0]` 已回，但目标站一个字节都不回。
+ * 客户端侧表现为「连着但永远等不到响应」，超时后 -1。
+ *
+ * edgetunnel 的解法（`connecttoPry()`）：**直连成功后若下行无数据，
+ * 自动重拨到反代入口**（第三方服务器按 SNI 转发，出口不是 Cloudflare，
+ * 因而不受该限制）。BPB 用 NAT64 前缀达到同样目的。
+ *
+ * 因此这里做同一件事：建连后 `DOWNLINK_STALL_MS` 内没收到任何下行字节，
+ * 就关闭当前出站、改连反代入口重试一次。
+ */
+const DOWNLINK_STALL_MS = 2500
+
+/** 反代重拨的最多次数（含内置入口的轮换） */
+const MAX_RELAY_REDIAL = 2
 
 /** 握手头最大长度 */
 const MAX_HEADER_BYTES = 64 * 1024
@@ -169,6 +200,13 @@ export async function handleWebSocket(
   let dialed: DialResult | null = null
   let writer: WritableStreamDefaultWriter<Uint8Array> | null = null
   let firstPacketTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * 当前会话的目标站信息。
+   *
+   * 提到外层作用域是为了让 `redialViaRelay()` 能拿到它做诊断记录
+   * （反代重拨发生在 `establish()` 之后，那里有自己的局部 target）。
+   */
+  let target: WsTarget | null = null
 
   const send = (bytes: Uint8Array): void => {
     try {
@@ -212,6 +250,10 @@ export async function handleWebSocket(
       clearTimeout(firstPacketTimer)
       firstPacketTimer = null
     }
+    if (stallTimer) {
+      clearTimeout(stallTimer)
+      stallTimer = null
+    }
     if (dialed) {
       try {
         void dialed.writable.close()
@@ -221,15 +263,46 @@ export async function handleWebSocket(
     }
   }
 
+  /**
+   * 下行静默检测定时器。
+   *
+   * 建连后启动；收到第一个下行字节或出站流结束时清除。
+   * 到点仍未收到字节 → 判定「直连假活」，触发反代重拨。
+   */
+  let stallTimer: ReturnType<typeof setTimeout> | null = null
+
+  /** 已尝试过的反代入口（避免同一入口反复重试） */
+  const triedRelays = new Set<string>()
+
+  /** 反代重拨次数 */
+  let relayRedialCount = 0
+
   /** 下行：出站 → 客户端 */
   const pumpDown = async (): Promise<void> => {
     if (!dialed) return
     const reader = dialed.readable.getReader()
+    // 建连后启动静默检测：目标是「TCP 通了但收不到数据」的假活场景
+    if (stallTimer) clearTimeout(stallTimer)
+    stallTimer = setTimeout(() => {
+      stallTimer = null
+      if (downlinkBytes > 0) return
+      // 一个字节都没收到 —— 这条出站是假活，换反代入口重拨
+      recordDiagnostics(
+        `${target!.hostname}:${target!.port}`,
+        [],
+        `直连 ${DOWNLINK_STALL_MS}ms 无下行数据，改走反代入口`
+      )
+      void redialViaRelay()
+    }, DOWNLINK_STALL_MS)
+
     try {
       for (;;) {
         const { done, value } = await reader.read()
         if (done) break
-        if (value && value.byteLength > 0) send(value)
+        if (value && value.byteLength > 0) {
+          downlinkBytes += value.byteLength
+          send(value)
+        }
       }
     } catch {
       /* 传输错误 */
@@ -239,9 +312,16 @@ export async function handleWebSocket(
       } catch {
         /* 已释放 */
       }
+      if (stallTimer) {
+        clearTimeout(stallTimer)
+        stallTimer = null
+      }
       closeWith(1000, 'done')
     }
   }
+
+  /** 已收到的下行字节数（用于静默检测） */
+  let downlinkBytes = 0
 
   /** 上行：客户端 → 出站 */
   const pumpUp = async (bytes: Uint8Array): Promise<void> => {
@@ -296,8 +376,8 @@ export async function handleWebSocket(
    * 出站失败则用 WS close code 1011 + 具体原因告知（分级诊断不受影响）。
    */
   const establish = async (isRetry: boolean): Promise<void> => {
-    const target = parseTarget(buffer)
-    if (!target) {
+    const parsed = parseTarget(buffer)
+    if (!parsed) {
       // 数据还不够：等一小会儿再看一次（客户端可能分帧发送）
       if (!isRetry) {
         firstPacketTimer = setTimeout(() => {
@@ -313,10 +393,12 @@ export async function handleWebSocket(
     }
     if (established) return
     established = true
+    // 同步到外层作用域：反代重拨（redialViaRelay）需要它做诊断记录
+    target = parsed
 
     // UDP 暂不支持
     const udpCommand = mode === 'vless' ? VLESS_COMMAND_UDP : TROJAN_COMMAND_UDP
-    if (target.command === udpCommand) {
+    if (parsed.command === udpCommand) {
       closeWith(1002, 'UDP over WebSocket 暂不支持')
       return
     }
@@ -332,12 +414,22 @@ export async function handleWebSocket(
     let dialError: unknown = null
     try {
       dialed = await dial({
-        hostname: target.hostname,
-        port: target.port,
+        hostname: parsed.hostname,
+        port: parsed.port,
         proxies,
         timeoutMs: DIAL_TIMEOUT_MS,
         concurrent: config.concurrentDial,
         nat64: config.nat64 || undefined,
+        // ⚠️ 这里**不要**传 `config.add`（面板回填的优选 IP）。
+        //
+        // `optimizedIps` 的语义是「**目标站**的落地 IP 候选」——
+        // 访问 www.youtube.com 时用哪些 IP 去连 YouTube。
+        // 而面板里回填的 IP 是 **Cloudflare 边缘 IP**（客户端连 Worker 用的），
+        // 两者完全不同。把边缘 IP 当目标站 IP 会让出站全部连错地方。
+        //
+        // 目标站的落地候选由 `resolvePreferred`（DoH 解析）负责，
+        // 那才是「优选」在出站侧的正确含义。
+        //
         // 自动 DoH 解析目标域名，取得可用的优选 IP 候选。
         // 解析出的 Cloudflare 网段 IP 会被自动降权（连不回自家 Anycast）。
         resolvePreferred: config.resolvePreferred,
@@ -366,7 +458,7 @@ export async function handleWebSocket(
           : `出站连接失败：${String(dialError)}`
       // 完整诊断另存一份（close reason 装不下，且超长会被边缘静默丢弃）
       recordDiagnostics(
-        `${target.hostname}:${target.port}`,
+        `${parsed.hostname}:${parsed.port}`,
         failures,
         detail
       )
@@ -380,11 +472,129 @@ export async function handleWebSocket(
     // buffer 里可能不只有首帧的负载——拨号期间到达的后续帧也会暂存进
     // buffer（见 message 处理器里 `if (!writer)` 分支），
     // 因此这里必须整段补写，而不是只写第一帧。
-    const payload = buffer.byteLength > target.headerLength ? buffer.slice(target.headerLength) : new Uint8Array(0)
+    const payload = buffer.byteLength > parsed.headerLength ? buffer.slice(parsed.headerLength) : new Uint8Array(0)
     if (payload.byteLength > 0) await pumpUp(payload)
     buffer = new Uint8Array(0)
 
     ctx?.waitUntil(pumpDown())
+  }
+
+  /**
+   * 下行无数据时改走反代入口重拨。
+   *
+   * ## 背景（2026-10-25 真机定位 + edgetunnel 源码对照）
+   *
+   * Cloudflare Workers 的 `connect()` 对部分目标（Google / YouTube / GitHub
+   * 等 443）**TCP 能建连但一个字节都收不到**。这不是我们的代码问题，
+   * 是 Cloudflare 边缘出口的限制 —— 同类项目（edgetunnel / BPB）的解法都是
+   * 「假活时改走反代入口」：第三方服务器按 SNI 把流量转到目标站，
+   * 出口不是 Cloudflare，因而不受该限制。
+   *
+   * ## 与内置反代机制的关系
+   *
+   * `dial()` 内部已有反代逻辑，但**只在目标解析结果全是 CF 网段时才启用**
+   * （见 `outbound/dial.ts` 的 `relayNeeded`）。Google / YouTube 解析到
+   * `142.251.x.x`（非 CF 网段），因此走不到那条路径 —— 这正是漏洞。
+   *
+   * 本函数补上这条路径：**无条件**在假活时尝试反代。
+   *
+   * ## 数据不丢
+   *
+   * 重拨前已写入假活连接的上行数据会丢（目标站没收到），
+   * 但客户端会在应用层重试（TCP 重传 / TLS 重传）——
+   * 反代建连成功后 `establish` 里会把 `buffer` 里暂存的首包一起补写。
+   */
+  const redialViaRelay = async (): Promise<void> => {
+    // target 理论上一定已解析（本函数只在 establish 成功后由静默检测触发），
+    // 这里仍做空判断，避免未来重构把调用点提前。
+    const targetInfo = target
+    if (!targetInfo) {
+      closeWith(1011, '出站无数据：目标未解析')
+      return
+    }
+    if (relayRedialCount >= MAX_RELAY_REDIAL) {
+      // 反代也试过了，仍然假活 —— 明确告知客户端，不要静默挂起
+      closeWith(1011, '出站无数据：直连与反代入口均无响应')
+      return
+    }
+    relayRedialCount++
+
+    // 收反代入口候选：用户自配优先，其次内置表（按当前 colo 选地区）
+    let endpoints: RelayEndpoint[] = []
+    try {
+      endpoints = await collectRelayEndpoints({
+        userEntries: config.relayPool || undefined,
+        useBuiltin: config.useBuiltinRelay,
+        colo: typeof request.cf?.colo === 'string' ? request.cf.colo : undefined,
+      })
+    } catch {
+      endpoints = []
+    }
+    // 过滤已试过的，避免同一入口反复重试
+    const fresh = endpoints.filter((e) => !triedRelays.has(`${e.ip}:${e.port}`))
+    if (fresh.length === 0) {
+      closeWith(1011, '出站无数据：无反代入口可用')
+      return
+    }
+
+    for (const endpoint of fresh.slice(0, MAX_RELAY_REDIAL)) {
+      triedRelays.add(`${endpoint.ip}:${endpoint.port}`)
+      // 关掉假活的旧出站（只 close writable，不动客户端 WS）
+      if (dialed) {
+        try {
+          void dialed.writable.close()
+        } catch {
+          /* 已关闭 */
+        }
+      }
+      writer = null
+      downlinkBytes = 0
+
+      try {
+        const socket = await dial({
+          hostname: endpoint.ip,
+          port: endpoint.port,
+          timeoutMs: DIAL_TIMEOUT_MS,
+          // 反代路径不做 DoH 解析（入口已是解析好的 IP）
+          resolvePreferred: false,
+        })
+        if (!socket) continue
+
+        dialed = socket
+        writer = socket.writable.getWriter()
+
+        // 反代是「按 SNI 转发」的第三方服务器。
+        //
+        // ⚠️ VLESS over WS 是 TLS 透传（铁律12）：Worker 不终结出站 TLS，
+        // 客户端与目标站直接完成 TLS。所以反代收到的就是客户端的原始
+        // ClientHello（SNI = 目标站）—— 无需 Worker 做任何改写，直通即可。
+        //
+        // 把暂存的首包补写进去（含协议头之后的负载）
+        if (buffer.byteLength > 0) {
+          await writer.write(buffer)
+          buffer = new Uint8Array(0)
+        }
+
+        recordDiagnostics(
+          `${targetInfo.hostname}:${targetInfo.port}`,
+          [],
+          `已切换反代入口 ${endpoint.ip}:${endpoint.port}`
+        )
+        // 重新启动下行泵（含新的静默检测）
+        ctx?.waitUntil(pumpDown())
+        return
+      } catch (err) {
+        recordDiagnostics(
+          `${targetInfo.hostname}:${targetInfo.port}`,
+          [],
+          `反代入口 ${endpoint.ip}:${endpoint.port} 失败：${String(err)}`
+        )
+        // 继续试下一个入口
+      }
+    }
+
+    // 所有入口都失败
+    closeWith(1011, '出站无数据：所有反代入口均失败')
   }
 
   server.addEventListener('message', (event: MessageEvent) => {

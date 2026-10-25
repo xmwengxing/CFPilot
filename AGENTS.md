@@ -178,6 +178,26 @@ CFPilot 是一个运行在 Cloudflare Workers 上的**代理微内核 + 真连�
     验证出站链路要么用**公网 IP**的目标，要么用真机。
     另外 workerd 也不校验 TLS 证书（适合验协议层），
     但真机校验 —— 两边结论不一致时以真机为准。
+29. **`connect()` 成功 ≠ 能收到数据 —— 假活必须切反代**。
+    真机实测（2026-10-25，VLESS over WS，协议响应头 `[0,0]` 已回后）：
+
+    | 目标 | TCP | 实际收到字节 |
+    |------|-----|-------------|
+    | `neverssl.com:80` / `baidu.com:80` / `qq.com:80` | ✅ | 241~413B ✅ |
+    | `cloudflare.com:443` / `amazon.com:443` | ✅ | 413B ✅ |
+    | `github.com:443` / `wikipedia.org:443` / Google 系 443 | ✅ | **0B** ❌ |
+
+    Workers 的出站对部分 443 目标「TCP 建连成功但一个字节都不回」，
+    这是 Cloudflare 边缘出口的限制。**只判 `connect()` 成功就当中继可用，
+    客户端会一直挂着等响应，超时后 -1。**
+
+    同类项目（edgetunnel / BPB）的解法一致：**直连成功后若下行无数据，
+    自动重拨到反代入口**（第三方按 SNI 转发，出口不是 Cloudflare）。
+    本项目的实现见 `protocols/websocket-self.ts` 的
+    `DOWNLINK_STALL_MS` / `redialViaRelay()`。
+
+    ⚠️ 触发条件**不能**只看「目标是否 Cloudflare 网段」——
+    `www.youtube.com` 解析到 `142.251.x.x`（非 CF 网段）同样假活。
 
 ---
 

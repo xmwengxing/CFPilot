@@ -28,8 +28,8 @@
 ### 1. 部署
 
 ```bash
-npx -y cfpilot-deploy@latest init        # Worker 单项目
 npx -y cfpilot-deploy@latest pages-split # Pages 双项目（推荐）
+npx -y cfpilot-deploy@latest init        # Worker 单项目（实验阶段，不可用）
 ```
 
 `init` 会依次引导你完成：填 API Token → 选账号 → 自动建 KV → 上传内核 → 绑定域名。

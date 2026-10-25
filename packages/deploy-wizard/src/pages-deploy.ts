@@ -911,6 +911,16 @@ export async function deployPagesSplit(
   /* ---------------- 4. 写回部署清单（下次更新靠它识别同源项目） ---------------- */
 
   if (result.control.subdomain && result.data.subdomain) {
+    // ⚠️ 不要写 `'unknown'` 这种假版本号（2026-10-25 修正）。
+    //
+    // 早年这里写 `options.localBuild ?? 'unknown'`，于是清单里留下真正的字符串
+    // `"build": "unknown"`。而读清单的一方（GUI 的「检查状态」）无法区分
+    // 「真的叫 unknown」和「当时没读到」—— 只能显示「线上内核 unknown ≠ 本地 xxx」，
+    // 用户完全看不懂。
+    //
+    // 正确做法：**读不到就写空串**（语义 = 未知），由读取方按「无版本号」处理。
+    const build = (options.localBuild ?? '').trim()
+
     await writeManifest(client, options.accountId, options.kvNamespaceId, {
       v: 1,
       kvNamespaceId: options.kvNamespaceId,
@@ -920,7 +930,7 @@ export async function deployPagesSplit(
       dataSubdomain: result.data.subdomain,
       // 自定义域名：本次迁过来的，或旧项目上原有的（下次更新还要靠它迁移）
       dataCustomDomain: dataCustomDomain || manifest?.dataCustomDomain || '',
-      build: options.localBuild ?? 'unknown',
+      build,
       at: new Date().toISOString(),
       credentials: {
         panelPath: effective.panelPath,

@@ -52,10 +52,32 @@ interface CFPilotLogEntry {
   at: number
 }
 
+/**
+ * 账户配置视图（渲染层用）。
+ *
+ * ⚠️ **不包含 `cfToken`**：令牌明文只留在主进程，
+ * 渲染层只能通过 `hasToken` 知道「配没配」。
+ */
+interface CFPilotProfileView {
+  id: string
+  name: string
+  accountId: string
+  accountName: string
+  kvNamespaceId: string
+  /** 是否已保存 Token */
+  hasToken: boolean
+  createdAt: string
+  updatedAt: string
+  /** 是否是当前激活项 */
+  active: boolean
+}
+
 interface CFPilotDeployStatus {
   hasDeploy: boolean
-  /** 结论：none 未部署 / outdated 可更新 / latest 已是最新 */
-  state: 'none' | 'outdated' | 'latest'
+  /** 结论：none 未部署 / outdated 可更新 / latest 已是最新 / blocked 前置条件不满足 */
+  state: 'none' | 'outdated' | 'latest' | 'blocked'
+  /** 阻塞原因（state=blocked 时才有） */
+  reason?: 'no-token' | 'no-account' | 'no-kv'
   /** 线上（KV 清单）的构建版本 */
   build?: string
   /** 本地内核产物的构建版本 */
@@ -86,6 +108,30 @@ interface CFPilotKvOption {
 
 interface Window {
   cfpilot: {
+    // ---- 多账户（profile）管理 ----
+    /** 列出所有账户配置（不含 Token 明文） */
+    listProfiles(): Promise<CFPilotProfileView[]>
+    /** 新建账户配置并激活 */
+    createProfile(name?: string): Promise<CFPilotProfileView>
+    /** 更新账户配置 */
+    updateProfile(
+      id: string,
+      patch: {
+        name?: string
+        cfToken?: string
+        accountId?: string
+        accountName?: string
+        kvNamespaceId?: string
+        panelPassword?: string
+      }
+    ): Promise<{ ok: boolean; error?: string }>
+    /** 删除账户配置 */
+    deleteProfile(id: string): Promise<{ deleted: boolean; activeId: string }>
+    /** 切换激活账户 */
+    switchProfile(id: string): Promise<{ ok: boolean; activeId: string }>
+    /** 当前激活账户 */
+    currentProfile(): Promise<CFPilotProfileView | null>
+
     runDeploy(
       params: {
         mode: 'auto' | 'fresh' | 'update'
@@ -117,7 +163,8 @@ interface Window {
    */
   checkDeployed(kvNamespaceId?: string): Promise<{
     hasDeploy: boolean
-    state: 'none' | 'outdated' | 'latest'
+    state: 'none' | 'outdated' | 'latest' | 'blocked'
+    reason?: 'no-token' | 'no-account' | 'no-kv'
     /** 线上（KV 清单）的构建版本 */
     build?: string
     /** 本地内核产物的构建版本 */

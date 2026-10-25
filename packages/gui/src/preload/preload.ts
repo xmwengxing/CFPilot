@@ -38,6 +38,29 @@ const api = {
       kvNamespaceId: string
     }>,
 
+  // ---- 多账户（profile）管理 ----
+  // 渲染层永远拿不到 Token 明文，只能看到 hasToken 布尔值。
+  listProfiles: () => ipcRenderer.invoke('profile:list') as Promise<CFPilotProfileView[]>,
+  createProfile: (name?: string) =>
+    ipcRenderer.invoke('profile:create', name) as Promise<CFPilotProfileView>,
+  updateProfile: (
+    id: string,
+    patch: {
+      name?: string
+      cfToken?: string
+      accountId?: string
+      accountName?: string
+      kvNamespaceId?: string
+      panelPassword?: string
+    }
+  ) => ipcRenderer.invoke('profile:update', id, patch) as Promise<{ ok: boolean; error?: string }>,
+  deleteProfile: (id: string) =>
+    ipcRenderer.invoke('profile:delete', id) as Promise<{ deleted: boolean; activeId: string }>,
+  switchProfile: (id: string) =>
+    ipcRenderer.invoke('profile:switch', id) as Promise<{ ok: boolean; activeId: string }>,
+  currentProfile: () =>
+    ipcRenderer.invoke('profile:current') as Promise<CFPilotProfileView | null>,
+
   // 本地真连接优选
   runScan: (params: {
     host: string
@@ -146,7 +169,8 @@ const api = {
   onDeployStatus: (
     cb: (status: {
       hasDeploy: boolean
-      state: 'none' | 'outdated' | 'latest'
+      state: 'none' | 'outdated' | 'latest' | 'blocked'
+      reason?: 'no-token' | 'no-account' | 'no-kv'
       build?: string
       localBuild?: string
       at?: string

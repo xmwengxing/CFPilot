@@ -429,7 +429,7 @@
           wsPath: path,
           probePath,
           skipSpeed: $('optNoSpeed').checked,
-          sample: Number($('optSample').value) || 3000,
+          sample: Number($('optSample').value) || 6556,
           top: Number($('optTop').value) || 15,
           countries: readOptCountries(),
           speedMode: speedUrl ? 'url' : 'auto',

@@ -24,11 +24,16 @@ export const DEFAULT_CANDIDATE_SEED = 24301
 /**
  * 本地桥接服务未指定采样数时的默认值。
  *
- * 2026-10-24 从 300 提到 3000：阶段一新增 TLS 握手筛选后，
+ * 2026-10-25 从 3000 提到 6556：加权采样后有效候选密度提高，
+ * 但 TLS 握手快慢与 TCP 延迟几乎无关，仍需要较大样本才能覆盖到
+ * 「握手快」的 IP。6556 是真机验证过的值（选出的 IP TLS 124~352ms、
+ * 下行 1.4~7.3 MB/s）。
+ *
+ * 历史：2026-10-24 从 300 提到 3000：阶段一新增 TLS 握手筛选后，
  * 采样量直接决定能否碰到「握手快」的 IP —— 实测 TCP 9ms 的 IP
  * TLS 握手可能要 3.5 秒，两者几乎无关，300 个候选里往往一个都快不了。
  */
-export const DEFAULT_BRIDGE_SAMPLE = 3000
+export const DEFAULT_BRIDGE_SAMPLE = 6556
 
 export interface CandidateOptions {
   /** 采样上限，0 = 不限制；默认 20000 */

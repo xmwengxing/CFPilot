@@ -79,10 +79,16 @@ export const IPV4_CIDR_WEIGHTS: Readonly<Record<string, number>> = {
   '188.114.96.0/20': 0.3,
   '141.101.64.0/18': 0.2,
   '162.158.0.0/16': 0.2, // 162.158.x.x：边缘节点，部分可用
-  // 162.159.x.x 是 Cloudflare 的管理 / API 网段，不是边缘节点：
-  // 真机实测大量返回 HTTP 403（反爬风控），数据面不会正常响应。
-  // 它被 162.158.0.0/15 覆盖，因此显式压到 0。
-  '162.159.0.0/16': 0,
+  // 162.159.x.x 是 Cloudflare 的管理 / API 网段，真机实测**多数**返回
+  // HTTP 403（反爬风控），但**并非全部**——用户实测 162.159.237.59 可用
+  // （2.8 MB/s），本地复测同样通过（SJC）。
+  //
+  // 因此**不能压到 0**（会错杀可用 IP），给一个很低的权重：
+  // 仍能采到少量候选，但不让大量 403 IP 占据阶段二额度。
+  //
+  // ⚠️ 教训：权重粒度为 /16，但实际可用性可能细到单个 IP。
+  // 实测样本只有 9 个就下「完全不可用」的结论过于草率。
+  '162.159.0.0/16': 0.05,
   '172.64.0.0/13': 0.1,
   // 实测 0/12 —— 不采样
   '173.245.48.0/20': 0,
@@ -297,6 +303,62 @@ function bigIntToIpv6(value: bigint): string {
 }
 
 /**
+ * 把网段按「权重区」拆分成子网段。
+ *
+ * ## 为什么需要（2026-10-25 真机发现的缺陷）
+ *
+ * 官方返回的网段是 `162.158.0.0/15`，它**横跨两个权重区**：
+ *   - `162.158.x.x`：边缘节点，权重 0.2
+ *   - `162.159.x.x`：管理 / API 网段，权重 0（大量 HTTP 403）
+ *
+ * 若按整个 /15 给一个权重再均匀采样，两个区会各拿一半候选 ——
+ * 细粒度权重表完全失效（真机：用户可用的 `162.159.237.59` 被错杀，
+ * 而大量 403 IP 又混进候选）。
+ *
+ * 因此这里把网段拆到「权重一致的最小前缀」：逐级细分（/15 → /16 → /24 …），
+ * 直到每个子块的 `cidrWeight` 相同，或无法再细（/32）。
+ *
+ * 只对 IPv4 生效（权重表只覆盖 IPv4）。
+ */
+function splitByWeight(cidr: ParsedCidr): ParsedCidr[] {
+  if (cidr.family !== 4) return [cidr]
+  const out: ParsedCidr[] = []
+  /** 待处理栈：[网段, 已知权重] */
+  const stack: Array<{ c: ParsedCidr; known?: number }> = [{ c: cidr }]
+
+  while (stack.length > 0) {
+    const item = stack.pop()!
+    const c = item.c
+    const weight = item.known ?? cidrWeight(c.cidr)
+    if (c.prefix >= 32) {
+      out.push(c)
+      continue
+    }
+    // 拆成两个等长子网。注意 cidr 字段要同步成子网的字符串形式，
+    // 否则 cidrWeight 会一直拿到父网段的串、得出相同的权重。
+    const half = 1n << BigInt(32 - c.prefix - 1)
+    const mk = (base: bigint): ParsedCidr => {
+      const sub: ParsedCidr = { ...c, prefix: c.prefix + 1, size: half, base }
+      return { ...sub, cidr: `${bigIntToIpv4(base)}/${c.prefix + 1}` }
+    }
+    const left = mk(c.base)
+    const right = mk(c.base + half)
+    const lw = cidrWeight(left.cidr)
+    const rw = cidrWeight(right.cidr)
+    if (lw === rw) {
+      // 两半权重相同：无需继续拆
+      out.push(c)
+      continue
+    }
+    // 权重不同：分别入栈（带上各自的权重，避免重复计算）
+    stack.push({ c: left, known: lw }, { c: right, known: rw })
+  }
+
+  // 按 base 排序，保证输出顺序稳定（可复现）
+  return out.sort((a, b) => (a.base < b.base ? -1 : a.base > b.base ? 1 : 0))
+}
+
+/**
  * 把网段展开为候选 IP 列表。
  * 大网段按比例均匀采样，避免一次枚举几百万个地址。
  *
@@ -317,11 +379,19 @@ function bigIntToIpv6(value: bigint): string {
  *   - 想要的个数 ≥ 网段大小时退化为全量枚举（step 永不为 0）；
  *   - 最后按预算收口：每网段保底 1 个会让总数略超，从计数最大的网段
  *     依次减 1 压回预算内（网段数超过预算时如实保留每网段 1 个）。
+ *
+ * ## 网段拆分（2026-10-25 新增）
+ *
+ * 进入采样前先把网段按权重区拆开（见 `splitByWeight`），
+ * 否则 `162.158.0.0/15` 这种跨权重区的网段会让细粒度权重失效。
  */
 export function expandCidrs(cidrs: string[], options: IpRangeOptions = {}): string[] {
   const sample = options.sample ?? 20000
   const random = makeRandom(options.seed ?? 0x5eed)
-  const parsed = cidrs.map(parseCidr).filter((c): c is ParsedCidr => c !== null)
+  const parsedRaw = cidrs.map(parseCidr).filter((c): c is ParsedCidr => c !== null)
+  if (parsedRaw.length === 0) return []
+  // 按权重区拆分：让细粒度权重在跨区网段上也生效
+  const parsed = parsedRaw.flatMap(splitByWeight)
   if (parsed.length === 0) return []
   if (sample <= 0) {
     // 不限制：全量枚举
@@ -376,10 +446,21 @@ export function expandCidrs(cidrs: string[], options: IpRangeOptions = {}): stri
     }
     if (familyTotal === 0n) continue
 
-    // 第一步：按比例算出每个网段「想要的个数」
+    // 第一步：按比例算出每个网段「想要的个数」。
+    //
+    // 下限 `minPerCidr` 也要随权重缩放 —— 否则 0.05 权重的网段会被抬到
+    // 与 1.0 权重相同的保底数（真机：162.159 拿到 64 个，与 104.16 一样多），
+    // 加权就白做了。缩放后保底 1 个（低权重网段至少留个探针）。
+    const minForCidr = (c: ParsedCidr): number => {
+      if (c.family !== 4) return minPerCidr
+      const w = cidrWeight(c.cidr)
+      if (w >= 1) return minPerCidr
+      return Math.max(1, Math.round(minPerCidr * w))
+    }
+
     const plans = group.map((cidr) => {
       const ratio = Number((allocOf(cidr) * BigInt(familyBudget)) / familyTotal)
-      const wanted = Math.max(minPerCidr, Math.min(20000, ratio))
+      const wanted = Math.max(minForCidr(cidr), Math.min(20000, ratio))
       return { cidr, count: Math.min(Number(cidr.size), wanted) }
     })
 

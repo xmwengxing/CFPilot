@@ -465,9 +465,9 @@
             <div class="row">
               <div class="field">
                 <label>候选采样数（--sample）</label>
-                <input type="number" id="optSample" value="3000" min="100" max="50000" />
+                <input type="number" id="optSample" value="6556" min="100" max="50000" />
                 <p class="tip">
-                  建议 <b>3000 起</b>。阶段一要按 <b>TLS 握手耗时</b>筛选，
+                  建议 <b>6556</b>（默认）。阶段一要按 <b>TLS 握手耗时</b>筛选，
                   而 TLS 握手快慢和 TCP 延迟几乎无关（实测 TCP 9ms 的 IP，
                   TLS 可能要 3.5 秒）—— 采样小了根本碰不到握手快的 IP。<br>
                   第一次测新网络建议 <b>5000~10000</b>，确认能选出低延迟 IP 再降回来。

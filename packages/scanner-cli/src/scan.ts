@@ -292,23 +292,33 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   //
   // `--no-verify` 可退回纯 101 校验（对接第三方项目时用，
   // 因为它们没有 CFPilot 的 PING 机制）。
+  //
+  // ⚠️ **内容校验必须走 `/__edge_probe`，不能用 WS 入站路径**（真机实测）：
+  // 探针端点的 WS 分支内置 PING/PONG，而 VLESS/Trojan 入站路径期待的是
+  // 协议头（`[0,0]`）而非 PING 文本 —— 对它发 PING 会永远等不到响应。
+  // 同一批 IP：探针路径 16/20 通过，WS 路径 0/20 全部超时。
+  //
+  // WS 入站路径（`options.wsPath`）只用于**非严格模式**的 101 校验，
+  // 以及阶段三测速（那时走的是 HTTP GET，不是 WS）。
   const strictProbe = options.verifyPayload !== false
+  const strictProbePath = '/__edge_probe'
   report({
     type: 'stage',
     stage: 2,
-    name: strictProbe ? 'WS 101 + 响应体校验' : 'WebSocket 101 校验',
+    name: strictProbe ? 'WS 101 + 响应体校验（探针端点）' : 'WebSocket 101 校验',
     total: stage1.length,
   })
   let probeDone = 0
   let verifiedCount = 0
   const probeResults = await pool(stage1, probeConcurrency, async (item) => {
     const probeFn = strictProbe ? probeWsPing : probeWs101
+    const probePath = strictProbe ? strictProbePath : options.wsPath ?? '/__edge_probe'
     const result: WsProbeResult = await probeFn(
       item.ip,
       options.port,
       options.host,
       probeTimeoutMs,
-      options.wsPath ?? '/__edge_probe'
+      probePath
     )
     probeDone++
     if (result.pongVerified) verifiedCount++

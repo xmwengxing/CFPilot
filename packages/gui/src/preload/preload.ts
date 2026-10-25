@@ -69,6 +69,15 @@ const api = {
       error?: string
     }>,
 
+  /** 自动识别数据面 WS 路径（读 KV 的 CONFIG，回落环境变量 WS_PATH） */
+  detectScanPath: () =>
+    ipcRenderer.invoke('scan:detectPath') as Promise<{
+      ok: boolean
+      path?: string
+      source?: 'kv' | 'env'
+      error?: string
+    }>,
+
   /** 优选器支持的国家列表（与面板 / 命令行版同源） */
   listScanCountries: () =>
     ipcRenderer.invoke('scan:countries') as Promise<Array<{ code: string; name: string }>>,
@@ -86,7 +95,7 @@ const api = {
       options: Array<{
         id: string
         title: string
-        ownership: 'instance' | 'cfnext' | 'cfpilot' | 'empty'
+        ownership: 'instance' | 'foreign' | 'cfpilot' | 'empty'
         controlProject?: string
         dataProject?: string
         at?: string
@@ -135,12 +144,20 @@ const api = {
     }
   },
   onDeployStatus: (
-    cb: (status: { hasDeploy: boolean; build?: string; at?: string; controlProject?: string; dataProject?: string }) => void
+    cb: (status: {
+      hasDeploy: boolean
+      state: 'none' | 'outdated' | 'latest'
+      build?: string
+      localBuild?: string
+      at?: string
+      controlProject?: string
+      dataProject?: string
+      controlSubdomain?: string
+      dataSubdomain?: string
+    }) => void
   ) => {
-    const listener = (
-      _e: Electron.IpcRendererEvent,
-      status: { hasDeploy: boolean; build?: string; at?: string; controlProject?: string; dataProject?: string }
-    ): void => cb(status)
+    type S = Parameters<typeof cb>[0]
+    const listener = (_e: Electron.IpcRendererEvent, status: S): void => cb(status)
     ipcRenderer.on('deploy-status', listener)
     return () => {
       ipcRenderer.off('deploy-status', listener)
@@ -168,8 +185,11 @@ const api = {
       ipcRenderer.off('scan-result', listener)
     }
   },
-  onUpdateProgress: (cb: (p: { received: number; total: number }) => void) => {
-    const listener = (_e: Electron.IpcRendererEvent, p: { received: number; total: number }): void => cb(p)
+  onUpdateProgress: (
+    cb: (p: { received: number; total: number; source: string; attempt: number }) => void
+  ) => {
+    type P = { received: number; total: number; source: string; attempt: number }
+    const listener = (_e: Electron.IpcRendererEvent, p: P): void => cb(p)
     ipcRenderer.on('update-progress', listener)
     return () => {
       ipcRenderer.off('update-progress', listener)

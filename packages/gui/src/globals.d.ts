@@ -54,10 +54,17 @@ interface CFPilotLogEntry {
 
 interface CFPilotDeployStatus {
   hasDeploy: boolean
+  /** 结论：none 未部署 / outdated 可更新 / latest 已是最新 */
+  state: 'none' | 'outdated' | 'latest'
+  /** 线上（KV 清单）的构建版本 */
   build?: string
+  /** 本地内核产物的构建版本 */
+  localBuild?: string
   at?: string
   controlProject?: string
   dataProject?: string
+  controlSubdomain?: string
+  dataSubdomain?: string
 }
 
 /**
@@ -68,7 +75,7 @@ interface CFPilotDeployStatus {
 interface CFPilotKvOption {
   id: string
   title: string
-  ownership: 'instance' | 'cfnext' | 'cfpilot' | 'empty'
+  ownership: 'instance' | 'foreign' | 'cfpilot' | 'empty'
   controlProject?: string
   dataProject?: string
   at?: string
@@ -102,7 +109,25 @@ interface Window {
       uuid?: string
       wsPath?: string
     }>
-  checkDeployed(kvNamespaceId?: string): Promise<void>
+  /**
+   * 检查线上部署状态。
+   *
+   * 返回的 `state` 直接决定部署按钮的语义：
+   * `none` → 首次部署；`outdated` → 更新部署；`latest` → 已是最新。
+   */
+  checkDeployed(kvNamespaceId?: string): Promise<{
+    hasDeploy: boolean
+    state: 'none' | 'outdated' | 'latest'
+    /** 线上（KV 清单）的构建版本 */
+    build?: string
+    /** 本地内核产物的构建版本 */
+    localBuild?: string
+    at?: string
+    controlProject?: string
+    dataProject?: string
+    controlSubdomain?: string
+    dataSubdomain?: string
+  }>
     runScan(params: {
       host: string
       wsPath: string
@@ -122,6 +147,13 @@ interface Window {
       ok: boolean
       host?: string
       source?: 'custom' | 'pages'
+      error?: string
+    }>
+    /** 自动识别数据面 WS 路径（读 KV 的 CONFIG，回落环境变量 WS_PATH） */
+    detectScanPath(): Promise<{
+      ok: boolean
+      path?: string
+      source?: 'kv' | 'env'
       error?: string
     }>
     /** 优选器支持的国家列表（与面板 / 命令行版同源） */
@@ -144,7 +176,16 @@ interface Window {
     onLog(cb: (entry: CFPilotLogEntry) => void): () => void
     onDeployStatus(cb: (status: CFPilotDeployStatus) => void): () => void
     onScanResult(cb: (payload: CFPilotScanResult) => void): () => void
-    onUpdateProgress(cb: (p: { received: number; total: number }) => void): () => void
+    onUpdateProgress(
+      cb: (p: {
+        received: number
+        total: number
+        /** 当前下载源名称（GitHub / 镜像名） */
+        source: string
+        /** 第几次尝试（1 = 直连） */
+        attempt: number
+      }) => void
+    ): () => void
     checkUpdate(): Promise<{
       current: string
       latest: string | null

@@ -69,7 +69,7 @@
   let kvOptions: Array<{
     id: string
     title: string
-    ownership: 'instance' | 'cfnext' | 'cfpilot' | 'empty'
+    ownership: 'instance' | 'foreign' | 'cfpilot' | 'empty'
     controlProject?: string
     dataProject?: string
     at?: string
@@ -108,8 +108,8 @@
       opt.value = item.id
       if (item.ownership === 'instance') {
         opt.textContent = `● ${item.title} — 实例 ${item.controlProject}/${item.dataProject}（${item.at ?? ''}）`
-      } else if (item.ownership === 'cfnext') {
-        opt.textContent = `○ ${item.title} — 疑似原版 CFNext 项目占用`
+      } else if (item.ownership === 'foreign') {
+        opt.textContent = `○ ${item.title} — 已被其他项目占用`
       } else if (item.ownership === 'cfpilot') {
         opt.textContent = `○ ${item.title} — 含 CFPilot 残留配置`
       } else {
@@ -140,10 +140,10 @@
         `这是本工具部署的实例：控制面 ${item.controlProject} / 数据面 ${item.dataProject}，` +
         `部署于 ${item.at}。选它 = 更新这个实例（UUID 与 WS 路径不变）。`
       deployKv.textContent = `${item.title}（${item.id}）`
-    } else if (item.ownership === 'cfnext') {
+    } else if (item.ownership === 'foreign') {
       hint.textContent =
-        '此命名空间含 CFNext 的 config 键，疑似你自己的原版 CFNext 项目在用。' +
-        '两者使用的键不重叠，可以共存，但建议为 CFPilot 单独建一个。'
+        '此命名空间正被另一个项目使用（键名与本工具不重叠，可以共存），' +
+        '但建议为 CFPilot 单独建一个，避免混淆。'
       deployKv.textContent = `${item.title}（${item.id}）`
     } else if (item.ownership === 'cfpilot') {
       hint.textContent =
@@ -298,7 +298,6 @@
             dataProject: $('dataProject').value.trim(),
             panelPath: $('panelPath').value.trim(),
             wsPath: $('wsPath').value.trim(),
-            // 数据面实现：self（默认）/ vendor
           },
           kvId
         )
@@ -311,6 +310,9 @@
           log('── 部署成功 ──', 'ok')
           if (result.panelUrl) log('面板地址：' + result.panelUrl, 'ok')
           if (result.panelPassword) log('面板密码：' + result.panelPassword, 'ok')
+          // 部署成功后自动刷新状态：版本已同步，按钮应回到「已是最新」
+          const select = $sel('kvSelect')
+          await window.cfpilot.checkDeployed(select.value || undefined)
         }
       } catch (err) {
         log('部署异常：' + (err instanceof Error ? err.message : String(err)), 'err')
@@ -472,6 +474,26 @@
       }
     })
 
+    // 自动识别 WS 路径：从 KV 的 CONFIG 读（最权威），回落数据面环境变量
+    document.getElementById('btnAutoPath')!.addEventListener('click', async () => {
+      log('自动识别 WS 路径…')
+      try {
+        const result = await window.cfpilot.detectScanPath()
+        if (result.ok && result.path) {
+          $('optPath').value = result.path
+          if (result.source === 'kv') {
+            log(`已填入 WS 路径：${result.path}`, 'ok')
+          } else {
+            log(`已从数据面环境变量填入 WS 路径：${result.path}`, 'ok')
+          }
+        } else {
+          log('自动识别失败：' + (result.error ?? '未知错误'), 'err')
+        }
+      } catch (err) {
+        log('自动识别异常：' + (err instanceof Error ? err.message : String(err)), 'err')
+      }
+    })
+
     document.getElementById('btnEnvCheck')!.addEventListener('click', async () => {
       log('检测网络环境…')
       try {
@@ -526,17 +548,21 @@
       if (!confirm('将下载新版本并在替换后重启程序，继续？')) return
       const wrap = document.getElementById('updateProgressWrap')!
       const bar = document.getElementById('updateBar')!
+      const text = document.getElementById('updateProgressText')
       wrap.hidden = false
       bar.style.width = '0%'
+      if (text) { text.hidden = false; text.textContent = '准备下载…' }
       log('开始下载新版本…')
       try {
         const res = await window.cfpilot.downloadUpdate(pendingUpdateUrl)
         bar.style.width = '100%'
+        if (text) text.textContent = '下载完成，正在替换并重启…'
         log('下载完成，正在替换并重启…', 'ok')
         const applied = await window.cfpilot.applyUpdate(res.file)
         if (!applied.ok) log('替换失败：' + (applied.error ?? ''), 'err')
       } catch (err) {
         log('更新失败：' + (err instanceof Error ? err.message : String(err)), 'err')
+        if (text) text.textContent = '下载失败（已显示在日志）'
         wrap.hidden = true
       }
     })
@@ -573,17 +599,68 @@
   function bindPush(): void {
     window.cfpilot.onLog((entry) => log(entry.message, entry.level as never))
 
+    /**
+     * 渲染部署状态，并**同步驱动部署按钮的语义**。
+     *
+     * 交互设计（2026-10-25 重构，解决「这页选项和按钮有点乱」）：
+     *   - 状态卡只回答「现在什么情况」，不承载操作；
+     *   - 部署卡的按钮文案随状态变化：
+     *       none     → 「开始首次部署」
+     *       outdated → 「更新到最新内核」(primary 高亮)
+     *       latest   → 「重新部署」(ghost，弱化)
+     *   - 用户不需要理解「auto/update/fresh」也能直接用默认的「自动判断」。
+     *
+     * ⚠️ 不自动填 optHost：`dataProject` 是**项目名**不是域名，
+     * 项目名与子域不保证一致（用户可自定义子域）。
+     * 域名走「自动识别域名」按钮读真实 subdomain / 自定义域名。
+     */
     window.cfpilot.onDeployStatus((status) => {
-      const el = document.getElementById('deployStatus')!
+      const el = document.getElementById('deployStatus')
+      const box = document.getElementById('deployStateBox')
+      const btn = document.getElementById('btnDeploy') as HTMLButtonElement | null
+      const hint = document.getElementById('deployActionHint')
+      if (!el || !box || !btn) return
+
+      const setBtn = (label: string, primary: boolean): void => {
+        btn.textContent = label
+        btn.classList.toggle('btn-primary', primary)
+        btn.classList.toggle('btn-ghost', !primary)
+      }
+
       if (!status.hasDeploy) {
-        el.textContent = '尚未部署'
+        el.innerHTML =
+          '这个 KV 里<b>还没有部署记录</b> —— 点下面的按钮会创建新的控制面与数据面项目。'
+        setBtn('开始首次部署', true)
+        if (hint) hint.textContent = '首次部署会生成新的 UUID、WS 路径与面板密码，请存好。'
         return
       }
-      el.innerHTML = '已有部署：<b>' + escapeHtml(status.controlProject ?? '') + '</b> / ' +
-        escapeHtml(status.dataProject ?? '') + '（版本 ' + escapeHtml(status.build ?? '?') + '）'
-      // 顺手把数据面域名填进优选表单，省得用户手动输入
-      if (status.dataProject) {
-        $('optHost').value = status.dataProject + '.pages.dev'
+
+      const local = status.localBuild ? escapeHtml(status.localBuild) : '未知'
+      const remote = status.build ? escapeHtml(status.build) : '（无版本号）'
+      const instance =
+        '<b>' + escapeHtml(status.controlProject ?? '?') + '</b> / <b>' +
+        escapeHtml(status.dataProject ?? '?') + '</b>'
+
+      if (status.state === 'latest') {
+        el.innerHTML =
+          '<span class="badge ok">已是最新</span><br>' +
+          '实例：' + instance + '<br>' +
+          '线上内核 <code>' + remote + '</code> = 本地内核 <code>' + local + '</code>'
+        setBtn('重新部署', false)
+        if (hint) hint.textContent = '线上已是最新内核，通常不需要再部署。'
+        return
+      }
+
+      // outdated
+      el.innerHTML =
+        '<span class="badge warn">可更新</span><br>' +
+        '实例：' + instance + '<br>' +
+        '线上内核 <code>' + remote + '</code> → 本地 <code>' + local + '</code>' +
+        (status.at ? '<br><span style="color:var(--muted)">上次部署：' + escapeHtml(status.at) + '</span>' : '')
+      setBtn('更新到最新内核', true)
+      if (hint) {
+        hint.textContent =
+          '更新会沿用原 UUID 与 WS 路径，客户端订阅地址不用改。'
       }
     })
 
@@ -592,10 +669,26 @@
     window.cfpilot.onUpdateProgress((p) => {
       const wrap = document.getElementById('updateProgressWrap')
       const bar = document.getElementById('updateBar')
+      const text = document.getElementById('updateProgressText')
       if (!wrap || !bar) return
       wrap.hidden = false
+
+      const mb = (n: number): string => (n / 1024 / 1024).toFixed(1)
       const pct = p.total > 0 ? Math.round((p.received / p.total) * 100) : 0
-      bar.style.width = pct + '%'
+      bar.style.width = (p.total > 0 ? pct : 30) + '%'
+
+      if (text) {
+        const parts: string[] = []
+        if (p.total > 0) {
+          parts.push(`${mb(p.received)} / ${mb(p.total)} MB（${pct}%）`)
+        } else {
+          // 服务端没给 content-length：只能显示已下载量
+          parts.push(`已下载 ${mb(p.received)} MB`)
+        }
+        if (p.source && p.source !== 'GitHub') parts.push(`镜像 ${p.source}`)
+        if (p.attempt > 1) parts.push(`第 ${p.attempt} 次尝试`)
+        text.textContent = parts.join(' · ')
+      }
     })
   }
 

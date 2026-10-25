@@ -15,10 +15,13 @@ import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { app, type BrowserWindow } from 'electron'
 import { loadSecrets, saveSecrets, clearSecrets, hasToken } from './config-store'
+import { normalizePagesHost } from './pages-host'
 import { runLocalScan, detectProxyInterference, listScanCountries, type ScanEvent } from './scanner'
 
 // 国家列表与扫描逻辑同在 scanner.ts，这里转供 IPC 层使用
 export { listScanCountries }
+// 域名规整抽在 pages-host.ts（纯函数，可单测），这里转出保持历史 import 路径可用
+export { normalizePagesHost }
 
 /**
  * 当前文件所在目录。
@@ -112,6 +115,13 @@ interface CfPagesProject {
   subdomain: string
   /** 已绑定的自定义域名列表（不含 pages.dev 子域） */
   domains?: string[]
+  /** 生产环境的部署配置（含环境变量与 KV 绑定） */
+  deployment_configs?: {
+    production?: {
+      env_vars?: Record<string, { value: string }>
+      kv_namespaces?: Record<string, { namespace_id: string }>
+    }
+  }
 }
 
 /** 定位 deploy-wizard 库文件（构建产物） */
@@ -277,11 +287,26 @@ export async function runDeploy(
   }
 }
 
-/** 从产物里读构建版本 */
+/**
+ * 从产物里读构建版本。
+ *
+ * ## 版本串格式（build.mjs 的 buildVersion）
+ *
+ * `<git短hash>-<源码内容哈希前8位>`，例如 `ba44891-0b9cdd59`。
+ *
+ * ## 2026-10-25 修复：正则写死了「12 位纯数字」
+ *
+ * 老正则 `/["']([0-9a-f]{7,10}-\d{12})["']/` 只匹配 `-` 后面 12 位**十进制**数字，
+ * 而实际后缀是 **8 位十六进制**（含 `a-f`）—— 永远匹配不上，
+ * GUI 因此一直显示「版本 unknown」。
+ *
+ * 现在放宽为：短 hash + `-` + 4~16 位十六进制。
+ */
 async function readLocalBuild(dist: string): Promise<string | undefined> {
   try {
     const code = await readFile(join(dist, 'control.js'), 'utf8')
-    const m = /["']([0-9a-f]{7,10}-\d{12})["']/.exec(code)
+    // 同时兼容旧的 12 位数字格式与新格式，避免历史产物读不出
+    const m = /["']([0-9a-f]{7,10}-(?:[0-9a-f]{4,16}|\d{12}))["']/i.exec(code)
     return m?.[1]
   } catch {
     return undefined
@@ -314,7 +339,7 @@ export interface ScanParams {
  *
  * 旧实现会在账号下存在 KV 时直接复用 `namespaces[0]` 并落盘锁定，
  * 导致：
- *   - 可能选中别的项目（甚至用户自己的原版 CFNext）的命名空间并写坏它；
+ *   - 可能选中别的项目的命名空间并写坏它；
  *   - 用户无法修改，唯一的解锁方式是「清除本机凭据」（连 Token 一起清掉）；
  *   - 账号下已有 KV 时就永远无法为新实例新建一个。
  *
@@ -356,14 +381,14 @@ export async function detectAccount(
  *
  * `ownership` 说明这个命名空间当前归谁：
  * - `instance`  本工具部署的实例（含清单）
- * - `cfnext`    疑似原版 CFNext 项目占用（键不重叠，可共存）
+ * - `foreign`   被其他项目占用（键不重叠，可共存）
  * - `cfpilot`   含 CFPilot 配置但无清单（残留）
  * - `empty`     空命名空间
  */
 export interface KvOption {
   id: string
   title: string
-  ownership: 'instance' | 'cfnext' | 'cfpilot' | 'empty'
+  ownership: 'instance' | 'foreign' | 'cfpilot' | 'empty'
   /** instance 时：控制面 / 数据面项目名 */
   controlProject?: string
   dataProject?: string
@@ -426,9 +451,12 @@ export async function listKvOptions(
           ownership = 'cfpilot'
         }
       } else {
-        const cfnext = await client.getKvValue(accountId, ns.id, 'config')
-        if (cfnext !== null) {
-          ownership = 'cfnext'
+        // 探测小写 `config` 键：某些同源项目用它存配置。
+        // 存在即说明该命名空间被别的项目占用 —— 本工具**不写**这个键
+        // （AGENTS.md 铁律 3），仅用它做归属判定。
+        const foreignConfig = await client.getKvValue(accountId, ns.id, 'config')
+        if (foreignConfig !== null) {
+          ownership = 'foreign'
         } else {
           const cfpilot = await client.getKvValue(accountId, ns.id, 'CONFIG')
           if (cfpilot !== null) ownership = 'cfpilot'
@@ -667,17 +695,55 @@ export async function runScanJob(
   }
 }
 
-/** 探测线上部署状态：是否存在清单、版本是否落后 */
+/**
+ * 部署状态（供部署页显示）。
+ *
+ * `state` 是给 UI 用的结论，UI 不必自己拼if-else：
+ *   - `none`      没有部署过
+ *   - `outdated`  已部署，但本地内核版本与线上不一致（可更新）
+ *   - `latest`    已部署，且线上就是当前版本
+ */
+export interface DeployStatus {
+  hasDeploy: boolean
+  state: 'none' | 'outdated' | 'latest'
+  /** 线上（KV 清单里记录的）构建版本 */
+  build?: string
+  /** 本地内核产物的构建版本 */
+  localBuild?: string
+  at?: string
+  controlProject?: string
+  dataProject?: string
+  controlSubdomain?: string
+  dataSubdomain?: string
+}
+
+/**
+ * 探测线上部署状态：是否存在清单、线上版本与本地内核版本是否一致。
+ *
+ * ## 为什么要比对版本（2026-10-25）
+ *
+ * 之前只显示清单里的 `build`，用户看到一串 `hash-xxxx` 也不知道是不是最新。
+ * 现在同时读**本地** `dist/control.js` 的构建版本，两者对比：
+ * 不一致就提示「有更新可用」，UI 把按钮变成「更新部署」。
+ *
+ * ## 为什么不用「仓库最新版」比对
+ *
+ * 部署到 Cloudflare 的是**内核产物**（由本机构建），不是 npm 包；
+ * 本地构建版本就是「能部署的最好版本」。仓库 latest 只用于 GUI 自身升级，
+ * 与这个检查无关 —— 混在一起会让用户以为要重新下载 exe。
+ */
 export async function checkDeployed(
   win: BrowserWindow | null,
   kvNamespaceId?: string
-): Promise<void> {
+): Promise<DeployStatus> {
   const secrets = loadSecrets()
   const kvId = (kvNamespaceId ?? '').trim() || secrets.kvNamespaceId.trim()
+  const localBuild = await readLocalBuild(findDistDir())
   if (!secrets.cfToken.trim() || !kvId) {
-    sendLog(win, '未配置 Token 或未选择 KV，跳过检查', 'warn')
-    win?.webContents.send('deploy-status', { hasDeploy: false })
-    return
+    sendLog(win, '未配置 Token 或未选择 KV，无法检查部署状态', 'warn')
+    const status: DeployStatus = { hasDeploy: false, state: 'none', localBuild }
+    win?.webContents.send('deploy-status', status)
+    return status
   }
   try {
     const cfApi = loadCfApi()
@@ -688,22 +754,56 @@ export async function checkDeployed(
       'CFP_DEPLOY_MANIFEST'
     )
     if (!raw) {
-      sendLog(win, '未检测到已有部署', 'info')
-      win?.webContents.send('deploy-status', { hasDeploy: false })
-      return
+      sendLog(win, '该 KV 里没有部署记录 —— 可以「首次部署」', 'info')
+      const status: DeployStatus = { hasDeploy: false, state: 'none', localBuild }
+      win?.webContents.send('deploy-status', status)
+      return status
     }
-    const manifest = JSON.parse(raw) as { build: string; at: string; controlProject: string; dataProject: string }
-    sendLog(win, `已有部署：${manifest.controlProject} / ${manifest.dataProject}（版本 ${manifest.build}）`)
-    win?.webContents.send('deploy-status', {
+
+    const manifest = JSON.parse(raw) as {
+      build?: string
+      at?: string
+      controlProject?: string
+      dataProject?: string
+      controlSubdomain?: string
+      dataSubdomain?: string
+    }
+    const remoteBuild = (manifest.build ?? '').trim()
+    const same = Boolean(remoteBuild && localBuild && remoteBuild === localBuild)
+    const state: DeployStatus['state'] = same ? 'latest' : 'outdated'
+
+    if (same) {
+      sendLog(win, `✅ 线上已是最新内核（${remoteBuild}）`, 'ok')
+    } else if (!remoteBuild) {
+      sendLog(win, '线上部署记录没有版本号（早期版本部署的），建议更新一次', 'warn')
+    } else {
+      sendLog(win, `线上内核 ${remoteBuild} ≠ 本地 ${localBuild ?? '未知'}，可更新部署`, 'warn')
+    }
+    sendLog(
+      win,
+      `实例：控制面 ${manifest.controlProject ?? '?'} / 数据面 ${manifest.dataProject ?? '?'}` +
+        (manifest.at ? `（部署于 ${manifest.at}）` : ''),
+      'info'
+    )
+
+    const status: DeployStatus = {
       hasDeploy: true,
-      build: manifest.build,
+      state,
+      build: remoteBuild || undefined,
+      localBuild,
       at: manifest.at,
       controlProject: manifest.controlProject,
       dataProject: manifest.dataProject,
-    })
+      controlSubdomain: manifest.controlSubdomain,
+      dataSubdomain: manifest.dataSubdomain,
+    }
+    win?.webContents.send('deploy-status', status)
+    return status
   } catch (err) {
-    sendLog(win, `检查失败：${err instanceof Error ? err.message : String(err)}`, 'err')
-    win?.webContents.send('deploy-status', { hasDeploy: false })
+    sendLog(win, `检查部署状态失败：${err instanceof Error ? err.message : String(err)}`, 'err')
+    const status: DeployStatus = { hasDeploy: false, state: 'none', localBuild }
+    win?.webContents.send('deploy-status', status)
+    return status
   }
 }
 
@@ -782,7 +882,13 @@ export async function detectDataPlaneHost(
       sendLog(win, `识别到自定义域名：${custom[0]}`, 'ok')
       return { ok: true, host: custom[0]!, source: 'custom' }
     }
-    const fallback = project.subdomain ? `${project.subdomain}.pages.dev` : manifest.dataSubdomain
+
+    // ⚠️ `project.subdomain` 的取值形态在不同 API 版本下不一致：
+    // 有时是 `cpdata`，有时已经是 `cpdata.pages.dev`。
+    // 早年这里无条件拼 `.pages.dev`，导致出现 `cpdata.pages.dev.pages.dev`
+    // 这种双后缀（2026-10-25 用户反馈）。因此先规整再去重。
+    const fallback =
+      normalizePagesHost(project.subdomain) || normalizePagesHost(manifest.dataSubdomain)
     if (!fallback) {
       sendLog(win, `项目 ${dataProject} 没有可用域名`, 'err')
       return { ok: false, error: '项目没有可用域名' }
@@ -797,6 +903,99 @@ export async function detectDataPlaneHost(
   }
 }
 
+
+/**
+ * 自动识别数据面的 WebSocket 路径。
+ *
+ * ## 为什么需要
+ *
+ * 优选时必须让 WS 路径与目标项目**完全一致**，否则一个 IP 都选不出来
+ * （握手 101 校验全失败）。而路径是部署时随机生成的（一长串字符），
+ * 用户很难记住或找回来。
+ *
+ * ## 数据来源（三级，从权威到兜底）
+ *
+ * 1. **KV 的 `CONFIG` 键**：内核把完整配置（含 `wsPath`）写在这里，
+ *    这是最权威的来源 —— 数据面实际读的就是它。
+ * 2. **环境变量 `WS_PATH`**：部署向导写进 Pages 项目的变量，
+ *    早期版本或未写 KV 时靠它。
+ * 3. 都没有则失败，提示用户去面板或部署日志里找。
+ *
+ * ## 为什么不用「探测」的方式
+ *
+ * 理论上可以拿一批候选路径逐个打 WS 握手试出来，但：
+ *   - 每次尝试都是一次真实的 TLS + WS 握手（慢）；
+ *   - 路径是随机的，暴力枚举不现实；
+ *   - 猜错了在服务端留下大量 404，没有收益。
+ * 直接读配置是唯一可靠且零成本的做法。
+ */
+export async function detectDataPlanePath(
+  win: BrowserWindow | null
+): Promise<{ ok: boolean; path?: string; source?: 'kv' | 'env'; error?: string }> {
+  const secrets = loadSecrets()
+  if (!secrets.cfToken.trim()) {
+    sendLog(win, '尚未保存 API Token，无法自动识别 WS 路径', 'err')
+    return { ok: false, error: '尚未保存 API Token' }
+  }
+  const accountId = secrets.accountId.trim()
+  const kvId = secrets.kvNamespaceId.trim()
+  if (!accountId || !kvId) {
+    sendLog(win, '未检测账号或未选择 KV，无法自动识别 WS 路径', 'err')
+    return { ok: false, error: '未检测账号或未选择 KV' }
+  }
+
+  try {
+    const cfApi = loadCfApi()
+    const client = new cfApi.CloudflareClient({ token: secrets.cfToken })
+
+    // ---- 1) KV 的 CONFIG（最权威）----
+    const rawConfig = await client.getKvValue(accountId, kvId, 'CONFIG')
+    if (rawConfig) {
+      try {
+        const config = JSON.parse(rawConfig) as { wsPath?: string }
+        const wsPath = (config.wsPath ?? '').trim()
+        if (wsPath) {
+          sendLog(win, `已从 KV 配置读到 WS 路径：${wsPath}`, 'ok')
+          return { ok: true, path: wsPath, source: 'kv' }
+        }
+      } catch {
+        sendLog(win, 'KV 里的 CONFIG 不是合法 JSON，改读环境变量', 'warn')
+      }
+    }
+
+    // ---- 2) 环境变量 WS_PATH（部署向导写入）----
+    // 需要先知道是哪个 Pages 项目 —— 从部署清单拿项目名，再从项目列表里取详情
+    const rawManifest = await client.getKvValue(accountId, kvId, 'CFP_DEPLOY_MANIFEST')
+    if (rawManifest) {
+      try {
+        const manifest = JSON.parse(rawManifest) as { dataProject?: string }
+        const dataProject = (manifest.dataProject ?? '').trim()
+        if (dataProject) {
+          // GUI 的 CfApiModule 没暴露 getPagesProject，用列表接口取（多一次全量但足够）
+          const projects = await client.listPagesProjects(accountId)
+          const project = projects.find((p) => p.name === dataProject)
+          const envVars = project?.deployment_configs?.production?.env_vars ?? {}
+          const wsPath = (envVars.WS_PATH?.value ?? envVars.PATH?.value ?? '').trim()
+          if (wsPath) {
+            sendLog(win, `已从数据面环境变量读到 WS 路径：${wsPath}`, 'ok')
+            return { ok: true, path: wsPath, source: 'env' }
+          }
+        }
+      } catch {
+        /* 清单解析失败 → 继续走失败分支 */
+      }
+    }
+
+    sendLog(win, 'KV 配置与数据面环境变量里都没有 WS 路径', 'err')
+    sendLog(win, '请到面板「订阅」页查看，或重新部署一次让向导写入 KV', 'warn')
+    return { ok: false, error: '未找到 WS 路径（KV 与环境变量均为空）' }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    sendLog(win, `自动识别 WS 路径失败：${message}`, 'err')
+    return { ok: false, error: message }
+  }
+}
+
 /** 保存 / 清除凭据 */
 export function saveCredentials(input: {
   cfToken?: string
@@ -806,9 +1005,7 @@ export function saveCredentials(input: {
 }): { saved: boolean } {
   saveSecrets(input)
   return { saved: true }
-}
-
-export function wipeCredentials(): { wiped: boolean } {
+}export function wipeCredentials(): { wiped: boolean } {
   clearSecrets()
   return { wiped: true }
 }

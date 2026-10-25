@@ -314,79 +314,98 @@
 
         <!-- ============ 部署 ============ -->
         <section class="page" id="page-deploy">
+          <!-- 状态卡：先看「现在是什么情况」，再看怎么操作 -->
           <div class="card">
-            <h2>🚀 一键部署</h2>
+            <h2>📌 当前部署状态</h2>
+            <p class="kv-row" style="margin:0 0 6px">
+              <span class="k">命名空间</span><span class="v" id="deployKv">—</span>
+            </p>
+            <div id="deployStateBox">
+              <p class="tip" id="deployStatus" style="margin:8px 0 0">
+                点下面的「检查状态」读取线上部署情况。
+              </p>
+            </div>
+            <div class="btn-row" style="margin-top:12px">
+              <button class="btn btn-ghost" id="btnCheck">检查状态</button>
+            </div>
+            <p class="tip" style="margin-top:8px">
+              会读取这个 KV 里的部署记录，比对<b>线上内核版本</b>与<b>本地内核版本</b>：
+              一致说明不用更新，不一致就可以一键更新。
+            </p>
+          </div>
+
+          <div class="card">
+            <h2>🚀 部署 / 更新</h2>
             <p class="desc">
-              Pages 双项目：控制面（面板 + 订阅 + 探针）+ 数据面（代理入站），共用同一个 KV。
+              Pages 双项目：控制面（面板 + 订阅 + 探针）+ 数据面（代理入站），共用下面这个 KV。
             </p>
 
             <div class="field">
-              <label>部署模式</label>
+              <label>本次操作</label>
               <div class="radios">
-                <label class="chk"><input type="radio" name="mode" value="auto" checked /> 自动判断</label>
-                <label class="chk"><input type="radio" name="mode" value="update" /> 更新部署</label>
-                <label class="chk"><input type="radio" name="mode" value="fresh" /> 首次部署</label>
+                <label class="chk"><input type="radio" name="mode" value="auto" checked /> 自动判断（推荐）</label>
+                <label class="chk"><input type="radio" name="mode" value="update" /> 更新现有部署</label>
+                <label class="chk"><input type="radio" name="mode" value="fresh" /> 全新部署</label>
               </div>
               <p class="tip">
-                <b>自动判断</b>：工具在 KV 里存了部署清单，有清单就是更新，没有就是首次。<br>
-                <b>更新部署</b>会沿用原来的 UUID 与 WS 路径 —— <b>客户端订阅地址不用改</b>。<br>
-                <b>首次部署</b>忽略清单，重新创建项目并生成新凭据 —— 需要一个<b>未被占用</b>的 KV，
-                请在凭据页为它新建一个。
+                <b>自动判断</b>：KV 里有部署记录就更新，没有就新建 —— 一般不用改这一项。<br>
+                <b>更新现有部署</b>：沿用原 UUID 与 WS 路径，<b>客户端订阅地址不用改</b>。<br>
+                <b>全新部署</b>：忽略旧记录，重新建项目并生成新凭据 ——
+                需要一个<b>未被占用</b>的 KV（在「Cloudflare 凭据」页新建）。
               </p>
             </div>
 
-            <div class="field">
-              <label>本次使用的 KV</label>
-              <p class="kv-row" style="margin:0">
-                <span class="k">命名空间</span><span class="v" id="deployKv">—</span>
-              </p>
-              <p class="tip">
-                在「Cloudflare 凭据」页选择。选错或没选会在这里提示，不会带着错的 KV 部署。
-              </p>
-            </div>
+            <details>
+              <summary style="cursor:pointer;color:var(--muted);margin:4px 0 12px">
+                高级选项（项目名 / 路径 / 强制覆盖）— 一般不用动
+              </summary>
 
-            <div class="row">
-              <div class="field">
-                <label>控制面项目名（可选）</label>
-                <input type="text" id="controlProject" placeholder="留空 = 随机或按清单" />
-                <p class="tip">控制面承载面板、订阅与探针，客户端不连它。</p>
+              <div class="row">
+                <div class="field">
+                  <label>控制面项目名</label>
+                  <input type="text" id="controlProject" placeholder="留空 = 随机或按清单" />
+                  <p class="tip">承载面板、订阅与探针，客户端不连它。</p>
+                </div>
+                <div class="field">
+                  <label>数据面项目名</label>
+                  <input type="text" id="dataProject" placeholder="留空 = 随机或按清单" />
+                  <p class="tip">代理转发层，<b>客户端连的就是它</b>。</p>
+                </div>
               </div>
-              <div class="field">
-                <label>数据面项目名（可选）</label>
-                <input type="text" id="dataProject" placeholder="留空 = 随机或按清单" />
-                <p class="tip">数据面是代理转发层，<b>客户端连的就是它</b>。</p>
-              </div>
-            </div>
 
-            <div class="row">
-              <div class="field">
-                <label>面板路径（可选）</label>
-                <input type="text" id="panelPath" placeholder="如 /p-a1b2c3d4" />
-                <p class="tip">面板的访问路径。留空则随机生成或沿用已有值。</p>
+              <div class="row">
+                <div class="field">
+                  <label>面板路径</label>
+                  <input type="text" id="panelPath" placeholder="如 /p-a1b2c3d4" />
+                  <p class="tip">面板访问路径。留空则随机生成或沿用已有值。</p>
+                </div>
+                <div class="field">
+                  <label>WS 路径</label>
+                  <input type="text" id="wsPath" placeholder="如 /k7m2x9q4w8" />
+                  <p class="tip">代理的 WebSocket 路径。留空则随机生成或沿用已有值。</p>
+                </div>
               </div>
-              <div class="field">
-                <label>WS 路径（可选）</label>
-                <input type="text" id="wsPath" placeholder="如 /k7m2x9q4w8" />
-                <p class="tip">代理的 WebSocket 路径。留空则随机生成或沿用已有值。</p>
-              </div>
-            </div>
 
-            <label class="chk" style="margin-bottom:8px">
-              <input type="checkbox" id="optNewCred" /> 更新时重新生成 UUID / WS 路径 / 面板凭据
-            </label>
-            <label class="chk" style="margin-bottom:8px">
-              <input type="checkbox" id="optForceKv" />
-              覆盖 KV 归属校验（明知选中的 KV 属于别的实例仍然继续）
-            </label>
-            <label class="chk">
-              <input type="checkbox" id="optForce" /> 强制重新部署（忽略「版本相同则跳过」）
-            </label>
+              <label class="chk" style="margin-bottom:8px">
+                <input type="checkbox" id="optNewCred" />
+                更新时重新生成 UUID / WS 路径 / 面板凭据（<b>客户端订阅要改</b>）
+              </label>
+              <label class="chk" style="margin-bottom:8px">
+                <input type="checkbox" id="optForceKv" />
+                覆盖 KV 归属校验（明知这个 KV 属于别的实例仍然继续）
+              </label>
+              <label class="chk" style="margin-bottom:8px">
+                <input type="checkbox" id="optForce" />
+                强制重新部署（忽略「版本相同则跳过」）
+              </label>
+            </details>
 
-            <div class="btn-row" style="margin-top:16px">
+            <div class="btn-row" style="margin-top:4px">
               <button class="btn btn-primary" id="btnDeploy">开始部署</button>
-              <button class="btn btn-ghost" id="btnCheck">检查更新</button>
             </div>
-            <p class="tip" id="deployStatus" style="margin-top:10px">尚未部署</p>
+            <p class="tip" id="deployActionHint" style="margin-top:10px">
+              尚未读取部署状态。可以先点上面的「检查状态」看看要不要更新。
+            </p>
           </div>
         </section>
 
@@ -418,12 +437,15 @@
               </div>
               <div class="field">
                 <label>WS 路径</label>
-                <input type="text" id="optPath" placeholder="如 /vless 或 /（根路径）" />
+                <div class="row">
+                  <input type="text" id="optPath" placeholder="如 /vless 或 /（根路径）" />
+                  <button class="btn btn-ghost" id="btnAutoPath" style="flex:0 0 auto">自动识别 WS 路径</button>
+                </div>
                 <p class="tip">
                   <b>必须与目标项目实际的 WebSocket 路径完全一致</b>，否则一个 IP 都选不出来。<br>
-                  · CFPilot / CFNext：通常是 <code>/vless</code> 或一长串 UUID<br>
+                  · CFPilot：通常是随机生成的一长串，也可能被改成 <code>/vless</code><br>
                   · 部分项目直接用根路径，那就填 <code>/</code><br>
-                  · 不知道就分别试 <code>/</code> 和 <code>/vless</code>，能出结果的那个就是对的
+                  · 点「自动识别 WS 路径」可从 KV 配置里读出来，不用自己记
                 </p>
               </div>
             </div>
@@ -590,6 +612,7 @@
               没有新版本时会提示当前版本。更新会在你确认后重启程序完成替换。
             </p>
             <div class="progress" id="updateProgressWrap" hidden><i id="updateBar"></i></div>
+            <p class="tip" id="updateProgressText" style="margin-top:6px" hidden></p>
           </div>
 
           <div class="card">

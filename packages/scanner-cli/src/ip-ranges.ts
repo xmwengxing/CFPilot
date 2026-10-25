@@ -3,6 +3,39 @@
  *
  * 优先从 cloudflare.com/ips-v4、/ips-v6 拉取权威列表，
  * 网络不可用时回退到内置的 Free Plan 友好型网段。
+ *
+ * ## 网段可用率加权（2026-10-25 实测）
+ *
+ * Cloudflare 的 IPv4 空间里大部分是区域/租户专用分配，对普通站点没有配置。
+ * 真机实测（VLESS over WS 101 校验，每段 12 个 IP，用户域名
+ * `cfpilot.shijingtian.de5.net`）：
+ *
+ * | 网段 | 通过率 |
+ * |------|--------|
+ * | `104.16.0.0/13` | 8/12（最好） |
+ * | `104.24.0.0/14` | 7/12 |
+ * | `103.21.244.0/22` | 3/12 |
+ * | `103.31.4.0/22` | 3/12 |
+ * | `190.93.240.0/20` | 3/12 |
+ * | `188.114.96.0/20` | 3/12 |
+ * | `141.101.64.0/18` | 2/12 |
+ * | `162.158.0.0/15` | 2/12 |
+ * | `172.64.0.0/13` | 1/12 |
+ * | `173.245.48.0/20` | **0/12** |
+ * | `103.22.200.0/22` | **0/12** |
+ * | `108.162.192.0/18` | **0/12** |
+ * | `197.234.240.0/22` | **0/12** |
+ * | `198.41.128.0/17` | **0/12** |
+ * | `131.0.72.0/22` | **0/12** |
+ *
+ * 若按网段**大小**比例分配采样预算，一半以上的候选会来自 0% 可用的网段 ——
+ * 真机表现为「阶段一过后只剩零星候选、阶段二全军覆没」。
+ *
+ * 因此这里给每个网段一个**可用率权重**，采样预算按
+ * 「大小 × 权重」分配，把候选集中到真正能用的网段。
+ *
+ * ⚠️ 权重是启发式，会随 Cloudflare 的分区调整过期。
+ * 改这张表前先用实测数据说话（`101 通过率`），别照抄。
  */
 
 /** 内置 IPv4 网段（Cloudflare 官方公布的主要段） */
@@ -23,6 +56,88 @@ export const BUILTIN_IPV4_CIDRS: string[] = [
   '172.64.0.0/13',
   '131.0.72.0/22',
 ]
+
+/**
+ * IPv4 网段的可用率权重（0~1）。
+ *
+ * 未列出的网段用 `DEFAULT_CIDR_WEIGHT`。
+ * 采样预算按 `size × weight` 分配，因此：
+ *   - 权重 0 的网段**完全不参与采样**（实测 0/12，采了也是浪费）
+ *   - 权重高的网段拿到更多候选
+ *
+ * ⚠️ **粒度问题**：权重是按整段给的，但 Cloudflare 的实际可用性可能细到 /24。
+ * 实测（2026-10-25）：同一个 `103.21.244.0/22` 里 `103.21.244.x` 16/16 全过，
+ * 而 `103.21.245.x` 0/14 全挂。因此低权重的网段仍会采到一些废 IP ——
+ * 这是「宁可多采不可漏采」的权衡，真正的剔除靠阶段二的 101 + PING 校验。
+ */
+export const IPV4_CIDR_WEIGHTS: Readonly<Record<string, number>> = {
+  '104.16.0.0/13': 1.0, // 实测 8/12
+  '104.24.0.0/14': 0.9, // 实测 7/12
+  '103.21.244.0/22': 0.3,
+  '103.31.4.0/22': 0.3,
+  '190.93.240.0/20': 0.3,
+  '188.114.96.0/20': 0.3,
+  '141.101.64.0/18': 0.2,
+  '162.158.0.0/16': 0.2, // 162.158.x.x：边缘节点，部分可用
+  // 162.159.x.x 是 Cloudflare 的管理 / API 网段，不是边缘节点：
+  // 真机实测大量返回 HTTP 403（反爬风控），数据面不会正常响应。
+  // 它被 162.158.0.0/15 覆盖，因此显式压到 0。
+  '162.159.0.0/16': 0,
+  '172.64.0.0/13': 0.1,
+  // 实测 0/12 —— 不采样
+  '173.245.48.0/20': 0,
+  '103.22.200.0/22': 0,
+  '108.162.192.0/18': 0,
+  '197.234.240.0/22': 0,
+  '198.41.128.0/17': 0,
+  '131.0.72.0/22': 0,
+}
+
+/** 未列入权重表的网段的默认权重（保守：给一个中等偏低的值） */
+export const DEFAULT_CIDR_WEIGHT = 0.2
+
+/**
+ * 取某个网段的可用率权重。
+ *
+ * ## 为什么不能只做精确匹配
+ *
+ * 官方返回的网段是 `162.158.0.0/15`（覆盖 162.158 与 162.159 两个 /16），
+ * 但两者的可用性天差地别：`162.158.x` 是边缘节点（部分可用），
+ * `162.159.x` 是管理 / API 网段（真机实测大量 HTTP 403）。
+ *
+ * 因此这里用**最长前缀匹配**：把候选网段与表中每一项比对，
+ * 取前缀长度最长（最具体）且能覆盖候选的那个权重。
+ */
+export function cidrWeight(cidr: string): number {
+  const normalized = cidr.trim()
+  // 1) 精确匹配优先
+  if (normalized in IPV4_CIDR_WEIGHTS) return IPV4_CIDR_WEIGHTS[normalized]!
+
+  // 2) 最长前缀匹配：找表中能覆盖 normalized 的最具体网段
+  const parsed = parseCidr(normalized)
+  if (!parsed || parsed.family !== 4) return DEFAULT_CIDR_WEIGHT
+
+  let bestPrefix = -1
+  let bestWeight = DEFAULT_CIDR_WEIGHT
+  for (const [tableCidr, weight] of Object.entries(IPV4_CIDR_WEIGHTS)) {
+    const tableParsed = parseCidr(tableCidr)
+    if (!tableParsed || tableParsed.family !== 4) continue
+    // tableParsed 必须能覆盖 parsed：前缀更短（或相等）
+    if (tableParsed.prefix > parsed.prefix) continue
+    // 对齐检查：都归一到「前 tableParsed.prefix 位」再比。
+    // parsed 的前 tableParsed.prefix 位 = parsed.base >> (32 - tableParsed.prefix)
+    //   （parsed.base 已按更长的 parsed.prefix 掩过，主机位为 0，直接右移即可）
+    // table 的前 tableParsed.prefix 位 = tableParsed.base >> (32 - tableParsed.prefix)
+    const parsedNorm = parsed.base >> BigInt(32 - tableParsed.prefix)
+    const tableNorm = tableParsed.base >> BigInt(32 - tableParsed.prefix)
+    if (parsedNorm !== tableNorm) continue
+    if (tableParsed.prefix > bestPrefix) {
+      bestPrefix = tableParsed.prefix
+      bestWeight = weight
+    }
+  }
+  return bestWeight
+}
 
 /** 内置 IPv6 网段 */
 export const BUILTIN_IPV6_CIDRS: string[] = [
@@ -86,6 +201,8 @@ export interface ParsedCidr {
   base: bigint
   prefix: number
   size: bigint
+  /** 原始 CIDR 字符串（用于查可用率权重表） */
+  cidr: string
 }
 
 /** 解析 CIDR */
@@ -102,7 +219,7 @@ export function parseCidr(cidr: string): ParsedCidr | null {
     const hostBits = 128 - prefix
     const size = 1n << BigInt(hostBits)
     const mask = hostBits === 0 ? 0n : ((1n << BigInt(hostBits)) - 1n)
-    return { family: 6, base: base & ~mask, prefix, size }
+    return { family: 6, base: base & ~mask, prefix, size, cidr: cidr.trim() }
   }
 
   if (prefix < 0 || prefix > 32) return null
@@ -111,7 +228,7 @@ export function parseCidr(cidr: string): ParsedCidr | null {
   const hostBits = 32 - prefix
   const size = 1n << BigInt(hostBits)
   const mask = hostBits === 0 ? 0n : ((1n << BigInt(hostBits)) - 1n)
-  return { family: 4, base: value & ~mask, prefix, size }
+  return { family: 4, base: value & ~mask, prefix, size, cidr: cidr.trim() }
 }
 
 function ipv4ToBigInt(addr: string): bigint | null {
@@ -225,28 +342,61 @@ export function expandCidrs(cidrs: string[], options: IpRangeOptions = {}): stri
   for (const family of [4, 6] as const) {
     const group = parsed.filter((c) => c.family === family)
     if (group.length === 0) continue
-    const familyTotal = group.reduce((sum, c) => sum + c.size, 0n)
-    if (familyTotal === 0n) continue
     // 混合两族时各拿一半预算，保证总数≈sample；单族时拿全量
     // 注意：必须先算布尔值再走三元——`sample / bool ? a : b` 会因 / 优先级高于 ?: 而恒为真
     const hasOtherFamily = parsed.some((c) => c.family !== family)
     const familyBudget = Math.max(1, Math.round(hasOtherFamily ? sample / 2 : sample))
 
+    // 可用率加权（2026-10-25 实测驱动）：
+    //
+    // Cloudflare 的 IPv4 空间大部分是区域/租户专用分配，对普通站点没有配置。
+    // 真机实测（101 校验，每段 12 IP）：6 个官方网段 0/12 完全不可用，
+    // 而 104.16/13 是 8/12。若按网段大小比例分配预算，一半以上候选会来自
+    // 0% 可用的网段 —— 表现为「阶段一过后只剩零星候选、阶段二全军覆没」。
+    //
+    // 因此预算按「大小 × 可用率权重」分配，把候选集中到真正能用的网段。
+    // IPv6 不加权（无实测数据；且 Workers 的 connect() 不支持 IPv6 出站，
+    // IPv6 候选主要供客户端侧使用）。
+    const effectiveSize = (c: ParsedCidr): bigint => {
+      if (c.family !== 4) return c.size
+      const weight = cidrWeight(c.cidr)
+      if (weight <= 0) return 0n // 权重 0 的网段直接排除
+      const scaled = Number(c.size) * weight
+      return scaled >= 1 ? BigInt(Math.floor(scaled)) : 0n
+    }
+
+    const rawTotal = group.reduce((sum, c) => sum + effectiveSize(c), 0n)
+    // 全部网段权重为 0（极端情况）：退化为按原始大小分配，避免返回空列表卡死用户
+    const allZero = rawTotal === 0n
+    let familyTotal = rawTotal
+    let allocOf = effectiveSize
+    if (allZero) {
+      familyTotal = group.reduce((sum, c) => sum + c.size, 0n)
+      allocOf = (c: ParsedCidr): bigint => c.size
+    }
+    if (familyTotal === 0n) continue
+
     // 第一步：按比例算出每个网段「想要的个数」
     const plans = group.map((cidr) => {
-      const ratio = Number((cidr.size * BigInt(familyBudget)) / familyTotal)
+      const ratio = Number((allocOf(cidr) * BigInt(familyBudget)) / familyTotal)
       const wanted = Math.max(minPerCidr, Math.min(20000, ratio))
       return { cidr, count: Math.min(Number(cidr.size), wanted) }
     })
 
-    // 第二步：下限（每网段至少 1 个）会让总数略微超出预算，
+    // 第二步：权重为 0 的网段（实测 0% 可用）彻底剔除，不占用 minPerCidr 名额。
+    // allZero 时（所有网段权重都是 0）退化为全量参与，避免返回空列表卡死用户。
+    const usablePlans = allZero
+      ? plans
+      : plans.filter((p) => effectiveSize(p.cidr) > 0n)
+
+    // 下限（每网段至少 1 个）会让总数略微超出预算，
     // 从计数最大的网段每次减 1，直到总数回到预算内。
     // 每个网段至少保留 1 个——网段数本身就超过预算时（如 --sample 5 配 15 个网段）
     // 无法再压，此时如实超出，保证每个网段都有代表。
-    let familySum = plans.reduce((sum, p) => sum + p.count, 0)
+    let familySum = usablePlans.reduce((sum, p) => sum + p.count, 0)
     while (familySum > familyBudget) {
       let target: { cidr: ParsedCidr; count: number } | null = null
-      for (const plan of plans) {
+      for (const plan of usablePlans) {
         if (plan.count > 1 && (!target || plan.count > target.count)) target = plan
       }
       if (!target) break
@@ -255,7 +405,8 @@ export function expandCidrs(cidrs: string[], options: IpRangeOptions = {}): stri
     }
 
     // 第三步：按计划生成 IP
-    for (const { cidr, count } of plans) {
+    for (const { cidr, count } of usablePlans) {
+      if (count <= 0) continue
       if (count >= Number(cidr.size)) {
         // 全量枚举（想要的个数不少于网段大小）
         for (let i = 0n; i < cidr.size; i++) {

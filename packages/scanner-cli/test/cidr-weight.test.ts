@@ -30,8 +30,8 @@ describe('cidrWeight：可用率权重查询', () => {
   it('最长前缀匹配：细粒度覆盖粗粒度', () => {
     // 104.16.0.0/24 被表中的 104.16.0.0/13 覆盖 → 继承 1.0
     expect(cidrWeight('104.16.0.0/24')).toBe(1.0)
-    // 162.159.0.0/16 显式压 0，即使它被 162.158.0.0/15 覆盖
-    expect(cidrWeight('162.159.0.0/16')).toBe(0)
+    // 162.159.0.0/16 显式给低权重，即使它被 162.158.0.0/15 覆盖
+    expect(cidrWeight('162.159.0.0/16')).toBe(0.05)
   })
 
   it('未列入的网段用默认权重', () => {
@@ -56,9 +56,13 @@ describe('权重表自身的一致性', () => {
     }
   })
 
-  it('162.159（管理/API 网段）必须是 0', () => {
-    // 真机实测：162.159.x.x 大量返回 HTTP 403（反爬风控），数据面不响应
-    expect(IPV4_CIDR_WEIGHTS['162.159.0.0/16']).toBe(0)
+  it('162.159（管理/API 网段）必须是低权重而非 0', () => {
+    // 真机实测：162.159.x.x 多数返回 HTTP 403，但**并非全部** ——
+    // 用户实测 162.159.237.59 可用（2.8 MB/s），本地复测同样通过（SJC）。
+    // 压到 0 会错杀可用 IP，因此给很低的权重（仍能采到少量候选）。
+    const w = IPV4_CIDR_WEIGHTS['162.159.0.0/16']
+    expect(w).toBeGreaterThan(0)
+    expect(w).toBeLessThan(0.1)
   })
 
   it('实测 0/12 的网段必须都是 0 权重', () => {
@@ -107,5 +111,37 @@ describe('expandCidrs：按可用率加权分配', () => {
     const out = expandCidrs(['104.16.0.0/13'], { sample: 100, seed: 24301 })
     expect(out.length).toBeGreaterThan(50)
     expect(out.every((ip) => ip.startsWith('104.1') || ip.startsWith('104.2'))).toBe(true)
+  })
+})
+
+describe('跨权重区网段拆分（splitByWeight）', () => {
+  it('162.158.0.0/15 拆成两半，权重各按自己的算', () => {
+    // 官方返回的 /15 横跨两个权重区：162.158（0.2）与 162.159（0.05）。
+    // 若不拆，均匀采样会让低权重区拿到与高权重区相同的候选数。
+    const out = expandCidrs(['162.158.0.0/15'], { sample: 400, seed: 24301 })
+    const n158 = out.filter((ip) => ip.startsWith('162.158')).length
+    const n159 = out.filter((ip) => ip.startsWith('162.159')).length
+    // 162.158 应明显多于 162.159（权重 0.2 vs 0.05，期望 4:1）
+    expect(n158).toBeGreaterThan(n159 * 2)
+    // 但 162.159 不该被完全排除（不错杀可用 IP，如用户实测的 162.159.237.59）
+    expect(n159).toBeGreaterThan(0)
+  })
+
+  it('单权重区网段不拆（保持原样）', () => {
+    const out = expandCidrs(['104.16.0.0/13'], { sample: 100, seed: 24301 })
+    expect(
+      out.every((ip) => {
+        const o = ip.split('.').map(Number)
+        return o[0] === 104 && o[1]! >= 16 && o[1]! <= 23
+      })
+    ).toBe(true)
+  })
+
+  it('低权重网段的保底数也随权重缩放（不被 minPerCidr 抬平）', () => {
+    // 真机缺陷：minPerCidr=64 让 0.05 权重的 162.159 拿到与 1.0 权重相同的
+    // 保底数，加权白做。缩放后低权重网段只留几个探针。
+    const out = expandCidrs(BUILTIN_IPV4_CIDRS, { sample: 3000, seed: 24301 })
+    const count = (p: string): number => out.filter((ip) => ip.startsWith(p)).length
+    expect(count('104.16.')).toBeGreaterThan(count('162.159.') * 10)
   })
 })

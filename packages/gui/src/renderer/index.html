@@ -209,9 +209,40 @@
 
         <!-- ============ 凭据 ============ -->
         <section class="page active" id="page-cred">
+          <!-- 账户管理：多账户切换 / 增删改 -->
+          <div class="card">
+            <h2>👤 账户配置 <span class="badge info" id="profileBadge">0 个</span></h2>
+            <p class="desc">
+              可以为多个 Cloudflare 账号各存一份配置，随时切换。
+              每份配置独立保存 Token 与该账号下的选择，互不干扰。
+            </p>
+
+            <div class="field">
+              <label>当前使用</label>
+              <select id="profileSelect">
+                <option value="">— 还没有账户配置，点下方「新建」—</option>
+              </select>
+              <p class="tip" id="profileHint">
+                切换账户后需要重新点「检测账号」，因为不同账号下的 KV 完全不同。
+              </p>
+            </div>
+
+            <div class="btn-row">
+              <button class="btn btn-ghost" id="btnProfileNew">新建账户</button>
+              <button class="btn btn-ghost" id="btnProfileRename">重命名</button>
+              <button class="btn btn-danger" id="btnProfileDelete">删除此账户</button>
+            </div>
+            <p class="tip" style="margin-top:8px">
+              「删除此账户」只删除本机保存的配置，<b>不会影响 Cloudflare 上已部署的项目</b>。
+            </p>
+          </div>
+
           <div class="card">
             <h2>🔑 Cloudflare API Token <span class="badge info" id="tokenBadge">未保存</span></h2>
-            <p class="desc">用于调用 Cloudflare 官方 API 完成部署。只保存在本机，不会上传到任何服务器。</p>
+            <p class="desc">
+              用于调用 Cloudflare 官方 API 完成部署。只保存在本机
+              <code>~/.cfpilot-gui/secrets.json</code>，不会上传到任何服务器。
+            </p>
 
             <div class="field">
               <label>API Token</label>
@@ -221,7 +252,8 @@
               </div>
               <p class="tip">
                 没有令牌？<a href="#" data-url="https://dash.cloudflare.com/profile/api-tokens">点此创建</a>。
-                需要哪些权限见下方说明。
+                需要哪些权限见下方说明。<br>
+                已保存过时输入框是空的 —— 出于安全考虑不回显明文，要改就直接粘贴新的。
               </p>
             </div>
 
@@ -233,7 +265,7 @@
 
             <div class="btn-row">
               <button class="btn btn-primary" id="btnDetect">检测账号</button>
-              <button class="btn btn-danger" id="btnWipe">清除本机凭据</button>
+              <button class="btn btn-danger" id="btnWipe">清除本机全部凭据</button>
             </div>
           </div>
 

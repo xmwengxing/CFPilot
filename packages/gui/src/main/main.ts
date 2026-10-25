@@ -15,6 +15,12 @@ import {
   saveCredentials,
   wipeCredentials,
   credentialsState,
+  listCredentialProfiles,
+  createCredentialProfile,
+  updateCredentialProfile,
+  deleteCredentialProfile,
+  switchCredentialProfile,
+  currentCredentialProfile,
   runScanJob,
   detectAccount,
   listKvOptions,
@@ -106,6 +112,19 @@ ipcMain.handle('deploy:check', (_event, kvNamespaceId?: string) =>
 ipcMain.handle('cred:save', (_event, input: Parameters<typeof saveCredentials>[0]) => saveCredentials(input))
 ipcMain.handle('cred:wipe', () => wipeCredentials())
 ipcMain.handle('cred:state', () => credentialsState())
+
+// ---- 多账户（profile）管理 ----
+// 渲染层永远拿不到 Token 明文，只能读到 hasToken 布尔值。
+ipcMain.handle('profile:list', () => listCredentialProfiles())
+ipcMain.handle('profile:create', (_event, name?: string) => createCredentialProfile(name))
+ipcMain.handle(
+  'profile:update',
+  (_event, id: string, patch: Parameters<typeof updateCredentialProfile>[1]) =>
+    updateCredentialProfile(id, patch)
+)
+ipcMain.handle('profile:delete', (_event, id: string) => deleteCredentialProfile(id))
+ipcMain.handle('profile:switch', (_event, id: string) => switchCredentialProfile(id))
+ipcMain.handle('profile:current', () => currentCredentialProfile())
 
 ipcMain.handle('scan:run', (_event, params: ScanParams) => runScanJob(mainWindow, params))
 ipcMain.handle('env:check', () => checkNetworkEnvironment(mainWindow))

@@ -170,26 +170,176 @@
     log(`共 ${kvOptions.length} 个命名空间`, 'ok')
   }
 
+  /* ---------------- 多账户（profile） ---------------- */
+
+  /** 当前所有账户配置（渲染层缓存，不含 Token 明文） */
+  let profiles: CFPilotProfileView[] = []
+
+  /**
+   * 重新拉取账户列表并渲染下拉框。
+   *
+   * 渲染后会自动对齐到「当前激活项」，保证界面与磁盘一致。
+   */
+  async function refreshProfiles(): Promise<void> {
+    profiles = await window.cfpilot.listProfiles()
+    const sel = $sel('profileSelect')
+    sel.innerHTML = ''
+
+    if (profiles.length === 0) {
+      const opt = document.createElement('option')
+      opt.value = ''
+      opt.textContent = '— 还没有账户配置，点下方「新建账户」—'
+      sel.appendChild(opt)
+      $text('profileBadge').textContent = '0 个'
+      return
+    }
+
+    for (const p of profiles) {
+      const opt = document.createElement('option')
+      opt.value = p.id
+      const marks: string[] = []
+      if (!p.hasToken) marks.push('未填 Token')
+      if (p.accountName) marks.push(p.accountName)
+      else if (p.accountId) marks.push(p.accountId.slice(0, 8))
+      const suffix = marks.length > 0 ? ` — ${marks.join(' · ')}` : ''
+      opt.textContent = (p.active ? '● ' : '○ ') + p.name + suffix
+      sel.appendChild(opt)
+    }
+
+    const active = profiles.find((p) => p.active)
+    if (active) sel.value = active.id
+    $text('profileBadge').textContent = `${profiles.length} 个`
+  }
+
+  /** 绑定账户管理相关按钮 */
+  function bindProfiles(): void {
+    $sel('profileSelect').addEventListener('change', async () => {
+      const id = $sel('profileSelect').value
+      if (!id) return
+      const target = profiles.find((p) => p.id === id)
+      if (!target || target.active) return
+
+      log(`切换账户：${target.name}`)
+      const res = await window.cfpilot.switchProfile(id)
+      if (!res.ok) { log('切换失败', 'err'); await refreshProfiles(); return }
+
+      // 切账户后必须重置上一账户的上下文：
+      // KV 列表、账号 ID、部署状态全部属于旧账户，留着会误操作。
+      currentAccountId = ''
+      kvOptions = []
+      renderKvOptions()
+      $text('detAccount').textContent = '—'
+      $('cfToken').value = ''
+      $('panelPassword').value = ''
+
+      await refreshProfiles()
+      await refreshCredState()
+      log(`已切换到「${target.name}」，请点「检测账号」重新读取该账户`, 'warn')
+    })
+
+    document.getElementById('btnProfileNew')!.addEventListener('click', async () => {
+      const name = prompt('给这个账户配置起个名字（可留空，之后会自动用账号名）：', '')
+      if (name === null) return
+      const created = await window.cfpilot.createProfile(name.trim() || undefined)
+      log(`已新建账户配置「${created.name}」，请填写 API Token`, 'ok')
+      currentAccountId = ''
+      kvOptions = []
+      renderKvOptions()
+      $text('detAccount').textContent = '—'
+      $('cfToken').value = ''
+      await refreshProfiles()
+      await refreshCredState()
+    })
+
+    document.getElementById('btnProfileRename')!.addEventListener('click', async () => {
+      const id = $sel('profileSelect').value
+      const target = profiles.find((p) => p.id === id)
+      if (!target) { log('请先选择一个账户', 'warn'); return }
+      const name = prompt('新的名称：', target.name)
+      if (name === null) return
+      const trimmed = name.trim()
+      if (!trimmed) { log('名称不能为空', 'warn'); return }
+      const res = await window.cfpilot.updateProfile(target.id, { name: trimmed })
+      if (res.ok) {
+        log(`已重命名为「${trimmed}」`, 'ok')
+        await refreshProfiles()
+      } else {
+        log('重命名失败：' + (res.error ?? ''), 'err')
+      }
+    })
+
+    document.getElementById('btnProfileDelete')!.addEventListener('click', async () => {
+      const id = $sel('profileSelect').value
+      const target = profiles.find((p) => p.id === id)
+      if (!target) { log('请先选择一个账户', 'warn'); return }
+      if (
+        !confirm(
+          `确定删除账户配置「${target.name}」？\n\n` +
+            '只删除本机保存的配置，不会影响 Cloudflare 上已部署的项目。'
+        )
+      ) {
+        return
+      }
+      const res = await window.cfpilot.deleteProfile(target.id)
+      if (!res.deleted) { log('删除失败：找不到该配置', 'err'); return }
+      log(`已删除账户配置「${target.name}」`, 'ok')
+
+      // 删的正是当前激活项 → 上下文全部失效
+      currentAccountId = ''
+      kvOptions = []
+      renderKvOptions()
+      $text('detAccount').textContent = '—'
+      $('cfToken').value = ''
+      await refreshProfiles()
+      await refreshCredState()
+    })
+  }
+
   function bindCredentials(): void {
     document.getElementById('btnSaveToken')!.addEventListener('click', async () => {
       const token = $('cfToken').value.trim()
       if (!token) { log('请先填写 API Token', 'warn'); return }
 
+      // 没有激活账户时先建一份，再保存（saveCredentials 会写到激活项）
+      if (profiles.length === 0) {
+        await window.cfpilot.createProfile()
+        await refreshProfiles()
+      }
+
       await window.cfpilot.saveCredentials({
         cfToken: token,
         panelPassword: $('panelPassword').value,
       })
-      log('凭据已保存到本机', 'ok')
+      // 保存后清空输入框：Token 不回显，避免被截屏/窥屏
+      $('cfToken').value = ''
+      log('凭据已保存到本机（当前账户）', 'ok')
+      await refreshProfiles()
       await refreshCredState()
     })
 
     document.getElementById('btnDetect')!.addEventListener('click', async () => {
+      // 没有激活的账户配置时先建一份，避免「检测了但没地方存」
+      if (profiles.length === 0) {
+        log('还没有账户配置，先新建一份…')
+        await window.cfpilot.createProfile()
+        await refreshProfiles()
+      }
+
       log('检测账号…')
       const result = await window.cfpilot.detectAccount()
       $text('detAccount').textContent =
         result.accountName ? result.accountName + '（' + result.accountId + '）' : '—'
       if (result.accountId) {
         currentAccountId = result.accountId
+        // 把账号名写回当前 profile —— 下拉框就能显示「主账号（xxx）」而不只是「新账户」
+        const active = profiles.find((p) => p.active)
+        if (active) {
+          await window.cfpilot.updateProfile(active.id, {
+            accountId: result.accountId,
+            accountName: result.accountName,
+          })
+          await refreshProfiles()
+        }
         await loadKvOptions()
       }
     })
@@ -228,12 +378,23 @@
     $('kvSelect').addEventListener('change', () => { updateKvHint() })
 
     document.getElementById('btnWipe')!.addEventListener('click', async () => {
-      if (!confirm('确定清除本机保存的 API Token 与面板密码？')) return
+      if (
+        !confirm(
+          `确定清除本机保存的全部账户配置（共 ${profiles.length} 个）？\n\n` +
+            '这只会删除本机的凭据文件（会留一份 .bak 备份），不影响 Cloudflare 上的部署。'
+        )
+      ) {
+        return
+      }
       await window.cfpilot.wipeCredentials()
-      log('已清除本机凭据', 'ok')
+      log('已清除本机全部凭据（保留 .bak 备份）', 'ok')
       $text('detAccount').textContent = '—'
+      $('cfToken').value = ''
+      $('panelPassword').value = ''
+      currentAccountId = ''
       kvOptions = []
       renderKvOptions()
+      await refreshProfiles()
       await refreshCredState()
     })
 
@@ -270,6 +431,7 @@
       'btnKvSave',
       'btnKvManual',
       'btnAutoHost',
+      'btnAutoPath',
     ]) {
       const el = document.getElementById(id) as HTMLButtonElement | null
       if (el) el.disabled = busy
@@ -283,6 +445,13 @@
       const kvId = select.value
       if (!kvId) {
         log('请先在「Cloudflare 凭据」页选择 KV 命名空间（可点「新建 KV」）', 'warn')
+        const st = document.getElementById('deployStatus')
+        if (st) {
+          st.innerHTML =
+            '<span class="badge warn">需要先完成设置</span><br>' +
+            '<b>还没选择 KV 命名空间</b><br>' +
+            '<span style="color:var(--muted)">👉 去「Cloudflare 凭据」页点「刷新 KV 列表」并选择</span>'
+        }
         return
       }
       setBusy(true)
@@ -627,6 +796,39 @@
         btn.classList.toggle('btn-ghost', !primary)
       }
 
+      if (status.state === 'blocked') {
+        // 前置条件不满足：明确告诉用户「缺什么、去哪补」，
+        // 绝不能显示成「还没部署」（那会让人以为要重新部署一个新实例）
+        const guide: Record<string, { title: string; body: string; action: string }> = {
+          'no-token': {
+            title: '还没填 API Token',
+            body: '检查部署状态需要读取 Cloudflare 上的部署记录，所以需要一个 API Token。',
+            action: '去「Cloudflare 凭据」页填写 Token 并保存',
+          },
+          'no-account': {
+            title: '还没检测到账号',
+            body: 'Token 已保存，但还没确认它属于哪个账号。',
+            action: '去「Cloudflare 凭据」页点「检测账号」',
+          },
+          'no-kv': {
+            title: '还没选择 KV 命名空间',
+            body: '部署记录保存在 KV 里，需要先选定是哪一个。',
+            action: '去「Cloudflare 凭据」页点「刷新 KV 列表」并选择',
+          },
+        }
+        const g = guide[status.reason ?? 'no-token']!
+        el.innerHTML =
+          '<span class="badge warn">需要先完成设置</span><br>' +
+          '<b>' + escapeHtml(g.title) + '</b><br>' +
+          escapeHtml(g.body) +
+          '<br><span style="color:var(--muted)">👉 ' + escapeHtml(g.action) + '</span>'
+        setBtn('开始部署', true)
+        btn.disabled = false
+        if (hint) hint.textContent = '完成上面的设置后，回来再点一次「检查状态」。'
+        return
+      }
+      btn.disabled = false
+
       if (!status.hasDeploy) {
         el.innerHTML =
           '这个 KV 里<b>还没有部署记录</b> —— 点下面的按钮会创建新的控制面与数据面项目。'
@@ -635,28 +837,61 @@
         return
       }
 
-      const local = status.localBuild ? escapeHtml(status.localBuild) : '未知'
-      const remote = status.build ? escapeHtml(status.build) : '（无版本号）'
       const instance =
         '<b>' + escapeHtml(status.controlProject ?? '?') + '</b> / <b>' +
         escapeHtml(status.dataProject ?? '?') + '</b>'
+      const deployedAt = status.at
+        ? '<br><span style="color:var(--muted)">上次部署：' + escapeHtml(status.at) + '</span>'
+        : ''
 
       if (status.state === 'latest') {
         el.innerHTML =
           '<span class="badge ok">已是最新</span><br>' +
           '实例：' + instance + '<br>' +
-          '线上内核 <code>' + remote + '</code> = 本地内核 <code>' + local + '</code>'
+          '内核版本 <code>' + escapeHtml(status.localBuild ?? '') + '</code>' +
+          deployedAt
         setBtn('重新部署', false)
-        if (hint) hint.textContent = '线上已是最新内核，通常不需要再部署。'
+        if (hint) hint.textContent = '线上与本地内核版本一致，通常不需要再部署。'
         return
       }
 
-      // outdated
+      // ---- outdated ----
+      // 三种子情况分开表达，绝不让用户看到 `unknown` 这种占位符
+      if (!status.build) {
+        // 线上没有版本记录（早期部署的，或当时没读到本地版本）
+        el.innerHTML =
+          '<span class="badge warn">建议更新</span><br>' +
+          '实例：' + instance + '<br>' +
+          '线上部署记录里<b>没有内核版本号</b>（较早版本部署的）<br>' +
+          '本地内核版本：<code>' + escapeHtml(status.localBuild ?? '读取失败') + '</code>' +
+          deployedAt
+        setBtn('更新并记录版本', true)
+        if (hint) {
+          hint.textContent =
+            '更新一次即可写入版本号，之后就能正常比对。会沿用原 UUID 与 WS 路径。'
+        }
+        return
+      }
+
+      if (!status.localBuild) {
+        // 本地读不到版本 —— 通常是产物缺失
+        el.innerHTML =
+          '<span class="badge err">本地产物异常</span><br>' +
+          '实例：' + instance + '<br>' +
+          '线上内核版本：<code>' + escapeHtml(status.build) + '</code><br>' +
+          '但<b>读不到本地内核版本</b> —— 应用内的内核产物可能缺失' + deployedAt
+        setBtn('重新部署', false)
+        if (hint) hint.textContent = '请重新安装或联系维护者；直接部署可能上传不完整的产物。'
+        return
+      }
+
+      // 正常差异：线上旧、本地新
       el.innerHTML =
         '<span class="badge warn">可更新</span><br>' +
         '实例：' + instance + '<br>' +
-        '线上内核 <code>' + remote + '</code> → 本地 <code>' + local + '</code>' +
-        (status.at ? '<br><span style="color:var(--muted)">上次部署：' + escapeHtml(status.at) + '</span>' : '')
+        '线上内核 <code>' + escapeHtml(status.build) + '</code>' +
+        ' → 本地 <code>' + escapeHtml(status.localBuild) + '</code>' +
+        deployedAt
       setBtn('更新到最新内核', true)
       if (hint) {
         hint.textContent =
@@ -711,11 +946,13 @@
       logHead.title = collapsed ? '点击展开日志' : '点击折叠日志'
     })
 
+    bindProfiles()
     bindCredentials()
     bindDeploy()
     bindScan()
     bindUpdater()
     bindPush()
+    await refreshProfiles()
     await refreshCredState()
     renderKvOptions()
     void fillCountryOptions()

@@ -14,7 +14,18 @@ import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { app, type BrowserWindow } from 'electron'
-import { loadSecrets, saveSecrets, clearSecrets, hasToken } from './config-store'
+import {
+  loadSecrets,
+  saveSecrets,
+  clearSecrets,
+  hasToken,
+  listProfiles,
+  activeProfileId,
+  createProfile,
+  updateProfile,
+  deleteProfile,
+  setActiveProfile,
+} from './config-store'
 import { normalizePagesHost } from './pages-host'
 import { runLocalScan, detectProxyInterference, listScanCountries, type ScanEvent } from './scanner'
 
@@ -698,14 +709,18 @@ export async function runScanJob(
 /**
  * 部署状态（供部署页显示）。
  *
- * `state` 是给 UI 用的结论，UI 不必自己拼if-else：
- *   - `none`      没有部署过
- *   - `outdated`  已部署，但本地内核版本与线上不一致（可更新）
+ * `state` 是给 UI 用的结论，UI 不必自己拼 if-else：
+ *   - `none`      已确认没有部署（KV 里没有清单）
+ *   - `outdated`  已部署，但版本与本地不一致（可更新）
  *   - `latest`    已部署，且线上就是当前版本
+ *   - `blocked`   **前置条件不满足**（没填令牌 / 没选 KV / 没检测账号），
+ *                 此时「有没有部署」是未知的，不能当成 `none`
  */
 export interface DeployStatus {
   hasDeploy: boolean
-  state: 'none' | 'outdated' | 'latest'
+  state: 'none' | 'outdated' | 'latest' | 'blocked'
+  /** 阻塞原因（state=blocked 时给 UI 展示与引导） */
+  reason?: 'no-token' | 'no-account' | 'no-kv'
   /** 线上（KV 清单里记录的）构建版本 */
   build?: string
   /** 本地内核产物的构建版本 */
@@ -739,12 +754,49 @@ export async function checkDeployed(
   const secrets = loadSecrets()
   const kvId = (kvNamespaceId ?? '').trim() || secrets.kvNamespaceId.trim()
   const localBuild = await readLocalBuild(findDistDir())
-  if (!secrets.cfToken.trim() || !kvId) {
-    sendLog(win, '未配置 Token 或未选择 KV，无法检查部署状态', 'warn')
-    const status: DeployStatus = { hasDeploy: false, state: 'none', localBuild }
+
+  /**
+   * 前置条件不满足时的统一出口。
+   *
+   * ⚠️ 关键：这种情况**不能**返回 `state: 'none'`（2026-10-25 用户反馈）。
+   * `none` 的含义是「已经查过、确实没部署」，UI 会显示「开始首次部署」；
+   * 而没填令牌时「有没有部署」根本无从判断 —— 报成 `none` 会误导用户
+   * 以为自己没部署过，进而重复部署一个新实例。
+   */
+  const blocked = (
+    reason: 'no-token' | 'no-account' | 'no-kv',
+    message: string,
+    hint?: string
+  ): DeployStatus => {
+    sendLog(win, message, 'err')
+    if (hint) sendLog(win, hint, 'warn')
+    const status: DeployStatus = { hasDeploy: false, state: 'blocked', reason, localBuild }
     win?.webContents.send('deploy-status', status)
     return status
   }
+
+  if (!secrets.cfToken.trim()) {
+    return blocked(
+      'no-token',
+      '还没有填写 Cloudflare API Token，无法检查部署状态',
+      '请先到「Cloudflare 凭据」页填入 Token 并保存，再回来点「检查状态」。'
+    )
+  }
+  if (!secrets.accountId.trim()) {
+    return blocked(
+      'no-account',
+      '还没有检测到 Cloudflare 账号',
+      '请到「Cloudflare 凭据」页点「检测账号」，确认 Token 能读取到账号。'
+    )
+  }
+  if (!kvId) {
+    return blocked(
+      'no-kv',
+      '还没有选择 KV 命名空间，无法检查部署状态',
+      '请到「Cloudflare 凭据」页点「刷新 KV 列表」选择一个，或点「新建 KV」。'
+    )
+  }
+
   try {
     const cfApi = loadCfApi()
     const client = new cfApi.CloudflareClient({ token: secrets.cfToken })
@@ -768,16 +820,27 @@ export async function checkDeployed(
       controlSubdomain?: string
       dataSubdomain?: string
     }
-    const remoteBuild = (manifest.build ?? '').trim()
+    // 历史遗留：早期向导在「没读到本地版本」时会写入字符串 `'unknown'`。
+    // 它不是真版本号，语义等同「无记录」—— 必须当成空处理，
+    // 否则界面会出现「线上内核 unknown ≠ 本地 xxx」这种谁也看不懂的话。
+    const rawRemote = (manifest.build ?? '').trim()
+    const remoteBuild = rawRemote.toLowerCase() === 'unknown' ? '' : rawRemote
     const same = Boolean(remoteBuild && localBuild && remoteBuild === localBuild)
     const state: DeployStatus['state'] = same ? 'latest' : 'outdated'
 
+    // 日志措辞要说人话：不展示 `unknown` 这种占位符，直接说明「没有版本记录」
     if (same) {
       sendLog(win, `✅ 线上已是最新内核（${remoteBuild}）`, 'ok')
     } else if (!remoteBuild) {
-      sendLog(win, '线上部署记录没有版本号（早期版本部署的），建议更新一次', 'warn')
+      sendLog(
+        win,
+        '线上部署记录里没有内核版本号（可能是较早版本部署的），建议更新一次以记录版本',
+        'warn'
+      )
+    } else if (!localBuild) {
+      sendLog(win, `线上内核 ${remoteBuild}，但读不到本地内核版本（产物可能缺失），建议重新构建`, 'warn')
     } else {
-      sendLog(win, `线上内核 ${remoteBuild} ≠ 本地 ${localBuild ?? '未知'}，可更新部署`, 'warn')
+      sendLog(win, `线上内核 ${remoteBuild} ≠ 本地 ${localBuild}，可更新部署`, 'warn')
     }
     sendLog(
       win,
@@ -1013,4 +1076,102 @@ export function saveCredentials(input: {
 export function credentialsState(): { hasToken: boolean; accountId: string; kvNamespaceId: string } {
   const s = loadSecrets()
   return { hasToken: hasToken(), accountId: s.accountId, kvNamespaceId: s.kvNamespaceId }
+}
+
+/* ------------------------------------------------------------------ */
+/* 多账户（profile）管理                                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 对外暴露的 profile 视图。
+ *
+ * **绝不包含 `cfToken` 全文** —— 渲染层只需要知道「有没有配」，
+ * 不需要拿到明文令牌。这样即使渲染层被注入脚本，也偷不到 Token。
+ */
+export interface ProfileView {
+  id: string
+  name: string
+  accountId: string
+  accountName: string
+  kvNamespaceId: string
+  /** 是否已保存 Token（不返回 Token 本身） */
+  hasToken: boolean
+  /** Token 是否看起来是脱敏占位（也用于 UI 判断） */
+  createdAt: string
+  updatedAt: string
+  /** 是否是当前激活项 */
+  active: boolean
+}
+
+/** 列出所有账户配置 */
+export function listCredentialProfiles(): ProfileView[] {
+  const activeId = activeProfileId()
+  return listProfiles().map((p) => ({
+    id: p.id,
+    name: p.name,
+    accountId: p.accountId,
+    accountName: p.accountName,
+    kvNamespaceId: p.kvNamespaceId,
+    hasToken: p.cfToken.trim().length > 0,
+    createdAt: p.createdAt,
+    updatedAt: p.updatedAt,
+    active: p.id === activeId,
+  }))
+}
+
+/** 新建账户配置并激活 */
+export function createCredentialProfile(name?: string): ProfileView {
+  const profile = createProfile(name)
+  return {
+    id: profile.id,
+    name: profile.name,
+    accountId: '',
+    accountName: '',
+    kvNamespaceId: '',
+    hasToken: false,
+    createdAt: profile.createdAt,
+    updatedAt: profile.updatedAt,
+    active: true,
+  }
+}
+
+/** 更新账户配置（不需要改的字段不传） */
+export function updateCredentialProfile(
+  id: string,
+  patch: {
+    name?: string
+    cfToken?: string
+    accountId?: string
+    accountName?: string
+    kvNamespaceId?: string
+    panelPassword?: string
+  }
+): { ok: boolean; error?: string } {
+  try {
+    updateProfile(id, patch)
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/** 删除账户配置 */
+export function deleteCredentialProfile(id: string): { deleted: boolean; activeId: string } {
+  return deleteProfile(id)
+}
+
+/**
+ * 切换激活账户。
+ *
+ * ⚠️ 切换后必须让上游重新检测账号 / KV —— 不同账户下的 KV 完全不同。
+ * 因此这里只负责落盘，UI 负责提示用户重新点「检测账号」。
+ */
+export function switchCredentialProfile(id: string): { ok: boolean; activeId: string } {
+  return setActiveProfile(id)
+}
+
+/** 当前激活账户（供 UI 顶部显示） */
+export function currentCredentialProfile(): ProfileView | null {
+  const all = listCredentialProfiles()
+  return all.find((p) => p.active) ?? null
 }

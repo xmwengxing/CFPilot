@@ -21,6 +21,7 @@ import {
   createKvNamespace,
   checkNetworkEnvironment,
   detectDataPlaneHost,
+  detectDataPlanePath,
   listScanCountries,
   type DeployParams,
   type ScanParams,
@@ -110,6 +111,8 @@ ipcMain.handle('scan:run', (_event, params: ScanParams) => runScanJob(mainWindow
 ipcMain.handle('env:check', () => checkNetworkEnvironment(mainWindow))
 // 自动识别数据面域名（优先自定义域名，回落 pages.dev）
 ipcMain.handle('scan:detectHost', () => detectDataPlaneHost(mainWindow))
+// 自动识别数据面 WS 路径（读 KV 的 CONFIG，回落环境变量 WS_PATH）
+ipcMain.handle('scan:detectPath', () => detectDataPlanePath(mainWindow))
 // 优选器支持的国家列表（面板 / CLI / GUI 同源）
 ipcMain.handle('scan:countries', () => listScanCountries())
 ipcMain.handle('account:detect', () => detectAccount(mainWindow))
@@ -120,9 +123,18 @@ ipcMain.handle('kv:create', (_event, accountId: string, title?: string) =>
 
 ipcMain.handle('update:check', () => checkForUpdate())
 ipcMain.handle('update:download', async (_event, url: string) => {
-  const file = await downloadUpdate(url, mainWindow, (received, total) => {
-    mainWindow?.webContents.send('update-progress', { received, total })
-  })
+  const file = await downloadUpdate(
+    url,
+    mainWindow,
+    (progress) => {
+      // 进度：received / total / 当前源 / 第几次尝试
+      mainWindow?.webContents.send('update-progress', progress)
+    },
+    (message, level) => {
+      // 镜像回退过程要让用户看到（软件源域名可能在客户端日志里更可信）
+      mainWindow?.webContents.send('log', { message, level, at: Date.now() })
+    }
+  )
   return { ok: true, file }
 })
 ipcMain.handle('update:apply', async (_event, file: string) => applyUpdate(file, mainWindow))

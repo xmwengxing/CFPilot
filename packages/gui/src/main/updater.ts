@@ -11,6 +11,17 @@
  * 2. 与当前版本比较；有新版本就下载对应的 portable exe
  * 3. 下载完成后，提示用户重启应用完成替换
  * 4. 替换由外部脚本执行：本进程正在运行，无法直接覆盖自己
+ *
+ * ## 镜像回退（2026-10-25）
+ *
+ * GitHub 的 `objects.githubusercontent.com` 在国内经常连不上或极慢。
+ * 因此下载按以下顺序尝试，任一个成功即停：
+ *
+ *   1. 直连 GitHub（`browser_download_url`）
+ *   2. `ghproxy` 类镜像（前缀代理原 URL）
+ *   3. `jsDelivr`（仅对仓库文件有效，对 Release 资产通常无效，作为最后兜底）
+ *
+ * 每个源失败都会在日志里说明原因，用户能看到「卡在哪个源」。
  */
 import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
@@ -21,6 +32,22 @@ import { spawn } from 'node:child_process'
 
 const REPO = 'xmwengxing/CFPilot'
 const API = `https://api.github.com/repos/${REPO}/releases`
+
+/**
+ * 下载镜像前缀。
+ *
+ * 用法：`<prefix><原始 URL>`。这些是社区维护的 GitHub 加速代理，
+ * 只代理 HTTPS 的 github 域名；不改变文件内容。
+ *
+ * ⚠️ 第三方镜像**可能失效或篡改内容**，因此：
+ *   - 只在直连失败时才用；
+ *   - 用完不做签名校验（本项目没签名），但会在日志里明确提示走的是镜像。
+ */
+const DOWNLOAD_MIRRORS = [
+  { name: 'ghproxy.net', prefix: 'https://ghproxy.net/' },
+  { name: 'gh-proxy.com', prefix: 'https://gh-proxy.com/' },
+  { name: 'ghfast.top', prefix: 'https://ghfast.top/' },
+]
 
 export interface ReleaseInfo {
   version: string
@@ -120,22 +147,37 @@ export async function checkForUpdate(): Promise<UpdateCheckResult> {
   }
 }
 
-/** 下载新版本到临时目录 */
-export async function downloadUpdate(
-  url: string,
-  win: BrowserWindow | null,
-  onProgress?: (received: number, total: number) => void
-): Promise<string> {
-  const dir = join(app.getPath('temp'), 'cfpilot-update')
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  const target = join(dir, 'CFPilot-new.exe')
+/** 下载进度回调 */
+export interface DownloadProgress {
+  /** 已下载字节 */
+  received: number
+  /** 总字节（0 表示服务端没给 content-length） */
+  total: number
+  /** 当前尝试的源名称（`GitHub` / `ghproxy.net` …） */
+  source: string
+  /** 第几次尝试（从 1 开始） */
+  attempt: number
+}
 
+/**
+ * 从单个 URL 下载，失败抛错。
+ *
+ * 内部完成：建目录 → fetch → 流式写盘 → 校验大小。
+ * 失败时删掉半截文件，避免下一轮被误判成「已下载」。
+ */
+async function downloadFrom(
+  url: string,
+  target: string,
+  sourceName: string,
+  attempt: number,
+  onProgress?: (p: DownloadProgress) => void
+): Promise<string> {
   const response = await fetch(url, {
     headers: { 'User-Agent': 'CFPilot-GUI' },
     signal: AbortSignal.timeout(10 * 60 * 1000),
   })
   if (!response.ok || !response.body) {
-    throw new Error(`下载失败：HTTP ${response.status}`)
+    throw new Error(`HTTP ${response.status}`)
   }
 
   const total = Number(response.headers.get('content-length') ?? 0)
@@ -143,10 +185,86 @@ export async function downloadUpdate(
   const source = Readable.fromWeb(response.body as never)
   source.on('data', (chunk: Buffer) => {
     received += chunk.length
-    onProgress?.(received, total)
+    onProgress?.({ received, total, source: sourceName, attempt })
   })
-  await pipeline(source, createWriteStream(target))
+
+  try {
+    await pipeline(source, createWriteStream(target))
+  } catch (err) {
+    // 清掉半截文件，否则下次可能被当成完整包
+    try {
+      rmSync(target, { force: true })
+    } catch {
+      /* 忽略 */
+    }
+    throw err
+  }
+
+  // 有 content-length 时校验完整性（镜像有时会截断）
+  if (total > 0 && received !== total) {
+    try {
+      rmSync(target, { force: true })
+    } catch {
+      /* 忽略 */
+    }
+    throw new Error(`下载不完整：${received}/${total} 字节`)
+  }
+
   return target
+}
+
+/**
+ * 下载新版本到临时目录。
+ *
+ * ## 镜像回退（2026-10-25）
+ *
+ * 依次尝试：直连 GitHub → 各镜像。任一成功即返回。
+ * 每个源失败都会通过 `onLog` 告诉调用方，用户能看到卡在哪。
+ *
+ * @param url     GitHub 原始下载地址
+ * @param onLog   日志回调（可选）
+ * @param onProgress 进度回调（可选）
+ */
+export async function downloadUpdate(
+  url: string,
+  _win: BrowserWindow | null,
+  onProgress?: (p: DownloadProgress) => void,
+  onLog?: (message: string, level: 'info' | 'warn' | 'err' | 'ok') => void
+): Promise<string> {
+  const dir = join(app.getPath('temp'), 'cfpilot-update')
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  const target = join(dir, 'CFPilot-new.exe')
+
+  // 候选源：直连优先，镜像兜底
+  const sources = [
+    { name: 'GitHub', url },
+    ...DOWNLOAD_MIRRORS.map((m) => ({ name: m.name, url: `${m.prefix}${url}` })),
+  ]
+
+  const errors: string[] = []
+  for (const [index, source] of sources.entries()) {
+    const attempt = index + 1
+    if (attempt > 1) {
+      onLog?.(`直连失败，改用镜像 ${source.name}…`, 'warn')
+    } else {
+      onLog?.(`从 ${source.name} 下载…`, 'info')
+    }
+    try {
+      const file = await downloadFrom(source.url, target, source.name, attempt, onProgress)
+      if (attempt > 1) {
+        onLog?.(`已通过镜像 ${source.name} 下载完成（注意：第三方镜像，建议核对版本号）`, 'warn')
+      } else {
+        onLog?.(`下载完成（${source.name}）`, 'ok')
+      }
+      return file
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      errors.push(`${source.name}: ${message}`)
+      onLog?.(`${source.name} 下载失败：${message}`, 'err')
+    }
+  }
+
+  throw new Error(`所有下载源均失败 —— ${errors.join('；')}`)
 }
 
 /**

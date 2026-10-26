@@ -63,6 +63,53 @@
 
   /* ---------------- 凭据 ---------------- */
 
+  /**
+   * 部署状态的形状（对应 Electron 的 DeployStatus / Go 版的 /api/deploy/check）。
+   *
+   * 抽成具名类型是因为 `applyDeployStatus` 被两处调用
+   * （onDeployStatus 事件 + 「检查状态」按钮），需要共享同一份定义。
+   */
+  interface DeployStatusLike {
+    hasDeploy?: boolean
+    state: 'none' | 'outdated' | 'latest' | 'blocked'
+    reason?: 'no-token' | 'no-account' | 'no-kv'
+    build?: string
+    localBuild?: string
+    controlProject?: string
+    dataProject?: string
+    controlSubdomain?: string
+    dataSubdomain?: string
+    customDomain?: string
+    deployedAt?: string
+    at?: string
+  }
+
+  /**
+   * 渲染「部署状态」卡片的函数引用（模块级）。
+   *
+   * ## 为什么用「可空引用 + 定义处赋值」而不是直接定义函数
+   *
+   * `checkDeployed()` 的返回值**不会自动渲染**，需要调用方把结果喂进来。
+   * 最初它只挂在 `onDeployStatus` 事件上，而「检查状态」按钮只
+   * `await` 了返回值却丢弃结果 —— 用户点完按钮界面上什么都不变。
+   *
+   * 修法：把渲染逻辑提取成具名函数，两个入口都调它。
+   * 但函数体很长（上百行）且在 bindDeploy 内部，
+   * 直接用 const/function 都会碰上作用域或暂时性死区问题。
+   *
+   * 因此：在模块级声明可空引用，在 bindDeploy 里给它赋值。
+   * 赋值发生在 IIFE 初始化期间，早于任何用户点击，所以运行时一定非空。
+   */
+  let applyDeployStatus: ((s: DeployStatusLike) => void) | null = null
+
+  /**
+   * 最近一次优选的结果（可复制格式：`IP:Port#COLO`）。
+   *
+   * 回填面板时用。放在模块级是因为 `renderScanResult`（模块级函数）
+   * 要写它，而「回填」按钮（bindScan 内）要读它。
+   */
+  let lastScanLines: string[] = []
+
   /** 当前账号 ID（检测后填充） */
   let currentAccountId = ''
   /** KV 候选列表 */
@@ -575,6 +622,25 @@
   }
 
   function bindDeploy(): void {
+    /**
+     * 渲染「部署状态」卡片的函数引用。
+     *
+     * ## 为什么用这种写法（2026-10-26 修复「检查状态没反应」）
+     *
+     * `checkDeployed()` 的返回值**不会自动渲染**，需要调用方把结果喂进来。
+     * 最初它只挂在 `onDeployStatus` 事件上，而「检查状态」按钮只
+     * `await` 了返回值却丢弃结果 —— 用户点完按钮界面上什么都不变，
+     * 日志里只有一句「检查线上部署状态…」。
+     *
+     * 修法：把渲染逻辑提取成具名函数，两个入口都调它。
+     * 但该函数体很长（上百行），且定义在 bindDeploy 靠后位置，
+     * 而 btnCheck 处理器在前面 —— 直接用 `const`/`function` 都会有
+     * 作用域/提升问题（TDZ 或块级提升不生效）。
+     *
+     * 所以用「先声明可空引用、定义处赋值」的方式：
+     *   - 声明后立即可被前面的闭包引用（只是当时还是 null）
+     *   - 赋值发生在 bindDeploy 执行过程中，早于任何用户点击
+     */
     document.getElementById('btnDeploy')!.addEventListener('click', async () => {
       // 用下拉框当前选中的 KV；没有选中则回落到本机保存的值
       const select = $sel('kvSelect')
@@ -640,7 +706,91 @@
     document.getElementById('btnCheck')!.addEventListener('click', async () => {
       log('检查线上部署状态…')
       const select = $sel('kvSelect')
-      await window.cfpilot.checkDeployed(select.value || undefined)
+      const btn = document.getElementById('btnCheck') as HTMLButtonElement | null
+      if (btn) btn.disabled = true
+      try {
+        // ⚠️ 必须把返回值渲染出来（2026-10-26 修复）
+        //
+        // 早前只 `await` 不接收结果 → 用户点完按钮界面上什么都不变，
+        // 日志里只有一句「检查线上部署状态…」然后就没了。
+        const status = (await window.cfpilot.checkDeployed(
+          select.value || undefined
+        )) as DeployStatusLike
+        if (applyDeployStatus) {
+          applyDeployStatus(status)
+          log('部署状态已刷新', 'ok')
+        } else {
+          // 理论上不会发生（赋值在本函数执行早期完成）
+          log('内部错误：状态渲染器未初始化', 'err')
+        }
+      } catch (err) {
+        log('检查失败：' + (err instanceof Error ? err.message : String(err)), 'err')
+      } finally {
+        if (btn) btn.disabled = false
+      }
+    })
+
+    /* ---------------- 查看面板凭据 ---------------- */
+
+    /**
+     * 显示部署清单里保存的面板凭据。
+     *
+     * ## 为什么需要（2026-10-27 用户反馈）
+     *
+     * Cloudflare 平台上的环境变量是**加密的**（页面只显示 `****`），
+     * 所以部署完成后如果没记下面板密码，用户就再也拿不回来，面板进不去。
+     *
+     * 这里的值从**本机部署清单**（KV 里的 CFP_DEPLOY_MANIFEST）读取，
+     * 不依赖云端变量的可见性。
+     */
+    document.getElementById('btnShowCreds')?.addEventListener('click', async () => {
+      const box = document.getElementById('credBox')
+      if (!box) return
+
+      // 已经展开就收起（切换行为，避免重复请求）
+      if (!box.hidden) {
+        box.hidden = true
+        return
+      }
+
+      const select = $sel('kvSelect')
+      try {
+        const r = await window.cfpilot.getDeployCredentials(select.value || undefined)
+        if (!r || !r.ok) {
+          log('读取面板凭据失败：' + ((r && r.error) || '未知错误'), 'err')
+          return
+        }
+        const set = (id: string, v: string): void => {
+          const el = document.getElementById(id)
+          if (el) el.textContent = v || '—'
+        }
+        set('credPanelUrl', r.panelUrl ?? '')
+        set('credPanelPw', r.panelPassword ?? '')
+        set('credUuid', r.uuid ?? '')
+        set('credWsPath', r.wsPath ?? '')
+        box.hidden = false
+        log('已读取面板凭据（来自本机部署清单）', 'ok')
+      } catch (err) {
+        log('读取面板凭据失败：' + (err instanceof Error ? err.message : String(err)), 'err')
+      }
+    })
+
+    // 复制全部凭据到剪贴板
+    document.getElementById('btnCopyCreds')?.addEventListener('click', async () => {
+      const g = (id: string): string => document.getElementById(id)?.textContent ?? ''
+      const text = [
+        '面板地址：' + g('credPanelUrl'),
+        '面板密码：' + g('credPanelPw'),
+        'UUID：' + g('credUuid'),
+        'WS 路径：' + g('credWsPath'),
+      ].join('\n')
+      try {
+        await navigator.clipboard.writeText(text)
+        log('已复制面板凭据到剪贴板', 'ok')
+      } catch {
+        // 剪贴板可能被拒绝（非 https / 权限），退化为选中文本
+        log('复制失败，请手动选中文本复制', 'warn')
+      }
     })
   }
 
@@ -717,6 +867,25 @@
     // 表头也标明速度列是否有效
     const speedHead = table.querySelectorAll('th')[5]
     if (speedHead) speedHead.textContent = payload.skippedSpeed ? '下行(已跳过)' : '下行(MB/s)'
+
+    // ---- 记录结果并启用「回填面板」按钮（2026-10-27 交互改版）----
+    //
+    // 回填改为结果出来后手动触发，所以这里要把可复制格式保存下来，
+    // 供按钮点击时使用。
+    lastScanLines = (payload.copyable || '')
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0)
+
+    const pushBtn = document.getElementById('btnPushToPanel') as HTMLButtonElement | null
+    const pushHint = document.getElementById('pushHint')
+    if (pushBtn) pushBtn.disabled = lastScanLines.length === 0
+    if (pushHint) {
+      pushHint.textContent =
+        lastScanLines.length > 0
+          ? '上方是本次结果。需要让订阅用上这些 IP 就点「回填面板」。'
+          : ''
+    }
   }
 
   function bindScan(): void {
@@ -749,6 +918,19 @@
           speedUrl,
           speedConnections: Number($('optSpeedConns').value) || 3,
           speedDurationMs: (Number($('optSpeedDur').value) || 6) * 1000,
+          // ⚠️ 必须把「不回填」勾选状态传给后端（2026-10-27 修复）
+          //
+          // 早期完全不传这个参数：Go 后端没有回填实现，
+          // 界面也没有读取勾选状态的地方 —— 于是用户取消勾选后
+          // 点开始优选，界面重渲染时又把默认值（checked）勾了回去，
+          // 看起来像「勾选被自动恢复」，实际是整个开关没接线。
+          // 优选阶段**不回填**（2026-10-27 交互改版）
+          //
+          // 回填改为结果出来后手动点「回填面板」按钮再执行。
+          // 好处：
+          //   1. 令牌在回填那一刻才申请，不会因为优选耗时而过期
+          //   2. 用户不必理解令牌机制，看到结果再决定要不要回填
+          noCallback: true,
         })
         if (!result.ok) {
           $('scanOut').textContent = '优选失败：' + (result.error ?? '')
@@ -761,10 +943,74 @@
       }
     })
 
+    /* ---------------- 优选结果：复制 / 回填 ---------------- */
+
     document.getElementById('btnCopyResult')!.addEventListener('click', () => {
       const text = $('scanOut').textContent ?? ''
-      if (!text || text.includes('还没有结果')) { log('还没有可复制的结果', 'warn'); return }
+      if (!text || text.includes('还没有结果')) {
+        log('还没有可复制的结果', 'warn')
+        return
+      }
       copy(text)
+    })
+
+    /**
+     * 回填面板：把这批 IP 写进面板的「手动优选 IP」。
+     *
+     * ## 为什么放在「优选之后」才做（2026-10-27 交互改版）
+     *
+     * 回填需要临时令牌（面板签发，10 分钟有效）。
+     * 早期是「优选前先取令牌」，但优选本身要跑几分钟 ——
+     * 令牌很容易在回填前就过期，而且界面上多一个令牌输入框，
+     * 用户还得理解「令牌」是什么东西。
+     *
+     * 现在改为：点这个按钮时才「取令牌 → 回填」，一气呵成。
+     * 既不会超时，用户也没有学习成本 —— 拿到结果按一下就好。
+     */
+    document.getElementById('btnPushToPanel')!.addEventListener('click', async () => {
+      const btn = document.getElementById('btnPushToPanel') as HTMLButtonElement | null
+      const hint = document.getElementById('pushHint')
+
+      if (lastScanLines.length === 0) {
+        log('还没有优选结果，先跑一次优选', 'warn')
+        return
+      }
+      if (btn) btn.disabled = true
+      if (hint) hint.textContent = '正在申请临时令牌…'
+
+      try {
+        // ---- 1. 现取临时令牌（10 分钟有效，足够用）----
+        const tokenRes = await window.cfpilot.fetchScannerToken()
+        if (!tokenRes || !tokenRes.ok) {
+          const msg = (tokenRes && tokenRes.error) || '未知错误'
+          if (hint) hint.textContent = '获取令牌失败：' + msg
+          log('回填失败：' + msg, 'err')
+          return
+        }
+
+        // ---- 2. 回填 ----
+        if (hint) hint.textContent = '正在回填到面板…'
+        const result = await window.cfpilot.pushScanResults(lastScanLines)
+        if (!result || !result.ok) {
+          const msg = (result && result.error) || '未知错误'
+          if (hint) hint.textContent = '回填失败：' + msg
+          log('回填失败：' + msg, 'err')
+          return
+        }
+
+        const n = result.count ?? lastScanLines.length
+        if (hint) {
+          hint.textContent =
+            '✅ 已回填 ' + n + ' 条到面板。打开面板「节点来源 → 手动优选 IP」点「查看」即可看到。'
+        }
+        log('✅ 已回填 ' + n + ' 条到面板的「手动优选 IP」', 'ok')
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (hint) hint.textContent = '回填失败：' + msg
+        log('回填失败：' + msg, 'err')
+      } finally {
+        if (btn) btn.disabled = false
+      }
     })
 
     // 自动识别域名：有自定义域名优先填它，没有则填 pages.dev
@@ -811,13 +1057,38 @@
 
     document.getElementById('btnEnvCheck')!.addEventListener('click', async () => {
       log('检测网络环境…')
+      const btn = document.getElementById('btnEnvCheck') as HTMLButtonElement | null
+      if (btn) btn.disabled = true
       try {
+        // ⚠️ 必须**总是**输出结果（2026-10-27 用户反馈「按钮没效果」）
+        //
+        // 早期只在 `if (result.clean)` 分支里 log，环境不干净时
+        // **一个字都不打** —— 用户点了按钮看到日志里只有「检测网络环境…」
+        // 然后什么都没有，看起来就是按钮坏了。
+        //
+        // 正确行为：
+        //   - 正常 → 明确说「正常」
+        //   - 有发现 → 逐条列出发现项，并说明对优选结果的影响
         const result = await window.cfpilot.checkEnvironment()
+
         if (result.clean) {
           log('✅ 环境正常，优选结果可信', 'ok')
+        } else {
+          log('⚠ 检测到网络环境异常，优选结果可能失真：', 'warn')
+          const findings = result.findings ?? []
+          if (findings.length === 0) {
+            log('  （未提供具体发现项）', 'warn')
+          } else {
+            for (const f of findings) {
+              log('  · ' + f, 'warn')
+            }
+          }
+          log('  建议：关闭系统代理 / TUN 模式后重新优选', 'warn')
         }
       } catch (err) {
         log('检测失败：' + (err instanceof Error ? err.message : String(err)), 'err')
+      } finally {
+        if (btn) btn.disabled = false
       }
     })
   }
@@ -929,7 +1200,8 @@
      * 项目名与子域不保证一致（用户可自定义子域）。
      * 域名走「自动识别域名」按钮读真实 subdomain / 自定义域名。
      */
-    window.cfpilot.onDeployStatus((status) => {
+    // 赋值给前面声明的引用：让「检查状态」按钮也能调用同一个渲染逻辑
+    applyDeployStatus = (status: DeployStatusLike): void => {
       const el = document.getElementById('deployStatus')
       const box = document.getElementById('deployStateBox')
       const btn = document.getElementById('btnDeploy') as HTMLButtonElement | null
@@ -1043,6 +1315,11 @@
         hint.textContent =
           '更新会沿用原 UUID 与 WS 路径，客户端订阅地址不用改。'
       }
+    }
+
+    // 事件入口：部署完成后主进程 / SSE 推送状态时也走同一个渲染函数
+    window.cfpilot.onDeployStatus((status) => {
+      if (applyDeployStatus) applyDeployStatus(status as DeployStatusLike)
     })
 
     window.cfpilot.onScanResult((payload) => renderScanResult(payload))

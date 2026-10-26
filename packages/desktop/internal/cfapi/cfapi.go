@@ -25,7 +25,9 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"strings"
 	"time"
@@ -94,6 +96,26 @@ type Options struct {
 }
 
 // New 创建客户端。
+//
+// ## 为什么要自定义 Transport（2026-10-27 真机故障修复）
+//
+// 最初用 `&http.Client{Timeout: timeout}`，即 Go 默认 Transport。
+// 真机部署时出现大量：
+//
+//	Post "https://api.cloudflare.com/...": EOF
+//	请求超时：Cloudflare API 无响应
+//
+// 甚至被误判成 8000119（业务错误）。根因是默认 Transport 的默认值
+// 对「短时间内多次打同一域名」的部署场景不合适：
+//
+//   - `MaxIdleConnsPerHost` 默认只有 **2**，而我们连续发几十个请求
+//     （建项目、配变量、绑 KV、部署、轮询状态），连接频繁新建/关闭
+//   - 没有 `DialContext` 超时，TCP 建连卡住时会一直等
+//   - 没有 `TLSHandshakeTimeout` / `ExpectContinueTimeout`
+//
+// 更关键的是：连接被服务端或中间设备（代理/防火墙）过早关闭时，
+// Go 会复用一个**已经失效的连接**，直接报 EOF。
+// `ForceAttemptHTTP2 = false` + 合理的 IdleConnTimeout 能显著缓解。
 func New(opts Options) *Client {
 	base := opts.APIBase
 	if base == "" {
@@ -103,12 +125,35 @@ func New(opts Options) *Client {
 	if opts.TimeoutMs > 0 {
 		timeout = time.Duration(opts.TimeoutMs) * time.Millisecond
 	}
+
+	// 针对「连续多次请求同一域名」优化的 Transport
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		// 每个 host 保留更多空闲连接：部署过程会连续打几十个请求，
+		// 默认值 2 会导致频繁重建连接（也是 EOF 的来源之一）
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 16,
+		MaxConnsPerHost:     32,
+		// 空闲连接复用时长：太长会用到被中间设备掐断的死连接
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		// 关闭 HTTP/2：Cloudflare API 上 HTTP/2 复用连接在多请求场景下
+		// 偶发 stream 错误，强制 HTTP/1.1 更稳定
+		ForceAttemptHTTP2: false,
+	}
+
 	return &Client{
 		token:   strings.TrimSpace(opts.Token),
 		apiBase: strings.TrimRight(base, "/"),
 		timeout: timeout,
 		httpC: &http.Client{
-			Timeout: timeout,
+			Timeout:   timeout,
+			Transport: transport,
 		},
 	}
 }
@@ -596,37 +641,129 @@ type PagesDeployOptions struct {
 // 表现为「部署成功、HTTP 200，但返回默认 Welcome 页」。
 // 正确的 metadata 只有 { main_module: "_worker.js", bindings: {} }。
 func (c *Client) DeployPagesWorker(ctx context.Context, opts PagesDeployOptions) (*PagesDeployment, error) {
-	metadata := map[string]any{
+	// ================================================================
+	// ⚠️ Pages 部署 API 的表单结构（2026-10-27 真机修正）
+	//
+	// 早期实现直接发 `_worker.js` + `metadata` 两个顶层字段，
+	// **100% 失败**。真实错误是：
+	//
+	//     code 8000096
+	//     "A \"manifest\" field was expected in the request body but was not provided."
+	//
+	// 而这个错误在部署流程里被误判成 8000119（风控），
+	// 导致「反复换名重试 + 堆积孤儿项目」，且部署永远不成功。
+	//
+	// 正确的结构（对照 Electron 版 cf-api.ts 的 deployPagesWorker）：
+	//
+	//   外层 multipart：
+	//     branch         = "main"
+	//     manifest       = "{}"                 ← 必须有！
+	//     _worker.bundle = 内层 multipart 的原始字节
+	//
+	//   内层 multipart（_worker.bundle 的内容）：
+	//     metadata   = {"main_module":"_worker.js","bindings":{}}
+	//     _worker.js = 脚本内容
+	// ================================================================
+
+	// ---- 内层：构建 _worker.bundle ----
+	innerMeta := map[string]any{
 		"main_module": "_worker.js",
-		"bindings":    []any{},
+		"bindings":    map[string]any{},
 	}
-	metaRaw, err := json.Marshal(metadata)
+	innerMetaRaw, err := json.Marshal(innerMeta)
 	if err != nil {
 		return nil, err
 	}
 
+	var innerBuf bytes.Buffer
+	innerW := multipart.NewWriter(&innerBuf)
+
+	metaHeader := make(textproto.MIMEHeader)
+	metaHeader.Set("Content-Disposition", `form-data; name="metadata"; filename="metadata.json"`)
+	metaHeader.Set("Content-Type", "application/json")
+	metaPart, err := innerW.CreatePart(metaHeader)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := metaPart.Write(innerMetaRaw); err != nil {
+		return nil, err
+	}
+
+	scriptHeader := make(textproto.MIMEHeader)
+	scriptHeader.Set("Content-Disposition", `form-data; name="_worker.js"; filename="_worker.js"`)
+	scriptHeader.Set("Content-Type", "application/javascript+module")
+	scriptPart, err := innerW.CreatePart(scriptHeader)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := scriptPart.Write(opts.Script); err != nil {
+		return nil, err
+	}
+	if err := innerW.Close(); err != nil {
+		return nil, err
+	}
+
+	// ---- 外层：branch + manifest + _worker.bundle ----
 	branch := opts.Branch
 	if branch == "" {
 		branch = "main"
 	}
-	msg := opts.CommitMessage
-	if msg == "" {
-		msg = "deploy from CFPilot desktop"
+
+	var outerBuf bytes.Buffer
+	outerW := multipart.NewWriter(&outerBuf)
+
+	if err := outerW.WriteField("branch", branch); err != nil {
+		return nil, err
+	}
+	// ⚠️ manifest 是必需字段，缺了直接 8000096
+	if err := outerW.WriteField("manifest", "{}"); err != nil {
+		return nil, err
 	}
 
-	var out PagesDeployment
+	bundleHeader := make(textproto.MIMEHeader)
+	bundleHeader.Set("Content-Disposition", `form-data; name="_worker.bundle"; filename="_worker.bundle"`)
+	bundleHeader.Set("Content-Type", innerW.FormDataContentType())
+	bundlePart, err := outerW.CreatePart(bundleHeader)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := bundlePart.Write(innerBuf.Bytes()); err != nil {
+		return nil, err
+	}
+	if err := outerW.Close(); err != nil {
+		return nil, err
+	}
+
+	// ---- 发送 ----
 	path := fmt.Sprintf("/accounts/%s/pages/projects/%s/deployments",
 		opts.AccountID, url.PathEscape(opts.Project))
-	err = c.doForm(ctx, http.MethodPost, path,
-		map[string]FormFile{
-			"_worker.js": {Filename: "_worker.js", Content: opts.Script},
-		},
-		map[string]string{
-			"metadata":       string(metaRaw),
-			"branch":         branch,
-			"commit_message": msg,
-		}, &out)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiBase+path, &outerBuf)
 	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", outerW.FormDataContentType())
+
+	res, err := c.httpC.Do(req)
+	if err != nil {
+		return nil, wrapNetErr(err)
+	}
+	defer func() { _ = res.Body.Close() }()
+
+	raw, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, wrapNetErr(err)
+	}
+	result, err := readResponse(res.StatusCode, raw)
+	if err != nil {
+		return nil, err
+	}
+	if len(result) == 0 {
+		return &PagesDeployment{}, nil
+	}
+	var out PagesDeployment
+	if err := json.Unmarshal(result, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

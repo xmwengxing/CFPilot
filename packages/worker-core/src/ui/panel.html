@@ -245,7 +245,42 @@
           <div class="row">
             <span class="muted" id="localState">本地真连接池：0 条</span>
             <div class="spacer"></div>
+            <button class="ghost" id="btnToggleLocal">查看</button>
             <button class="ghost" id="btnClearIps">清空本地池</button>
+          </div>
+
+          <!--
+            本地真连接池的内容展示（2026-10-27 用户反馈补上）
+
+            之前这里只有一行「本地真连接池：N 条」，**看不到具体 IP**。
+            用户跑完本地优选、回填成功后，在面板里找不到列表，
+            以为回填失败了（实际数据已写入 KV，只是没有展示入口）。
+
+            /api/v1/ips 一直返回 raw 与 entries，这个区块把它们显示出来，
+            并允许直接编辑保存（等价于手动修改本地池）。
+          -->
+          <div id="localBox" class="hidden" style="margin-top: 10px">
+            <div class="field">
+              <label>
+                本地真连接池内容
+                <span class="muted" id="localCount"></span>
+              </label>
+              <textarea
+                id="localIpsText"
+                placeholder="还没有本地优选结果 —— 到「本地优选」页跑一次，或直接在这里填"
+                style="min-height: 140px; font-family: ui-monospace, monospace; font-size: 12px"
+              ></textarea>
+              <p class="muted" style="margin: 4px 0 0">
+                每行一条：<code class="inline">IP</code> / <code class="inline">IP:端口</code> /
+                <code class="inline">IP:端口#备注</code>。
+                这里是<b>本地优选回填的结果</b>，与上面「手动填写」是两回事 —— 两者都会进入订阅。
+              </p>
+            </div>
+            <div class="row">
+              <button class="ghost" id="btnReloadLocal">重新读取</button>
+              <div class="spacer"></div>
+              <button class="primary" id="btnSaveLocal">保存本地池</button>
+            </div>
           </div>
         </div>
       </div>
@@ -1076,6 +1111,45 @@
       if (!confirm('确定清空本地真连接优选池？')) return;
       api('/api/v1/ips', { method: 'DELETE' }).then(function () { loadAll(); toast('已清空'); })
         .catch(function (e) { toast(e.message, true); });
+    });
+
+    /* ---- 本地池查看 / 编辑（2026-10-27 补上）----
+     *
+     * 之前这里只有「清空」按钮，**看不到具体 IP**。
+     * 用户跑完本地优选、回填成功后，面板里没有展示入口，
+     * 误以为回填失败（实际数据一直在 KV 的 LOCAL_PREFERRED_IPS 里）。
+     */
+
+    function loadLocalIps() {
+      api('/api/v1/ips').then(function (r) {
+        var text = (r && r.raw) || '';
+        var count = (r && r.count) || 0;
+        $('localIpsText').value = text;
+        $('localCount').textContent = count > 0 ? '（' + count + ' 条）' : '（空）';
+      }).catch(function (e) { toast(e.message, true); });
+    }
+
+    $('btnToggleLocal').addEventListener('click', function () {
+      var box = $('localBox');
+      var hidden = box.classList.toggle('hidden');
+      $('btnToggleLocal').textContent = hidden ? '查看' : '收起';
+      if (!hidden) loadLocalIps();
+    });
+
+    $('btnReloadLocal').addEventListener('click', function () {
+      loadLocalIps();
+      toast('已重新读取');
+    });
+
+    $('btnSaveLocal').addEventListener('click', function () {
+      api('/api/v1/ips', {
+        method: 'PUT',
+        body: JSON.stringify({ raw: $('localIpsText').value })
+      }).then(function (r) {
+        toast('已保存 ' + ((r && r.count) || 0) + ' 条');
+        loadAll();
+        loadLocalIps();
+      }).catch(function (e) { toast(e.message, true); });
     });
 
     $('btnScan').addEventListener('click', startScan);

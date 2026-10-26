@@ -175,6 +175,26 @@ interface Window {
     controlSubdomain?: string
     dataSubdomain?: string
   }>
+
+  /**
+   * 读取部署清单里保存的面板凭据。
+   *
+   * 为什么需要：Cloudflare 云端环境变量是加密的（只显示 ****），
+   * 密码一旦没记录就彻底拿不回来。这里从本机部署清单读明文。
+   */
+  getDeployCredentials(kvNamespaceId?: string): Promise<{
+    ok: boolean
+    error?: string
+    /** 面板完整地址（https://<控制面域名><面板路径>） */
+    panelUrl?: string
+    panelPassword?: string
+    uuid?: string
+    wsPath?: string
+    dataSubdomain?: string
+    build?: string
+    at?: string
+  }>
+
     runScan(params: {
       host: string
       wsPath: string
@@ -188,6 +208,17 @@ interface Window {
       speedUrl?: string
       speedConnections?: number
       speedDurationMs?: number
+      /**
+       * 为 true 表示「只输出列表，不回填面板」。
+       *
+       * 界面上的同名勾选框控制它；Go 后端据此跳过回填。
+       * 早期这个开关完全没接线，导致用户无法测试回填是否工作。
+       */
+      noCallback?: boolean
+      /** 回填用的扫描令牌（面板一次性令牌 / SCANNER_TOKEN） */
+      scanToken?: string
+      /** 自定义回填地址（留空由 host 推导） */
+      callbackUrl?: string
     }): Promise<{ ok: boolean; count?: number; copyable?: string; error?: string }>
     /** 自动识别数据面域名（优先自定义域名，回落 pages.dev） */
     detectScanHost(): Promise<{
@@ -201,6 +232,31 @@ interface Window {
       ok: boolean
       path?: string
       source?: 'kv' | 'env'
+      error?: string
+    }>
+    /**
+     * 自动获取面板的一次性扫描令牌。
+     *
+     * 用保存的面板密码登录控制面，再调 /api/v1/scanner-token 换令牌。
+     * 令牌有效期 10 分钟，用于回填优选结果。
+     */
+    /**
+     * 把优选结果回填到面板的「手动优选 IP」。
+     *
+     * 服务端在回填那一刻才取临时令牌并写入，
+     * 所以不会出现「优选耗时过长导致令牌过期」。
+     */
+    pushScanResults(lines: string[]): Promise<{
+      ok: boolean
+      count?: number
+      host?: string
+      error?: string
+    }>
+    fetchScannerToken(host?: string, password?: string): Promise<{
+      ok: boolean
+      token?: string
+      host?: string
+      expiresIn?: number
       error?: string
     }>
     /** 优选器支持的国家列表（与面板 / 命令行版同源） */

@@ -95,7 +95,17 @@ async function buildVersion() {
       for (const name of readdirSync(dir)) {
         const p = resolve(dir, name)
         if (statSync(p).isDirectory()) walk(p)
-        else if (/\.(ts|html)$/.test(name)) files.push(p)
+        // ⚠️ 必须排除构建产物（2026-10-27 修复版本号永不收敛）
+        //
+        // `ui/panel.generated.ts` 是 panel.html 压缩后的中间产物，
+        // 每次构建都会重新生成。把它算进哈希会出两个问题：
+        //   1. 哈希在**构建前**计算，用的是上一次的 generated
+        //      → 改了面板 UI 后版本号不变，用户点「检查状态」永远显示「已是最新」
+        //   2. 下一次构建又因为 generated 变了而得到新哈希
+        //      → 版本号在两个值之间反复横跳，永不收敛
+        //
+        // 源码哈希只应覆盖**人写的东西**，不该包含机器生成的中间物。
+        else if (/\.(ts|html)$/.test(name) && !/\.generated\.ts$/.test(name)) files.push(p)
       }
     }
     walk(srcDir)

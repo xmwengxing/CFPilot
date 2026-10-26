@@ -39,8 +39,25 @@ type Options struct {
 	Port int
 	// Candidates 是候选 IP 列表
 	Candidates []string
-	// WSPath 是探针路径，默认 /__edge_probe
+	// WSPath 是代理的 WebSocket 路径（如 /fthiqeowoe）。
+	//
+	// ⚠️ 只用于 **WS 101 握手校验**（阶段二），不要拿去测速！
 	WSPath string
+	// ProbePath 是**测速探针端点**，默认 /__edge_probe。
+	//
+	// ## 为什么必须与 WSPath 分开（2026-10-27 严重缺陷）
+	//
+	// 早期实现把 WSPath 同时用于两个用途：
+	//   - 阶段二 WS 101 校验（正确：要校验代理路径真的能升级）
+	//   - 阶段三 下行测速（**错误**：应该打探针端点）
+	//
+	// 后果：测速时向 `/fthiqeowoe?bytes=5242880` 发 GET，
+	// 那是个 WebSocket 升级端点，普通 GET 只返回极短响应（约 17 字节），
+	// 于是速度算出来是 0.00000418 MB/s —— 用户看到「所有节点下行接近 0」。
+	//
+	// Electron 版一直是对的：`options.probePath ?? '/__edge_probe'`，
+	// 与 WS 路径完全无关。
+	ProbePath string
 	// Countries 是地区过滤（按机房代码，空表示不过滤）
 	Countries []string
 
@@ -113,7 +130,12 @@ func (o Options) withDefaults() Options {
 	set(&o.SpeedBytes, defSpeedBytes)
 	set(&o.Top, defTop)
 	if o.WSPath == "" {
-		o.WSPath = ProbeDefaultPath
+		if o.WSPath == "" {
+			o.WSPath = ProbeDefaultPath
+		}
+		if o.ProbePath == "" {
+			o.ProbePath = ProbeDefaultPath
+		}
 	}
 	return o
 }
@@ -270,8 +292,11 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 		dl DownloadResult
 	}
 	speedResults := forEachIP(ctx, stage3, opt.SpeedConcurrency, func(r WSResult) (speedOut, bool) {
+		// ⚠️ 测速必须打**探针端点**（ProbePath），不是代理的 WS 路径。
+		// 用 WS 路径打 GET 只会拿到 17 字节的升级失败响应，
+		// 算出来的速度是 0.000004 MB/s（用户实测踩过）。
 		dl := MeasureDownload(ctx, r.IP, opt.Port, opt.Host, opt.SpeedBytes,
-			msDuration(opt.SpeedTimeoutMs), opt.WSPath)
+			msDuration(opt.SpeedTimeoutMs), opt.ProbePath)
 		return speedOut{ws: r, dl: dl}, dl.OK
 	}, func(done int) {
 		report(Progress{Stage: "speed", Done: done, Total: len(stage3), Message: "阶段三：真实下行测速"})

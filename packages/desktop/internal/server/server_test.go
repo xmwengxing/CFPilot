@@ -103,8 +103,11 @@ func TestSessionExchangeHappyPath(t *testing.T) {
 	if !found.HttpOnly {
 		t.Error("会话 Cookie 必须是 HttpOnly")
 	}
-	if found.SameSite != http.SameSiteStrictMode {
-		t.Error("会话 Cookie 必须是 SameSite=Strict")
+	// 2026-10-26 从 Strict 改为 Lax：
+	// Strict 在「地址栏直接粘贴 URL 打开」等场景下会导致浏览器不回传 Cookie，
+	// 表现为会话建立了但 API 全 401。Lax 仍阻止跨站 POST，安全性等价。
+	if found.SameSite == http.SameSiteStrictMode {
+		t.Error("会话 Cookie 不应是 SameSite=Strict（会丢 Cookie），应为 Lax")
 	}
 
 	// 带 Cookie 再调 API 应该通过

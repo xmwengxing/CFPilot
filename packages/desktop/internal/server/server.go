@@ -431,11 +431,22 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
+		// ⚠️ 用 Lax 而不是 Strict（2026-10-26 修正）。
+		//
+		// Strict 的语义是「任何跨站来源的请求都不带 Cookie」，
+		// 包括**从地址栏直接粘贴 URL 打开**这种场景在某些浏览器上
+		// 也会被判为「无来源」而不携带 —— 表现为会话明明建立了，
+		// 后续 API 仍然全线 401。
+		//
+		// Lax 仍然阻止跨站 POST（本服务所有写操作都是 POST），
+		// 安全性等价，兼容性更好。
+		SameSite: http.SameSiteLaxMode,
 		// 本地 http 服务，不能设 Secure（否则浏览器不会回传）
 		MaxAge: 12 * 60 * 60,
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	// 明确告诉浏览器/代理不要缓存这次会话建立
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "expiresIn": 12 * 60 * 60})
 }
 
 func (s *Server) handleServiceStatus(w http.ResponseWriter, r *http.Request) {

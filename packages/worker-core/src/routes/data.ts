@@ -18,6 +18,7 @@ import { handleWebSocket } from '../protocols/websocket-self'
 import { handleXhttp } from '../protocols/xhttp'
 import { parseProxyPool, type ProxyEndpoint } from '../outbound/proxy-pool'
 import { jsonError } from '../ui/neutral'
+import { VERSION_PATH, versionResponse, BUILD_VERSION } from '../version'
 import { loadDataPlaneConfig } from './control'
 
 /** 汇总出站代理池 */
@@ -47,6 +48,23 @@ export async function routeDataPlane(
     return handleEdgeProbe(request)
   }
 
+  // 版本端点：让外部能问「这个数据面跑的是哪一版内核」。
+  //
+  // ## 为什么需要（2026-10-26）
+  //
+  // 早前 GUI 的「检查状态」只能读 KV 清单里的 `build` 字段 —— 那是
+  // **部署时自己写进去的**，不是从线上读回来的。因此存在盲区：
+  // 手动改过项目、或用命令行部署过，清单与实际就可能对不上。
+  //
+  // 有了这个端点，GUI 可以直接问线上数据面「你是什么版本」，
+  // 结论比清单可靠。
+  //
+  // ⚠️ 只返回版本号与时间戳，不泄露任何配置（无 uuid / 路径 / 代理信息）。
+  // 任何知道数据面域名的人都能读 —— 这本身不是秘密（`/` 也能访问）。
+  if (url.pathname === VERSION_PATH || url.pathname === '/__version') {
+    return versionResponse()
+  }
+
   // 出站诊断端点：自研数据面专有。
   //
   // 完整诊断装不进 WebSocket close frame（最多 123 字节），
@@ -61,6 +79,8 @@ export async function routeDataPlane(
           ok: true,
           // 只有一套实现了（vendor 已于 2026-10-25 移除），固定返回 self
           impl: 'self',
+          // 版本号：排查「线上跑的到底是哪一版」时最直接的依据
+          build: BUILD_VERSION,
           recent: recentDiagnostics(),
           xhttp: recentXhttpDiagnostics(),
         },

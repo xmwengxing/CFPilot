@@ -811,6 +811,40 @@ func (d *Deployer) deployWithBlockRetry(ctx context.Context, p deployAttemptPara
 				blocked := isBlocked(err)
 				isLast := attempt == sameProjectAttempts
 
+				// ⚠️ 网络错误绝不能当成 8000119 处理（2026-10-27 真机修复）
+				//
+				// 真机日志里出现过：
+				//   Post ".../pages/projects": EOF
+				//   请求超时：Cloudflare API 无响应
+				// 早期实现把这些也走进「8000119 换名重试」分支，
+				// 于是报出「连续 3 次被平台拒绝部署（8000119）」——
+				// **完全是误判**：平台根本没拒绝，是网络断了。
+				//
+				// 用户的真实体验是「部署失败，日志说 8000119」，
+				// 会误以为是账号被风控，实际上重试一下就能成功。
+				//
+				// 所以这里区分：
+				//   - 网络类错误（EOF / 超时 / 连接重置）→ 直接重试 + 明确提示
+				//   - 真正的业务错误（8000119）→ 换名重试
+				if isNetworkError(err) {
+					if !isLast {
+						d.log(fmt.Sprintf("⚠ %s项目 %s 部署时网络中断，%d 次后重试",
+							p.label, name, sameProjectAttempts-attempt))
+						d.log("  → 这不是账号风控，是到 Cloudflare 的网络不稳定")
+						// 退避一下再重试，避免立刻又撞上同一个网络问题
+						select {
+						case <-ctx.Done():
+							return nil
+						case <-time.After(time.Duration(attempt) * 1500 * time.Millisecond):
+						}
+						continue
+					}
+					d.warn(fmt.Sprintf(
+						"%s部署失败：网络无法连接 Cloudflare API（%v）。\n"+
+							"  → 这不是账号风控，请检查网络 / 代理后重试", p.label, err))
+					return nil
+				}
+
 				// 同名重试耗尽：换名再试
 				if isLast && index < len(candidates)-1 {
 					d.log(fmt.Sprintf("⚠ %s项目 %s 连续 %d 次被平台拒绝部署（8000119）",
@@ -833,6 +867,21 @@ func (d *Deployer) deployWithBlockRetry(ctx context.Context, p deployAttemptPara
 						d.configureProject(ctx, next, p.label, p.eff)
 					}
 					d.log("  → 已创建并配置 " + next)
+
+					// ⚠️ 换名成功后必须清理旧项目（2026-10-27 用户反馈）
+					//
+					// 真机故障：网络抖动导致反复换名重试，账号下堆积了
+					// 8 个孤儿项目（4 组 cpdata + 4 组 cpmanager）。
+					//
+					// 根因：早期只有「8000119 换名成功后」才走
+					// migrateAndCleanup（迁移域名 + 删旧项目），
+					// 而**网络错误触发的换名完全不清理** ——
+					// 新项目建了、旧项目留着，每次重试多一组。
+					//
+					// 现在：只要换了项目名，就把候选链里所有「非最终项目」
+					// 都尝试删掉（含自定义域名迁移）。
+					d.cleanupSupersededProjects(ctx, p, next)
+
 					break
 				}
 
@@ -874,8 +923,22 @@ func (d *Deployer) deployWithBlockRetry(ctx context.Context, p deployAttemptPara
 					p.label, name, orUnknown(final)))
 			}
 
-			// 换名成功：迁域名、删旧项目
+			// 换名成功后的收尾，两件事：
+			//
+			// 1. migrateAndCleanup：处理**清单里的旧实例项目**
+			//    （更新部署时旧项目名与新项目名不同）→ 迁域名 + 删旧项目
+			// 2. cleanupSupersededProjects：处理**本次尝试链里被淘汰的项目**
+			//    （网络抖动 / 8000119 反复重试产生的中间项目）→ 全部清理
+			//
+			// 两件事互补，缺任何一件都会留下孤儿项目。
+			// 2026-10-27 用户实测：只做第 1 件事，结果账号下堆了 8 个项目。
 			d.migrateAndCleanup(ctx, p, name)
+			// ⚠️ 传的是「刚成功的项目名」而不是 index+1
+			//
+			// 早期写成 candidates[index+1]，那是**下一个候选**（可能根本不存在），
+			// 导致清理逻辑误判最终项目 → 把活跃项目当成孤儿删掉
+			// （真机故障：清单里 dataProject 还在，实际项目被删）。
+			d.cleanupSupersededProjects(ctx, p, name)
 
 			return &deployAttemptResult{project: name, subdomain: subdomain, deploymentID: dep.ID}
 		}
@@ -890,6 +953,44 @@ func orUnknown(s string) string {
 	return s
 }
 
+// isNetworkError 判断是否是「网络层面」的错误（而非平台业务拒绝）。
+//
+// ## 为什么必须区分（2026-10-27 真机故障）
+//
+// 真机部署时出现过：
+//
+//	Post ".../pages/projects": EOF
+//	请求超时：Cloudflare API 无响应（检查网络或代理）
+//
+// 这些是**网络问题**，但早期实现与 8000119 共用同一个重试分支，
+// 日志里报出「连续 3 次被平台拒绝部署（8000119）」——
+// 用户会误以为账号被风控，实际只是网络抖动。
+//
+// 区分依据：cfapi 把网络错误包装成普通 error（不是 *cfapi.APIError），
+// 且消息里含特定网络关键词。
+func isNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// 业务错误（*APIError）一律不算网络错误
+	var apiErr *cfapi.APIError
+	if errors.As(err, &apiErr) {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, kw := range []string{
+		"eof", "timeout", "timed out", "deadline exceeded",
+		"connection reset", "connection refused", "broken pipe",
+		"no such host", "network is unreachable", "tls handshake",
+		"\u7f51\u7edc\u8bf7\u6c42\u5931\u8d25", "\u8bf7\u6c42\u8d85\u65f6",
+	} {
+		if strings.Contains(msg, kw) {
+			return true
+		}
+	}
+	return false
+}
+
 func isBlocked(err error) bool {
 	if err == nil {
 		return false
@@ -900,6 +1001,125 @@ func isBlocked(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "8000119") || strings.Contains(msg, "has been blocked")
+}
+
+// cleanupSupersededProjects 清理被换名淘汰的项目。
+//
+// ## 为什么需要（2026-10-27 真机故障）
+//
+// 网络抖动（如开启了 TUN 模式的代理）会让部署反复失败并换名重试。
+// 早期实现只在「8000119 换名成功后」清理旧项目，**网络错误路径不清理**，
+// 结果账号下快速堆积孤儿项目：
+//
+//	cpdata-ux7t-li8f-9vlk     ← 第 1 次重试建的
+//	cpdata-ux7t-li8f-i2t5     ← 第 2 次
+//	cpdata-ux7t-li8f-f69z     ← 第 3 次
+//	cpdata-ux7t-li8f-6ngd     ← 第 4 次
+//	（控制面同样 4 个）
+//
+// 用户看到的就是「账户里凭空多了很多 Pages 项目」。
+//
+// ## 清理策略
+//
+// 只删**本次尝试链里**的项目（candidates[0..finalIndex-1]），
+// 绝不碰：
+//   - 最终选定的项目（finalIndex 及以后）
+//   - 清单里记录的旧实例项目（那是用户正在用的，走 migrateAndCleanup）
+//
+// 删除前先把自定义域名迁到最终项目（否则用户订阅地址失效）。
+func (d *Deployer) cleanupSupersededProjects(
+	ctx context.Context,
+	p deployAttemptParams,
+	finalName string,
+) {
+	if finalName == "" {
+		return
+	}
+
+	// 候选链：原始名 + 两个随机后缀名
+	// 只清理「以原始名为前缀」且「不等于最终名」的项目
+	base := p.preferredName
+	if base == "" {
+		return
+	}
+
+	projects, err := d.client.ListPagesProjects(ctx, d.opt.AccountID)
+	if err != nil {
+		d.warn("列举项目失败，跳过清理：" + err.Error())
+		return
+	}
+
+	// ⚠️ 活跃项目保护名单（2026-10-27 误删事故修复）
+	//
+	// 真机事故：更新部署时 p.preferredName 恰好**等于清单里活跃的数据面项目名**
+	// （如 cpdata-ux7t-li8f）。一旦发生换名重试，finalName 变成
+	// cpdata-ux7t-li8f-xxxx，下面 `name == base` 就把**活跃项目**命中了，
+	// 而它 != finalName，于是被当成「被淘汰的旧项目」删掉。
+	//
+	// 用户的真实感受是「绑定的数据面项目莫名其妙没了，部署工具又重建了一个」，
+	// 而旧项目里的 KV 绑定、域名配置全丢。
+	//
+	// 所以这里必须显式排除活跃项目：清单里记录的控制面 / 数据面项目，
+	// 即使名字匹配前缀也绝不删除。
+	activeNames := map[string]bool{}
+	if m, err := d.readManifest(ctx); err == nil && m != nil {
+		if m.ControlProject != "" {
+			activeNames[m.ControlProject] = true
+		}
+		if m.DataProject != "" {
+			activeNames[m.DataProject] = true
+		}
+	}
+	// 本次部署的结果也算活跃（防止顺序问题）
+	if d.result.Control.Name != "" {
+		activeNames[d.result.Control.Name] = true
+	}
+	if d.result.Data.Name != "" {
+		activeNames[d.result.Data.Name] = true
+	}
+
+	for _, proj := range projects {
+		name := proj.Name
+		if name == finalName {
+			continue // 最终项目，绝不动
+		}
+		// 活跃项目（清单里正在用的）绝不动
+		if activeNames[name] {
+			d.log(fmt.Sprintf("· 跳过活跃项目 %s（清单正在使用）", name))
+			continue
+		}
+		// 只碰「本次尝试链」里的项目：
+		//   等于原始名，或以「原始名-」开头
+		if name != base && !strings.HasPrefix(name, base+"-") {
+			continue
+		}
+
+		// 这个项目可能压根没建成功（网络失败在创建阶段就挂了），
+		// 先确认存在再删，避免无意义的 404 日志
+		proj, err := d.client.GetPagesProject(ctx, d.opt.AccountID, name)
+		if err != nil || proj == nil {
+			continue
+		}
+
+		// 迁移自定义域名（如果有）
+		if domain := d.findCustomDomain(ctx, name); domain != "" {
+			_ = d.client.RemovePagesDomain(ctx, d.opt.AccountID, name, domain)
+			if addErr := d.client.AddPagesDomain(ctx, d.opt.AccountID, finalName, domain); addErr != nil {
+				d.warn(fmt.Sprintf(
+					"清理旧项目 %s 前迁移域名失败（%s → %s）：%v\n"+
+						"  → 请手动改绑，否则订阅地址会失效", name, domain, finalName, addErr))
+				// 域名没迁成功就不删这个项目
+				continue
+			}
+			d.log(fmt.Sprintf("· 已把域名 %s 从 %s 迁到 %s", domain, name, finalName))
+		}
+
+		if delErr := d.client.DeletePagesProject(ctx, d.opt.AccountID, name); delErr != nil {
+			d.warn(fmt.Sprintf("清理被淘汰的项目 %s 失败：%v", name, delErr))
+			continue
+		}
+		d.log(fmt.Sprintf("✅ 已清理被淘汰的项目：%s", name))
+	}
 }
 
 // migrateAndCleanup 迁移自定义域名 + 删除旧项目。
@@ -1006,9 +1226,23 @@ func RandomWorkerName() string {
 	return randomString(8, nameAlphabet)
 }
 
-// RandomPanelPath 生成面板路径。
+// RandomPanelPath 生成面板路径（**带前导斜杠**）。
+//
+// ## 为什么必须带斜杠（2026-10-27 用户反馈）
+//
+// 早期返回的是裸串（如 `g8ih0p7amfsh`），而 WS 路径是带斜杠的
+// （`/fthiqeowoe`）。两者不一致带来三个问题：
+//
+//  1. 清单里存的值不规范，下次更新部署复用时会把裸串写进
+//     `PANEL_PATH` 环境变量
+//  2. 界面上显示「面板路径：g8ih0p7amfsh」，用户手动拼 URL 时
+//     少打一个斜杠就打不开，容易误以为路径错了
+//  3. 内核的 normalizePath() 虽然会自动补斜杠所以「碰巧能用」，
+//     但那是内核对脏数据的容错，不该依赖它
+//
+// 现在统一带斜杠，与 RandomWSPath 保持一致。
 func RandomPanelPath() string {
-	return randomString(12, "abcdefghijklmnopqrstuvwxyz0123456789")
+	return "/" + randomString(12, "abcdefghijklmnopqrstuvwxyz0123456789")
 }
 
 // RandomWSPath 生成 WS 路径（带前导斜杠）。

@@ -341,6 +341,10 @@ export interface ScanParams {
   speedUrl?: string
   speedConnections?: number
   speedDurationMs?: number
+  /** 为 true 表示「只输出列表，不回填面板」 */
+  noCallback?: boolean
+  /** 回填用的扫描令牌（面板一次性令牌） */
+  scanToken?: string
 }
 
 /**
@@ -704,6 +708,38 @@ export async function runScanJob(
       stats: result.stats,
       skippedSpeed: params.skipSpeed,
     })
+    // ---- 结果明细打到日志（与 Go 版一致）----
+    if (result.entries.length > 0) {
+      sendLog(win, `优选完成：${result.entries.length} 个可用节点`, 'ok')
+      sendLog(win, '排名  地址                     机房  TLS(ms)  TCP(ms)  下行(MB/s)')
+      for (let i = 0; i < result.entries.length && i < 30; i++) {
+        const e = result.entries[i]
+        sendLog(
+          win,
+          `${String(i + 1).padStart(4)}  ${(e.ip + ':' + e.port).padEnd(23)}  ` +
+            `${(e.colo || '—').padEnd(4)}  ${String(e.tlsMs).padStart(6)}  ` +
+            `${String(e.latency).padStart(7)}  ${e.speed.toFixed(3).padStart(9)}`
+        )
+      }
+      if (result.entries.length > 30) {
+        sendLog(win, `  …（其余 ${result.entries.length - 30} 条见页面表格）`)
+      }
+    } else {
+      sendLog(win, '优选完成，但没有可用节点（检查域名 / WS 路径 / 采样数）', 'warn')
+    }
+
+    // ---- 回填改为「结果出来后手动点按钮」（2026-10-27 交互改版）----
+    //
+    // 优选阶段**不再自动回填**。原因：
+    //   1. 回填需要临时令牌（10 分钟有效），而优选要跑几分钟，
+    //      提前取的令牌很容易在回填前过期；
+    //   2. 用户也不必理解令牌机制，拿到结果再决定要不要回填。
+    //
+    // 回填逻辑现在在 `pushScanResults()` 里，由界面的「回填面板」按钮触发。
+    if (result.entries.length > 0) {
+      sendLog(win, `提示：需要让订阅用上这些 IP，点结果下方的「回填面板」按钮`)
+    }
+
     return { ok: true, count: result.entries.length, copyable: result.copyable }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
@@ -788,6 +824,303 @@ async function fetchRemoteBuild(dataSubdomain: string | undefined): Promise<stri
  * 本地构建版本就是「能部署的最好版本」。仓库 latest 只用于 GUI 自身升级，
  * 与这个检查无关 —— 混在一起会让用户以为要重新下载 exe。
  */
+/**
+ * 读取部署清单里保存的面板凭据。
+ *
+ * ## 为什么需要（2026-10-27 用户反馈）
+ *
+ * Cloudflare 平台上的环境变量是**加密的**（页面只显示 `****`），
+ * 部署完成后如果没记下面板密码，用户就再也拿不回来，面板永远进不去。
+ *
+ * 清单（KV 里的 `CFP_DEPLOY_MANIFEST`）保存了明文凭据，
+ * 这个函数把它读出来供界面展示。两个版本（Electron / Go）行为一致。
+ */
+/**
+ * 自动获取面板的一次性扫描令牌。
+ *
+ * ## 为什么需要（2026-10-27 用户要求 Electron 版也支持）
+ *
+ * 「回填优选结果」需要 Bearer 令牌，令牌来自面板
+ * `POST /api/v1/scanner-token`，而它要求面板会话。
+ *
+ * 桌面版存着面板密码（清单 / 账户里都有），所以能自动
+ * 「登录 → 取令牌」，用户不必手动去面板点「生成令牌」。
+ *
+ * ## 密码来源（三级查找）
+ *   1. 参数显式传入
+ *   2. 部署清单里的 credentials.panelPassword
+ *   3. 当前账户的 panelPassword
+ */
+/**
+ * 把优选结果回填到面板的「手动优选 IP」。
+ *
+ * ## 为什么单独一个函数（2026-10-27 交互改版）
+ *
+ * 早期是优选过程中顺带回填，需要提前取令牌（10 分钟有效），
+ * 而优选要跑几分钟，令牌很容易在回填前过期。
+ *
+ * 现在改为：优选只出结果，用户看完后手动点「回填面板」，
+ * 这里在回填那一刻才「取令牌 → 回填」，一气呵成。
+ */
+export async function pushScanResults(
+  lines: string[]
+): Promise<{ ok: boolean; count?: number; host?: string; error?: string }> {
+  if (!lines || lines.length === 0) {
+    return { ok: false, error: '没有可回填的 IP' }
+  }
+
+  // 现取临时令牌
+  const tok = await fetchScannerToken()
+  if (!tok.ok || !tok.token) {
+    return { ok: false, error: tok.error ?? '获取令牌失败' }
+  }
+
+  const host = tok.host ?? ''
+  if (!host) {
+    return { ok: false, error: '无法确定控制面地址' }
+  }
+
+  const url = host.replace(/\/$/, '') + '/api/v1/preferred-ips'
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${tok.token}`,
+        'User-Agent': 'CFPilot-GUI/1.0',
+      },
+      body: JSON.stringify({ ips: lines }),
+      signal: AbortSignal.timeout(20000),
+    })
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      return {
+        ok: false,
+        error: `回填失败 HTTP ${res.status} ${text.slice(0, 120)}`,
+      }
+    }
+
+    const data = (await res.json()) as { ok?: boolean; count?: number }
+    return { ok: true, count: data.count ?? lines.length, host }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+export async function fetchScannerToken(
+  host?: string,
+  password?: string
+): Promise<{ ok: boolean; token?: string; host?: string; expiresIn?: number; error?: string }> {
+  const secrets = loadSecrets()
+
+  try {
+    // ---- 确定控制面地址 ----
+    //
+    // ⚠️ 必须用**清单里的 controlSubdomain**，不能用界面传的 host
+    // （2026-10-27 真机故障修复）
+    //
+    // 界面「目标域名」是**数据面**（cpdata.pages.dev），
+    // 因为优选要用数据面做 SNI/Host。而面板登录接口 /api/v1/login
+    // 只在**控制面**（cpmanager.pages.dev）上。
+    //
+    // 真机实测：
+    //   控制面登录 → {"ok":true} + 令牌     ✅
+    //   数据面登录 → <!DOCTYPE html>...<title>Welcome</title>  ❌
+    let target = ''
+    let manifestPassword = ''
+    let manifestControl = ''
+    let manifestData = ''
+
+    const kvId = secrets.kvNamespaceId.trim()
+    if (kvId && secrets.accountId.trim() && secrets.cfToken.trim()) {
+      try {
+        const cfApi = loadCfApi()
+        const client = new cfApi.CloudflareClient({ token: secrets.cfToken })
+        const raw = await client.getKvValue(
+          secrets.accountId.trim(),
+          kvId,
+          'CFP_DEPLOY_MANIFEST'
+        )
+        if (raw) {
+          const m = JSON.parse(raw) as {
+            controlSubdomain?: string
+            dataSubdomain?: string
+            credentials?: { panelPassword?: string }
+          }
+          manifestControl = (m.controlSubdomain ?? '').trim()
+          manifestData = (m.dataSubdomain ?? '').trim()
+          manifestPassword = (m.credentials?.panelPassword ?? '').trim()
+        }
+      } catch {
+        // 读清单失败，后面会给出明确错误
+      }
+    }
+
+    // 强制走控制面
+    target = manifestControl
+    if (!target) {
+      return {
+        ok: false,
+        error: '清单里没有控制面域名，请先在「部署」页完成一次部署',
+      }
+    }
+    // 防御：如果传入的是数据面，明确提示
+    const passedHost = (host ?? '').trim()
+    if (passedHost && passedHost === manifestData) {
+      // 不是错误，只是提示走的是控制面
+    }
+    if (!/^https?:\/\//i.test(target)) target = 'https://' + target
+    target = target.replace(/\/$/, '')
+
+    // ---- 确定面板密码 ----
+    const pw =
+      (password ?? '').trim() || manifestPassword || (secrets.panelPassword ?? '').trim()
+    if (!pw) {
+      return { ok: false, error: '找不到面板密码，请先在部署页填写并保存' }
+    }
+
+    // ---- 1. 登录 ----
+    const loginRes = await fetch(target + '/api/v1/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw }),
+      signal: AbortSignal.timeout(20000),
+    })
+
+    if (loginRes.status === 401) {
+      return { ok: false, error: '面板密码不正确' }
+    }
+    if (!loginRes.ok) {
+      const t = await loginRes.text().catch(() => '')
+      return { ok: false, error: `登录失败 HTTP ${loginRes.status} ${t.slice(0, 120)}` }
+    }
+
+    // ⚠️ 手动提取并回传 Cookie（2026-10-27 故障修复）
+    //
+    // 真机报错：「令牌响应解析失败：<!DOCTYPE html>...<title>Welcome</title>」
+    //
+    // 根因：面板 Set-Cookie 带 `Secure; HttpOnly; SameSite=Strict`，
+    // 在 Node 的 fetch 里 `getSetCookie()` 某些运行时（Electron 的
+    // undici 版本）拿不到，或者拿到后 Cookie 没被正确回传，
+    // 第二步请求就是裸奔的 —— 服务端当未登录，返回 Pages 默认 Welcome
+    // 页（纯 HTML），JSON 解析自然失败。
+    //
+    // 稳妥做法：从原始响应头里把所有 set-cookie 抓出来，
+    // 拼成 Cookie 头手动带上。
+    const rawSetCookie: string[] = []
+    // 兼容不同运行时：有的有 getSetCookie，有的只能逐个 get
+    if (typeof loginRes.headers.getSetCookie === 'function') {
+      rawSetCookie.push(...loginRes.headers.getSetCookie())
+    }
+    if (rawSetCookie.length === 0) {
+      const single = loginRes.headers.get('set-cookie')
+      if (single) rawSetCookie.push(single)
+    }
+    const cookie = rawSetCookie
+      .map((c) => c.split(';')[0].trim())
+      .filter(Boolean)
+      .join('; ')
+
+    if (!cookie) {
+      return { ok: false, error: '登录成功但服务端没有下发会话 Cookie（面板版本可能不匹配）' }
+    }
+
+    // ---- 2. 取令牌 ----
+    const tokenRes = await fetch(target + '/api/v1/scanner-token', {
+      method: 'POST',
+      headers: { Cookie: cookie },
+      signal: AbortSignal.timeout(20000),
+    })
+
+    if (!tokenRes.ok) {
+      const t = await tokenRes.text().catch(() => '')
+      return {
+        ok: false,
+        error: `获取令牌失败 HTTP ${tokenRes.status} ${t.slice(0, 120)}`,
+      }
+    }
+
+    const data = (await tokenRes.json()) as { ok?: boolean; token?: string; expiresIn?: number }
+    if (!data.token) {
+      return { ok: false, error: '面板没有返回令牌' }
+    }
+    return { ok: true, token: data.token, host: target, expiresIn: data.expiresIn ?? 600 }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+export async function getDeployCredentials(
+  kvNamespaceId?: string
+): Promise<{
+  ok: boolean
+  error?: string
+  panelUrl?: string
+  panelPassword?: string
+  uuid?: string
+  wsPath?: string
+  dataSubdomain?: string
+  build?: string
+  at?: string
+}> {
+  const secrets = loadSecrets()
+  const kvId = (kvNamespaceId ?? '').trim() || secrets.kvNamespaceId.trim()
+
+  if (!secrets.cfToken.trim()) return { ok: false, error: '请先保存 API Token' }
+  if (!secrets.accountId.trim()) return { ok: false, error: '请先检测账号' }
+  if (!kvId) return { ok: false, error: '请先选择 KV 命名空间' }
+
+  try {
+    const cfApi = loadCfApi()
+    const client = new cfApi.CloudflareClient({ token: secrets.cfToken })
+    const raw = await client.getKvValue(
+      secrets.accountId.trim(),
+      kvId,
+      'CFP_DEPLOY_MANIFEST'
+    )
+    if (!raw) {
+      return { ok: false, error: '这个 KV 里没有部署记录，请先完成一次部署' }
+    }
+
+    const m = JSON.parse(raw) as {
+      build?: string
+      at?: string
+      controlSubdomain?: string
+      dataSubdomain?: string
+      credentials?: {
+        panelPath?: string
+        panelPassword?: string
+        uuid?: string
+        wsPath?: string
+      }
+    }
+
+    // 面板路径必须带前导斜杠（兼容旧清单里的裸串）
+    let panelPath = (m.credentials?.panelPath ?? '').trim()
+    if (panelPath && !panelPath.startsWith('/')) panelPath = '/' + panelPath
+
+    let panelUrl = ''
+    const host = (m.controlSubdomain ?? '').trim()
+    if (host && panelPath) {
+      panelUrl = (host.startsWith('http') ? host : 'https://' + host) + panelPath
+    }
+
+    return {
+      ok: true,
+      panelUrl,
+      panelPassword: m.credentials?.panelPassword ?? '',
+      uuid: m.credentials?.uuid ?? '',
+      wsPath: m.credentials?.wsPath ?? '',
+      dataSubdomain: m.dataSubdomain ?? '',
+      build: m.build ?? '',
+      at: m.at ?? '',
+    }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
 export async function checkDeployed(
   win: BrowserWindow | null,
   kvNamespaceId?: string

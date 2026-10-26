@@ -166,77 +166,67 @@ func TestInvalidJSON(t *testing.T) {
 	}
 }
 
-// 部署 Pages 时的 multipart 必须正确：文件名、metadata、boundary。
-func TestDeployPagesWorkerMultipart(t *testing.T) {
-	var gotMeta string
-	var gotSlash bool
-	c, _ := mockCF(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Errorf("应为 POST，实际 %s", r.Method)
-		}
-		if !strings.Contains(r.URL.Path, "/pages/projects/myproj/deployments") {
-			t.Errorf("路径不对：%s", r.URL.Path)
-		}
+// 部署表单的**顶层字段**校验（嵌套结构由 deploy_form_test.go 负责）。
+//
+// ⚠️ 这个测试曾被写成「断言 metadata 是顶层字段」——那是**错误的结构**，
+// 导致真实部署 100% 失败（8000096）却测试全绿。
+// 现在改为断言正确的顶层字段：branch / manifest / _worker.bundle。
+func TestDeployPagesWorkerTopLevelFields(t *testing.T) {
+	var fields map[string]bool
+	var manifest string
 
-		ct := r.Header.Get("Content-Type")
-		mediaType, params, err := mime.ParseMediaType(ct)
-		if err != nil {
-			t.Fatalf("Content-Type 解析失败：%v", err)
-		}
-		if mediaType != "multipart/form-data" {
-			t.Fatalf("应为 multipart/form-data，实际 %s", mediaType)
-		}
-		if params["boundary"] == "" {
-			t.Fatal("缺少 boundary")
-		}
-
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, params, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
 		mr := multipart.NewReader(r.Body, params["boundary"])
-		form, err := mr.ReadForm(8 << 20)
-		if err != nil {
-			t.Fatalf("读 multipart 失败：%v", err)
+		form, _ := mr.ReadForm(16 << 20)
+
+		fields = map[string]bool{}
+		for k := range form.Value {
+			fields[k] = true
 		}
-		for name := range form.File {
-			if name == "_worker.js" {
-				gotSlash = true
-			}
+		for k := range form.File {
+			fields[k] = true
 		}
-		if v := form.Value["metadata"]; len(v) > 0 {
-			gotMeta = v[0]
+		if v := form.Value["manifest"]; len(v) > 0 {
+			manifest = v[0]
 		}
 
-		writeJSON(w, http.StatusOK, map[string]any{
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"success": true,
-			"result":  map[string]string{"id": "dep1", "environment": "production"},
+			"result":  map[string]string{"id": "dep1"},
 		})
-	})
+	}))
+	defer srv.Close()
 
-	dep, err := c.DeployPagesWorker(context.Background(), PagesDeployOptions{
-		AccountID:     "acc1",
-		Project:       "myproj",
-		Script:        []byte("export default { fetch() {} }"),
-		CommitMessage: "test deploy",
-	})
-	if err != nil {
+	c := New(Options{Token: "t", APIBase: srv.URL})
+	if _, err := c.DeployPagesWorker(context.Background(), PagesDeployOptions{
+		AccountID: "acc",
+		Project:   "proj",
+		Script:    []byte("x"),
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if dep.ID != "dep1" {
-		t.Errorf("部署 id 不对：%q", dep.ID)
-	}
-	if !gotSlash {
-		t.Error("multipart 里缺少 _worker.js 文件字段")
-	}
 
-	// metadata 必须只有 main_module + bindings，
-	// 绝不能带 compatibility_date（带了 Pages 会忽略 _worker.js）
-	var meta map[string]any
-	if err := json.Unmarshal([]byte(gotMeta), &meta); err != nil {
-		t.Fatalf("metadata 不是合法 JSON：%v", err)
+	// manifest 是必需字段（缺了 8000096）
+	if !fields["manifest"] {
+		t.Error("缺少 manifest 字段 —— Pages API 会返回 8000096")
 	}
-	if meta["main_module"] != "_worker.js" {
-		t.Errorf("main_module 应为 _worker.js，实际 %v", meta["main_module"])
+	if manifest != "{}" {
+		t.Errorf("manifest 应为 \"{}\"，实际 %q", manifest)
 	}
-	if _, has := meta["compatibility_date"]; has {
-		t.Error("metadata 绝不能带 compatibility_date（会让 Pages 忽略 _worker.js）")
+	// 必须是 _worker.bundle 而不是裸 _worker.js
+	if !fields["_worker.bundle"] {
+		t.Error("缺少 _worker.bundle 字段")
+	}
+	if fields["_worker.js"] {
+		t.Error("顶层不能直接放 _worker.js（必须包在 _worker.bundle 里）")
+	}
+	if fields["metadata"] {
+		t.Error("顶层不能直接放 metadata（必须包在 _worker.bundle 里）")
+	}
+	if !fields["branch"] {
+		t.Error("缺少 branch 字段")
 	}
 }
 

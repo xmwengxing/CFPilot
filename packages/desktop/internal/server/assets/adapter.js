@@ -252,51 +252,106 @@
       return post('/api/deploy/check', { kvNamespaceId: kvNamespaceId || '' })
     },
 
-    /* ---------------- 凭据与账户 ---------------- */
+    // 读取清单里保存的面板凭据（面板地址 / 密码 / UUID / WS 路径）。
+    //
+    // 云端环境变量是加密的，所以这是用户拿回面板密码的唯一途径。
+    getDeployCredentials: function (kvNamespaceId) {
+      return post('/api/deploy/credentials', { kvNamespaceId: kvNamespaceId || '' })
+    },
+
+    /* ---------------- 凭据与账户 ----------------
+     *
+     * ## ⚠️ 返回值必须与 Electron 版**逐字段一致**（2026-10-26 严重故障）
+     *
+     * 界面代码（renderer.ts）是按 Electron 版的桥接契约写的，
+     *
+     *     const saved = await window.cfpilot.updateProfile(id, {...})
+     *     if (!saved.ok) { log('新建账户失败：' + saved.error) }
+     *
+     * 我最初让适配层返回 `r.profile`（对象），于是 `saved.ok` 是 undefined
+     * → **永远判定为失败**，而且 createProfile 已经先创建了一条记录，
+     * 点几次就多几条「○ 新账户」。
+     *
+     * 正确契约（来自 packages/gui/src/main/bridge.ts）：
+     *
+     *   saveCredentials      → { saved: boolean }
+     *   wipeCredentials      → { wiped: boolean }
+     *   listProfiles         → ProfileView[]  ← 每项必须带 active 字段
+     *   createProfile        → ProfileView
+     *   updateProfile        → { ok: boolean, error?: string }
+     *   deleteProfile        → { deleted: boolean, activeId: string }
+     *   switchProfile        → { ok: boolean, activeId: string }
+     *   currentProfile       → ProfileView | null
+     *   credentialsState     → { hasToken, accountId, kvNamespaceId }
+     */
 
     saveCredentials: function (input) {
-      return post('/api/cred/save', input || {})
+      // 后端返回 { ok, profile }；Electron 版返回 { saved }。
+      // 原样透传会让 `result.saved` 是 undefined，界面无法判断成功。
+      return post('/api/cred/save', input || {}).then(function () {
+        return { saved: true }
+      })
     },
 
     wipeCredentials: function () {
-      return post('/api/cred/wipe')
+      return post('/api/cred/wipe').then(function () {
+        return { wiped: true }
+      })
     },
 
     credentialsState: function () {
+      // 后端已返回 { hasToken, accountId, kvNamespaceId, ... }，字段名一致
       return get('/api/cred/state')
     },
 
     listProfiles: function () {
-      // 后端返回 { profiles, activeId }，界面只关心 profiles
+      // ⚠️ 必须给每一项补上 `active` 字段。
+      // 后端返回的是 { profiles, activeId } —— profiles 里没有 active，
+      // 而界面用 `profiles.find(p => p.active)` 找当前账户，
+      // 不补就会永远是 undefined → 下拉框选不中、切换逻辑失效。
       return get('/api/profile/list').then(function (r) {
-        return (r && r.profiles) || []
+        var list = (r && r.profiles) || []
+        var activeId = (r && r.activeId) || ''
+        return list.map(function (p) {
+          return Object.assign({}, p, { active: p.id === activeId })
+        })
       })
     },
 
     createProfile: function (name) {
       return post('/api/profile/create', { name: name || '' }).then(function (r) {
-        return r && r.profile
+        var p = (r && r.profile) || null
+        if (!p) throw new Error('新建账户失败：后端没有返回账户信息')
+        // 与 listProfiles 保持一致：新建的账户即为激活项
+        return Object.assign({}, p, { active: true })
       })
     },
 
     updateProfile: function (id, patch) {
-      const body = Object.assign({ id: id }, patch || {})
-      return post('/api/profile/update', body).then(function (r) {
-        return r && r.profile
-      })
+      // ⚠️ 返回 { ok, error? }，不是 profile 对象
+      return post('/api/profile/update', Object.assign({ id: id }, patch || {}))
+        .then(function () {
+          return { ok: true }
+        })
+        .catch(function (err) {
+          return { ok: false, error: err && err.message ? err.message : String(err) }
+        })
     },
 
     deleteProfile: function (id) {
+      // 后端返回 { deleted, activeId }，与 Electron 版一致
       return post('/api/profile/delete', { id: id })
     },
 
     switchProfile: function (id) {
+      // 后端返回 { ok, activeId }，与 Electron 版一致
       return post('/api/profile/switch', { id: id })
     },
 
     currentProfile: function () {
       return get('/api/profile/current').then(function (r) {
-        return (r && r.profile) || null
+        var p = (r && r.profile) || null
+        return p ? Object.assign({}, p, { active: true }) : null
       })
     },
 
@@ -307,13 +362,26 @@
     },
 
     listKvOptions: function (accountId) {
+      // ⚠️ 返回 `{ options: [...] }`，不是裸数组！
+      //
+      // 界面代码是：
+      //     const result = await window.cfpilot.listKvOptions(id)
+      //     kvOptions = result.options        ← 期望对象外壳
+      //
+      // 早期我返回裸数组，于是 result.options 是 undefined，
+      // 后面 kvOptions.filter(...) 直接抛
+      // 「Cannot read properties of undefined (reading 'length')」。
       return post('/api/kv/list', { accountId: accountId || '' }).then(function (r) {
-        return (r && r.options) || []
+        return { options: (r && r.options) || [] }
       })
     },
 
     createKvNamespace: function (accountId, title) {
-      return post('/api/kv/create', { accountId: accountId || '', title: title || '' })
+      // 界面期望直接拿到 { id, title }，后端返回的也是这个形状
+      return post('/api/kv/create', {
+        accountId: accountId || '',
+        title: title || '',
+      })
     },
 
     /* ---------------- 优选 ---------------- */
@@ -357,11 +425,65 @@
     },
 
     detectScanHost: function () {
+      // ⚠️ 界面判断的是 `result.ok && result.host`，后端只返回 { host, source }
+      // → ok 是 undefined，永远不会填域名。这里补上 ok 字段。
       return post('/api/scan/detect-host')
+        .then(function (r) {
+          if (r && r.host) {
+            return {
+              ok: true,
+              host: r.host,
+              // 后端给的是中文 source（"自定义域名" / "pages.dev 子域名"），
+              // 界面比的是 'custom' / 'pages'
+              source: String(r.source || '').indexOf('自定义') >= 0 ? 'custom' : 'pages',
+            }
+          }
+          return { ok: false, error: (r && r.error) || '未能识别数据面域名' }
+        })
+        .catch(function (err) {
+          return { ok: false, error: err && err.message ? err.message : String(err) }
+        })
     },
 
     detectScanPath: function () {
+      // 同上：界面判断 `result.ok && result.path`
       return post('/api/scan/detect-path')
+        .then(function (r) {
+          if (r && r.path) {
+            return {
+              ok: true,
+              path: r.path,
+              source: String(r.source || '').indexOf('KV') >= 0 ? 'kv' : 'env',
+            }
+          }
+          return { ok: false, error: (r && r.error) || '未能识别 WS 路径' }
+        })
+        .catch(function (err) {
+          return { ok: false, error: err && err.message ? err.message : String(err) }
+        })
+    },
+
+    /**
+     * 自动获取面板的一次性扫描令牌。
+     *
+     * 用保存的面板密码登录控制面，再调 /api/v1/scanner-token 换令牌。
+     * 用户不用手动去面板点「生成令牌」。
+     */
+    /**
+     * 把优选结果回填到面板的「手动优选 IP」。
+     *
+     * 服务端会现取临时令牌（10 分钟有效）再回填，
+     * 所以不会出现「优选跑太久令牌过期」的问题。
+     */
+    pushScanResults: function (lines) {
+      return post('/api/scan/push-results', { lines: lines || [] })
+    },
+
+    fetchScannerToken: function (host, password) {
+      return post('/api/scan/scanner-token', {
+        host: host || '',
+        password: password || '',
+      })
     },
 
     listScanCountries: function () {
@@ -409,7 +531,31 @@
     },
 
     checkEnvironment: function () {
+      // ⚠️ 界面判断的是 `result.clean`（布尔），后端返回的是
+      // { findings: [{kind, message, level}] } —— 缺 clean 字段，
+      // 于是「环境正常」永远不会显示。这里做转换。
       return post('/api/scan/env-check')
+        .then(function (r) {
+          var findings = (r && r.findings) || []
+          // 有任意一条 level=warn 就认为环境不干净
+          var clean = !findings.some(function (f) {
+            return f && f.level === 'warn'
+          })
+          return {
+            clean: clean,
+            // 界面用的是 string[]，后端给的是对象数组 → 拍平成文案
+            findings: findings.map(function (f) {
+              return (f && f.message) || String(f)
+            }),
+          }
+        })
+        .catch(function (err) {
+          // 检测失败不该阻断优选，当作「无法判断」处理
+          return {
+            clean: true,
+            findings: ['环境检测失败：' + (err && err.message ? err.message : String(err))],
+          }
+        })
     },
 
     /* ---------------- 更新 ---------------- */

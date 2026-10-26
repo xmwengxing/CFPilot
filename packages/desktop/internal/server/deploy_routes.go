@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -32,6 +33,7 @@ import (
 
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/cfapi"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/deploy"
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/kernel"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/store"
 )
 
@@ -45,6 +47,7 @@ type deployState struct {
 func (s *Server) registerDeployRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/deploy/run", s.guard(s.handleDeployRun))
 	mux.HandleFunc("/api/deploy/check", s.guard(s.handleDeployCheck))
+	mux.HandleFunc("/api/deploy/credentials", s.guard(s.handleDeployCredentials))
 	mux.HandleFunc("/api/account/detect", s.guard(s.handleAccountDetect))
 	mux.HandleFunc("/api/kv/list", s.guard(s.handleKvList))
 	mux.HandleFunc("/api/kv/create", s.guard(s.handleKvCreate))
@@ -141,6 +144,18 @@ func (s *Server) handleDeployRun(w http.ResponseWriter, r *http.Request) {
 	opt.DataProject = req.DataProject
 	opt.PanelPath = req.PanelPath
 	opt.WSPath = req.WSPath
+	// ⚠️ 面板密码必须从账户里读（2026-10-27 用户反馈）
+	//
+	// 界面把用户填的面板密码通过 saveCredentials 写进了账户，
+	// 但早期**部署时从来不读 profile.PanelPassword** ——
+	// 于是每次都走「随机生成新密码」，更新部署把用户原来的密码覆盖掉，
+	// 而云端环境变量是加密的，用户再也读不到，面板进不去。
+	//
+	// 正确语义：
+	//   - 用户在部署页填了密码 → 界面先 saveCredentials 写入账户 → 这里读它
+	//   - 用户没填 → profile.PanelPassword 为空 → 部署层随机生成
+	//   - 更新模式 + 没填 → 由 mergeCredentials 从清单沿用原密码
+	opt.PanelPassword = profile.PanelPassword
 	opt.LocalBuild = build
 	// 「重新生成凭据」= 不沿用清单里的
 	opt.KeepCredentials = !req.NewCredentials
@@ -171,6 +186,20 @@ func (s *Server) handleDeployRun(w http.ResponseWriter, r *http.Request) {
 			} else {
 				s.logLevel("部署完成", "ok")
 			}
+
+			// ⚠️ 必须把面板凭据完整打印出来（2026-10-27 用户反馈）
+			//
+			// 早期 Go 版**完全没有这段汇总**，导致：
+			//   - 部署成功后界面看不到面板密码 / 路径
+			//   - 云端环境变量是加密的，用户也读不到
+			//   - 结果：面板进不去（密码丢了就彻底没了）
+			//
+			// Electron 版一直有这段汇总，Go 版漏了。
+			// 注意：**只在面板密码不是从清单沿用来的全新值时**才值得强调，
+			// 但无论新旧都要显示 —— 用户可能忘了。
+			if !res.Skipped {
+				s.logSummary(res)
+			}
 		}
 		s.events.publish("deploy-status", payload)
 	}()
@@ -183,40 +212,26 @@ func (s *Server) handleDeployRun(w http.ResponseWriter, r *http.Request) {
 
 // loadKernelArtifacts 读取内核产物（control.js / dataplane.js）。
 //
-// 产物随程序一起分发：Windows 是 exe 同目录的 worker-core/dist/，
-// Linux 用同一个相对位置。也允许用环境变量覆盖（开发时直接指仓库）。
+// 实际实现在 internal/kernel 包里 —— 那边用 go:embed 把产物**内嵌进 exe**。
+//
+// ## 为什么改成内嵌（2026-10-26 严重缺陷）
+//
+// 最初的设计假设「exe 旁边有 worker-core/dist 目录」，但构建脚本
+// 从来没把产物拷进去。用户下载的单文件 exe 完全不包含内核，
+// 点「开始部署」直接报「找不到内核产物」—— 部署功能 100% 不可用。
+//
+// 现在产物编译进二进制，真正的单文件分发。
 func (s *Server) loadKernelArtifacts() (control, data []byte, build string, err error) {
-	dirs := []string{}
-	if env := strings.TrimSpace(os.Getenv("CFPILOT_KERNEL_DIR")); env != "" {
-		dirs = append(dirs, env)
+	a, err := kernel.Load()
+	if err != nil {
+		return nil, nil, "", fmt.Errorf(
+			"内核产物不可用：%w\n"+
+				"  这通常意味着构建时漏了拷贝内核产物。\n"+
+				"  请重新执行 node scripts/build-desktop.mjs（它会自动拷贝）", err)
 	}
-	// exe 同目录的 worker-core/dist
-	if exe, e := os.Executable(); e == nil {
-		base := filepath.Dir(exe)
-		dirs = append(dirs,
-			filepath.Join(base, "worker-core", "dist"),
-			filepath.Join(base, "..", "worker-core", "dist"),
-		)
-	}
-	// 开发期：从工作目录往上找
-	if wd, e := os.Getwd(); e == nil {
-		d := wd
-		for i := 0; i < 5; i++ {
-			dirs = append(dirs, filepath.Join(d, "packages", "worker-core", "dist"))
-			d = filepath.Dir(d)
-		}
-	}
-
-	for _, dir := range dirs {
-		c, e1 := os.ReadFile(filepath.Join(dir, "control.js"))
-		d, e2 := os.ReadFile(filepath.Join(dir, "dataplane.js"))
-		if e1 == nil && e2 == nil && len(c) > 0 && len(d) > 0 {
-			return c, d, readBuildVersion(dir, c), nil
-		}
-	}
-	return nil, nil, "", fmt.Errorf(
-		"找不到内核产物（control.js / dataplane.js）。\n" +
-			"  请确认安装包里带 worker-core/dist，或用环境变量 CFPILOT_KERNEL_DIR 指定目录")
+	log.Printf("[cfpilot] 内核产物已加载（%s，control=%dKB data=%dKB，build=%s）",
+		a.Source, len(a.Control)/1024, len(a.Data)/1024, a.Build)
+	return a.Control, a.Data, a.Build, nil
 }
 
 // readBuildVersion 从产物里提取版本串。
@@ -257,15 +272,15 @@ func (s *Server) handleDeployCheck(w http.ResponseWriter, r *http.Request) {
 
 	profile, err := s.store.Active()
 	if err != nil || profile == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"state": "none", "reason": "no-token"})
+		writeJSON(w, http.StatusOK, map[string]any{"state": "none", "hasDeploy": false, "reason": "no-token"})
 		return
 	}
 	if strings.TrimSpace(profile.CfToken) == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"state": "none", "reason": "no-token"})
+		writeJSON(w, http.StatusOK, map[string]any{"state": "none", "hasDeploy": false, "reason": "no-token"})
 		return
 	}
 	if strings.TrimSpace(profile.AccountID) == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"state": "none", "reason": "no-account"})
+		writeJSON(w, http.StatusOK, map[string]any{"state": "none", "hasDeploy": false, "reason": "no-account"})
 		return
 	}
 	kvID := strings.TrimSpace(req.KVNamespaceID)
@@ -273,7 +288,7 @@ func (s *Server) handleDeployCheck(w http.ResponseWriter, r *http.Request) {
 		kvID = strings.TrimSpace(profile.KVNamespaceID)
 	}
 	if kvID == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"state": "none", "reason": "no-kv"})
+		writeJSON(w, http.StatusOK, map[string]any{"state": "none", "hasDeploy": false, "reason": "no-kv"})
 		return
 	}
 
@@ -284,12 +299,12 @@ func (s *Server) handleDeployCheck(w http.ResponseWriter, r *http.Request) {
 	// 先读清单
 	raw, ok := client.GetKVValue(ctx, profile.AccountID, kvID, deploy.ManifestKey)
 	if !ok || strings.TrimSpace(raw) == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"state": "none"})
+		writeJSON(w, http.StatusOK, map[string]any{"state": "none", "hasDeploy": false})
 		return
 	}
 	var m deploy.Manifest
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"state": "none", "note": "部署清单格式损坏"})
+		writeJSON(w, http.StatusOK, map[string]any{"state": "none", "hasDeploy": false, "note": "部署清单格式损坏"})
 		return
 	}
 
@@ -316,16 +331,156 @@ func (s *Server) handleDeployCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
+		// ⚠️ 字段名必须与 Electron 版 DeployStatus **逐字段一致**
+		// （2026-10-27 修复「检查状态是空壳按钮」）
+		//
+		// 界面代码（renderer.ts 的 applyDeployStatus）读的是：
+		//   status.build        ← 线上内核版本
+		//   status.localBuild   ← 本地内核版本
+		//   status.at           ← 部署时间
+		//
+		// 我最初返回 remoteBuild / deployedAt，于是：
+		//   - status.build 是 undefined → `if (!status.build)` 恒为真
+		//     → 永远走「读不到版本」分支，界面看起来毫无变化
+		//   - status.at 是 undefined → 不显示部署时间
+		//
+		// 这就是用户看到的「永远是空壳按钮、只打一句日志」。
 		"state":            state,
+		"hasDeploy":        true,
+		"build":            remoteBuild, // 契约字段名（线上版本）
 		"localBuild":       localBuild,
-		"remoteBuild":      remoteBuild,
+		"at":               m.At, // 契约字段名（部署时间）
 		"controlProject":   m.ControlProject,
 		"dataProject":      m.DataProject,
 		"controlSubdomain": m.ControlSubdomain,
 		"dataSubdomain":    m.DataSubdomain,
 		"customDomain":     m.DataCustomDomain,
-		"deployedAt":       m.At,
 	})
+}
+
+// handleDeployCredentials 返回清单里保存的面板凭据（供界面随时查看）。
+//
+// ## 为什么需要这个接口（2026-10-27 用户需求）
+//
+// Cloudflare 平台上的环境变量是**加密的**（页面只显示 `****`），
+// 所以一旦部署完成时没记下面板密码，用户就彻底拿不回来了。
+//
+// 部署清单（KV 里的 CFP_DEPLOY_MANIFEST）里保存了明文凭据，
+// 这个接口把它读出来给界面展示。数据只在本机回环服务内流转。
+//
+// ⚠️ 安全：接口仍需会话 Cookie；不对外网暴露。
+func (s *Server) handleDeployCredentials(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "仅支持 POST"})
+		return
+	}
+
+	profile, err := s.store.Active()
+	if err != nil || profile == nil || strings.TrimSpace(profile.CfToken) == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "请先保存 API Token"})
+		return
+	}
+	kvID := strings.TrimSpace(profile.KVNamespaceID)
+	if kvID == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "请先选择 KV 命名空间"})
+		return
+	}
+
+	client := cfapi.New(cfapi.Options{Token: profile.CfToken})
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+
+	raw, ok := client.GetKVValue(ctx, profile.AccountID, kvID, deploy.ManifestKey)
+	if !ok || strings.TrimSpace(raw) == "" {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":    false,
+			"error": "这个 KV 里没有部署记录，请先完成一次部署",
+		})
+		return
+	}
+	var m deploy.Manifest
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "部署清单格式损坏"})
+		return
+	}
+
+	// 面板完整地址 = 控制面域名 + 面板路径
+	// ⚠️ 面板路径必须保证带前导斜杠（兼容清单里可能存在的旧格式裸串）
+	panelPath := m.Credentials.PanelPath
+	if panelPath != "" && !strings.HasPrefix(panelPath, "/") {
+		panelPath = "/" + panelPath
+	}
+	panelURL := ""
+	if m.ControlSubdomain != "" && panelPath != "" {
+		host := m.ControlSubdomain
+		if !strings.HasPrefix(host, "http") {
+			host = "https://" + host
+		}
+		panelURL = host + panelPath
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":            true,
+		"panelUrl":      panelURL,
+		"panelPath":     panelPath,
+		"panelPassword": m.Credentials.PanelPassword,
+		"uuid":          m.Credentials.UUID,
+		"wsPath":        m.Credentials.WSPath,
+		"dataSubdomain": m.DataSubdomain,
+		"build":         m.Build,
+		"at":            m.At,
+	})
+}
+
+// logSummary 打印部署完成后的凭据汇总。
+//
+// ## 为什么必须有（2026-10-27 用户反馈）
+//
+// 用户部署成功后**看不到面板密码**，而 Cloudflare 平台上的环境变量
+// 是加密的（页面只显示 `****`），所以密码一旦没记录就彻底找不回来，
+// 面板永远进不去。
+//
+// Electron 版一直有这个汇总块，Go 版漏了 —— 属于功能缺失。
+//
+// 输出内容（与 Electron 版对齐）：
+//   - 控制面 / 数据面的访问地址
+//   - UUID、WS 路径
+//   - **面板路径与面板密码**（最关键）
+func (s *Server) logSummary(res *deploy.Result) {
+	line := strings.Repeat("─", 52)
+
+	s.logLevel(line, "info")
+	s.logLevel("部署完成，以下是访问本实例所需的全部信息", "ok")
+	s.logLevel(line, "info")
+
+	if res.Control.Subdomain != "" {
+		s.logLevel("控制面地址："+res.Control.Subdomain, "info")
+	}
+	if res.Data.Subdomain != "" {
+		s.logLevel("订阅域名："+res.Data.Subdomain, "info")
+	}
+
+	if res.UUID != "" {
+		s.logLevel("UUID："+res.UUID, "info")
+	}
+	if res.WSPath != "" {
+		s.logLevel("WS 路径："+res.WSPath, "info")
+	}
+
+	// ⚠️ 面板凭据单独强调 —— 这是用户唯一一次能看到明文密码的机会
+	if res.PanelPath != "" {
+		s.logLevel("面板路径："+res.PanelPath, "ok")
+	}
+	if res.PanelPassword != "" {
+		s.logLevel("面板密码："+res.PanelPassword, "ok")
+		s.logLevel("⚠ 请立刻保存面板密码 —— 云端环境变量是加密的，之后无法再读取", "warn")
+	}
+
+	if res.Control.Subdomain != "" && res.PanelPath != "" {
+		s.logLevel("面板完整地址：https://"+res.Control.Subdomain+res.PanelPath, "ok")
+	}
+
+	s.logLevel(line, "info")
 }
 
 // handleAccountDetect 检测账号（用 Token 列出账号）。

@@ -179,6 +179,42 @@ export async function handleApi(
     return json({ ok: true })
   }
 
+  // 手动保存本地池（2026-10-27 用户需求）
+  //
+  // ## 与「手动填写 ADD」的区别
+  //
+  //   LOCAL_PREFERRED_IPS（本地池）← 本地优选回填，可在面板里查看/编辑
+  //   config.add（手动填写）        ← 用户自己加的条目
+  //
+  // 两者在 collectNodes 里都会进入订阅（当 poolManual 勾选时）。
+  // 之前面板只能「清空」本地池，看不到也不能改 ——
+  // 用户跑完回填后在面板里找不到 IP，以为失败了。
+  //
+  // ⚠️ 语义：这里**无条件保存**，与 poolManual 勾选无关。
+  // poolManual 只决定这些 IP 是否成为订阅节点。
+  if (path === '/ips' && method === 'PUT') {
+    let body: { raw?: unknown }
+    try {
+      body = (await request.json()) as { raw?: unknown }
+    } catch {
+      return error('请求体解析失败', 400)
+    }
+    if (typeof body.raw !== 'string') return error('缺少 raw 字段', 400)
+
+    const cleaned = body.raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .join('\n')
+
+    if (cleaned) {
+      await store.put(LOCAL_IPS_KEY, cleaned)
+    } else {
+      await store.delete(LOCAL_IPS_KEY)
+    }
+    return json({ ok: true, count: cleaned ? cleaned.split('\n').length : 0 })
+  }
+
   if (path === '/nodes' && method === 'GET') {
     // 预算建在 KV 读**之后**：墙钟近似含 I/O 等待，建早了会把等待算成 CPU，
     // 预览永远显示"CPU 预算不足"（远程 fetch 期间另有 pause/resume 保护）。

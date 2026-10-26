@@ -23,6 +23,27 @@ const api = {
   ) => ipcRenderer.invoke('deploy:run', params, kvNamespaceId),
   checkDeployed: (kvNamespaceId?: string) => ipcRenderer.invoke('deploy:check', kvNamespaceId),
 
+  // 读取清单里保存的面板凭据（面板地址 / 密码 / UUID / WS 路径）。
+  //
+  // 为什么需要：Cloudflare 云端的环境变量是加密的，密码一旦没记录
+  // 就彻底拿不回来，面板永远进不去。这里从本机部署清单读明文。
+  getDeployCredentials: (kvNamespaceId?: string) =>
+    ipcRenderer.invoke('deploy:credentials', kvNamespaceId),
+
+  /**
+   * 自动获取面板的一次性扫描令牌（登录 → /api/v1/scanner-token）。
+   *
+   * 用户不必手动去面板生成，桌面版用保存的面板密码自动换。
+   */
+  fetchScannerToken: (host?: string, password?: string) =>
+    ipcRenderer.invoke('scan:scanner-token', host, password),
+
+  /**
+   * 把优选结果回填到面板的「手动优选 IP」。
+   * 服务端在回填时现取临时令牌，不会因优选耗时而过期。
+   */
+  pushScanResults: (lines: string[]) => ipcRenderer.invoke('scan:push-results', lines),
+
   // 凭据
   saveCredentials: (input: {
     cfToken?: string

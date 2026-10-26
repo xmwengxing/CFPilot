@@ -477,11 +477,51 @@
             </div>
             <div class="btn-row" style="margin-top:12px">
               <button class="btn btn-ghost" id="btnCheck">检查状态</button>
+              <button class="btn btn-ghost" id="btnShowCreds">查看面板凭据</button>
             </div>
             <p class="tip" style="margin-top:8px">
               会读取这个 KV 里的部署记录，比对<b>线上内核版本</b>与<b>本地内核版本</b>：
               一致说明不用更新，不一致就可以一键更新。
             </p>
+
+            <!--
+              面板凭据面板（默认隐藏，点「查看面板凭据」展开）
+
+              为什么需要：Cloudflare 平台上的环境变量是加密的（只显示 ****），
+              密码一旦没记录就彻底找不回来，面板永远进不去。
+              这里的值从**本机部署清单**读取（KV 里的 CFP_DEPLOY_MANIFEST），
+              不依赖云端变量的可见性。
+            -->
+            <div id="credBox" hidden style="margin-top:12px">
+              <div
+                style="
+                  background: var(--bg-input);
+                  border: 1px solid var(--line);
+                  border-radius: 8px;
+                  padding: 12px 14px;
+                "
+              >
+                <p class="kv-row" style="margin: 0 0 6px">
+                  <span class="k">面板地址</span><span class="v" id="credPanelUrl">—</span>
+                </p>
+                <p class="kv-row" style="margin: 0 0 6px">
+                  <span class="k">面板密码</span><span class="v" id="credPanelPw">—</span>
+                </p>
+                <p class="kv-row" style="margin: 0 0 6px">
+                  <span class="k">UUID</span><span class="v" id="credUuid">—</span>
+                </p>
+                <p class="kv-row" style="margin: 0">
+                  <span class="k">WS 路径</span><span class="v" id="credWsPath">—</span>
+                </p>
+                <div class="btn-row" style="margin-top:10px">
+                  <button class="btn btn-ghost" id="btnCopyCreds">复制全部</button>
+                </div>
+                <p class="tip" style="margin-top:8px">
+                  ⚠ 这些值来自<b>本机部署清单</b>。请自行妥善保存 ——
+                  Cloudflare 云端的环境变量是加密的，之后无法再读取。
+                </p>
+              </div>
+            </div>
           </div>
 
           <div class="card">
@@ -664,9 +704,17 @@
             <label class="chk" style="margin-bottom:8px">
               <input type="checkbox" id="optNoSpeed" /> 跳过测速，只按延迟排序
             </label>
-            <label class="chk">
-              <input type="checkbox" id="optNoCallback" checked /> 不回填面板，只输出列表
-            </label>
+
+            <!--
+              已移除两个控件（2026-10-27 用户要求）：
+
+              1. 「不回填面板，只输出列表」勾选框
+                 —— 回填改为结果出来后手动点按钮，这个开关就没意义了。
+              2. 「扫描令牌」输入框 + 「自动获取」按钮
+                 —— 令牌改为点「回填面板」时才现取。优选要跑几分钟，
+                     提前取的 10 分钟令牌很容易过期；而且用户也不需要
+                     理解令牌这回事，按个按钮就行。
+            -->
             <p class="tip" style="margin-top:6px">
               <b>阶段二两层校验：</b><br>
               · 第一层 WebSocket <b>101 握手</b> —— 排除 Enterprise 专属 IP、SNI 阻断；
@@ -692,9 +740,47 @@
           <div class="card">
             <h2>📋 优选结果</h2>
             <div class="result-box" id="scanOut">还没有结果，填好上面的参数后点「开始优选」</div>
-            <div class="btn-row" style="margin-top:10px">
+            <div class="btn-row" style="margin-top: 10px">
               <button class="btn btn-ghost" id="btnCopyResult">复制结果</button>
+              <button class="btn btn-primary" id="btnPushToPanel" disabled>回填面板</button>
             </div>
+
+            <!--
+              两个按钮的分工说明（2026-10-27 用户要求）
+
+              设计要点：令牌改为**优选完成后**才获取。
+              原因：优选要跑几分钟，提前取的令牌（10 分钟有效）很容易过期。
+              放到点击「回填面板」时才现取，既不会超时，用户也没有学习成本
+              —— 他只管在拿到结果后按一下按钮。
+            -->
+            <div
+              class="tip"
+              style="
+                margin-top: 12px;
+                background: var(--bg-input);
+                border: 1px solid var(--line);
+                border-radius: 8px;
+                padding: 12px 14px;
+                line-height: 1.9;
+              "
+            >
+              <b>两个按钮的区别</b><br /><br />
+              <b>复制结果</b> —— 把这批 IP 复制到剪贴板，你自己粘到面板的
+              「手动优选 IP」框里。<br />
+              <span style="color: var(--muted)"
+                >不需要令牌，离线可用；适合只想留个备份、或不想让工具联网的情况。</span
+              ><br /><br />
+              <b>回填面板</b> —— 自动登录你的控制面面板，把这批 IP 直接写进去，
+              之后订阅里就能用上。<br />
+              <span style="color: var(--muted)"
+                >需要临时令牌：点按钮时才向面板申请，<b>10 分钟内有效</b>，
+                用完即弃。因为是在优选<b>结束之后</b>才申请，不会出现「跑到一半令牌过期」的问题。
+                申请令牌需要你保存过面板密码（部署时填的那个）。</span
+              >
+            </div>
+
+            <!-- 回填进度 / 结果反馈 -->
+            <p class="tip" id="pushHint" style="margin-top: 8px"></p>
             <table id="scanTable" hidden>
               <thead><tr><th>#</th><th>地址</th><th>机房</th><th>TLS握手(ms)</th><th>TCP(ms)</th><th>下行(MB/s)</th></tr></thead>
               <tbody></tbody>

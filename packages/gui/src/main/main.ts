@@ -31,6 +31,9 @@ import {
   listScanCountries,
   type DeployParams,
   type ScanParams,
+  getDeployCredentials,
+  fetchScannerToken,
+  pushScanResults,
 } from './bridge'
 import { checkForUpdate, downloadUpdate, applyUpdate, cleanupUpdateFiles } from './updater'
 
@@ -108,6 +111,20 @@ ipcMain.handle('deploy:run', (_event, params: DeployParams, kvNamespaceId?: stri
 ipcMain.handle('deploy:check', (_event, kvNamespaceId?: string) =>
   checkDeployed(mainWindow, kvNamespaceId)
 )
+
+// 读取清单里保存的面板凭据（面板地址 / 密码 / UUID / WS 路径）。
+// 云端环境变量加密，这是用户拿回面板密码的唯一途径。
+ipcMain.handle('deploy:credentials', (_event, kvNamespaceId?: string) =>
+  getDeployCredentials(kvNamespaceId)
+)
+
+// 自动获取扫描令牌（登录 → /api/v1/scanner-token）
+ipcMain.handle('scan:scanner-token', (_event, host?: string, password?: string) =>
+  fetchScannerToken(host, password)
+)
+
+// 回填优选结果到面板（内部会现取临时令牌，避免优选耗时导致令牌过期）
+ipcMain.handle('scan:push-results', (_event, lines: string[]) => pushScanResults(lines))
 
 ipcMain.handle('cred:save', (_event, input: Parameters<typeof saveCredentials>[0]) => saveCredentials(input))
 ipcMain.handle('cred:wipe', () => wipeCredentials())

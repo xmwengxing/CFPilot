@@ -79,6 +79,35 @@ console.log(
   `[desktop] 界面资源 adapter.js → internal/server/assets/ (${(statSync(join(assetsDir, 'adapter.js')).size / 1024).toFixed(1)} KB)`
 )
 
+// ---- 1b. 同步 Worker 内核产物（go:embed 打进 exe）----
+//
+// ⚠️ 这一步曾经完全缺失，导致最严重的缺陷（2026-10-26）：
+//
+//   最初的设计假设「exe 旁边放 worker-core/dist 目录」，
+//   但构建脚本从来没把产物拷进包里。用户下载的单文件 exe
+//   **完全不包含内核**，点「开始部署」直接报
+//   「找不到内核产物（control.js / dataplane.js）」——
+//   部署功能 100% 不可用，整个应用是个空壳。
+//
+// 现在把产物拷到 internal/kernel/assets/ 再编译，
+// go:embed 会把它打进二进制，做到真正的单文件分发。
+const kernelSrcDir = join(repoRoot, 'packages', 'worker-core', 'dist')
+const kernelDstDir = join(desktopDir, 'internal', 'kernel', 'assets')
+
+for (const f of ['control.js', 'dataplane.js']) {
+  if (!existsSync(join(kernelSrcDir, f))) {
+    console.error(`[desktop] 未找到内核产物 ${f}`)
+    console.error(`[desktop] 请先执行：npm run build -w @cfpilot/worker-core`)
+    process.exit(1)
+  }
+}
+mkdirSync(kernelDstDir, { recursive: true })
+for (const f of ['control.js', 'dataplane.js']) {
+  copyFileSync(join(kernelSrcDir, f), join(kernelDstDir, f))
+  const kb = (statSync(join(kernelDstDir, f)).size / 1024).toFixed(1)
+  console.log(`[desktop] 内核产物 ${f} → internal/kernel/assets/ (${kb} KB)`)
+}
+
 // 构建目标（图标生成阶段就要知道是否编 Windows，所以定义在最前面）
 const targets = [
   { goos: 'windows', goarch: 'amd64', out: `cfpilot-${version}-windows-amd64.exe`, extra: ['-H=windowsgui'] },

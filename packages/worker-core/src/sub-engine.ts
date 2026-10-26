@@ -18,7 +18,7 @@ import { isIpv4, isIpv6 } from './protocols/address'
 import { base64Encode } from './util'
 import { CpuBudget } from './budget'
 import { CF_IPV4_CIDRS, CURATED_OFFICIAL_IPS, PREFERRED_DOMAINS, countryOfColo, isKnownCountry } from './data/pools'
-import { renderRouteSections } from './route-profile'
+import { buildBuiltinRules, renderRouteSections } from './route-profile'
 
 export type { SubFormat }
 
@@ -1235,9 +1235,22 @@ export function renderClash(ctx: RenderContext): string {
   }
   lines.push('')
   lines.push('rules:')
-  lines.push('  - GEOIP,CN,DIRECT')
-  if (route.rules.length > 0) lines.push(...route.rules)
-  lines.push('  - MATCH,CFPilot')
+  // 分流规则：优先用 ini 里能安全翻译的（仅内联 GEOIP 类），
+  // 否则回落到**内置 GEOSITE/GEOIP 规则**（零外部依赖）。
+  //
+  // ⚠️ 绝不使用 `RULE-SET`（2026-10-26 线上事故）：
+  // 它需要配套的 `rule-providers:` 段，缺了就报
+  // `rule set [CFnat] not found` 而**整个订阅加载失败**。
+  // 内置 GEOSITE/GEOIP 由 Clash 内核自带地理库驱动，无此问题。
+  if (route.rules.length > 0) {
+    lines.push(...route.rules)
+    // 确保末尾一定有 MATCH 兜底（否则未匹配流量不知去向）
+    if (!route.rules.some((r) => r.includes('MATCH,'))) {
+      lines.push('  - MATCH,CFPilot')
+    }
+  } else {
+    lines.push(...buildBuiltinRules('CFPilot'))
+  }
   lines.push('')
   return lines.join('\n')
 }

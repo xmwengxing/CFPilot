@@ -111,15 +111,46 @@ describe('Clash YAML：Clash Verge 兼容性', () => {
     }
 
     // rules 的目标组必须存在
+    //
+    // ⚠️ 规则格式可能是 `TYPE,VALUE,TARGET` 或 `TYPE,VALUE,TARGET,no-resolve`：
+    // `no-resolve` / `src` 等是**修饰符**，不是策略名。
+    // 早前用「取最后一个字段」当目标，遇到 `GEOIP,LAN,DIRECT,no-resolve`
+    // 就把 `no-resolve` 误判成目标组而误报。
+    const MODIFIERS = new Set(['no-resolve', 'src'])
     const ruleTargets = yaml
       .split('\n')
       .filter((l) => /^\s+- [A-Z]+,/.test(l))
-      .map((l) => l.trim().split(',').pop()!.trim())
+      .map((l) => {
+        const parts = l.trim().replace(/^-\s*/, '').split(',').map((p) => p.trim())
+        // 从末尾往前找第一个「不是修饰符」的字段，它就是策略名
+        for (let i = parts.length - 1; i >= 2; i--) {
+          if (!MODIFIERS.has(parts[i]!.toLowerCase())) return parts[i]!
+        }
+        return parts[parts.length - 1]!
+      })
     for (const t of ruleTargets) {
       // DIRECT / REJECT 是 mihomo 内置策略，不出现在 proxies / proxy-groups 里
       if (t === 'DIRECT' || t === 'REJECT') continue
       expect(names.has(t), `规则指向了不存在的目标「${t}」`).toBe(true)
     }
+  })
+
+  it('不下发 RULE-SET（缺 rule-providers 会让订阅整体加载失败）', () => {
+    // 2026-10-26 线上事故：早前把远端 ruleset 翻译成 `RULE-SET,<name>,<策略>`，
+    // 但没有配套的 `rule-providers:` 段，Clash 报
+    // `rules[3] [RULE-SET,CFnat,DIRECT] error: rule set [CFnat] not found`。
+    const yaml = renderClash(makeCtx())
+    expect(yaml).not.toContain('RULE-SET')
+    expect(yaml).not.toContain('rule-providers')
+  })
+
+  it('rules 以 MATCH 结尾（否则未匹配流量无去向）', () => {
+    const yaml = renderClash(makeCtx())
+    const ruleLines = yaml
+      .split('\n')
+      .filter((l) => /^\s+- [A-Z]+,/.test(l))
+    expect(ruleLines.length).toBeGreaterThan(0)
+    expect(ruleLines[ruleLines.length - 1]!.trim()).toContain('MATCH,')
   })
 
   it('节点名两两不重复（mihomo 要求组内名字唯一）', () => {

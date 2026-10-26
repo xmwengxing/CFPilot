@@ -1,0 +1,70 @@
+fix: v0.5.1 —— 修复 Clash 订阅因 RULE-SET 缺 rule-providers 而整体加载失败
+
+## 线上事故
+
+用户导入订阅后 Clash 报：
+
+    rules[3] [RULE-SET,CFnat,DIRECT] error: rule set [CFnat] not found
+
+**整个订阅加载失败，一个节点都用不了。**
+
+## 根因（三处错误）
+
+1. **翻译了 RULE-SET 却没生成 rule-providers**
+   上一版把 ini 里的 `ruleset=<策略组>,<URL>` 翻译成
+   `RULE-SET,<name>,<策略>`，但 Clash 需要配套的 `rule-providers:`
+   段定义这个名字。缺了就报 `rule set not found`。
+
+2. **把规则源误当节点列表**
+   订阅里出现的「规则配置源的节点」其实是远端 ruleset URL 被当成
+   节点解析的结果 —— 那些地址根本连不上。
+
+3. **gzip+base64 内嵌整份规则清单**
+   部署代码里出现大段 base64 是明显的风控扫描特征，且规则清单本身
+   与「怎么连节点」无关，内嵌它零收益。
+
+## 修复
+
+### 1. 改用 Clash 内核自带的 GEOSITE / GEOIP
+
+新增 `buildBuiltinRules()`，生成 22 条内置规则：
+
+    GEOSITE,category-ads-all,REJECT     广告拦截
+    GEOSITE,youtube/netflix/...        媒体走代理
+    GEOSITE,openai/anthropic/...       AI 服务（地区敏感）
+    GEOSITE,google/twitter/...         常见被墙站
+    GEOIP,LAN,DIRECT,no-resolve        局域网直连
+    GEOSITE,cn,DIRECT + GEOIP,CN       国内直连
+    MATCH,CFPilot                      兜底
+
+优点：
+- **零外部依赖、零下载**（地理库由内核自带）
+- 兼容所有 Clash / mihomo 版本
+- 不会出现 `rule set not found`
+
+### 2. 删除内嵌的规则配置文件
+
+- 删 `assets/route-profiles.ini`
+- 删 `scripts/gen-route-profile.mjs` 及生成产物
+- 从 build/dev/deploy/typecheck 脚本移除生成步骤
+- 控制面 `routeProfile` 默认取空串 → 自动用内置规则
+
+KV 的 `ROUTE_PROFILE` 仍保留，供高级用户写自定义 ini（远端 ruleset 会被忽略）。
+
+### 3. 移除 all remote ruleset 处理
+
+`renderRouteProfile` 直接 `continue` 跳过 `inline === false` 的规则，
+不再生成任何 `RULE-SET`。
+
+## 效果
+
+- 控制面产物 61.8 KB → **60.2 KB**
+- 产物中已无 `RULE-SET` 字样
+- 实际渲染验证：rules 段 22 条，以 `MATCH,CFPilot` 结尾
+
+## 测试
+
+47 文件 / 566 用例全绿。新增/修正：
+- `buildBuiltinRules` 11 个用例（无 RULE-SET、必需 MATCH、媒体/AI/国内分流）
+- `clash-ech` 新增「不下发 RULE-SET」「以 MATCH 结尾」两个守护用例
+- 修正规则目标校验：`no-resolve` 是修饰符不是策略名（此前会误报）

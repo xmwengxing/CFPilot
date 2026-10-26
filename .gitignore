@@ -46,3 +46,10 @@ packages/worker-core/src/route-profile.generated.ts
 
 # 含服务器凭据的本地文档，禁止入仓库
 /docs/key.txt
+
+# 本地开发用的 Agent 规范文件（本地保留，不入仓库）
+#   内容是对自动化 Agent 的行为约束，属于本地开发配置，
+#   与项目本身的代码/文档无关，故不公开。
+/AGENTS.md
+/CLAUDE.md
+/.cursorrules

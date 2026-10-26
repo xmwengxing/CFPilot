@@ -62,16 +62,35 @@
 
     .log-panel {
       flex: 0 0 auto; border-top: 1px solid var(--line);
-      background: #070c1c; display: flex; flex-direction: column; min-height: 0;
+      background: #070c1c; display: flex; flex-direction: column;
+      /* 拖动 resize 手柄会把高度写成内联 px，窗口变小时不会跟着缩；
+         必须允许收缩（0 1 auto），否则会在小窗口里顶出窗口下沿 */
+      flex-shrink: 1;
+      min-height: 30px;   /* 至少留住标题条，否则折叠后没得点 */
+      max-height: 60%;    /* 不允许日志把内容区挤没 */
       resize: vertical; overflow: hidden;
     }
-    /* 折叠态：只留标题条 */
+    /* 折叠态：只留标题条，且把拖拽出来的高度还回去
+       （只隐藏 .log 不重置 height 的话，标题条会留在原面板中段、
+       掉到窗口外，连点击都点不到 —— 只能重启恢复） */
+    .log-panel.collapsed { height: auto !important; max-height: none; min-height: 0; }
     .log-panel.collapsed .log { display: none; }
-    .log-panel.collapsed .log-head { border-bottom: none; }
+    .log-panel.collapsed .log-head {
+      border-bottom: none;
+      align-items: center;
+      /* 展开时若被拖得很高，标题条会垂直居中，视觉上「掉到中间」 */
+      align-self: flex-start;
+    }
     .log-head {
       display: flex; align-items: center; justify-content: space-between;
       padding: 5px 16px; border-bottom: 1px solid var(--line); flex: 0 0 auto;
       cursor: pointer; user-select: none;
+      /* 标题条永远吸顶：面板被拖高时不会被推到看不见的位置 */
+      position: sticky; top: 0; z-index: 2;
+      background: #070c1c;
+      /* 标题条自身绝不被压缩：它是唯一能点开日志的入口 */
+      flex-shrink: 0;
+      min-height: 26px;
     }
     .log-head .title { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
     .log-head .arrow { color: var(--muted); font-size: 10px; transition: transform .18s; }

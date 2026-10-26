@@ -1083,10 +1083,54 @@
     // 日志栏折叠：点标题条切换
     const logPanel = $('logPanel')
     const logHead = $('logHead')
+
+    /**
+     * 记住折叠前的拖拽高度。
+     *
+     * `resize: vertical` 会把高度写成内联 `style.height`。折叠时若只隐藏 .log
+     * 而不清掉这个高度，标题条会留在原面板中段并溢出到窗口外 ——
+     * 因为 .log-panel 有 overflow:hidden 且底部贴着窗口下沿，
+     * 用户既看不到也点不到折叠按钮，只能重启程序。
+     *
+     * 所以折叠前先把内联高度摘下来存着，展开时还回去。
+     */
+    let savedLogHeight = ''
+
     logHead.addEventListener('click', () => {
+      const willCollapse = !logPanel.classList.contains('collapsed')
+      if (willCollapse) {
+        savedLogHeight = logPanel.style.height
+        logPanel.style.height = ''
+      } else if (savedLogHeight) {
+        logPanel.style.height = savedLogHeight
+      }
       const collapsed = logPanel.classList.toggle('collapsed')
       logHead.title = collapsed ? '点击展开日志' : '点击折叠日志'
     })
+
+    /**
+     * 兜底：窗口高度变化后，如果日志面板（含标题条）已经超出视口，
+     * 强制把它压回可用高度内。
+     *
+     * CSS 的 flex-shrink 已经能处理大部分情况，但用户手动拖拽出来的高度
+     * 是内联 style，某些时序下仍可能算错一帧 —— 这里每次 resize 后
+     * 直接量一次真实几何，发现越界就夹回去，保证标题条永远可点。
+     */
+    const clampLogPanel = (): void => {
+      const headRect = logHead.getBoundingClientRect()
+      const overflow = headRect.bottom - window.innerHeight
+      if (overflow > 0) {
+        // 标题条底部超出窗口：把面板高度减去超出的部分
+        const current = logPanel.getBoundingClientRect().height
+        const next = Math.max(30, current - overflow)
+        logPanel.style.height = `${next}px`
+        if (logPanel.classList.contains('collapsed')) logPanel.classList.remove('collapsed')
+      }
+    }
+    window.addEventListener('resize', clampLogPanel)
+    // 首次也校正一次：避免用极小窗口启动时就已越界
+    clampLogPanel()
+
 
     bindProfiles()
     bindCredentials()

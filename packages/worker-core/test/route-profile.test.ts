@@ -1,17 +1,28 @@
 /**
- * 分流规则配置解析 —— 回归测试。
+ * 分流规则 —— 回归测试。
  *
- * 守护 2026-10-25 借鉴 cfnew 的能力：Clash 订阅自带 ACL4SSR 风格的
- * 分流规则与代理组，用户导入后 YouTube / Netflix / OpenAI 自动走代理。
+ * ## 2026-10-26 重要修正
  *
- * 实现方式为「构建期内联」（方案 A）：ini 放仓库，gzip+base64 嵌进产物，
- * 运行时零外网请求（铁律 8）。ini 里的 ruleset 仍指向公共远端 list，
- * 因此分流数据永远是最新的。
+ * 早前实现把 ACL4SSR 风格的 ini 用 gzip+base64 内嵌进部署代码，
+ * 并把其中远端 `ruleset=` 翻译成 `RULE-SET,<name>,<策略>`，
+ * 但**没有生成配套的 `rule-providers:` 段** → Clash 报
+ *
+ *     rules[3] [RULE-SET,CFnat,DIRECT] error: rule set [CFnat] not found
+ *
+ * **整个订阅加载失败**，用户一个节点都用不了。
+ *
+ * 现在改为 `buildBuiltinRules()` 生成的 GEOSITE/GEOIP 内置规则：
+ * 零外部依赖、零下载、兼容所有 Clash / mihomo。
  */
 import { describe, expect, it } from 'vitest'
-import { parseRouteProfile, renderRouteProfile, renderRouteSections } from '../src/route-profile'
+import {
+  buildBuiltinRules,
+  parseRouteProfile,
+  renderRouteProfile,
+  renderRouteSections,
+} from '../src/route-profile'
 
-/** 取自内置 assets/route-profiles.ini 的真实片段 */
+/** 模拟 KV 里用户自定义的 ini（含远端 ruleset，应被忽略） */
 const SAMPLE = [
   '[custom]',
   ';不要随意改变关键字，否则会导致出错',
@@ -110,16 +121,27 @@ describe('renderRouteProfile', () => {
     expect(out.rules).toContain('  - MATCH,CFPilot')
   })
 
-  it('远端 ruleset 翻译成 RULE-SET', () => {
-    const yt = out.rules.find((r) => r.includes('YouTube'))
-    expect(yt).toBe('  - RULE-SET,YouTube,CFPilot')
-    const nat = out.rules.find((r) => r.includes('CFnat'))
-    expect(nat).toBe('  - RULE-SET,CFnat,DIRECT') // 组名含「直连」→ DIRECT
+  it('远端 ruleset 被完全忽略（不再生成 RULE-SET）', () => {
+    // ⚠️ 2026-10-26 线上事故回归：
+    // 早前把 `ruleset=<组>,<URL>` 翻译成 `RULE-SET,<name>,<策略>`，
+    // 但没有配套的 `rule-providers:` 段 → Clash 报
+    // `rule set [CFnat] not found`，**整个订阅加载失败**。
+    //
+    // 现在远端 ruleset 一律忽略，只保留内联 GEOIP 类规则。
+    const ruleText = out.rules.join('\n')
+    expect(ruleText).not.toContain('RULE-SET')
+    expect(ruleText).not.toContain('YouTube')
+    expect(ruleText).not.toContain('CFnat')
   })
 
-  it('「全球直连」组的规则动作是 DIRECT', () => {
+  it('只输出合法的内置规则类型', () => {
     for (const line of out.rules) {
-      if (line.includes('CFnat')) expect(line.endsWith('DIRECT')).toBe(true)
+      const body = line.trim().replace(/^-\s*/, '')
+      const kind = body.split(',')[0]!.toUpperCase()
+      // 允许的规则类型：GEOSITE / GEOIP / MATCH / DOMAIN 系列 / IP-CIDR 等
+      expect(
+        ['GEOSITE', 'GEOIP', 'MATCH', 'FINAL', 'DOMAIN', 'DOMAIN-SUFFIX', 'DOMAIN-KEYWORD', 'IP-CIDR', 'IP-CIDR6', 'PROCESS-NAME', 'DST-PORT'].includes(kind)
+      ).toBe(true)
     }
   })
 
@@ -206,5 +228,68 @@ describe('内置配置文件', () => {
     const r = parseRouteProfile(lines.join('\n'))
     expect(r.rules).toHaveLength(30)
     expect(r.groups).toHaveLength(10)
+  })
+})
+
+describe('buildBuiltinRules：内核内置分流规则', () => {
+  const rules = buildBuiltinRules('CFPilot')
+
+  it('不含任何 RULE-SET（否则需要 rule-providers）', () => {
+    expect(rules.join('\n')).not.toContain('RULE-SET')
+  })
+
+  it('不含 rule-providers 引用', () => {
+    expect(rules.join('\n')).not.toContain('rule-providers')
+  })
+
+  it('只使用 GEOSITE / GEOIP / MATCH 三类（Clash 内置，无需下载）', () => {
+    for (const line of rules) {
+      const body = line.trim().replace(/^-\s*/, '')
+      const kind = body.split(',')[0]!.toUpperCase()
+      expect(['GEOSITE', 'GEOIP', 'MATCH']).toContain(kind)
+    }
+  })
+
+  it('必定以 MATCH 结尾（兜底规则）', () => {
+    const last = rules[rules.length - 1]!.trim()
+    expect(last).toBe('- MATCH,CFPilot')
+  })
+
+  it('包含媒体分流（YouTube / Netflix）', () => {
+    const text = rules.join('\n')
+    expect(text).toContain('GEOSITE,youtube')
+    expect(text).toContain('GEOSITE,netflix')
+  })
+
+  it('包含 AI 服务分流（OpenAI 地区敏感）', () => {
+    expect(rules.join('\n')).toContain('GEOSITE,openai')
+  })
+
+  it('国内流量直连（含局域网 no-resolve）', () => {
+    const text = rules.join('\n')
+    expect(text).toContain('GEOIP,LAN,DIRECT,no-resolve')
+    expect(text).toContain('GEOSITE,cn,DIRECT')
+    expect(text).toContain('GEOIP,CN,DIRECT')
+  })
+
+  it('广告拦截指向 REJECT', () => {
+    expect(rules.join('\n')).toContain('category-ads-all,REJECT')
+  })
+
+  it('主组名可定制（不同订阅名也能正确引用）', () => {
+    const custom = buildBuiltinRules('我的节点')
+    expect(custom[custom.length - 1]!.trim()).toBe('- MATCH,我的节点')
+    expect(custom.join('\n')).toContain('GEOSITE,youtube,我的节点')
+  })
+
+  it('国内直连规则排在 MATCH 之前（顺序决定优先级）', () => {
+    const cnIdx = rules.findIndex((r) => r.includes('GEOIP,CN,DIRECT'))
+    const matchIdx = rules.findIndex((r) => r.includes('MATCH,'))
+    expect(cnIdx).toBeGreaterThan(-1)
+    expect(cnIdx).toBeLessThan(matchIdx)
+  })
+
+  it('规则数量合理（不会被误删成空）', () => {
+    expect(rules.length).toBeGreaterThan(15)
   })
 })

@@ -256,28 +256,92 @@ export function renderRouteProfile(
   }
 
   // ---- 分流规则 ----
+  //
+  // ## ⚠️ 绝不能用 RULE-SET（2026-10-26 修正线上事故）
+  //
+  // 早前实现把 ini 里的远端 `ruleset=<策略组>,<URL>` 翻译成
+  // `RULE-SET,<name>,<策略>`，但**没有生成配套的 `rule-providers:` 段** ——
+  // Clash 在字典里查不到该名字，直接报：
+  //
+  //     rules[3] [RULE-SET,CFnat,DIRECT] error: rule set [CFnat] not found
+  //
+  // 结果是**整个订阅加载失败**，用户一个节点都用不了。
+  //
+  // 现在改用 Clash **内置**的 GEOSITE / GEOIP 规则：
+  //   - 由内核自带的地理库驱动，**零外部依赖、零下载**；
+  //   - 任何 Clash / mihomo 内核都支持，兼容性最好；
+  //   - 不在部署代码里内嵌任何远端规则清单，规避风控特征。
+  //
+  // 远端 ruleset 一律忽略（它是「怎么下载规则」的元数据，与节点无关）。
   for (const r of profile.rules) {
-    if (r.inline) {
-      // `[]GEOIP,CN` → `GEOIP,CN,<动作>`
-      const inner = r.value.slice(2)
-      // 动作：组名是「全球直连」类 → DIRECT；否则指向主组
-      const action = /直连|direct/i.test(r.group) ? 'DIRECT' : mainGroup
-      // FINAL 特殊：MATCH 语义
-      if (/^FINAL$/i.test(inner)) {
-        ruleLines.push(`  - MATCH,${action}`)
-      } else {
-        ruleLines.push(`  - ${inner},${action}`)
-      }
-    } else {
-      // 远端 ruleset：Clash 支持 `RULE-SET,<name>,<策略>`
-      // name 用 URL 的最后一段（去掉 .list 后缀）
-      const name = ruleSetName(r.value)
-      const action = /直连|direct/i.test(r.group) ? 'DIRECT' : mainGroup
-      ruleLines.push(`  - RULE-SET,${name},${action}`)
+    if (!r.inline) continue // 远端 ruleset 跳过 —— 见上方说明
+    const inner = r.value.slice(2).trim()
+    const action = /直连|direct/i.test(r.group) ? 'DIRECT' : mainGroup
+    if (/^FINAL$/i.test(inner)) {
+      ruleLines.push(`  - MATCH,${action}`)
+    } else if (inner) {
+      ruleLines.push(`  - ${inner},${action}`)
     }
   }
 
   return { rules: ruleLines, groups: groupLines }
+}
+
+/**
+ * 生成**内置**分流规则（不依赖任何远端规则集）。
+ *
+ * ## 设计原则
+ *
+ * 1. **零外部依赖**：只用 `GEOSITE` / `GEOIP`，Clash 内核自带地理库，
+ *    不需要 `rule-providers`、不需要下载、不会出现 `rule set not found`。
+ * 2. **顺序即优先级**：具体的媒体站先匹配，再看通用代理/直连，最后 MATCH 兜底。
+ * 3. **不内嵌规则清单**：只生成几十行规则逻辑，不在代码里塞 gzip+base64
+ *    的 YAML（那是明显的扫描特征）。
+ *
+ * ## 为什么用这套
+ *
+ * 用户反馈「实在不行就套用其中一套规则使用即可」——这套是 ACL4SSR 的思路
+ * （媒体走代理、国内直连、广告拦截），但用内置 GEOSITE 实现，兼容性最好。
+ *
+ * @param mainGroup 主策略组名（节点都挂在它下面）
+ */
+export function buildBuiltinRules(mainGroup: string): string[] {
+  return [
+    // ---- 广告与追踪：直接拒绝 ----
+    `  - GEOSITE,category-ads-all,REJECT`,
+
+    // ---- 媒体：走代理 ----
+    `  - GEOSITE,youtube,${mainGroup}`,
+    `  - GEOSITE,netflix,${mainGroup}`,
+    `  - GEOSITE,disney,${mainGroup}`,
+    `  - GEOSITE,primevideo,${mainGroup}`,
+    `  - GEOSITE,hbo,${mainGroup}`,
+    `  - GEOSITE,bahamut,${mainGroup}`,
+    `  - GEOSITE,spotify,${mainGroup}`,
+    `  - GEOSITE,tiktok,${mainGroup}`,
+    `  - GEOSITE,telegram,${mainGroup}`,
+
+    // ---- AI / 开发服务：走代理（地区敏感） ----
+    `  - GEOSITE,openai,${mainGroup}`,
+    `  - GEOSITE,anthropic,${mainGroup}`,
+    `  - GEOSITE,google-gemini,${mainGroup}`,
+    `  - GEOSITE,github,${mainGroup}`,
+
+    // ---- 常见被墙站点：走代理 ----
+    `  - GEOSITE,google,${mainGroup}`,
+    `  - GEOSITE,twitter,${mainGroup}`,
+    `  - GEOSITE,facebook,${mainGroup}`,
+    `  - GEOSITE,instagram,${mainGroup}`,
+    `  - GEOSITE,wikipedia,${mainGroup}`,
+
+    // ---- 国内：直连（含局域网与保留地址） ----
+    `  - GEOIP,LAN,DIRECT,no-resolve`,
+    `  - GEOSITE,cn,DIRECT`,
+    `  - GEOIP,CN,DIRECT`,
+
+    // ---- 兜底：其余走代理 ----
+    `  - MATCH,${mainGroup}`,
+  ]
 }
 
 /** 把 ini 里的成员引用翻译成我们订阅里存在的名字 */
@@ -293,12 +357,6 @@ function resolveMember(member: string, mainGroup: string, autoGroup: string): st
   return m
 }
 
-/** 从 ruleset URL 取一个 Clash `RULE-SET` 可用的名字 */
-function ruleSetName(url: string): string {
-  const last = url.split('/').pop() ?? url
-  return last.replace(/\.(list|txt|yaml|yml)$/i, '') || url
-}
-
 /** YAML 字符串：含特殊字符时加双引号 */
 function yamlStr(value: string): string {
   if (/^[A-Za-z0-9._-]+$/.test(value)) return value
@@ -308,10 +366,20 @@ function yamlStr(value: string): string {
 /**
  * 高层入口：解析 ini 文本并渲染成 Clash 订阅的 rules / proxy-groups 段。
  *
- * 供 `renderClash` 在生成订阅尾部调用。KV 里可写 `ROUTE_PROFILE`
- * 覆盖内置配置；传空字符串表示「用内置」。
+ * ## 用途（2026-10-26 起收窄）
  *
- * @param text ini 原文（内置的或 KV 覆盖的）
+ * 内核**默认不再内嵌**任何规则配置文件，`renderClash` 会直接用
+ * `buildBuiltinRules()` 生成 GEOSITE/GEOIP 规则。
+ *
+ * 这个函数只服务于「用户在 KV 的 `ROUTE_PROFILE` 里写自定义 ini」的高级场景。
+ * 传入空字符串时返回空，调用方自动回落到内置规则。
+ *
+ * ⚠️ 即使这里解析出了远端 `ruleset=`，渲染时也会**全部忽略**
+ * （见 `renderRouteProfile`），因为把远端规则集翻译成 `RULE-SET`
+ * 需要配套 `rule-providers:`，缺了会让 Clash 报
+ * `rule set not found` 并使整个订阅加载失败。
+ *
+ * @param text ini 原文（KV 覆盖的；空串 = 用内置规则）
  */
 export function renderRouteSections(
   text: string,

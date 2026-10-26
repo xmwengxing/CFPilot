@@ -9,7 +9,6 @@
 import type { Env, UserConfig } from '../types'
 import type { Store } from '../store'
 import { LOCAL_IPS_KEY, ROUTE_PROFILE_KEY } from '../config'
-import { loadRouteProfileText } from '../route-profile.generated'
 import type { RenderContext, SubFormat } from '../sub-engine'
 import { collectNodes, renderSubscription, resolveSubPorts, sanitizeSubName } from '../sub-engine'
 import { handleEdgeProbe } from '../probe'
@@ -57,12 +56,20 @@ async function handleSubscription(
   const localIps = (await store.get(LOCAL_IPS_KEY)) ?? ''
   const collected = await collectNodes(config, localIps)
 
-  // 分流规则配置：KV 的 `ROUTE_PROFILE` 优先，留空则用内置（assets/route-profiles.ini）。
+  // 分流规则：默认用**内核内置的 GEOSITE/GEOIP 规则**（零外部依赖、零下载）。
   //
-  // 为什么要 KV 可覆盖：内置配置是构建期内联的，改它要发新版；
-  // 而用户可能想换一套分组（比如只要 Netflix 分流）。给个覆盖口子，
-  // 又不必为此把整个订阅生成改成运行时 fetch（铁律 8）。
-  const routeProfile = (await store.get(ROUTE_PROFILE_KEY)) ?? (await loadRouteProfileText())
+  // KV 的 `ROUTE_PROFILE` 可写入自定义 ini 覆盖它（高级用法，留空即用内置）。
+  //
+  // ## 为什么不内嵌一份规则配置文件（2026-10-26 修正线上事故）
+  //
+  // 早前把一份 ACL4SSR 风格的 ini 用 gzip+base64 嵌进部署代码，问题有三：
+  //   1. 那份 ini 的 `ruleset=` 指向远端规则集，需要配套 `rule-providers:`，
+  //      我们没生成 → Clash 报 `rule set [CFnat] not found`，**订阅整个加载失败**；
+  //   2. 部署代码里出现大段 gzip+base64 是明显的风控扫描特征；
+  //   3. 规则清单本身与「怎么连节点」无关，内嵌它没有任何收益。
+  //
+  // 现在改用 Clash 内核自带的 GEOSITE/GEOIP，兼容所有 Clash / mihomo 版本。
+  const routeProfile = (await store.get(ROUTE_PROFILE_KEY)) ?? ''
 
   // 拆分部署时控制面域名 ≠ 数据面域名，必须用 subDomain（或 DATA_HOST）指定节点地址
   const domain = normalizeNodeDomain(config.subDomain || env.DATA_HOST || url.hostname)

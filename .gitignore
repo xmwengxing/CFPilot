@@ -32,5 +32,14 @@ packages/worker-core/src/route-profile.generated.ts
 /packages/gui/release/
 .workbuddy/
 
+# Go 桌面版：构建产物与界面资源拷贝
+#   dist/    三平台二进制
+#   assets/  由 scripts/build-desktop.mjs 从 packages/gui/dist 拷来，
+#            属构建中间物，不入库（避免界面源码出现两份真相）
+/packages/desktop/dist/
+/packages/desktop/internal/server/assets/
+/packages/desktop/cfpilot-*
+
+
 # 含服务器凭据的本地文档，禁止入仓库
 /docs/key.txt

@@ -1,6 +1,6 @@
 {
   "name": "@cfpilot/worker-core",
-  "version": "0.5.5",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "description": "CFPilot 边缘内核：VLESS/Trojan/XHTTP 入站 + 优选订阅引擎 + 真连接探针 + 中文面板",

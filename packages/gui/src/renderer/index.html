@@ -4,6 +4,20 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CFPilot 部署与维护工具</title>
+
+  <!--
+    favicon：内联 SVG data URI。
+    用内联而不是引用文件，原因是：
+      1. 零额外文件 —— Go 版通过 go:embed 打包产物，多一个文件就多一份同步负担
+      2. 零网络请求 —— 不会在日志里刷 404
+      3. 两个版本（Electron / Go）共用同一份 index.html，天然一致
+    图案与托盘图标同源：紫蓝渐变圆角方块 + 白色 CP。
+  -->
+  <link
+    rel="icon"
+    type="image/svg+xml"
+    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%234f7cff'/%3E%3Cstop offset='1' stop-color='%238b5cf6'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='7' fill='url(%23g)'/%3E%3Ctext x='16' y='22' font-family='Segoe UI,Arial,sans-serif' font-size='15' font-weight='700' fill='%23fff' text-anchor='middle'%3ECP%3C/text%3E%3C/svg%3E"
+  />
   <style>
     :root {
       --bg: #0a1024;
@@ -60,57 +74,163 @@
     .page { display: none; max-width: 940px; margin: 0 auto; }
     .page.active { display: block; }
 
+    /* ============ 底部运行日志 ============
+     *
+     * ## 历史与最终方案（2026-10-26 第三次迭代）
+     *
+     * **第一版**：`resize: vertical` 让用户拖高度。
+     *   问题：拖出来的高度是**内联固定 px**，不跟窗口缩放，
+     *   2K 屏折叠后标题条只露一半、1080P 展开后溢出窗口下沿、
+     *   四个页面各自拖过导致大小不一。
+     *
+     * **第二版**：彻底禁止拖拽，固定高度 + 媒体查询。
+     *   问题解决了，但用户要求「支持拖曳调整上下宽度」。
+     *
+     * **第三版（当前）**：自己做拖拽，但**用百分比而不是像素**。
+     *
+     * 关键设计：
+     *   1. 拖拽时记录**比例**（0.15 ~ 0.75），存进 CSS 变量 --log-ratio，
+     *      而不是像素 —— 这样换分辨率 / 缩放窗口时比例不变，永远不越界
+     *   2. 日志区高度 = calc(var(--log-ratio) * 100%)，永远相对窗口
+     *   3. 边界钳制在 15%~75%，保证内容区至少留 25%
+     *   4. 折叠时高度 auto（只剩标题条），与拖拽状态互不干扰
+     *   5. 四个页面共用同一个面板（在 .body 下，不属于任何 .page），
+     *      所以拖一次全部页面一致
+     *   6. 比例持久化到 localStorage，下次打开保持
+     *
+     * 拖拽手柄是标题条**上边缘**的 6px 热区（比传统 resize 手柄更好点中）。
+     */
     .log-panel {
-      flex: 0 0 auto; border-top: 1px solid var(--line);
-      background: #070c1c; display: flex; flex-direction: column;
-      /* 拖动 resize 手柄会把高度写成内联 px，窗口变小时不会跟着缩；
-         必须允许收缩（0 1 auto），否则会在小窗口里顶出窗口下沿 */
-      flex-shrink: 1;
-      min-height: 30px;   /* 至少留住标题条，否则折叠后没得点 */
-      max-height: 60%;    /* 不允许日志把内容区挤没 */
-      resize: vertical; overflow: hidden;
-    }
-    /* 折叠态：只留标题条，且把拖拽出来的高度还回去
-       （只隐藏 .log 不重置 height 的话，标题条会留在原面板中段、
-       掉到窗口外，连点击都点不到 —— 只能重启恢复） */
-    .log-panel.collapsed { height: auto !important; max-height: none; min-height: 0; }
-    .log-panel.collapsed .log { display: none; }
-    .log-panel.collapsed .log-head {
-      border-bottom: none;
-      align-items: center;
-      /* 展开时若被拖得很高，标题条会垂直居中，视觉上「掉到中间」 */
-      align-self: flex-start;
-    }
-    .log-head {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 5px 16px; border-bottom: 1px solid var(--line); flex: 0 0 auto;
-      cursor: pointer; user-select: none;
-      /* 标题条永远吸顶：面板被拖高时不会被推到看不见的位置 */
-      position: sticky; top: 0; z-index: 2;
+      /* 日志区占视口的比例（拖拽改这个值） */
+      --log-ratio: 0.28;
+      border-top: 1px solid var(--line);
       background: #070c1c;
-      /* 标题条自身绝不被压缩：它是唯一能点开日志的入口 */
-      flex-shrink: 0;
-      min-height: 26px;
+      display: flex;
+      flex-direction: column;
+      /* 不参与 flex 压缩：高度完全由内部 .log 的 calc 决定 */
+      flex: 0 0 auto;
+      overflow: hidden;
+      position: relative;
     }
-    .log-head .title { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
-    .log-head .arrow { color: var(--muted); font-size: 10px; transition: transform .18s; }
+
+    /* 折叠态：只留标题条 */
+    .log-panel.collapsed {
+      height: auto !important;
+      max-height: none;
+    }
+    .log-panel.collapsed .log { display: none; }
+    .log-panel.collapsed .log-head { border-bottom: none; }
+    /* 折叠时隐藏拖拽手柄（没东西可拖） */
+    .log-panel.collapsed .log-resizer { display: none; }
+
+    /* 拖拽手柄：标题条上边缘的 6px 热区 */
+    .log-resizer {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: -3px;
+      height: 8px;
+      cursor: ns-resize;
+      z-index: 4;
+      /* 视觉上是一条细线，hover 时高亮 */
+      background: transparent;
+    }
+    .log-resizer::after {
+      content: '';
+      position: absolute;
+      left: 50%;
+      top: 3px;
+      width: 44px;
+      height: 3px;
+      margin-left: -22px;
+      border-radius: 2px;
+      background: var(--line);
+      transition: background .15s;
+    }
+    .log-resizer:hover::after,
+    .log-panel.resizing .log-resizer::after {
+      background: var(--accent);
+    }
+    /* 拖拽中禁止选中文字，避免拖出一片蓝色选区 */
+    .log-panel.resizing { user-select: none; }
+    body.resizing-log { cursor: ns-resize; user-select: none; }
+
+    .log-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      /* 用 padding 精确控制高度，配合 line-height 避免高 DPI 下被压扁 */
+      padding: 6px 16px;
+      min-height: 30px;
+      border-bottom: 1px solid var(--line);
+      flex: 0 0 auto;
+      flex-shrink: 0;
+      cursor: pointer;
+      user-select: none;
+      background: #070c1c;
+      /* 标题条永远吸顶 + 高层级，任何情况下都能点到 */
+      position: relative;
+      z-index: 3;
+    }
+    .log-head .title {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.2;
+    }
+    .log-head .arrow {
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1;
+      transition: transform .18s;
+    }
     .log-panel.collapsed .log-head .arrow { transform: rotate(-90deg); }
-    .log-head span { font-size: 12px; color: var(--muted); }
+    .log-head span { font-size: 12px; color: var(--muted); line-height: 1.2; }
     .log-head button {
       background: transparent; border: 1px solid var(--line); color: var(--muted);
-      border-radius: 6px; padding: 2px 9px; font-size: 11.5px; cursor: pointer; font-family: inherit;
+      border-radius: 6px; padding: 2px 9px; font-size: 11.5px; cursor: pointer;
+      font-family: inherit; line-height: 1.4;
+      /* 按钮也不能被压缩 */
+      flex-shrink: 0;
     }
     .log-head button:hover { color: var(--text); border-color: var(--accent); }
+
+    /* 日志内容区：高度 = 视口比例（拖拽改 --log-ratio），超出滚动 */
     .log {
-      flex: 1 1 auto; overflow-y: auto; padding: 8px 16px 12px; margin: 0;
-      height: 190px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px;
+      flex: 0 0 auto;
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding: 8px 16px 12px;
+      margin: 0;
+      /*
+       * 用 `vh` 而不是 `%`：
+       *   - `%` 依赖父级有确定高度，而 .log-panel 是 flex: 0 0 auto（高度由内容决定）
+       *     → 百分比会失效（高度塌成 0）
+       *   - `vh` 直接相对视口，与父级高度无关，计算稳定
+       *
+       * 减去 header/nav/标题条等固定占用（约 110px），
+       * 保证 15%~75% 的钳制范围在任何分辨率下都不越界。
+       */
+      height: calc(var(--log-ratio, 0.28) * (100vh - 110px));
+      min-height: 60px;
+      max-height: calc(100vh - 150px);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11.5px;
+      line-height: 1.55;
     }
     .log-line { padding: 1px 0; white-space: pre-wrap; word-break: break-all; }
     .log-line .t { color: #4a5878; margin-right: 8px; }
     .log-line.ok { color: var(--ok); }
     .log-line.warn { color: var(--warn); }
     .log-line.err { color: var(--err); }
+
+    /* 矮窗口时把标题条压小一点，避免占掉内容 */
+    @media (max-height: 600px) {
+      .log-head { padding: 4px 16px; min-height: 26px; }
+      .log { min-height: 50px; }
+    }
 
     .card {
       background: var(--bg-card); border: 1px solid var(--line);
@@ -256,7 +376,7 @@
               <p class="tip">
                 没有令牌？<a href="#" data-url="https://dash.cloudflare.com/profile/api-tokens">点此创建</a>。
                 需要哪些权限见下方说明。<br>
-                已保存过时输入框是空的 —— 出于安全考虑不回显明文，要改就粘贴新的再点「修改并保存」。
+                出于安全考虑不回显明文，需修改请粘贴新 Token 后点击「修改并保存」。
               </p>
             </div>
 
@@ -290,9 +410,8 @@
           <div class="card">
             <h2>🗄️ KV 命名空间</h2>
             <p class="desc">
-              一个 KV 命名空间对应且仅对应一个 CFPilot 部署实例。
-              内核在 KV 里用的是全局平铺的键（CONFIG / PANEL_PATH / SESSION 等），没有实例前缀，
-              两个实例共用一个 KV 会互相覆盖凭据与面板密码。
+              一个 KV 命名空间仅对应一对 CFPilot 部署实例（数据面+控制面）。
+              
             </p>
 
             <div class="field">
@@ -325,20 +444,6 @@
             <p class="tip" style="margin-top:8px">
               选中后点「保存此选择」会记住它；不保存则每次部署都使用下面这个下拉框里的当前项。
             </p>
-          </div>
-
-          <div class="card">
-            <h2>🔐 安全说明</h2>
-            <div class="secure">
-              你的 <b>API Token</b> 与<b>面板密码</b>只保存在本机
-              <code>~/.cfpilot-gui/secrets.json</code>，<br>
-              <b>不会上传</b>到任何服务器，也不随安装包分发。<br><br>
-              工具运行时的出境网络请求只有：<br>
-              · <b>api.cloudflare.com</b>（部署功能必需，令牌仅用于该请求的 Authorization 头）<br>
-              · <b>优选阶段</b>访问你自己的域名做 101 校验<br>
-              · 你主动点击的官方链接（用系统浏览器打开）<br><br>
-              点「清除本机凭据」可随时删除。
-            </div>
           </div>
 
           <div class="card">
@@ -419,12 +524,12 @@
                 <div class="field">
                   <label>控制面项目名</label>
                   <input type="text" id="controlProject" placeholder="留空 = 随机或按清单" />
-                  <p class="tip">承载面板、订阅与探针，客户端不连它。</p>
+                  <p class="tip">承载面板、订阅与探针，客户端不连它</p>
                 </div>
                 <div class="field">
                   <label>数据面项目名</label>
                   <input type="text" id="dataProject" placeholder="留空 = 随机或按清单" />
-                  <p class="tip">代理转发层，<b>客户端连的就是它</b>。</p>
+                  <p class="tip">代理转发层，<b>客户端连的就是它</b></p>
                 </div>
               </div>
 
@@ -432,12 +537,12 @@
                 <div class="field">
                   <label>面板路径</label>
                   <input type="text" id="panelPath" placeholder="如 /p-a1b2c3d4" />
-                  <p class="tip">面板访问路径。留空则随机生成或沿用已有值。</p>
+                  <p class="tip">面板访问路径，留空则随机生成或沿用已有值</p>
                 </div>
                 <div class="field">
                   <label>WS 路径</label>
                   <input type="text" id="wsPath" placeholder="如 /k7m2x9q4w8" />
-                  <p class="tip">代理的 WebSocket 路径。留空则随机生成或沿用已有值。</p>
+                  <p class="tip">代理的 WebSocket 路径，留空则随机生成或沿用已有值</p>
                 </div>
               </div>
 
@@ -459,7 +564,7 @@
               <button class="btn btn-primary" id="btnDeploy">开始部署</button>
             </div>
             <p class="tip" id="deployActionHint" style="margin-top:10px">
-              尚未读取部署状态。可以先点上面的「检查状态」看看要不要更新。
+              尚未读取部署状态，可以先点上面的「检查状态」看看要不要更新
             </p>
           </div>
         </section>
@@ -469,9 +574,9 @@
           <div class="card">
             <h2>⚡ 本地真连接优选</h2>
             <p class="desc">
-              用你自己的域名做 <b>TLS 握手</b> + <b>WebSocket 101</b> +
+              用自己域名做 <b>TLS 握手</b> + <b>WebSocket 101</b> +
               <b>响应体内容</b>三层校验，只保留<b>真正能连通且数据面在响应</b>的
-              Cloudflare IP。跑完直接得到可粘贴的 IP 列表。
+              Cloudflare IP，运行可获得 IP 列表
             </p>
 
             <div class="row">
@@ -482,12 +587,8 @@
                   <button class="btn btn-ghost" id="btnAutoHost" style="flex:0 0 auto">自动识别域名</button>
                 </div>
                 <p class="tip">
-                  你的代理域名（<b>数据面</b>的地址）。检查更新后会自动填入。
-                  用它做 TLS SNI 与 HTTP Host，才能测出真实可用性。<br>
-                  <b>建议使用自定义域名</b>，避免 Cloudflare 项目提供的
-                  <code>*.pages.dev</code> 生产链接在部分网络被阻断——
-                  拿被阻断的域名测优选，结果本身就不准。
-                  点「自动识别域名」可自动填入：有自定义域名优先填它，没有则填 pages.dev。
+                  · <b>建议使用自定义域名</b>，<code>*.pages.dev</code> 生产链接可能被阻断<br>
+                  · 点「自动识别域名」：优先填入数据面自定义域名，没有则填入 pages.dev
                 </p>
               </div>
               <div class="field">
@@ -497,10 +598,9 @@
                   <button class="btn btn-ghost" id="btnAutoPath" style="flex:0 0 auto">自动识别 WS 路径</button>
                 </div>
                 <p class="tip">
-                  <b>必须与目标项目实际的 WebSocket 路径完全一致</b>，否则一个 IP 都选不出来。<br>
-                  · CFPilot：通常是随机生成的一长串，也可能被改成 <code>/vless</code><br>
-                  · 部分项目直接用根路径，那就填 <code>/</code><br>
-                  · 点「自动识别 WS 路径」可从 KV 配置里读出来，不用自己记
+                  · <b>必须与实际 WebSocket 路径完全一致</b>，否则无法优选 IP <br>
+                  · CFPilot：部署后日志内显示，或点「自动识别 WS 路径」从项目内读取后填入<br>
+                  · 其他项目（不保障有效）：根据实际填写，若根路径可只填 <code>/</code></b><br>
                 </p>
               </div>
             </div>
@@ -512,19 +612,17 @@
                   <option value="">（正在加载国家列表…）</option>
                 </select>
                 <p class="tip">
-                  按住 <code>Ctrl</code> / <code>Shift</code> 多选。只保留这些国家/地区的
-                  Cloudflare 机房；<b>不选则按采样数跑全量测试</b>。<br>
-                  筛选只影响「已通过 101 校验」的候选。采样太小可能某些国家没有候选，
-                  提示筛空时请调大「候选采样数」到 500~1000 再试。
+                  · 按住 <code>Ctrl</code> / <code>Shift</code> 多选或取消，
+				  <b>不选则按采样数跑全量测试</b><br>
+                  · 若结果没有出现候选国家，请增加<b>「候选采样数」</b>
                 </p>
               </div>
               <div class="field">
                 <label>保留条数（--top）</label>
                 <input type="number" id="optTop" value="15" min="1" max="100" />
                 <p class="tip">
-                  建议 <b>10~20</b>。太多会让订阅变长且质量下降。<br>
-                  端口固定为 <b>443</b>——Cloudflare Pages 的 HTTPS 入口；
-                  2053 等端口在部分网络环境会被中间设备阻断，故不提供选择。
+                  · 建议 <b>10~20</b>，过多增加请求没有实际意义<br>
+                  · 端口固定 <b>443</b>——其他端口请在web面板中配置（不推荐）
                 </p>
               </div>
             </div>
@@ -534,20 +632,15 @@
                 <label>候选采样数（--sample）</label>
                 <input type="number" id="optSample" value="6556" min="100" max="50000" />
                 <p class="tip">
-                  建议 <b>6556</b>（默认）。阶段一要按 <b>TLS 握手耗时</b>筛选，
-                  而 TLS 握手快慢和 TCP 延迟几乎无关（实测 TCP 9ms 的 IP，
-                  TLS 可能要 3.5 秒）—— 采样小了根本碰不到握手快的 IP。<br>
-                  第一次测新网络建议 <b>5000~10000</b>，确认能选出低延迟 IP 再降回来。
+                  · 建议 <b>6556</b>（默认），<b>不宜超过23000</b>
                 </p>
               </div>
               <div class="field">
                 <label>测速地址（可选）</label>
                 <input type="text" id="optProbePath" placeholder="留空 = 自动" />
                 <p class="tip">
-                  <b>留空即可</b>，工具会自动决定：<br>
-                  · 目标有 CFPilot 探针端点（<code>/__edge_probe</code>）→ 走它，最忠实<br>
-                  · 否则 → 用公开测速地址（默认 <code>speed.cloudflare.com</code>）<br>
-                  填了则强制用你指定的地址（需返回大文件，如 <code>xxx/__down?bytes=104857600</code>）。
+                  · <b>留空即可</b>，工具自动决定：<br>
+                  · 自定义则强制用指定地址（大文件测试可自填）
                 </p>
               </div>
             </div>
@@ -557,15 +650,14 @@
                 <label>测速连接数</label>
                 <input type="number" id="optSpeedConns" value="3" min="1" max="8" />
                 <p class="tip">
-                  建议 <b>3</b>。单条 TCP 连接受拥塞窗口限制，测不满真实带宽；
-                  多条并发取峰值更接近实际可用速度。
+                  · 建议 <b>3</b>，单条 TCP 连接受拥塞窗口限制，测不满真实带宽
                 </p>
               </div>
               <div class="field">
                 <label>测速时长（秒）</label>
                 <input type="number" id="optSpeedDur" value="6" min="2" max="30" />
                 <p class="tip">
-                  建议 <b>5~8</b>。太短会被 TCP 慢启动拉低（前 1 秒的样本会被丢弃）。
+                  · 建议 <b>5~8</b>，太短会被 TCP 慢启动拉低（前 1 秒的样本会被丢弃）
                 </p>
               </div>
             </div>
@@ -577,18 +669,13 @@
               <input type="checkbox" id="optNoCallback" checked /> 不回填面板，只输出列表
             </label>
             <p class="tip" style="margin-top:6px">
-              <b>阶段二会做两层校验</b>（借鉴 CFData-WEB 的「链路复验」）：<br>
-              · 第一层 WebSocket <b>101 握手</b> —— 排除 Enterprise 专属 IP、SNI 阻断<br>
-              · 第二层 <b>响应体内容校验</b> —— 发 PING 并验证数据面回
-              <code>{"pong":true,...}</code>，把「101 通但数据面不响应」的假活 IP 拦掉<br><br>
-              <b>测速已支持任意项目</b>，不再需要手动跳过：<br>
-              · 目标有 CFPilot 探针端点 → 走项目自身路径测速（最忠实）<br>
-              · 其它项目 → 自动改用<b>公开测速地址</b>测速<br>
-              两种方式都<b>只对通过两层校验的 IP 测速</b>，所以不会选出连不上的 IP。<br><br>
-              对接<b>非 CFPilot 项目</b>时，第二层校验可能全部不通过 ——
-              此时用命令行加 <code>--no-verify</code> 退回纯 101 校验。<br><br>
-              勾选「跳过测速」才会退化为纯延迟排序（速度列显示 —）。
-              勾选「不回填」时结果只在下方显示，复制到面板「手动优选 IP」框即可。
+              <b>阶段二两层校验：</b><br>
+              · 第一层 WebSocket <b>101 握手</b> —— 排除 Enterprise 专属 IP、SNI 阻断；
+              第二层 <b>响应体内容校验</b> —— 发 PING 验证数据面，拦假活IP<br>
+              · CFPilot → 自有探针端点 → 自身路径测速；
+              其它项目 → <b>公开测速地址</b>测速<br>
+              · 勾选「跳过测速」退化为纯延迟排序（速度列显示 —）<br>
+			  · 勾选「不回填」时结果在下方显示，复制到web面板「手动优选 IP」框
             </p>
 
             <div class="btn-row" style="margin-top:16px">
@@ -597,18 +684,15 @@
             </div>
             <div class="warnbox" style="margin-top:12px">
               <b>⚠️ 运行前请关闭所有代理工具</b>（Clash / Mihomo / v2rayN / sing-box / Surge 等），
-              包括 <b>TUN 模式</b>与<b>系统代理</b>。<br><br>
-              优选器测的是「<b>本机直连该 IP</b>」的真实质量。流量一旦被代理接管，
-              测出来的就是到代理的延迟而不是到目标 IP 的延迟 ——
-              结果看起来正常，但所有 IP 成绩趋于一致，<b>导入客户端后大量 -1</b>。<br><br>
-              如果必须开着代理，请把本程序加入直连/绕过名单。
-              点「检测网络环境」可以帮你确认当前是否处于干扰状态。
+              包括 <b>TUN 模式</b>与<b>系统代理</b><br><br>
+              如果必须开代理，请把本程序加入直连/绕过名单，
+              点<b>「检测网络环境」</b>可以确认当前系统是否处于干扰/代理状态
             </div>
           </div>
 
           <div class="card">
             <h2>📋 优选结果</h2>
-            <div class="result-box" id="scanOut">还没有结果。填好上面的参数后点「开始优选」。</div>
+            <div class="result-box" id="scanOut">还没有结果，填好上面的参数后点「开始优选」</div>
             <div class="btn-row" style="margin-top:10px">
               <button class="btn btn-ghost" id="btnCopyResult">复制结果</button>
             </div>
@@ -632,13 +716,14 @@
               <b>三步部署</b><br>
               1. 在「Cloudflare 凭据」页填 Token 并保存，点「检测账号」，再点「刷新 KV 列表」<br>
               2. 在下拉框里选一个 KV（带 ● 的是已有实例，空的可以部署新实例），点「开始部署」<br>
-              3. 在「本地真连接优选」页填上一步得到的数据面域名，跑一次优选，把结果粘贴到面板的「手动优选 IP」<br><br>
+              3. 在「本地真连接优选」页填上一步得到的数据面域名，跑一次优选，把结果粘贴到面板的「手动优选 IP」<br>
+			  4. 优选IP会失效，在节点出现不稳定时可再跑优选，无需每天进行<br><br>
               <b>更新升级</b><br>
-              再跑一次「开始部署」即可：选同一个 KV，工具认得自己的项目，会沿用 UUID 与 WS 路径，
-              <b>客户端订阅地址不用改</b>。<br><br>
+              选择「更新现有部署」即可：选同一个 KV，工具识别本项目，复用 UUID 与 WS 路径，
+              <b>客户端订阅地址保持不变</b>。<br><br>
               <b>部署多个实例</b><br>
-              一个 KV 只能承载一个实例。要在同一账号下跑多个，
-              点「新建 KV」给每个实例各建一个，然后分别选对应的 KV 部署。
+              一个KV仅承载一对CFPilot实例：控制面为web面板，数据面负责转发。同账户多CFPilot实例：
+              点「新建 KV」，选择该 KV 部署第二个（不建议）
             </div>
           </div>
 
@@ -694,6 +779,8 @@
 
       <!-- ============ 常驻日志 ============ -->
       <div class="log-panel" id="logPanel">
+        <!-- 拖拽手柄：拖动改日志区高度（比例存 CSS 变量，不写像素） -->
+        <div class="log-resizer" id="logResizer" title="拖动调整日志高度"></div>
         <div class="log-head" id="logHead">
           <span class="title"><span class="arrow">▼</span>运行日志</span>
           <button id="btnClearLog">清空</button>

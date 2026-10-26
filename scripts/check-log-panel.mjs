@@ -1,29 +1,48 @@
-// 校验日志栏折叠/展开的 CSS 与 JS 修复是否真的进了产物。
-// 背景：折叠后调整窗口大小，日志标题栏曾被顶出窗口下沿导致无法点击（只能重启）。
+// 校验日志栏的三代实现是否都正确落地。
 //
-// 注意：renderer.js 是 minify 过的，变量名会被重命名（savedLogHeight -> e），
-// 所以 JS 侧只能校验「行为特征」而不是符号名。
+// ## 背景（三次迭代）
+//
+// **第一代**：`resize: vertical` 让用户拖高度。
+//   高度被写成内联固定 px → 2K 折叠后标题条露一半、
+//   1080P 展开后溢出窗口下沿、四个页面大小不一。
+//
+// **第二代**：彻底禁止拖拽，固定高度 + 媒体查询。
+//   问题解决了，但用户要求恢复拖拽。
+//
+// **第三代（当前）**：自己实现拖拽，但用**比例**而不是像素。
+//   - 拖拽改 CSS 变量 --log-ratio（0.15 ~ 0.75）
+//   - .log 高度 = calc(var(--log-ratio) * (100vh - 110px))
+//   - 比例存 localStorage，下次打开保持
+//   - 折叠时高度 auto，与拖拽互不干扰
+//
+// 本脚本锁住这些关键特征，防止有人改回内联像素方案。
 import { readFileSync } from 'node:fs'
 
 const html = readFileSync('packages/gui/dist/renderer/index.html', 'utf8')
 const js = readFileSync('packages/gui/dist/renderer/renderer.js', 'utf8')
 
 const checks = [
-  // ---- CSS 侧 ----
-  ['.collapsed 重置高度为 auto', /\.log-panel\.collapsed\s*\{[^}]*height:\s*auto\s*!important/],
-  ['log-panel 允许 flex 收缩', /\.log-panel\s*\{[^}]*flex-shrink:\s*1/],
-  ['log-panel min-height 兜底', /\.log-panel\s*\{[^}]*min-height:\s*30px/],
-  ['log-panel max-height 限制', /\.log-panel\s*\{[^}]*max-height:\s*60%/],
-  ['log-head 吸附顶部', /\.log-head\s*\{[^}]*position:\s*sticky/],
-  ['折叠时标题条顶对齐', /collapsed\s+\.log-head\s*\{[^}]*align-self:\s*flex-start/],
+  // ---- CSS：比例方案 ----
+  ['日志面板定义 --log-ratio 变量', /--log-ratio:\s*0\.28/],
+  ['日志高度用 ratio × vh 计算', /height:\s*calc\(var\(--log-ratio[^)]*\)\s*\*\s*\(100vh/],
+  ['有最小高度（不会塌成 0）', /\.log\s*\{[^}]*min-height:\s*60px/],
+  ['有最大高度（不越界）', /\.log\s*\{[^}]*max-height:\s*calc\(100vh/],
+  ['折叠态高度 auto', /\.log-panel\.collapsed\s*\{[^}]*height:\s*auto\s*!important/],
+  ['折叠态隐藏日志区', /\.log-panel\.collapsed\s+\.log\s*\{\s*display:\s*none/],
+  ['折叠态隐藏拖拽手柄', /\.log-panel\.collapsed\s+\.log-resizer\s*\{\s*display:\s*none/],
+  ['拖拽手柄光标为 ns-resize', /\.log-resizer\s*\{[^}]*cursor:\s*ns-resize/],
+  ['拖拽手柄有可见的握把', /\.log-resizer::after/],
+  ['拖拽时禁止选中文字', /body\.resizing-log[^{]*\{[^}]*user-select:\s*none/],
+  ['log-head 有最小高度', /\.log-head\s*\{[^}]*min-height:\s*30px/],
+  ['log-head 层级高于手柄之下但可点', /\.log-head\s*\{[^}]*z-index:\s*3/],
 
-  // ---- JS 侧（按行为特征）----
-  // 折叠前把 style.height 摘走存起来，展开时还回去
-  ['折叠前暂存并还原拖拽高度', /style\.height=""\)[^;]{0,40}style\.height=/],
-  // 监听 window resize 做越界兜底
-  ['监听 window resize 校正越界', /addEventListener\("resize"/],
-  // 用 getBoundingClientRect 量真实几何 + 拿 innerHeight 比较
-  ['按真实几何判断是否越界', /getBoundingClientRect\(\)[^;]{0,120}innerHeight|innerHeight[^;]{0,120}getBoundingClientRect\(\)/],
+  // ---- JS：拖拽逻辑 ----
+  ['拖拽改的是 --log-ratio', /setProperty\("--log-ratio"/],
+  ['有比例上下限钳制', /0\.75/],
+  ['比例持久化到 localStorage', /localStorage\.setItem/],
+  ['启动时恢复上次比例', /localStorage\.getItem/],
+  ['折叠状态禁止拖拽', /collapsed'\)\)\s*return|collapsed"\)\)\s*return/],
+  ['双击手柄恢复默认', /dblclick/],
 ]
 
 let bad = 0
@@ -32,5 +51,26 @@ for (const [name, re] of checks) {
   console.log(`${hit ? 'PASS' : 'FAIL'}  ${name}`)
   if (!hit) bad++
 }
-console.log(bad === 0 ? '\n全部通过：日志栏折叠后不会再被窗口边缘遮挡。' : `\n${bad} 项未通过`)
+
+// ---- 反向断言：历史包袱必须已移除 ----
+
+if (/\.log-panel\s*\{[^}]*resize\s*:\s*vertical/.test(html)) {
+  console.log('FAIL  仍在用 CSS resize: vertical（会用内联 px 导致越界）')
+  bad++
+} else {
+  console.log('PASS  未使用 CSS resize: vertical')
+}
+
+if (/\.log\s*\{[^}]*height:\s*var\(--log-h/.test(html)) {
+  console.log('FAIL  仍在用旧的 --log-h 固定高度方案')
+  bad++
+} else {
+  console.log('PASS  已移除旧的 --log-h 固定高度方案')
+}
+
+console.log(
+  bad === 0
+    ? '\n全部通过：日志栏支持拖拽调高，2K / 1080P 下都不越界，四个页面共用同一比例。'
+    : `\n${bad} 项未通过`
+)
 process.exit(bad ? 1 : 0)

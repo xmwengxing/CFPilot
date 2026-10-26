@@ -24,15 +24,15 @@ export interface Env {
   /**
    * WebSocket 路径。
    *
-   * `PATH` 是 CFNext 的历史命名，`WS_PATH` 是本项目的命名，两者等价。
+   * `PATH` 是 旧版的历史命名，`WS_PATH` 是本项目的命名，两者等价。
    * 部署向导注入 `PATH`，这里两个都读，避免被静默忽略。
    */
   WS_PATH?: string
   PATH?: string
-  /** 是否启用 Trojan 入站（`TROJAN` 为 CFNext 历史命名） */
+  /** 是否启用 Trojan 入站（`TROJAN` 为 旧版历史命名） */
   ENABLE_TROJAN?: string
   TROJAN?: string
-  /** 是否启用 XHTTP 入站（`XHTTP` 为 CFNext 历史命名） */
+  /** 是否启用 XHTTP 入站（`XHTTP` 为 旧版历史命名） */
   ENABLE_XHTTP?: string
   XHTTP?: string
   /**
@@ -141,7 +141,7 @@ export interface UserConfig {
   /**
    * 是否启用**内置**反代入口表。
    *
-   * 内置表与 CFNext（vendor）同构（`proxyip.<地区>.cmliussss.net` 等 14 个域名），
+   * 内置表与 旧版第三方实现同构（`proxyip.<地区>.cmliussss.net` 等 14 个域名），
    * 依赖社区第三方服务。关闭后只用用户在 `relayPool` 里自配的入口 ——
    * 自配入口不依赖任何第三方。
    *
@@ -151,7 +151,7 @@ export interface UserConfig {
   /**
    * 是否在出站前自动用 DoH 解析目标域名以获得优选 IP 候选。
    *
-   * 机制与 CFNext（vendor）的 `Ft()`、edgetunnel 的「预加载竞速」一致：
+   * 机制与 旧版第三方实现的 `Ft()`、edgetunnel 的「预加载竞速」一致：
    * TXT 记录里的社区优选 IP 库优先，回退 A / AAAA。
    *
    * 为什么需要：Worker **连不回 Cloudflare 自家的 Anycast 地址**

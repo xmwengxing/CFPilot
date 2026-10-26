@@ -27,7 +27,7 @@
  * 因为出口是第三方 VPS 而非 Cloudflare 自己的边缘，
  * **不触发 Worker 的 TCP Loop 限制** —— 这是唯一能打通 CF 网段目标的办法。
  *
- * ## 与 vendor（CFNext）的关系
+ * ## 与 旧版第三方实现的关系
  *
  * vendor 内置了一张第三方反代域名表（`proxyip.{hk,us,jp,...}.cmliussss.net`），
  * 运行时解析出 IP 后直连。本模块实现同一机制，但：
@@ -132,7 +132,7 @@ export function sortEndpointsByRegion(
 /**
  * 内置反代入口域名表。
  *
- * 与 vendor（CFNext）内置的 `Rt` 同构：`proxyip.<地区>.<主域名>`。
+ * 与 旧版第三方实现内置的 `Rt` 同构：`proxyip.<地区>.<主域名>`。
  * 这些是社区维护的第三方反代入口，解析出的 IP 分布在不同地区/线路。
  *
  * ⚠️ **这是对第三方服务的依赖**：该服务不可用时，内置入口会一起失效
@@ -183,7 +183,7 @@ export const BUILTIN_RELAY_DOMAINS: readonly string[] = [
  * 用途：**按当前机房所在国家优先选反代入口** ——
  * 边缘机房位置 ≈ 用户位置，从同地区的反代入口出去最快也最稳。
  *
- * 这与 vendor（CFNext）的 `_Zc()` 同构。
+ * 这与 旧版第三方实现的 `_Zc()` 同构。
  */
 export const COLO_TO_COUNTRY: Readonly<Record<string, string>> = {
   HKG: 'HK',
@@ -311,7 +311,7 @@ export const RELAY_BATCH_SIZE = 8
 /**
  * 默认选取的内置反代域名数。
  *
- * ⚠️ 与 vendor（CFNext）同构：**当前 colo 地区 + 2 个备用**。
+ * ⚠️ 与 旧版第三方实现同构：**当前 colo 地区 + 2 个备用**。
  * vendor 的 `Rt` 选择逻辑是 `[当前地区, ...其他].slice(0, 2)`，
  * 每个域名取 2/1 个 IP —— 少量但地区精确的候选，
  * 比 14 个域名全解析（42 次 DoH 子请求）可靠得多，也更省预算。

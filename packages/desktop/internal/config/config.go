@@ -29,23 +29,51 @@ const DefaultPort = 19726
 type DesktopSettings struct {
 	// Port 是本地服务监听端口。
 	Port int `json:"port"`
-	// Host 固定为 127.0.0.1，不允许改成 0.0.0.0 ——
-	// 这个服务持有 Cloudflare Token 的读写能力，绝不能暴露到局域网。
+	// Host 是监听地址。
+	//
+	// **默认 127.0.0.1（仅本机）**，因为服务持有 Cloudflare Token 的读写能力。
+	// 用户可在「服务管理」界面显式开启「允许局域网访问」，
+	// 此时 Host 变为 0.0.0.0 —— 该操作需要二次确认，且必须有面板密码保护。
 	Host string `json:"host"`
+	// AllowLAN 是用户显式开启的「允许局域网访问」开关（2026-10-26 新增）。
+	//
+	// 用独立布尔而不是直接存 Host 字符串，原因：
+	//   1. 语义明确（用户勾的是「允许局域网」，不是「监听 0.0.0.0」）
+	//   2. 便于界面回填与二次确认
+	//   3. Host 由它推导，避免出现「Host 是 0.0.0.0 但开关是关的」这种矛盾状态
+	AllowLAN bool `json:"allowLan"`
 	// OpenBrowserOnStart 决定启动后是否自动打开浏览器。
 	OpenBrowserOnStart bool `json:"openBrowserOnStart"`
 	// KeepRunningInTray 决定关掉浏览器页面后是否继续在托盘驻留。
 	KeepRunningInTray bool `json:"keepRunningInTray"`
 }
 
+// LoopbackHost 是仅本机可访问的监听地址。
+const LoopbackHost = "127.0.0.1"
+
+// AnyHost 是所有网卡都可访问的监听地址（局域网模式）。
+const AnyHost = "0.0.0.0"
+
 // DefaultSettings 返回一份合理的出厂设置。
 func DefaultSettings() DesktopSettings {
 	return DesktopSettings{
 		Port:               DefaultPort,
-		Host:               "127.0.0.1",
+		Host:               LoopbackHost,
+		AllowLAN:           false,
 		OpenBrowserOnStart: true,
 		KeepRunningInTray:  true,
 	}
+}
+
+// EffectiveHost 根据 AllowLAN 推导实际监听地址。
+//
+// 单一真相：Host 永远由 AllowLAN 决定，不单独存可写值，
+// 避免出现「开关关了但还在监听 0.0.0.0」的危险状态。
+func (s DesktopSettings) EffectiveHost() string {
+	if s.AllowLAN {
+		return AnyHost
+	}
+	return LoopbackHost
 }
 
 // Dir 返回配置目录（与 Electron 版一致）。
@@ -97,8 +125,9 @@ func LoadSettings() (DesktopSettings, error) {
 		// 设置文件损坏不该让程序起不来，回退出厂值
 		return def, nil
 	}
-	// 兜底校正：Host 永远只能是回环地址
-	s.Host = "127.0.0.1"
+	// Host 由 AllowLAN 推导，不信盘上的 Host 字段
+	// （旧版本可能留下 Host="0.0.0.0" 但没有 AllowLAN 的文件）
+	s.Host = s.EffectiveHost()
 	if s.Port < 1 || s.Port > 65535 {
 		s.Port = def.Port
 	}
@@ -107,10 +136,11 @@ func LoadSettings() (DesktopSettings, error) {
 
 // SaveSettings 原子写回设置文件。
 func SaveSettings(s DesktopSettings) error {
-	s.Host = "127.0.0.1"
 	if s.Port < 1 || s.Port > 65535 {
 		return fmt.Errorf("端口 %d 不合法，应在 1-65535 之间", s.Port)
 	}
+	// Host 永远由 AllowLAN 推导，不接受外部直接写入
+	s.Host = s.EffectiveHost()
 	path, err := settingsPath()
 	if err != nil {
 		return err

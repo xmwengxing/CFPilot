@@ -167,14 +167,14 @@ export interface RouteInput {
  *
  * `https` 的语义：代理服务器本身走 TLS（需要 `connect({secureTransport:'on'})`），
  * 与 HTTP 代理的「明文 CONNECT 到代理、再由代理做 CONNECT」不同。
- * 这是 edgetunnel 有、CFNext（vendor）没有的能力。
+ * 这是 edgetunnel 有、旧版第三方实现没有的能力。
  */
 export type ProxyKind = 'direct' | 'socks5' | 'http' | 'https'
 
 /**
  * 生成出站候选列表（按优先级排列）。
  *
- * 顺序与 CFNext 的 `Bt()` 对齐：
+ * 顺序与 旧版实现的 `Bt()` 对齐：
  *   1. 代理候选（用户明确配了代理 → 优先）
  *   2. 直连目标
  *   3. 优选 IP 落地

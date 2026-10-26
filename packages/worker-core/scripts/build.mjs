@@ -33,7 +33,7 @@ const TARGETS = [
  * （1101 且 Observability 无事件）。因此自研出站代码改用动态导入
  * （见 outbound/dial.ts 的 getConnect()）。
  *
- * vendor（CFNext 的 `wsHandler`）已于 2026-10-25 **完全移除** ——
+ * 旧版第三方实现（`wsHandler`）已于 2026-10-25 **完全移除** ——
  * 它占数据面产物体积 77% 且自带 sockets 静态 import。现在所有产物
  * 都是纯自研代码，因此断言覆盖**全部**产物。
  */

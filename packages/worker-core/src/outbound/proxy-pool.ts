@@ -38,7 +38,7 @@ export interface ProxyEndpoint {
  *
  * `https://` 与 `http://` 的区别：代理服务器本身走 TLS
  * （需 `connect({secureTransport:'on'})`），而不是明文 CONNECT。
- * 这是 edgetunnel 支持、CFNext（vendor）不支持的类型。
+ * 这是 edgetunnel 支持、旧版第三方实现不支持的类型。
  */
 export function parseProxyEntry(entry: string, defaultKind: ProxyKind = 'direct'): ProxyEndpoint | null {
   const text = entry.trim()

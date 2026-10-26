@@ -142,24 +142,44 @@ describe('KV 归属校验', () => {
     expect(logs.join('\n')).toContain('强制覆盖')
   })
 
-  it('含 CFNext config 键时只提醒不阻断（两者键不重叠，可共存）', async () => {
-    const logs: string[] = []
+  it('含其他项目 config 键时必须阻断（纯自研，不与他人共用 KV）', async () => {
     await withMockServer(
       kvWith({ config: '{"uuid":"x"}' }),
       async (base) => {
         const { assertKvOwnership } = await import('../src/pages-deploy')
         const { CloudflareClient } = await import('../src/cf-api')
         const client = new CloudflareClient({ token: 't', apiBase: base })
-        const info = await assertKvOwnership(client, 'acc', 'ns', {
+        const err = await assertKvOwnership(client, 'acc', 'ns', {
           controlProject: 'ctl',
           mode: 'auto',
-          log: logs.push.bind(logs),
-        })
-        expect(info.verdict).toBe('foreign')
-        expect(info.blocking).toBe(false)
+        }).then(
+          () => null,
+          (e: Error) => e
+        )
+        expect(err).toBeInstanceOf(Error)
+        expect(err?.message).toContain('config')
+        expect(err?.message).toContain('独立的 KV')
       }
     )
-    expect(logs.join('\n')).toContain('CFNext')
+  })
+
+  it('其他项目占用时加 force 也不能绕过（硬约束）', async () => {
+    await withMockServer(
+      kvWith({ config: '{"uuid":"x"}' }),
+      async (base) => {
+        const { assertKvOwnership } = await import('../src/pages-deploy')
+        const { CloudflareClient } = await import('../src/cf-api')
+        const client = new CloudflareClient({ token: 't', apiBase: base })
+        // force: true 只对 occupied / stale 生效，对 foreign 无效
+        await expect(
+          assertKvOwnership(client, 'acc', 'ns', {
+            controlProject: 'ctl',
+            mode: 'auto',
+            force: true,
+          })
+        ).rejects.toThrow(/config|命名空间/)
+      }
+    )
   })
 
   it('含残留 CONFIG 但无清单时中止', async () => {
@@ -196,7 +216,13 @@ describe('部署参数校验', () => {
   it('接受合法参数', async () => {
     const { deployPagesSplit } = await import('../src/pages-deploy')
     await withMockServer(
-      () => ({ status: 200, body: { success: true, result: [] } }),
+      // KV 读取返回 404（= 键不存在），让归属判定落到 empty；
+      // 不能用「200 + 空 result」——那种响应会被 getKvValue 当成真实的
+      // 空字符串值返回，从而误判成「命名空间被 旧版第三方实现 占用」。
+      (req) =>
+        req.url?.includes('/values/')
+          ? { status: 404, body: { success: false, errors: [{ code: 10009, message: 'not found' }] } }
+          : { status: 200, body: { success: true, result: [] } },
       async (base) => {
         // 只验证不抛参数错误：用空 mock 让后续步骤全失败但 warnings 收集
         const result = await deployPagesSplit({
@@ -243,7 +269,11 @@ describe('部署参数校验', () => {
   it('项目名留空时生成随机名（GUI 可选输入框场景）', async () => {
     const { deployPagesSplit } = await import('../src/pages-deploy')
     await withMockServer(
-      () => ({ status: 200, body: { success: true, result: [] } }),
+      // 同前：KV 读取必须是 404，否则会被误判成被 旧版第三方实现 占用
+      (req) =>
+        req.url?.includes('/values/')
+          ? { status: 404, body: { success: false, errors: [{ code: 10009, message: 'not found' }] } }
+          : { status: 200, body: { success: true, result: [] } },
       async (base) => {
         const result = await deployPagesSplit({
           ...baseOptions,
@@ -341,7 +371,7 @@ describe('部署凭据写入 KV 的 CONFIG 键', () => {
     expect(cfg.enableXhttp).toBe(false)
   })
 
-  it('绝不写 CFNext 的小写 config 键（否则会整体覆盖原版 CFNext 项目的配置）', async () => {
+  it('绝不写 旧版的小写 config 键（否则会整体覆盖旧版第三方 项目的配置）', async () => {
     const written = new Map<string, string>()
     await withMockServer(
       kvMock(written),

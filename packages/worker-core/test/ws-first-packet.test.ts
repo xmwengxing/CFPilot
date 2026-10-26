@@ -8,7 +8,7 @@
  * 早前实现让它走 pumpUp → `if (!writer) return` **静默丢弃** →
  * 真机表现为「WS 升级 101、VLESS 认证通过，但隧道挂起、永远等不到响应」。
  *
- * vendor（CFNext）的实测形态是暂存回缓冲区，writer 就绪后整体补写：
+ * 旧版第三方实现的实测形态是暂存回缓冲区，writer 就绪后整体补写：
  *   i ? (s ? await s.write(e) : l = l ? concat(l, e) : e) : await u(e)
  */
 import { describe, expect, it, vi } from 'vitest'

@@ -1,7 +1,7 @@
 # CFPilot（CP面板）
 
 > Cloudflare 代理微内核 · 真连接优选面板 · 一键部署
-> MIT License · 架构设计参考 [CFNext](https://github.com/PAICNI/CFNext)
+> MIT License · 数据面完全自研（无第三方内核依赖）
 
 把「代理内核 + 优选订阅 + 本地真连接优选 + 中文部署向导」整合成一套方案，
 解决 Cloudflare 代理最常见的那类故障：**本地优选测速几百兆，客户端却全是 `-1`**。

@@ -72,7 +72,7 @@ describe('反代入口池汇总', () => {
 
   it('内置表非空且与 vendor 同构', () => {
     expect(BUILTIN_RELAY_DOMAINS.length).toBeGreaterThan(0)
-    // vendor（CFNext）的 Rt 表就是这组域名
+    // 旧版第三方实现的 Rt 表就是这组域名
     expect(BUILTIN_RELAY_DOMAINS).toContain('proxyip.hk.cmliussss.net')
     expect(BUILTIN_RELAY_DOMAINS).toContain('proxyip.jp.cmliussss.net')
   })

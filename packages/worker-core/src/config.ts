@@ -95,7 +95,7 @@ export function configFromEnv(env: Env): UserConfig {
   return {
     uuid: text(env.UUID, ''),
     trojanPassword: text(env.TROJAN_PASSWORD, ''),
-    // WS 路径：PATH 是 CFNext 的历史命名，WS_PATH 是本项目的命名。
+    // WS 路径：PATH 是 旧版的历史命名，WS_PATH 是本项目的命名。
     // 两者都读，避免部署向导注入的 PATH 被静默忽略。
     wsPath: text(env.WS_PATH || env.PATH, DEFAULT_CONFIG.wsPath),
     trojanPath: DEFAULT_CONFIG.trojanPath,

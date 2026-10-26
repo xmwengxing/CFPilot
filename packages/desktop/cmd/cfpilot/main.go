@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/config"
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/notify"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/server"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/tray"
 )
@@ -101,6 +102,9 @@ func main() {
 		return
 	}
 
+	// 注入版本号（构建时 ldflags 写入 Version 变量）
+	server.SetVersion(Version)
+
 	srv, err := server.New(settings)
 	if err != nil {
 		fatal(err)
@@ -131,6 +135,8 @@ func main() {
 	//   2. 自动化测试要验证服务行为时，避免托盘线程干扰与阻塞。
 	if *noTray {
 		log.Printf("[cfpilot] 以无托盘模式运行，Ctrl+C 退出")
+		// 无托盘也发系统通知（Linux 服务器上能通过桌面通知/日志确认启动）
+		notify.ShowViaShell(notify.StartupMessage(url, settings.Port, settings.AllowLAN))
 		waitForSignal()
 		_ = srv.Stop()
 		return
@@ -149,7 +155,29 @@ func main() {
 	})
 	app.Run()
 
-	// systray.Run 返回即退出
+	// 走到这里有两种可能：
+	//   1. 用户在托盘里点了「退出」→ onExit 已 os.Exit(0)，不会到这
+	//   2. **托盘启动失败**（图标坏 / 建窗口类失败 / 无桌面会话）→ 消息循环立即返回
+	//
+	// 第 2 种情况如果直接往下走，进程会静默退出，用户看到的是
+	// 「双击毫无反应，托盘也没图标」—— 这个坑实测踩过，极难定位。
+	// 所以这里降级为「无托盘模式」：服务继续跑并打开浏览器，至少还能用。
+	if app.Failed() {
+		log.Printf("[cfpilot] 托盘不可用，降级为无托盘模式（服务继续运行）")
+		log.Printf("[cfpilot] 管理界面：%s", url)
+		if !*noBrowser {
+			if err := openBrowser(url); err != nil {
+				log.Printf("[cfpilot] 打开浏览器失败，请手动访问 %s：%v", url, err)
+			}
+		}
+		showMessageBox("CFPilot 托盘无法启动",
+			"系统托盘不可用（可能是无桌面会话或图标资源异常）。\n\n"+
+				"服务已在后台运行，界面地址：\n"+url+"\n\n"+
+				"浏览器会自动打开。关掉本提示后程序继续在后台运行，\n"+
+				"需要退出时请用任务管理器结束本进程。")
+		waitForSignal()
+	}
+
 	_ = srv.Stop()
 }
 

@@ -3,9 +3,9 @@
  *
  * ## 与 vendor 数据面的关系
  *
- * vendor（CFNext 的 `wsHandler`）目前仍在生产使用，作为回退实现保留。
+ * 旧版第三方实现（`wsHandler`）目前仍在生产使用，作为回退实现保留。
  * 本文件是自研实现，取三家成熟项目之长：
- *   - **CFNext**：出站三级候选（代理 → 直连 → 优选 IP）与竞速语义
+ *   - **旧版第三方实现**：出站三级候选（代理 → 直连 → 优选 IP）与竞速语义
  *   - **BPB**：先回协议响应头再中继（客户端据此判定入站已建立）
  *   - **cfnew**：首包数据缓存（竞速期间客户端已发的数据不能丢）
  *   - **edgetunnel**：出站失败必须**可诊断**，不能吞异常
@@ -360,7 +360,7 @@ export async function handleWebSocket(
    *
    * ## 顺序（重要，2026-10-23 本地真机验证发现）
    *
-   * **先回协议响应头，再做���站** —— 与 vendor（CFNext）和 BPB 一致：
+   * **先回协议响应头，再做���站** —— 与 旧版第三方实现和 BPB 一致：
    *
    * ```js
    * // vendor: 认证通过立刻发头，后续处理异步做
@@ -619,7 +619,7 @@ export async function handleWebSocket(
       // 而 writer 仍为 null → `if (!writer) return` 静默丢弃 →
       // 表现为「VLESS 认证通过但隧道挂起、永远等不到响应」。
       //
-      // vendor（CFNext）的实测形态：暂存回 buffer，writer 就绪后与首包一起补写：
+      // 旧版第三方实现的实测形态：暂存回 buffer，writer 就绪后与首包一起补写：
       //   i ? (s ? await s.write(e) : l = l ? concat(l, e) : e) : await u(e)
       if (!writer) {
         buffer = concatBytes(buffer, bytes)

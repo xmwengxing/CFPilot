@@ -50,7 +50,7 @@ describe('代理池解析', () => {
 })
 
 describe('数据面出站池汇总（逻辑与 routes/data.ts 的 collectProxies 一致）', () => {
-  // 这里不直接 import routes/data：它经 protocols/websocket 牵出 vendor/cfnext-dataplane.js，
+  // 这里不直接 import routes/data：它经 protocols/websocket 牵出 protocols/websocket-self.ts，
   // 而后者静态 import 了 cloudflare:sockets，在 Node 测试环境里无法加载。
   // 因此在这里复现同样的汇总规则，锁定 PROXYIP 的解析语义。
   function collect(config: { proxyIp: string; socks5: string; httpProxy: string }) {

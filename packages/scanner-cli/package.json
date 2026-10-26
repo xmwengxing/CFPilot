@@ -1,6 +1,6 @@
 {
   "name": "cfpilot-scanner",
-  "version": "0.5.5",
+  "version": "0.6.0",
   "description": "CFPilot 优选器：用你自己的域名做 WebSocket 101 真连接校验，只保留真正可用的 Cloudflare IP；兼容任意 VLESS-WS 项目",
   "license": "MIT",
   "author": "CFPilot Contributors",

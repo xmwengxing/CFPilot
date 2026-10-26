@@ -7,7 +7,7 @@
  *
  * ## 只有一套数据面实现（2026-10-25）
  *
- * vendor（CFNext 的 `wsHandler`）已于 2026-10-25 **完全移除**：
+ * 旧版第三方实现（`wsHandler`）已于 2026-10-25 **完全移除**：
  * 它占产物体积 77%（250KB 里 193KB），让数据面长期超出 80KB 预算，
  * 且自带 `cloudflare:sockets` 静态 import。自研实现（`websocket-self.ts`）
  * 覆盖 VLESS-WS / Trojan-WS / XHTTP + 代理池 + 分级诊断，早已是生产默认。

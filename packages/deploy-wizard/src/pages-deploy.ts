@@ -16,7 +16,7 @@
  *   ┌─────────────┐      ┌─────────────┐
  *   │ 控制面 Pages │      │ 数据面 Pages │
  *   │ 面板/订阅/探针│      │ VLESS/Trojan │
- *   │ 无 sockets   │      │ CFNext 数据面 │
+ *   │ 无 sockets   │      │ 数据面 │
  *   └──────┬──────┘      └──────┬──────┘
  *          └────── 共用同一 KV ──┘
  *
@@ -88,7 +88,7 @@ export interface PagesSplitDeployOptions {
    * 明知会覆盖他人 KV 仍然继续。
    *
    * 默认 false。归属校验失败时（该 KV 属于另一个 CFPilot 实例，
-   * 或疑似原版 CFNext 项目）会中止部署；只有显式传 true 才继续。
+   * 或疑似旧版第三方 项目）会中止部署；只有显式传 true 才继续。
    */
   force?: boolean
   /** 本地产物的构建版本（用于版本比对；不传则不做版本跳过） */
@@ -230,8 +230,22 @@ async function writeManifest(
  * - `empty`　　完全空的命名空间，可用
  * - `owned`　　含清单且属于目标实例 → 可原地更新
  * - `occupied` 含清单但属于**另一个**实例 → 越界，必须拒绝
- * - `foreign`　含 CFNext 的 `config` 键 → 疑似原版 CFNext 项目占用
+ * - `foreign`　含其他项目的 `config` 键 → 已被占用，**必须拒绝**
  * - `stale`　含 CFPilot 的 `CONFIG` 键但没有清单 → 残留配置
+ *
+ * ## ⚠️ `foreign` 为什么从「只提醒」改成「阻断」（2026-10-26）
+ *
+ * CFPilot 早已是**纯自研数据面**（vendor 于 2026-10-25 完全移除）。
+ * 继续往已被其他项目使用的 KV 里部署会带来三个问题：
+ *
+ *   1. **共享配额**：对方的用量与本实例互相挤占，两边都可能被限流；
+ *   2. **语义污染**：旧版原版会按它自己的 schema 读写部分键，
+ *      与本实例的大写 `CONFIG` 并存会让排查变得极其困难；
+ *   3. **用户预期**：旧提示是「可以共存」，用户会以为安全，
+ *      实际两个项目在同一命名空间上互相影响。
+ *
+ * 因此现在**一律阻断**，要求为 CFPilot 单独建 KV。
+ * 这与「纯自研、不与任何第三方共用命名空间」的项目定位一致。
  */
 export type KvOwnership = 'empty' | 'owned' | 'occupied' | 'foreign' | 'stale'
 
@@ -281,16 +295,16 @@ export async function inspectKvOwnership(
   }
 
   // 没有清单：看有没有别的产品留下的痕迹
-  const cfnextConfig = await client.getKvValue(accountId, namespaceId, 'config')
-  if (cfnextConfig !== null) {
+  const legacyConfig = await client.getKvValue(accountId, namespaceId, 'config')
+  if (legacyConfig !== null) {
     return {
       verdict: 'foreign',
       manifest: null,
-      detail: '含 CFNext 的 config 键，疑似原版 CFNext 项目正在使用此命名空间',
-      // ⚠️ 不阻断：CFPilot 读写的键（CONFIG / PANEL_PATH / SESSION:* …）与
-      // CFNext 读写的键（config / usageColo / initPool …）**完全不重叠**，
-      // 且本项目不再往小写 config 键写任何东西，两者可以共存。
-      blocking: false,
+      detail: '含其他项目的 config 键，该命名空间正被别的项目使用',
+      // ⚠️ 阻断（2026-10-26 由 false 改为 true）：
+      // CFPilot 已是纯自研数据面，不再与其他项目共存于同一 KV。
+      // 理由见上方 KvOwnership 的注释（配额共享 / 语义污染 / 用户预期）。
+      blocking: true,
     }
   }
   const cfpilotConfig = await client.getKvValue(accountId, namespaceId, 'CONFIG')
@@ -337,11 +351,16 @@ export async function assertKvOwnership(
   }
 
   if (info.verdict === 'foreign') {
-    // 不阻断，但必须告知：用户可能正在与自己的原版 CFNext 项目共用命名空间。
-    log(`⚠ KV 归属提醒：${info.detail}。`)
-    log('  CFPilot 与 CFNext 使用的 KV 键不重叠，可共存；但两者会共享同一命名空间的配额。')
-    log('  → 如需完全隔离，请为本次部署新建独立 KV（GUI：凭据页「新建 KV」；CLI：--new-kv）。')
-    return info
+    // ⚠️ 阻断（2026-10-26）：CFPilot 是纯自研数据面，不与其他项目共用 KV。
+    // 即使加 --force / 勾选「强制」也**不允许**继续 —— 这是硬约束，
+    // 因为共存会让两个项目在同一命名空间上互相影响（配额、schema、排查难度），
+    // 而用户往往意识不到。要部署就换一个干净的 KV。
+    throw new Error(
+      `该 KV 命名空间${info.detail}。\n` +
+        '  CFPilot 的数据面已完全自研，不再与其他项目共用同一命名空间。\n' +
+        '  → 请为 CFPilot 新建一个独立的 KV（GUI：凭据页「新建 KV」；CLI：--new-kv）。\n' +
+        '  → 此判定不可用「强制」绕过。'
+    )
   }
 
   if (info.verdict === 'empty') {
@@ -368,7 +387,7 @@ export async function assertKvOwnership(
 /**
  * 把本次部署的凭据写入 KV 的 **大写 `CONFIG` 键**。
  *
- * ## 为什么写 `CONFIG` 而不是 CFNext 的 `config`
+ * ## 为什么写 `CONFIG` 而不是小写 `config`
  *
  * 数据面产物 `dist/dataplane.js` 由 `src/entry-data.ts` 构建，
  * 它通过 CFPilot 自己的 `loadConfig()` 读取 **大写 `CONFIG` 键**（UserConfig schema），
@@ -376,9 +395,9 @@ export async function assertKvOwnership(
  * 控制面读的是同一个键 —— 两端共享同一份配置，
  * 订阅里的 UUID / WS 路径因此必然与数据面实际接受的一致。
  *
- * CFNext 的小写 `config` 键（CFNext schema）**只被 CFNext 原版读取**，
+ * 旧版的小写 `config` 键（旧版 schema）**只被 旧版原版读取**，
  * CFPilot 的数据面不读它。往那个键里写不仅无效，
- * 还会**整体覆盖**共栖的 CFNext 项目的配置（vendor 侧是 `Object.assign` 整体覆盖），
+ * 还会**整体覆盖**共存项目的配置（旧实现是 `Object.assign` 整体覆盖），
  * 因此这里**绝不写**小写 `config` 键。
  *
  * 保留用户已在面板里改过的设置（优选池、代理池、订阅域名等），
@@ -759,9 +778,9 @@ export async function deployPagesSplit(
   // 因此本次生成的 UUID / WS 路径 / Trojan 密码必须落到 KV 才真正生效，
   // 否则环境变量会被 KV 里的旧值压过（用户会拿着新密码登不进去）。
   //
-  // ⚠️ 写的是大写 `CONFIG` 键（UserConfig schema），不是 CFNext 的小写 `config` 键：
-  // CFPilot 的数据面读的是 `CONFIG`；小写 `config` 只被 CFNext 原版读取，
-  // 往那里写不仅无效，还会整体覆盖共栖的 CFNext 项目的配置。
+  // ⚠️ 写的是大写 `CONFIG` 键（UserConfig schema），不是 旧版的小写 `config` 键：
+  // CFPilot 的数据面读的是 `CONFIG`；小写 `config` 只被 旧版原版读取，
+  // 往那里写不仅无效，还会整体覆盖共存项目的配置。
   await writeEffectiveConfig(
     client,
     options.accountId,
@@ -792,7 +811,7 @@ export async function deployPagesSplit(
 
   /* ---------------- 3. 部署（先数据面，控制面的 DATA_HOST 才有效） ---------------- */
 
-  // ⚠️ 已知平台行为（2026-10-22 实测，含 cfnext 原版文件对照）：
+  // ⚠️ 已知平台行为（2026-10-22 实测，含旧版原文件对照）：
   //    Pages 对含代理入站 + 出站拨号的项目，**第二次部署必然返回
   //    HTTP 400 / 8000119 blocked**，与项目名、是否二次打包、
   //    是否改动源码均无关（原版文件 + 全新随机项目名同样 1/3）。
@@ -970,7 +989,7 @@ interface DeployAttemptResult {
  *
  * KV 绑定两个名字：
  *   - `KV`：CFPilot 内核读的名字（store.ts 用 env.KV）
- *   - `K` ：CFNext 风格的名字（vendor 源码里 `t.K`）
+ *   - `K` ：旧版风格的名字（vendor 源码里 `t.K`）
  * 少绑一个就会有一侧读不到配置。
  */
 async function configureProject(

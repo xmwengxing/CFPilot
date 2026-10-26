@@ -1,0 +1,673 @@
+// Package cfapi 是 Cloudflare REST API 的 Go 客户端。
+//
+// ## 与 Electron 版的关系
+//
+// 对应 packages/deploy-wizard/src/cf-api.ts。字段名、错误码语义、
+// 边界行为（404 返回 nil 而不是报错、DELETE 无响应体等）都必须一致 ——
+// 部署向导的 8000119 风控判定、域名迁移、KV 归属校验都建立在这些细节上。
+//
+// ## 三个必须遵守的约束
+//
+//  1. **multipart 的 Content-Type 必须交给 http 库自己生成**。
+//     手动设 boundary 会让 Cloudflare 解析失败，Pages 部署接口对这点尤其敏感。
+//  2. **必须校验响应信封的 success 字段**。
+//     只看 HTTP 200 会把 `{"success":false,"errors":[...]}` 当成成功，
+//     表现为「部署成功但页面还是旧的」，极难排查。
+//  3. **account-owned Token（cfat_ 前缀）不能用 /user/tokens/verify**。
+//     它只认 /accounts/{id}/tokens/verify，用错端点必然返回 401。
+package cfapi
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+)
+
+// DefaultAPIBase 是 Cloudflare API 根地址。
+const DefaultAPIBase = "https://api.cloudflare.com/client/v4"
+
+// DefaultTimeout 是单请求超时。
+//
+// 30 秒是 Electron 版的值。Pages 部署上传 _worker.js 约 60KB，
+// 30 秒足够；但 KV 写入与脚本上传也走这个超时。
+const DefaultTimeout = 30 * time.Second
+
+// ErrCodeProjectLimit 是 8000119 —— 项目级风控标记。
+//
+// 实测：同一项目二次部署 100% 被拒，全新项目首次通常成功。
+// 部署向导据此触发「换项目名重试」。
+const ErrCodeProjectLimit = 8000119
+
+// APIError 表示 Cloudflare 返回的错误。
+type APIError struct {
+	// Message 是 errors[0].message 或拼起来的全部消息
+	Message string
+	// Status 是 HTTP 状态码
+	Status int
+	// Code 是 Cloudflare 业务错误码（可能为 0，表示响应里没有）
+	Code int
+	// Raw 是原始响应体（排查用，会截断）
+	Raw string
+}
+
+func (e *APIError) Error() string {
+	if e.Code != 0 {
+		return fmt.Sprintf("%s（HTTP %d，code %d）", e.Message, e.Status, e.Code)
+	}
+	return fmt.Sprintf("%s（HTTP %d）", e.Message, e.Status)
+}
+
+// IsProjectLimit 判断是否为 8000119 项目级风控。
+func (e *APIError) IsProjectLimit() bool {
+	return e.Code == ErrCodeProjectLimit
+}
+
+// IsNotFound 判断是否 404。
+func (e *APIError) IsNotFound() bool {
+	return e.Status == http.StatusNotFound
+}
+
+// Client 是 Cloudflare API 客户端。
+type Client struct {
+	token   string
+	apiBase string
+	timeout time.Duration
+	httpC   *http.Client
+}
+
+// Options 是构造参数。
+type Options struct {
+	// Token 是 Cloudflare API Token
+	Token string
+	// APIBase 可覆盖（测试用 mock 服务器）
+	APIBase string
+	// TimeoutMs 是单请求超时（毫秒），0 表示用默认 30 秒
+	TimeoutMs int
+}
+
+// New 创建客户端。
+func New(opts Options) *Client {
+	base := opts.APIBase
+	if base == "" {
+		base = DefaultAPIBase
+	}
+	timeout := DefaultTimeout
+	if opts.TimeoutMs > 0 {
+		timeout = time.Duration(opts.TimeoutMs) * time.Millisecond
+	}
+	return &Client{
+		token:   strings.TrimSpace(opts.Token),
+		apiBase: strings.TrimRight(base, "/"),
+		timeout: timeout,
+		httpC: &http.Client{
+			Timeout: timeout,
+		},
+	}
+}
+
+// ---------- 底层请求 ----------
+
+// envelope 是 Cloudflare 的响应信封。
+type envelope struct {
+	Success bool            `json:"success"`
+	Errors  []envelopeErr   `json:"errors"`
+	Result  json.RawMessage `json:"result"`
+}
+
+type envelopeErr struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+// parseAPIError 把错误响应体解析成 *APIError。
+func parseAPIError(status int, body []byte) *APIError {
+	text := string(body)
+	e := &APIError{Status: status, Raw: truncate(text, 300)}
+	e.Message = fmt.Sprintf("HTTP %d", status)
+
+	var env envelope
+	if err := json.Unmarshal(body, &env); err == nil && len(env.Errors) > 0 {
+		msgs := make([]string, 0, len(env.Errors))
+		for _, item := range env.Errors {
+			msgs = append(msgs, item.Message)
+		}
+		e.Message = strings.Join(msgs, "; ")
+		e.Code = env.Errors[0].Code
+	} else if text != "" {
+		e.Message = fmt.Sprintf("HTTP %d %s", status, truncate(text, 300))
+	}
+	return e
+}
+
+// readResponse 校验 HTTP 状态 + 响应信封，解出 result。
+func readResponse(status int, body []byte) (json.RawMessage, error) {
+	if status < 200 || status >= 300 {
+		return nil, parseAPIError(status, body)
+	}
+	// DELETE 等接口可能返回空体
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, nil
+	}
+
+	var env envelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, &APIError{
+			Message: fmt.Sprintf("响应不是合法 JSON：%s", truncate(string(body), 200)),
+			Status:  status,
+		}
+	}
+	// 关键：信封里 success=false 即使 HTTP 200 也是失败
+	if !env.Success {
+		return nil, parseAPIError(status, body)
+	}
+	return env.Result, nil
+}
+
+// doJSON 发 JSON 请求并解出 result。
+func (c *Client) doJSON(ctx context.Context, method, path string, payload any, out any) error {
+	var body io.Reader
+	if payload != nil {
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(raw)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, c.apiBase+path, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	res, err := c.httpC.Do(req)
+	if err != nil {
+		return wrapNetErr(err)
+	}
+	defer func() { _ = res.Body.Close() }()
+
+	raw, err := io.ReadAll(res.Body)
+	if err != nil {
+		return wrapNetErr(err)
+	}
+	result, err := readResponse(res.StatusCode, raw)
+	if err != nil {
+		return err
+	}
+	if out == nil || len(result) == 0 {
+		return nil
+	}
+	return json.Unmarshal(result, out)
+}
+
+// doForm 发 multipart 请求并解出 result。
+//
+// ⚠️ Content-Type 必须由 multipart.Writer 生成（带 boundary），
+// 手动设置会让 Cloudflare 解析失败。http 库自动处理这一点，
+// 所以我们**不设** Content-Type。
+func (c *Client) doForm(
+	ctx context.Context,
+	method, path string,
+	files map[string]FormFile,
+	fields map[string]string,
+	out any,
+) error {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+
+	for name, ff := range files {
+		fw, err := w.CreateFormFile(name, ff.Filename)
+		if err != nil {
+			return err
+		}
+		if _, err := fw.Write(ff.Content); err != nil {
+			return err
+		}
+	}
+	for k, v := range fields {
+		if err := w.WriteField(k, v); err != nil {
+			return err
+		}
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, c.apiBase+path, &buf)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+
+	res, err := c.httpC.Do(req)
+	if err != nil {
+		return wrapNetErr(err)
+	}
+	defer func() { _ = res.Body.Close() }()
+
+	raw, err := io.ReadAll(res.Body)
+	if err != nil {
+		return wrapNetErr(err)
+	}
+	result, err := readResponse(res.StatusCode, raw)
+	if err != nil {
+		return err
+	}
+	if out == nil || len(result) == 0 {
+		return nil
+	}
+	return json.Unmarshal(result, out)
+}
+
+// FormFile 是一个待上传的文件。
+type FormFile struct {
+	Filename string
+	Content  []byte
+}
+
+// wrapNetErr 把网络错误转成用户能看懂的提示。
+func wrapNetErr(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("请求超时：Cloudflare API 无响应（检查网络或代理）")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline") {
+		return fmt.Errorf("请求超时：Cloudflare API 无响应（检查网络或代理）")
+	}
+	return fmt.Errorf("网络请求失败：%w", err)
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
+// ---------- 账号与 Token ----------
+
+// Account 是 Cloudflare 账号。
+type Account struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// TokenVerifyResult 是 Token 校验结果。
+type TokenVerifyResult struct {
+	ID        string `json:"id"`
+	Status    string `json:"status"`
+	NotBefore string `json:"notBefore"`
+	ExpiresOn string `json:"expiresOn"`
+}
+
+// VerifyToken 校验 Token。
+//
+// account-owned Token（cfat_ 前缀）只认账号维度端点：
+// /user/tokens/verify 对它一律 401。所以先试用户维度，
+// 失败且已知账号时回退到账号维度。
+//
+// 拿不到元信息**不代表 Token 不可用**，调用方不应据此阻断部署。
+func (c *Client) VerifyToken(ctx context.Context, accountID string) (*TokenVerifyResult, error) {
+	var r TokenVerifyResult
+	if err := c.doJSON(ctx, http.MethodGet, "/user/tokens/verify", nil, &r); err == nil {
+		return &r, nil
+	} else if accountID == "" {
+		return nil, err
+	}
+
+	var r2 TokenVerifyResult
+	if err := c.doJSON(ctx, http.MethodGet, "/accounts/"+accountID+"/tokens/verify", nil, &r2); err != nil {
+		return nil, err
+	}
+	return &r2, nil
+}
+
+// ListAccounts 列出账号。
+func (c *Client) ListAccounts(ctx context.Context) ([]Account, error) {
+	var out []Account
+	if err := c.doJSON(ctx, http.MethodGet, "/accounts?per_page=50", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ---------- KV ----------
+
+// KVNamespace 是 KV 命名空间。
+type KVNamespace struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+// ListKVNamespaces 列出 KV 命名空间。
+func (c *Client) ListKVNamespaces(ctx context.Context, accountID string) ([]KVNamespace, error) {
+	var out []KVNamespace
+	if err := c.doJSON(ctx, http.MethodGet,
+		"/accounts/"+accountID+"/storage/kv/namespaces", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// CreateKVNamespace 创建 KV 命名空间。
+func (c *Client) CreateKVNamespace(ctx context.Context, accountID, title string) (*KVNamespace, error) {
+	var out KVNamespace
+	if err := c.doJSON(ctx, http.MethodPost,
+		"/accounts/"+accountID+"/storage/kv/namespaces",
+		map[string]string{"title": title}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetKVValue 读 KV 值；不存在或失败时返回 ("", false)。
+//
+// 与 Electron 版语义一致：KV 读失败不作为致命错误，
+// 因为它只用于「部署前提示会覆盖配置」，不该阻塞部署。
+func (c *Client) GetKVValue(ctx context.Context, accountID, nsID, key string) (string, bool) {
+	p := fmt.Sprintf("/accounts/%s/storage/kv/namespaces/%s/values/%s",
+		accountID, nsID, url.PathEscape(key))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.apiBase+p, nil)
+	if err != nil {
+		return "", false
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+
+	res, err := c.httpC.Do(req)
+	if err != nil {
+		return "", false
+	}
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusOK {
+		return "", false
+	}
+	raw, err := io.ReadAll(res.Body)
+	if err != nil {
+		return "", false
+	}
+	return string(raw), true
+}
+
+// SetKVValue 写 KV 值（text/plain）。
+func (c *Client) SetKVValue(ctx context.Context, accountID, nsID, key, value string) error {
+	p := fmt.Sprintf("/accounts/%s/storage/kv/namespaces/%s/values/%s",
+		accountID, nsID, url.PathEscape(key))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut,
+		c.apiBase+p, strings.NewReader(value))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "text/plain")
+
+	res, err := c.httpC.Do(req)
+	if err != nil {
+		return wrapNetErr(err)
+	}
+	defer func() { _ = res.Body.Close() }()
+
+	raw, err := io.ReadAll(res.Body)
+	if err != nil {
+		return wrapNetErr(err)
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return parseAPIError(res.StatusCode, raw)
+	}
+	return nil
+}
+
+// ---------- Pages ----------
+
+// PagesProject 是 Pages 项目。
+type PagesProject struct {
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	Subdomain        string   `json:"subdomain"`
+	Domains          []string `json:"domains"`
+	ProductionBranch string   `json:"production_branch"`
+	CreatedOn        string   `json:"created_on"`
+	// DeploymentConfigs 里带 production.env_vars，用于核对 DATA_HOST 是否过期
+	DeploymentConfigs PagesDeployConfigs `json:"deployment_configs"`
+}
+
+// PagesDeployConfigs 是 Pages 部署配置。
+type PagesDeployConfigs struct {
+	Production PagesEnvConfig `json:"production"`
+}
+
+// PagesEnvConfig 是某个环境的配置。
+type PagesEnvConfig struct {
+	EnvVars map[string]PageVar `json:"env_vars"`
+}
+
+// PagesDeployment 是 Pages 部署记录。
+type PagesDeployment struct {
+	ID          string `json:"id"`
+	ShortID     string `json:"short_id"`
+	URL         string `json:"url"`
+	Environment string `json:"environment"`
+	CreatedOn   string `json:"created_on"`
+	// LatestStage 是部署阶段对象，只取 status 字段
+	LatestStage StageStatus `json:"latest_stage"`
+}
+
+// StageStatus 是部署阶段状态。
+type StageStatus struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+}
+
+// PagesDomain 是 Pages 项目的自定义域名。
+type PagesDomain struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+}
+
+// GetPagesProject 取单个项目；不存在时返回 (nil, nil)。
+func (c *Client) GetPagesProject(ctx context.Context, accountID, name string) (*PagesProject, error) {
+	var out PagesProject
+	err := c.doJSON(ctx, http.MethodGet,
+		fmt.Sprintf("/accounts/%s/pages/projects/%s", accountID, url.PathEscape(name)), nil, &out)
+	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.IsNotFound() {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ListPagesProjects 列出全部 Pages 项目。
+//
+// ⚠️ 不要加 `?per_page=` —— Pages 接口不吃这个参数，会返回
+// 400 "Invalid list options provided. Review the `page` or `per_page` parameter."
+// （code 8000024）。这是真机实测踩到的坑，mock 测试测不出来。
+func (c *Client) ListPagesProjects(ctx context.Context, accountID string) ([]PagesProject, error) {
+	var out []PagesProject
+	if err := c.doJSON(ctx, http.MethodGet,
+		fmt.Sprintf("/accounts/%s/pages/projects", accountID), nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// CreatePagesProject 创建 Pages 项目。
+func (c *Client) CreatePagesProject(ctx context.Context, accountID, name, productionBranch string) (*PagesProject, error) {
+	if productionBranch == "" {
+		productionBranch = "main"
+	}
+	var out PagesProject
+	if err := c.doJSON(ctx, http.MethodPost,
+		fmt.Sprintf("/accounts/%s/pages/projects", accountID),
+		map[string]any{
+			"name":              name,
+			"production_branch": productionBranch,
+		}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// DeletePagesProject 删除 Pages 项目。
+func (c *Client) DeletePagesProject(ctx context.Context, accountID, name string) error {
+	return c.doJSON(ctx, http.MethodDelete,
+		fmt.Sprintf("/accounts/%s/pages/projects/%s", accountID, url.PathEscape(name)), nil, nil)
+}
+
+// UpdatePagesEnv 设置 Pages 项目的环境变量（production）。
+//
+// ⚠️ 调用它会**自动触发一次部署**。之后再 POST /deployments 就是二次部署，
+// 会触发 8000119。所以顺序必须是「建项目 → 设变量 → 部署」，
+// 且设变量后不要再单独触发部署。
+func (c *Client) UpdatePagesEnv(ctx context.Context, accountID, name string, vars map[string]PageVar) error {
+	type payload struct {
+		DeploymentConfigs struct {
+			Production struct {
+				EnvVars map[string]PageVar `json:"env_vars"`
+			} `json:"production"`
+		} `json:"deployment_configs"`
+	}
+	var p payload
+	p.DeploymentConfigs.Production.EnvVars = vars
+	return c.doJSON(ctx, http.MethodPatch,
+		fmt.Sprintf("/accounts/%s/pages/projects/%s", accountID, url.PathEscape(name)), &p, nil)
+}
+
+// BindPagesKV 给 Pages 项目绑定 KV 命名空间。
+//
+// bindings 的键是**绑定名**，值是命名空间 ID。
+// CFPilot 需要绑两个名字：`KV`（自研内核读）与 `K`（CFNext 风格）。
+// 少绑一个就会有一侧读不到配置。
+func (c *Client) BindPagesKV(ctx context.Context, accountID, name string, bindings map[string]string) error {
+	type kvBinding struct {
+		NamespaceID string `json:"namespace_id"`
+	}
+	type payload struct {
+		DeploymentConfigs struct {
+			Production struct {
+				KVNamespaces map[string]kvBinding `json:"kv_namespaces"`
+			} `json:"production"`
+		} `json:"deployment_configs"`
+	}
+	var p payload
+	p.DeploymentConfigs.Production.KVNamespaces = make(map[string]kvBinding, len(bindings))
+	for k, v := range bindings {
+		p.DeploymentConfigs.Production.KVNamespaces[k] = kvBinding{NamespaceID: v}
+	}
+	return c.doJSON(ctx, http.MethodPatch,
+		fmt.Sprintf("/accounts/%s/pages/projects/%s", accountID, url.PathEscape(name)), &p, nil)
+}
+
+// PageVar 是 Pages 环境变量。
+type PageVar struct {
+	Value string `json:"value"`
+	Type  string `json:"type"` // "plain_text" 或 "secret_text"
+}
+
+// PagesDeployOptions 是部署参数。
+type PagesDeployOptions struct {
+	AccountID string
+	Project   string
+	// Script 是 _worker.js 的内容
+	Script []byte
+	// CommitMessage 是部署备注
+	CommitMessage string
+	// Branch 是分支名（默认 main）
+	Branch string
+}
+
+// DeployPagesWorker 上传 _worker.js 完成一次部署。
+//
+// ⚠️ metadata 里**不能带 compatibility_date**。Pages Advanced Mode 与
+// Workers 的 metadata 结构不同，多带会让 Pages 忽略 _worker.js，
+// 表现为「部署成功、HTTP 200，但返回默认 Welcome 页」。
+// 正确的 metadata 只有 { main_module: "_worker.js", bindings: {} }。
+func (c *Client) DeployPagesWorker(ctx context.Context, opts PagesDeployOptions) (*PagesDeployment, error) {
+	metadata := map[string]any{
+		"main_module": "_worker.js",
+		"bindings":    []any{},
+	}
+	metaRaw, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, err
+	}
+
+	branch := opts.Branch
+	if branch == "" {
+		branch = "main"
+	}
+	msg := opts.CommitMessage
+	if msg == "" {
+		msg = "deploy from CFPilot desktop"
+	}
+
+	var out PagesDeployment
+	path := fmt.Sprintf("/accounts/%s/pages/projects/%s/deployments",
+		opts.AccountID, url.PathEscape(opts.Project))
+	err = c.doForm(ctx, http.MethodPost, path,
+		map[string]FormFile{
+			"_worker.js": {Filename: "_worker.js", Content: opts.Script},
+		},
+		map[string]string{
+			"metadata":       string(metaRaw),
+			"branch":         branch,
+			"commit_message": msg,
+		}, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ListPagesDeployments 列出部署记录。
+func (c *Client) ListPagesDeployments(ctx context.Context, accountID, name string) ([]PagesDeployment, error) {
+	var out []PagesDeployment
+	if err := c.doJSON(ctx, http.MethodGet,
+		fmt.Sprintf("/accounts/%s/pages/projects/%s/deployments?per_page=5",
+			accountID, url.PathEscape(name)), nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ListPagesDomains 列出项目的自定义域名。
+//
+// ⚠️ 必须用 /domains 子接口，不能用 project.domains ——
+// 后者只列 active 域名，正在 initializing 的域名看不到，
+// 会导致迁移时误判「没有域名要迁」。
+func (c *Client) ListPagesDomains(ctx context.Context, accountID, name string) ([]PagesDomain, error) {
+	var out []PagesDomain
+	if err := c.doJSON(ctx, http.MethodGet,
+		fmt.Sprintf("/accounts/%s/pages/projects/%s/domains", accountID, url.PathEscape(name)),
+		nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// AddPagesDomain 绑定自定义域名。
+func (c *Client) AddPagesDomain(ctx context.Context, accountID, name, domain string) error {
+	return c.doJSON(ctx, http.MethodPost,
+		fmt.Sprintf("/accounts/%s/pages/projects/%s/domains", accountID, url.PathEscape(name)),
+		map[string]string{"name": domain}, nil)
+}
+
+// RemovePagesDomain 解绑自定义域名。
+func (c *Client) RemovePagesDomain(ctx context.Context, accountID, name, domain string) error {
+	return c.doJSON(ctx, http.MethodDelete,
+		fmt.Sprintf("/accounts/%s/pages/projects/%s/domains/%s",
+			accountID, url.PathEscape(name), url.PathEscape(domain)), nil, nil)
+}

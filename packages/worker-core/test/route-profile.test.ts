@@ -293,3 +293,46 @@ describe('buildBuiltinRules：内核内置分流规则', () => {
     expect(rules.length).toBeGreaterThan(15)
   })
 })
+
+describe('GEOSITE 分类安全（2026-10-26 事故回归）', () => {
+  const rules = buildBuiltinRules('CFPilot')
+  const categories = rules
+    .filter((r) => r.includes('GEOSITE,'))
+    .map((r) => r.trim().replace(/^-\s*GEOSITE,/, '').split(',')[0]!)
+
+  it('绝不能使用 wikipedia 分类（geosite.dat 里不存在）', () => {
+    // ⚠️ 线上事故：Clash Verge 报
+    //   rules[18] [GEOSITE,wikipedia,CFPilot] error:
+    //   list wikipedia not found in geosite.dat
+    // **整份配置加载失败**。正确的是 wikimedia。
+    expect(categories).not.toContain('wikipedia')
+  })
+
+  it('使用 wikimedia 而非 wikipedia', () => {
+    expect(categories).toContain('wikimedia')
+  })
+
+  it('分类名不含空格与非法字符（避免解析歧义）', () => {
+    for (const c of categories) {
+      expect(c).toMatch(/^[A-Za-z0-9_!-]+$/)
+    }
+  })
+
+  it('分类名不重复（重复会让内核重复加载）', () => {
+    expect(new Set(categories).size).toBe(categories.length)
+  })
+
+  it('每个 GEOSITE 规则都有明确策略（不能只有类型和目标）', () => {
+    for (const line of rules.filter((r) => r.includes('GEOSITE,'))) {
+      const parts = line.trim().replace(/^-\s*/, '').split(',')
+      expect(parts.length).toBeGreaterThanOrEqual(3)
+      expect(parts[2]!.trim()).not.toBe('')
+    }
+  })
+
+  it('核心分类都在（媒体 / AI / 国内直连）', () => {
+    expect(categories).toEqual(
+      expect.arrayContaining(['youtube', 'netflix', 'openai', 'github', 'cn'])
+    )
+  })
+})

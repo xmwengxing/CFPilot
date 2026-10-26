@@ -733,6 +733,41 @@ export interface DeployStatus {
 }
 
 /**
+ * 直接向线上数据面查询真实运行的内核版本。
+ *
+ * ## 为什么比清单可靠
+ *
+ * KV 清单里的 `build` 是**部署时本地写进去的**，属于「自我申报」；
+ * 若用户手动改过项目、或用命令行部署过，清单与实际就可能不一致。
+ * 数据面的 `/__version` 端点返回的是**实际在跑的那份产物**的版本号。
+ *
+ * ## 容错
+ *
+ * 任何失败（域名拼错 / 网络不通 / 旧版没这个端点 / 超时）都返回 null，
+ * 调用方静默回落到清单值 —— 这是个「锦上添花」的校验，不该阻塞主流程。
+ *
+ * @param dataSubdomain 数据面域名（如 `cpdata.pages.dev`）
+ */
+async function fetchRemoteBuild(dataSubdomain: string | undefined): Promise<string | null> {
+  const host = (dataSubdomain ?? '').trim()
+  if (!host) return null
+  try {
+    const res = await fetch(`https://${host}/__version`, {
+      signal: AbortSignal.timeout(6000),
+      headers: { Accept: 'application/json' },
+    })
+    if (!res.ok) return null
+    const data = (await res.json()) as { build?: unknown }
+    const build = typeof data.build === 'string' ? data.build.trim() : ''
+    // `dev` 是未构建时的占位值，不算有效版本
+    if (!build || build === 'dev') return null
+    return build
+  } catch {
+    return null
+  }
+}
+
+/**
  * 探测线上部署状态：是否存在清单、线上版本与本地内核版本是否一致。
  *
  * ## 为什么要比对版本（2026-10-25）
@@ -824,7 +859,28 @@ export async function checkDeployed(
     // 它不是真版本号，语义等同「无记录」—— 必须当成空处理，
     // 否则界面会出现「线上内核 unknown ≠ 本地 xxx」这种谁也看不懂的话。
     const rawRemote = (manifest.build ?? '').trim()
-    const remoteBuild = rawRemote.toLowerCase() === 'unknown' ? '' : rawRemote
+    let remoteBuild = rawRemote.toLowerCase() === 'unknown' ? '' : rawRemote
+
+    // ⚠️ 优先向**线上数据面**直接询问版本（2026-10-26）。
+    //
+    // 清单里的 `build` 是「部署时自己写进去的」，不是从线上读回来的；
+    // 手动改过项目或用命令行部署过，两者就可能对不上。
+    // 数据面新增了 `/__version` 端点，能返回真实运行的版本，更可靠。
+    //
+    // 失败（域名不可达 / 旧版还没这个端点）时静默回落到清单值，不打扰用户。
+    const liveBuild = await fetchRemoteBuild(manifest.dataSubdomain)
+    if (liveBuild) {
+      if (liveBuild !== remoteBuild) {
+        sendLog(
+          win,
+          `线上数据面自报版本 ${liveBuild}` +
+            (remoteBuild ? `（清单记录为 ${remoteBuild}，已按实际为准）` : ''),
+          'info'
+        )
+      }
+      remoteBuild = liveBuild
+    }
+
     const same = Boolean(remoteBuild && localBuild && remoteBuild === localBuild)
     const state: DeployStatus['state'] = same ? 'latest' : 'outdated'
 

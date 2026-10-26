@@ -131,20 +131,61 @@ npx -y cfpilot-scanner@latest scan \
 
 ---
 
-## 图形化工具（Windows）
+## 图形化工具
 
-不想碰终端就用图形版：
+不想碰终端就用图形版。**提供两种版本，功能完全一致，按需选一个即可。**
 
-1. 到 [Releases](https://github.com/xmwengxing/CFPilot/releases) 下载
-   `CFPilot-<版本>-x64.exe`（安装版）或 `-portable.exe`（免安装）
+### 版本对比
+
+| | Go 版（推荐） | Electron 版 |
+|---|---|---|
+| Windows 体积 | **6.9 MB** | 78 MB |
+| Linux 支持 | ✅ x64 / arm64 | ❌ |
+| 界面形态 | 系统浏览器标签页 | 独立窗口 |
+| 托盘 | ✅ 状态 / 端口 / 启停 | ❌ |
+| 下载文件 | `cfpilot-<版本>-windows-amd64.exe` | `CFPilot-<版本>-x64.exe` |
+
+两个版本**共用同一份凭据文件**（`~/.cfpilot-gui/secrets.json`），
+换版本不用重新填 Token。
+
+### Go 版用法
+
+1. 到 [Releases](https://github.com/xmwengxing/CFPilot/releases) 下载对应平台文件
+   （Windows `.exe` 直接双击；Linux 先 `chmod +x`）
+2. 运行后托盘出现图标，系统浏览器自动打开管理界面
+3. 右键托盘图标可查看**服务状态 / 端口 / 运行时长**，也能**复制地址、修改端口、启停服务、退出**
+4. 界面操作与 Electron 版完全相同
+
+服务只监听 `127.0.0.1`，需要一次性令牌换取的会话才能访问，
+并校验 `Host` 与 `Origin` 防 DNS Rebinding 与跨站请求。
+
+常用参数：
+
+```bash
+--port <n>      临时指定端口（不写入配置）
+--no-browser    启动后不自动打开浏览器
+--no-tray       不启托盘，只跑服务（服务器 / 无桌面环境）
+--console       日志写入配置目录的 cfpilot.log
+--check         只做自检（配置目录 / 端口可用性）
+```
+
+### Electron 版用法
+
+1. 下载 `CFPilot-<版本>-x64.exe`（安装版）或 `-portable.exe`（免安装）
 2. 双击运行，**不需要预先装 Node.js**
 3. 「Cloudflare 凭据」页填 API Token → 检测账号 → 刷新 KV 列表
 4. 「部署」页选一个 KV → 开始部署
 5. 「优选」页点「**自动识别域名**」填数据面域名 + WS 路径 → 开始优选 → 复制结果到面板
 
+> ⚠️ Electron 版为**过渡形态**：Go 版发满 3 个版本后不再提供 Electron 版 exe
+> （源码永久保留）。
+
+### 通用流程
+
 界面分四个页签：凭据 / 部署 / 优选 / 说明，下方是常驻日志。
-「优选」页的一键优选通过本地桥接服务（`127.0.0.1:19527`）调用 scanner，**不需要单独开终端**。
-令牌只存在本机 `~/.cfpilot-gui/secrets.json`，不上传。详见 [packages/gui/README.md](packages/gui/README.md)。
+「优选」页的一键优选通过本地服务调用 scanner，**不需要单独开终端**。
+令牌只存在本机 `~/.cfpilot-gui/secrets.json`，不上传。
+详见 [packages/gui/README.md](packages/gui/README.md)。
 
 ---
 

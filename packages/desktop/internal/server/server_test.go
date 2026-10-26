@@ -161,7 +161,16 @@ func TestRejectsCrossSiteOrigin(t *testing.T) {
 }
 
 // 内嵌界面必须能取到，否则浏览器打开是空白页。
+//
+// 注意：assets/ 里的 index.html / renderer.js 是构建中间产物，
+// 不入库（见 assets/README.md）。CI 上刚 clone 下来时它们不存在，
+// 只有走完 scripts/build-desktop.mjs 才会有 —— 那种情况下本测试跳过，
+// 而不是判失败，否则每次新建 clone 跑测试都会红。
 func TestServesEmbeddedUI(t *testing.T) {
+	if _, err := embeddedFS.ReadFile("assets/index.html"); err != nil {
+		t.Skip("界面资源尚未构建（缺 assets/index.html），跳过。先执行 npm run build -w @cfpilot/gui")
+	}
+
 	_, base := newTestServer(t)
 
 	for _, p := range []string{"/", "/index.html", "/renderer.js"} {

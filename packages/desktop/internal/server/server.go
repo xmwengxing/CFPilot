@@ -122,25 +122,34 @@ func (s *Server) Start() error {
 
 // Stop 关闭监听。
 //
-// 用 Shutdown 而不是 Close：Close 会**立刻掐断所有连接**，
-// 包括正在处理的那个请求本身 —— 用户点「修改端口」，服务端处理完
-// 关监听时把这条连接的响应也砍了，浏览器只会看到
-// 「The response ended prematurely」，以为操作失败（实际已生效）。
+// ## 为什么用 Shutdown 而不是 Close
+//
+// Close 会**立刻掐断所有连接**，包括正在处理的那个请求本身 ——
+// 用户点「修改端口」，服务端处理完关监听时把这条连接的响应也砍了，
+// 浏览器只会看到「The response ended prematurely」，以为操作失败。
 // Shutdown 会等在途请求写完再关。
+//
+// ## 超时不能设太长
+//
+// 换端口时「本请求」正是要等的那个在途请求，Shutdown 会一直等到它结束。
+// 超时设 5 秒就会让停服务卡 5 秒（测试里更是每次收尾都多等 5 秒）。
+// 真正的换端口流程已经改成「先 flush 响应再后台执行」，
+// 所以这里 800ms 足够覆盖正常收尾，超时就强关。
 func (s *Server) Stop() error {
 	s.mu.Lock()
 	srv := s.httpSrv
+	s.httpSrv = nil
 	s.listener = nil
 	s.mu.Unlock()
 	if srv == nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		// 超时还没关干净就强关，避免托盘里点了「停止」却还占着端口
 		_ = srv.Close()
-		return err
+		return nil
 	}
 	return nil
 }

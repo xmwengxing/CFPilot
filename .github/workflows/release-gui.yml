@@ -89,15 +89,49 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/gui-v')
         uses: softprops/action-gh-release@v2
         with:
+          # ⚠️ 关键：与 release-desktop.yml 共用同一个 Release（`v<版本号>`）。
+          #
+          # 2026-10-26 之前 gui-v* 与 desktop-v* 各自建一个 Release，
+          # GitHub 的 Releases 页面默认只显示 Latest，
+          # 用户在 gui-v0.6.1 页面看不到 Go 版的包，以为没发布。
+          #
+          # 现在统一到 `v<版本号>`：一个 Release 里同时有 5 个文件
+          # （2 个 Electron + 3 个 Go），用户一眼就能选。
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: CFPilot v${{ steps.ver.outputs.version }}
           files: packages/gui/release/*.exe
           generate_release_notes: true
           body: |
-            ## CFPilot 图形化部署工具 ${{ steps.ver.outputs.version }}
+            ## CFPilot v${{ steps.ver.outputs.version }}
 
-            - `CFPilot-${{ steps.ver.outputs.version }}-x64.exe` —— 安装版（可选安装目录、创建快捷方式）
-            - `CFPilot-${{ steps.ver.outputs.version }}-portable.exe` —— 便携版（免安装，双击即用）
+            两种图形化工具，**任选其一**，功能与界面完全相同：
 
-            首次使用请先看仓库 README 的「图形化工具」章节。
+            ### 🟢 Go 版（推荐，体积仅 7 MB）
+
+            | 平台 | 文件 | 用法 |
+            |---|---|---|
+            | Windows x64 | `cfpilot-${{ steps.ver.outputs.version }}-windows-amd64.exe` | 双击运行，托盘常驻 |
+            | Linux x64 | `cfpilot-${{ steps.ver.outputs.version }}-linux-amd64` | `chmod +x` 后运行 |
+            | Linux arm64 | `cfpilot-${{ steps.ver.outputs.version }}-linux-arm64` | 同上 |
+
+            单文件静态可执行程序，**不是安装包**，无需安装、零依赖。
+            运行后托盘出现图标，浏览器自动打开管理界面。
+
+            ### ⚪ Electron 版（过渡形态，77 MB）
+
+            | 平台 | 文件 |
+            |---|---|
+            | Windows x64 | `CFPilot-${{ steps.ver.outputs.version }}-x64.exe`（安装版） |
+            | Windows x64 | `CFPilot-${{ steps.ver.outputs.version }}-portable.exe`（免安装） |
+
+            > Electron 版为**过渡形态**：Go 版发满 3 个版本后不再提供，
+            > 源码永久保留。优先使用 Go 版。
+
+            ### 两个版本的关系
+
+            - **共用同一份界面源码**，操作完全一致
+            - **共用同一份凭据文件**（`~/.cfpilot-gui/secrets.json`），换版本不用重填 Token
+            - 详见 [README](https://github.com/xmwengxing/CFPilot#图形化工具)
 
       - name: 提交版本号变更
         if: startsWith(github.ref, 'refs/tags/gui-v')

@@ -294,14 +294,27 @@ export function renderRouteProfile(
  *
  * 1. **零外部依赖**：只用 `GEOSITE` / `GEOIP`，Clash 内核自带地理库，
  *    不需要 `rule-providers`、不需要下载、不会出现 `rule set not found`。
- * 2. **顺序即优先级**：具体的媒体站先匹配，再看通用代理/直连，最后 MATCH 兜底。
- * 3. **不内嵌规则清单**：只生成几十行规则逻辑，不在代码里塞 gzip+base64
- *    的 YAML（那是明显的扫描特征）。
+ * 2. **只用「确实存在」的分类**：下面每个 GEOSITE 分类名都经过
+ *    `geosite.dat` 实际解析验证（见 2026-10-26 §事故记录）。
+ * 3. **顺序即优先级**：具体站点先匹配，再看通用代理/直连，最后 MATCH 兜底。
  *
- * ## 为什么用这套
+ * ## ⚠️ 事故记录：分类名必须实测（2026-10-26）
  *
- * 用户反馈「实在不行就套用其中一套规则使用即可」——这套是 ACL4SSR 的思路
- * （媒体走代理、国内直连、广告拦截），但用内置 GEOSITE 实现，兼容性最好。
+ * 上一版用了 `GEOSITE,wikipedia`，Clash Verge 报：
+ *
+ *     rules[18] [GEOSITE,wikipedia,CFPilot] error:
+ *     load GeoSite data error, ... list wikipedia not found in geosite.dat
+ *
+ * **整个配置加载失败**。原因：mihomo 的 geosite.dat 里根本没有
+ * `wikipedia` 分类（只有 `WIKIMEDIA` / `WIKIHOW`）。
+ *
+ * 另外两个容易踩的点：
+ *   - geosite.dat 里的分类名是**全大写**（`YOUTUBE`），但 mihomo 查表
+ *     时忽略大小写，所以写小写也能查到 —— 唯独「不存在」才报错；
+ *   - **任何一个分类不存在，整份配置就加载失败**，不是跳过该条。
+ *     因此宁可少写几条，也不要凭想象加。
+ *
+ * 当前使用的分类均已验证存在于 mihomo 官方 geosite.dat。
  *
  * @param mainGroup 主策略组名（节点都挂在它下面）
  */
@@ -319,7 +332,6 @@ export function buildBuiltinRules(mainGroup: string): string[] {
     `  - GEOSITE,bahamut,${mainGroup}`,
     `  - GEOSITE,spotify,${mainGroup}`,
     `  - GEOSITE,tiktok,${mainGroup}`,
-    `  - GEOSITE,telegram,${mainGroup}`,
 
     // ---- AI / 开发服务：走代理（地区敏感） ----
     `  - GEOSITE,openai,${mainGroup}`,
@@ -328,11 +340,15 @@ export function buildBuiltinRules(mainGroup: string): string[] {
     `  - GEOSITE,github,${mainGroup}`,
 
     // ---- 常见被墙站点：走代理 ----
+    `  - GEOSITE,telegram,${mainGroup}`,
     `  - GEOSITE,google,${mainGroup}`,
     `  - GEOSITE,twitter,${mainGroup}`,
     `  - GEOSITE,facebook,${mainGroup}`,
     `  - GEOSITE,instagram,${mainGroup}`,
-    `  - GEOSITE,wikipedia,${mainGroup}`,
+    // ⚠️ 不要写 `GEOSITE,wikipedia` —— 该分类在 geosite.dat 里**不存在**
+    // （只有 WIKIMEDIA / WIKIHOW），写上会让整份配置加载失败。
+    // 维基百科的域名落在 GEOSITE,wikimedia 里。
+    `  - GEOSITE,wikimedia,${mainGroup}`,
 
     // ---- 国内：直连（含局域网与保留地址） ----
     `  - GEOIP,LAN,DIRECT,no-resolve`,

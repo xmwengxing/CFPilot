@@ -1,6 +1,6 @@
 {
   "name": "cfpilot",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "private": true,
   "type": "module",
   "description": "CFPilot — Cloudflare Workers 代理微内核 + 真连接优选面板 + 本地优选器 + 中文部署向导",
@@ -32,12 +32,13 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present && node scripts/make-pages-zip.mjs",
     "zip:pages": "node scripts/make-pages-zip.mjs",
+    "check:geosite": "node scripts/check-geosite.mjs",
     "build:worker": "npm run build -w @cfpilot/worker-core",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "vitest run",
     "test:watch": "vitest",
     "dev": "npm run dev -w @cfpilot/worker-core",
-    "verify": "npm run build && npm run typecheck && npm run test",
+    "verify": "npm run build && npm run typecheck && npm run test && node scripts/check-geosite.mjs",
     "version:sync": "node scripts/sync-version.mjs",
     "version:bump": "node scripts/bump-version.mjs",
     "clean": "node scripts/clean.mjs"

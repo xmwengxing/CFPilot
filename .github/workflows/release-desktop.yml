@@ -1,0 +1,139 @@
+name: Release Desktop
+
+# 构建并发布 CFPilot 桌面版（Go 单二进制）。
+#
+# 触发条件：推送 desktop-v* tag（如 desktop-v0.5.5）。
+# 与 release-gui.yml 并列存在，互不干扰：
+#   - gui-v*     → Electron 版（Windows exe，收尾阶段仍发布）
+#   - desktop-v* → Go 版（Windows + Linux）
+#
+# 版本政策沿用「单一版本源」：tag 里的版本号必须与根 package.json 一致。
+
+on:
+  push:
+    tags:
+      - 'desktop-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（如 0.5.5，须与根 package.json 一致）'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # 用 ubuntu 而不是 windows：Go 交叉编译不需要目标平台工具链，
+    # Linux runner 更快也更便宜，且能顺手在容器里实跑 Linux 产物。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: packages/desktop/go.sum
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 确定版本号
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ inputs.version }}"
+          else
+            V="${GITHUB_REF_NAME#desktop-v}"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "版本：$V"
+
+      - name: 校验 tag 与根版本一致（单一版本源）
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          ROOT=$(node -p "require('./package.json').version")
+          if [ "$ROOT" != "$V" ]; then
+            echo "::error::tag 版本 $V 与根 package.json 版本 $ROOT 不一致。请先 npm run version:bump -- $V 并提交，再打 tag。"
+            exit 1
+          fi
+          echo "版本一致：$V"
+
+      - name: 构建内核与界面
+        run: |
+          npm run build -w @cfpilot/worker-core
+          npm run build -w @cfpilot/gui
+
+      - name: Go 单元测试
+        working-directory: packages/desktop
+        run: go test ./...
+
+      - name: Go vet
+        working-directory: packages/desktop
+        run: go vet ./...
+
+      - name: 交叉编译三平台产物
+        run: node scripts/build-desktop.mjs
+
+      - name: 实跑 Linux 产物（冒烟测试）
+        # 交叉编译出的二进制只保证「能生成」，不保证「能运行」。
+        # 这里真的执行一次 --version 和 --check，避免发出跑不起来的包。
+        run: |
+          BIN="packages/desktop/dist/cfpilot-${{ steps.ver.outputs.version }}-linux-amd64"
+          chmod +x "$BIN"
+          "$BIN" --version
+          "$BIN" --check
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: CFPilot-desktop-${{ steps.ver.outputs.version }}
+          path: packages/desktop/dist/*
+          retention-days: 30
+
+      - name: 发布到 Release
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packages/desktop/dist/*
+          generate_release_notes: true
+          body: |
+            ## CFPilot 桌面版 ${{ steps.ver.outputs.version }}
+
+            Go 单二进制的图形化部署工具（无 Electron，体积约为旧版的 1/11）。
+
+            | 平台 | 文件 | 用法 |
+            |---|---|---|
+            | Windows x64 | `cfpilot-${{ steps.ver.outputs.version }}-windows-amd64.exe` | 双击运行，托盘常驻 |
+            | Linux x64 | `cfpilot-${{ steps.ver.outputs.version }}-linux-amd64` | `chmod +x` 后运行 |
+            | Linux arm64 | `cfpilot-${{ steps.ver.outputs.version }}-linux-arm64` | 同上 |
+
+            ### 怎么用
+
+            1. 运行程序 —— 托盘出现 CFPilot 图标，系统浏览器自动打开管理界面
+            2. 界面与 Electron 版完全一致（同一份界面源码）
+            3. 右键托盘图标可查看服务状态、复制地址、修改端口、启停服务、退出
+
+            ### 命令行参数
+
+            ```
+            --port <n>     临时指定端口（不写入配置）
+            --no-browser   启动后不自动打开浏览器
+            --no-tray      不启托盘，只跑服务（无桌面环境 / 服务器用）
+            --console      日志写到配置目录的 cfpilot.log
+            --check        只做自检（配置目录 / 端口可用性），不启动
+            --version      打印版本号
+            ```
+
+            ### 安全说明
+
+            服务只监听 `127.0.0.1`，不对外网开放；
+            访问需要一次性启动令牌换取的 HttpOnly 会话 Cookie；
+            并校验 `Host` 与 `Origin`，防 DNS Rebinding 与跨站请求。
+            凭据仍存在 `~/.cfpilot-gui/secrets.json`，与 Electron 版共用。

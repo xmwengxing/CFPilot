@@ -172,27 +172,32 @@
 
   /* ---------------- 多账户（profile） ---------------- */
 
+  /** 「当前使用」下拉框里代表「新建账户」的哨兵值（不会与真实 profile id 冲突） */
+  const NEW_PROFILE_VALUE = '__new__'
+
   /** 当前所有账户配置（渲染层缓存，不含 Token 明文） */
   let profiles: CFPilotProfileView[] = []
 
   /**
    * 重新拉取账户列表并渲染下拉框。
+  /**
+   * 重新拉取账户列表并渲染下拉框。
    *
-   * 渲染后会自动对齐到「当前激活项」，保证界面与磁盘一致。
+   * ## 下拉框的两种选项（2026-10-26 重构交互）
+   *
+   * - **`__new__`「＋ 新建账户」**：始终放在最下面。
+   *   选中它 = 进入「新建」模式，Token 输入框后面显示「添加并保存」。
+   * - **已有账户**：选中 = 切换过去，按钮显示「修改并保存」。
+   *
+   * 这样「新建 / 切换 / 修改」三个动作都收敛到「当前使用」这一个控件上，
+   * 不再需要额外的「新建账户」按钮 —— 早前那个按钮用 `prompt()` 取名字，
+   * 在 Electron 里没有反应，而且即使能弹也容易被误解成「已经建好了」。
    */
   async function refreshProfiles(): Promise<void> {
     profiles = await window.cfpilot.listProfiles()
     const sel = $sel('profileSelect')
+    const previous = sel.value
     sel.innerHTML = ''
-
-    if (profiles.length === 0) {
-      const opt = document.createElement('option')
-      opt.value = ''
-      opt.textContent = '— 还没有账户配置，点下方「新建账户」—'
-      sel.appendChild(opt)
-      $text('profileBadge').textContent = '0 个'
-      return
-    }
 
     for (const p of profiles) {
       const opt = document.createElement('option')
@@ -206,116 +211,264 @@
       sel.appendChild(opt)
     }
 
+    // 新建项永远在最后
+    const newOpt = document.createElement('option')
+    newOpt.value = NEW_PROFILE_VALUE
+    newOpt.textContent = '＋ 新建账户'
+    sel.appendChild(newOpt)
+
+    // 对齐：优先保持用户刚选的那一项，其次激活项
     const active = profiles.find((p) => p.active)
-    if (active) sel.value = active.id
+    if (previous === NEW_PROFILE_VALUE) sel.value = NEW_PROFILE_VALUE
+    else if (active) sel.value = active.id
+    else sel.value = NEW_PROFILE_VALUE
+
     $text('profileBadge').textContent = `${profiles.length} 个`
+    updateProfileMode()
   }
 
-  /** 绑定账户管理相关按钮 */
+  /** 下拉框是否停在「新建」项 */
+  function isNewMode(): boolean {
+    return $sel('profileSelect').value === NEW_PROFILE_VALUE
+  }
+
+  /**
+   * 根据「当前使用」的选择同步界面状态。
+   *
+   * - 新建模式：按钮「添加并保存」、提示怎么填、清空输入框
+   * - 已有账户：按钮「修改并保存」、显示是否已配 Token
+   */
+  function updateProfileMode(): void {
+    const btn = document.getElementById('btnSaveToken') as HTMLButtonElement | null
+    const hint = $text('profileHint')
+    const tokenBadge = $text('tokenBadge')
+    if (!btn) return
+
+    if (isNewMode()) {
+      btn.textContent = '添加并保存'
+      btn.classList.add('btn-primary')
+      btn.classList.remove('btn-ghost')
+      tokenBadge.textContent = '待填写'
+      tokenBadge.className = 'badge info'
+      if (hint) {
+        hint.textContent =
+          '正在新建账户：粘贴一个 Cloudflare API Token 后点「添加并保存」。' +
+          '不同账号用不同的 Token，各自独立保存。'
+      }
+      return
+    }
+
+    const target = profiles.find((p) => p.id === $sel('profileSelect').value)
+    btn.textContent = '修改并保存'
+    btn.classList.remove('btn-primary')
+    btn.classList.add('btn-ghost')
+    if (target) {
+      tokenBadge.textContent = target.hasToken ? '已保存' : '未保存'
+      tokenBadge.className = target.hasToken ? 'badge ok' : 'badge warn'
+    }
+    if (hint) {
+      hint.textContent =
+        '当前使用该账户。要换 Token 就粘贴新的再点「修改并保存」；' +
+        '要新增账号请选「＋ 新建账户」。'
+    }
+  }
+
+  /** 切换账户后清空上一账户的所有上下文，避免误操作 */
+  function resetAccountContext(): void {
+    currentAccountId = ''
+    kvOptions = []
+    renderKvOptions()
+    $text('detAccount').textContent = '—'
+    $('cfToken').value = ''
+    $('panelPassword').value = ''
+  }
+
+  /** 绑定账户管理相关事件 */
   function bindProfiles(): void {
     $sel('profileSelect').addEventListener('change', async () => {
+      // 选「新建」：不落盘、不切换，只是进入新建模式
+      if (isNewMode()) {
+        log('已切换到「新建账户」模式，粘贴 Token 后点「添加并保存」')
+        resetAccountContext()
+        updateProfileMode()
+        $text('detHint').textContent = '填好 Token 并「添加并保存」后会自动检测账号。'
+        return
+      }
+
       const id = $sel('profileSelect').value
-      if (!id) return
       const target = profiles.find((p) => p.id === id)
-      if (!target || target.active) return
+      if (!target) { updateProfileMode(); return }
 
       log(`切换账户：${target.name}`)
       const res = await window.cfpilot.switchProfile(id)
-      if (!res.ok) { log('切换失败', 'err'); await refreshProfiles(); return }
-
-      // 切账户后必须重置上一账户的上下文：
-      // KV 列表、账号 ID、部署状态全部属于旧账户，留着会误操作。
-      currentAccountId = ''
-      kvOptions = []
-      renderKvOptions()
-      $text('detAccount').textContent = '—'
-      $('cfToken').value = ''
-      $('panelPassword').value = ''
-
-      await refreshProfiles()
-      await refreshCredState()
-      log(`已切换到「${target.name}」，请点「检测账号」重新读取该账户`, 'warn')
-    })
-
-    document.getElementById('btnProfileNew')!.addEventListener('click', async () => {
-      const name = prompt('给这个账户配置起个名字（可留空，之后会自动用账号名）：', '')
-      if (name === null) return
-      const created = await window.cfpilot.createProfile(name.trim() || undefined)
-      log(`已新建账户配置「${created.name}」，请填写 API Token`, 'ok')
-      currentAccountId = ''
-      kvOptions = []
-      renderKvOptions()
-      $text('detAccount').textContent = '—'
-      $('cfToken').value = ''
-      await refreshProfiles()
-      await refreshCredState()
-    })
-
-    document.getElementById('btnProfileRename')!.addEventListener('click', async () => {
-      const id = $sel('profileSelect').value
-      const target = profiles.find((p) => p.id === id)
-      if (!target) { log('请先选择一个账户', 'warn'); return }
-      const name = prompt('新的名称：', target.name)
-      if (name === null) return
-      const trimmed = name.trim()
-      if (!trimmed) { log('名称不能为空', 'warn'); return }
-      const res = await window.cfpilot.updateProfile(target.id, { name: trimmed })
-      if (res.ok) {
-        log(`已重命名为「${trimmed}」`, 'ok')
+      if (!res.ok) {
+        log('切换失败', 'err')
         await refreshProfiles()
+        return
+      }
+
+      resetAccountContext()
+      await refreshProfiles()
+      await refreshCredState()
+      updateProfileMode()
+
+      // 切到已有账户时**自动检测账号**（用户要求 2026-10-26）
+      if (target.hasToken) {
+        await detectAccountAndGuide()
       } else {
-        log('重命名失败：' + (res.error ?? ''), 'err')
+        $text('detHint').textContent = '该账户还没填 Token，请粘贴后点「修改并保存」。'
       }
     })
 
     document.getElementById('btnProfileDelete')!.addEventListener('click', async () => {
       const id = $sel('profileSelect').value
+      if (isNewMode()) {
+        log('当前停在「新建账户」，没有可删除的账户', 'warn')
+        return
+      }
       const target = profiles.find((p) => p.id === id)
       if (!target) { log('请先选择一个账户', 'warn'); return }
       if (
         !confirm(
-          `确定删除账户配置「${target.name}」？\n\n` +
-            '只删除本机保存的配置，不会影响 Cloudflare 上已部署的项目。'
+          `确定删除本地账户配置「${target.name}」？\n\n` +
+            '只删除这台电脑上保存的凭据，不会影响 Cloudflare 上已部署的项目，' +
+            '也不影响订阅地址。'
         )
       ) {
         return
       }
       const res = await window.cfpilot.deleteProfile(target.id)
       if (!res.deleted) { log('删除失败：找不到该配置', 'err'); return }
-      log(`已删除账户配置「${target.name}」`, 'ok')
-
-      // 删的正是当前激活项 → 上下文全部失效
-      currentAccountId = ''
-      kvOptions = []
-      renderKvOptions()
-      $text('detAccount').textContent = '—'
-      $('cfToken').value = ''
+      log(`已删除本地账户「${target.name}」`, 'ok')
+      resetAccountContext()
       await refreshProfiles()
       await refreshCredState()
+    })
+
+    document.getElementById('btnSavePanelPw')!.addEventListener('click', async () => {
+      if (isNewMode()) {
+        log('请先添加账户（粘贴 Token 并保存）再设置面板密码', 'warn')
+        return
+      }
+      const pw = $('panelPassword').value
+      if (!pw.trim()) { log('请先填写新的面板密码', 'warn'); return }
+      await window.cfpilot.saveCredentials({ panelPassword: pw })
+      $('panelPassword').value = ''
+      log('面板密码已更新（下次部署生效）', 'ok')
     })
   }
 
-  function bindCredentials(): void {
-    document.getElementById('btnSaveToken')!.addEventListener('click', async () => {
-      const token = $('cfToken').value.trim()
-      if (!token) { log('请先填写 API Token', 'warn'); return }
+  /**
+   * 检测账号并给出「下一步该做什么」的引导。
+   *
+   * 用户要求（2026-10-26）：
+   *   - 检测到已有 CFPilot 实例 → 提示去下方 KV 里选本次要用的那个，再点「保存此选择」
+   *   - 没检测到 → 提示在下方新建 KV 并保存
+   */
+  async function detectAccountAndGuide(): Promise<void> {
+    if (!hasActiveToken()) return
+    log('检测账号…')
+    try {
+      const result = await window.cfpilot.detectAccount()
+      $text('detAccount').textContent =
+        result.accountName ? result.accountName + '（' + result.accountId + '）' : '—'
+      if (!result.accountId) {
+        $text('detHint').textContent = '没能读到账号，请检查 Token 权限是否正确。'
+        return
+      }
+      currentAccountId = result.accountId
 
-      // 没有激活账户时先建一份，再保存（saveCredentials 会写到激活项）
-      if (profiles.length === 0) {
-        await window.cfpilot.createProfile()
+      // 把账号名写回当前 profile，下拉框就能显示可读名称
+      const active = profiles.find((p) => p.active)
+      if (active) {
+        await window.cfpilot.updateProfile(active.id, {
+          accountId: result.accountId,
+          accountName: result.accountName,
+        })
         await refreshProfiles()
       }
 
-      await window.cfpilot.saveCredentials({
-        cfToken: token,
-        panelPassword: $('panelPassword').value,
-      })
-      // 保存后清空输入框：Token 不回显，避免被截屏/窥屏
-      $('cfToken').value = ''
-      log('凭据已保存到本机（当前账户）', 'ok')
+      // 读 KV 列表，并判断有没有已部署的 CFPilot 实例
+      await loadKvOptions()
+
+      const instances = kvOptions.filter((o) => o.ownership === 'instance')
+      const hint = $text('detHint')
+      if (instances.length > 0) {
+        hint.innerHTML =
+          `检测到 <b>${instances.length}</b> 个已部署的 CFPilot 实例：` +
+          instances.map((i) => `<code>${escapeHtml(i.title)}</code>`).join('、') +
+          '。<br>请在下方「本次部署使用的 KV」里选择要维护的那个，再点「保存此选择」。'
+        log(`检测到 ${instances.length} 个已部署实例，请到下方选择本次使用的 KV`, 'ok')
+      } else {
+        hint.innerHTML =
+          '这个账号下<b>还没有部署过 CFPilot</b>。<br>' +
+          '请在下方点「新建 KV（部署新实例）」，建好后点「保存此选择」，再去「一键部署」页部署。'
+        log('该账号下没有已部署实例，请到下方新建 KV', 'warn')
+      }
+    } catch (err) {
+      log('检测账号失败：' + (err instanceof Error ? err.message : String(err)), 'err')
+      $text('detHint').textContent = '检测失败，请检查网络与 Token。'
+    }
+  }
+
+  /** 当前是否已有可用 Token（激活账户已配置） */
+  function hasActiveToken(): boolean {
+    const active = profiles.find((p) => p.active)
+    return Boolean(active?.hasToken)
+  }
+
+  function bindCredentials(): void {
+    /**
+     * 保存 Token。
+     *
+     * ## 关键：新建 vs 修改必须走不同路径（2026-10-26 修复）
+     *
+     * 早前无论什么情况都调 `saveCredentials()`，而它写的是「当前激活 profile」——
+     * 于是用户想新建第二个账户时，Token 把**当前账户**覆盖了，
+     * 永远建不出第二个。这也是「新建按钮没反应」背后的真实后果。
+     */
+    document.getElementById('btnSaveToken')!.addEventListener('click', async () => {
+      const token = $('cfToken').value.trim()
+      if (!token) {
+        log('请先填写 API Token', 'warn')
+        $('cfToken').focus()
+        return
+      }
+
+      if (isNewMode()) {
+        // ---- 新建：createProfile + 立刻写入 Token ----
+        const created = await window.cfpilot.createProfile()
+        const saved = await window.cfpilot.updateProfile(created.id, { cfToken: token })
+        if (!saved.ok) {
+          log('新建账户失败：' + (saved.error ?? ''), 'err')
+          return
+        }
+        log(`✅ 已新建账户并保存 Token（${created.name}）`, 'ok')
+        resetAccountContext()
+        await refreshProfiles()
+        await refreshCredState()
+        // 新建后自动检测，省得用户再点一次
+        await detectAccountAndGuide()
+        return
+      }
+
+      // ---- 修改：写到当前激活账户 ----
+      await window.cfpilot.saveCredentials({ cfToken: token })
+      log('Token 已更新到当前账户', 'ok')
+      resetAccountContext()
       await refreshProfiles()
       await refreshCredState()
+      await detectAccountAndGuide()
     })
+
+    document.getElementById('btnDetect')!.addEventListener('click', async () => {
+      if (!hasActiveToken() && !$('cfToken').value.trim()) {
+        log('请先填写 API Token 并保存', 'warn')
+        return
+      }
+      await detectAccountAndGuide()
+    })
+
 
     document.getElementById('btnDetect')!.addEventListener('click', async () => {
       // 没有激活的账户配置时先建一份，避免「检测了但没地方存」
@@ -377,27 +530,6 @@
 
     $('kvSelect').addEventListener('change', () => { updateKvHint() })
 
-    document.getElementById('btnWipe')!.addEventListener('click', async () => {
-      if (
-        !confirm(
-          `确定清除本机保存的全部账户配置（共 ${profiles.length} 个）？\n\n` +
-            '这只会删除本机的凭据文件（会留一份 .bak 备份），不影响 Cloudflare 上的部署。'
-        )
-      ) {
-        return
-      }
-      await window.cfpilot.wipeCredentials()
-      log('已清除本机全部凭据（保留 .bak 备份）', 'ok')
-      $text('detAccount').textContent = '—'
-      $('cfToken').value = ''
-      $('panelPassword').value = ''
-      currentAccountId = ''
-      kvOptions = []
-      renderKvOptions()
-      await refreshProfiles()
-      await refreshCredState()
-    })
-
     document.querySelectorAll('a[data-url]').forEach((a) => {
       a.addEventListener('click', (e) => {
         e.preventDefault()
@@ -456,6 +588,15 @@
       }
       setBusy(true)
       log('── 开始部署 ──')
+
+      // 部署页填了面板密码就先写入当前账户（部署读的是账户里的值）。
+      // 留空表示「沿用原密码/随机生成」，不要覆盖已有值。
+      const deployPw = $('deployPanelPassword').value
+      if (deployPw.trim()) {
+        await window.cfpilot.saveCredentials({ panelPassword: deployPw })
+        log('已使用本次填写的面板密码')
+      }
+
       try {
         const result = await window.cfpilot.runDeploy(
           {
@@ -473,12 +614,13 @@
         const status = document.getElementById('deployStatus')!
         status.textContent = result.ok ? '✅ 部署完成' : '❌ 部署失败：' + (result.error ?? '')
 
-        // 成功时把「马上要用的东西」集中再报一次：面板地址与密码。
-        // 密码是部署时随机生成的，不在这里显示就只能去 KV 清单里翻。
+        // 成功时**不再重复打印**面板地址与密码（2026-10-26 用户反馈）。
+        //
+        // 部署向导本身在结束时就会打印一次「控制面 / 数据面 / UUID / WS 路径 /
+        // 面板密码」的汇总块，这里再打一遍等于同一份信息出现两次，
+        // 反而让人怀疑是不是部署了两次。只补一句结束标记即可。
         if (result.ok) {
-          log('── 部署成功 ──', 'ok')
-          if (result.panelUrl) log('面板地址：' + result.panelUrl, 'ok')
-          if (result.panelPassword) log('面板密码：' + result.panelPassword, 'ok')
+          log('── 部署成功（详细信息见上方汇总）──', 'ok')
           // 部署成功后自动刷新状态：版本已同步，按钮应回到「已是最新」
           const select = $sel('kvSelect')
           await window.cfpilot.checkDeployed(select.value || undefined)

@@ -254,12 +254,64 @@ CFPilot/
 │   │       ├── scan.ts           # 三阶扫描器
 │   │       ├── server.ts         # 127.0.0.1:19527 桥接服务（SSE）
 │   │       └── ip-ranges.ts      # CF 网段库 + 采样
-│   └── deploy-wizard/            # cfpilot-deploy —— 全中文部署向导（npm 包）
-│       └── src/
-│           ├── cf-api.ts         # Cloudflare API 封装
-│           ├── wizard.ts         # 交互式向导
-│           └── cli.ts
+│   ├── deploy-wizard/            # cfpilot-deploy —— 全中文部署向导（npm 包）
+│   │   └── src/
+│   │       ├── cf-api.ts         # Cloudflare API 封装
+│   │       ├── wizard.ts         # 交互式向导
+│   │       └── cli.ts
+│   ├── gui/                      # @cfpilot/gui —— Electron 图形版（过渡形态）
+│   │   └── src/
+│   │       ├── main/             # 主进程：bridge / config-store / scanner / updater
+│   │       ├── preload/          # IPC 桥
+│   │       └── renderer/         # 界面源码（**与 Go 版共用**）
+│   └── desktop/                  # Go 桌面版（cfpilot-desktop）
+│       ├── cmd/cfpilot/          # 入口：参数 / 服务启动 / 浏览器
+│       └── internal/
+│           ├── config/           # 设置读写（~/.cfpilot-gui/desktop.json）
+│           ├── server/           # 本地 HTTP + 安全校验 + 端口管理
+│           │   └── assets/       # 界面资源（构建时从 gui/dist 拷入，go:embed）
+│           └── tray/             # 托盘图标与菜单
 ```
+
+---
+
+## 2.1 图形版的两种形态（2026-10-26 立）
+
+项目同时提供 Electron 版与 Go 版，**界面源码只有一份**
+（`packages/gui/src/renderer/`），差别只在宿主外壳：
+
+| | Electron 版 | Go 版 |
+|---|---|---|
+| 体积 | 78 MB | 6.9 MB |
+| 界面承载 | 内置 Chromium | 系统浏览器 |
+| 通信 | `ipcRenderer.invoke` | `fetch('/api/...')` |
+| 平台 | Windows | Windows + Linux |
+
+**铁律：**
+
+1. **界面只能改 `packages/gui/src/renderer/`，不许在 `packages/desktop/` 里放第二份 HTML/JS。**
+   Go 版通过 `scripts/build-desktop.mjs` 把 gui 的构建产物拷进
+   `internal/server/assets/` 再 `go:embed`。两份界面必然漂移。
+2. **`internal/server/assets/` 里只有 `README.md` 入库**。
+   `index.html` / `renderer.js` 是构建中间物，已 gitignore。
+   但目录**必须**留一个文件 —— `go:embed` 匹配不到文件会编译失败
+   （首版 CI 就是这么挂的：`pattern all:assets: no matching files found`）。
+3. **本地服务只许监听 `127.0.0.1`**。它持有 Cloudflare Token 的读写能力，
+   暴露到局域网就是安全事故。`config` 层强制 Host 回环，不要提供修改入口。
+4. **访问控制四道防线缺一不可**：一次性启动令牌 → HttpOnly Session Cookie
+   → Host 头校验（防 DNS Rebinding）→ Origin 同源校验。
+   改动 `internal/server/server.go` 必须同时补 `server_test.go` 的用例。
+5. **测试里设 Host 头必须用 `req.Host`**，`req.Header.Set("Host", ...)`
+   会被 Go 忽略 —— 曾因此让「Host 校验」测试假通过。
+6. **换端口必须先 flush 响应再后台执行**。关监听会掐断正在处理的请求：
+   `Close()` 让客户端拿到 `response ended prematurely`，
+   `Shutdown(ctx)` 会死等自身请求直到超时。
+7. **托盘库用 `energye/systray`**。`getlantern/systray` 在 Linux 上要 CGO
+   （GTK），`CGO_ENABLED=0` 交叉编译直接失败（`undefined: nativeLoop`）。
+8. **Go 版与 Electron 版共用 `~/.cfpilot-gui/secrets.json`**，
+   不许给 Go 版另起一套凭据格式，否则用户换版本要重填 Token。
+9. **Electron 版为过渡形态**：Go 版发满 3 个版本后停发 Electron 版 exe
+   （`gui-v*` tag 不再产包），**源码永久保留**。
 
 ---
 
@@ -320,11 +372,13 @@ XHTTP **不支持 UDP**。
 
 ## 6. 版本号政策（单一版本源，2026-10-24 立）
 
-1. **所有包同版本**：root / worker-core / scanner-cli / deploy-wizard / gui
+1. **所有包同版本**：root / worker-core / scanner-cli / deploy-wizard / gui / desktop
    的版本号永远一致。无论某个包本身有没有代码变动，只要发布就一起升——
    免去逐包管理版本号的麻烦（用户明确要求）。
 2. **根 `package.json` 的 `version` 是唯一版本源**。任何包都不允许单独改版本号；
    直接手改子包 `package.json` 或 `src/version.ts` 一律视为违规。
+   Go 版不写版本文件 —— 构建时由 `scripts/build-desktop.mjs` 读根版本，
+   通过 `-ldflags "-X main.Version=<版本>"` 注入。
 3. **升级唯一入口**：
    ```bash
    npm run version:bump -- 0.4.0    # 或 major / minor / patch
@@ -339,4 +393,39 @@ XHTTP **不支持 UDP**。
    出现「npm 上是 0.3.0、CLI 报 0.2.0」的事故）。
 6. **GUI 发布**：tag 必须用 `gui-v<统一版本号>`（如 `gui-v0.3.0`），
    CI 会校验 tag 与根版本一致，不一致直接失败。
-7. npm 已发布版本号不可覆盖重发，所以每次升级必须是**严格递增**的新号。
+7. **Desktop（Go 版）发布**：tag 必须用 `desktop-v<统一版本号>`。
+   ```bash
+   git tag -a desktop-v0.5.5 -m "..."
+   git push origin desktop-v0.5.5
+   ```
+   `release-desktop.yml` 在 `ubuntu-latest` 上交叉编译三平台，
+   **会实跑 Linux 产物做冒烟测试**（`--version` + `--check`），
+   然后自动发布 Release。**不需要本地打包，也不需要手动上传。**
+8. **两种 GUI 的 tag 相互独立**，可以只发其中一个：
+   - `gui-v*` → Electron 版（过渡形态，Go 版满 3 个版本后停发）
+   - `desktop-v*` → Go 版
+9. npm 已发布版本号不可覆盖重发，所以每次升级必须是**严格递增**的新号。
+
+---
+
+## 7. 本地验证清单（提交前）
+
+```bash
+# 内核与 CLI
+npm run typecheck && npm run test && npm run build
+
+# Go 桌面版（改动 packages/desktop 时）
+cd packages/desktop
+gofmt -l .          # 必须无输出
+go vet ./...
+go test ./...
+
+# 三平台产物（改动界面或 Go 代码时）
+cd ../..
+npm run build -w @cfpilot/gui
+node scripts/build-desktop.mjs
+```
+
+⚠️ **Go 测试在缺少界面资源时会跳过 `TestServesEmbeddedUI`**，
+这是预期行为（assets 的真实产物不入库）。如果怀疑界面真的坏了，
+先跑 `node scripts/build-desktop.mjs` 再测一次。

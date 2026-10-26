@@ -209,69 +209,63 @@
 
         <!-- ============ 凭据 ============ -->
         <section class="page active" id="page-cred">
-          <!-- 账户管理：多账户切换 / 增删改 -->
+          <!-- 账户配置：Token 与账户一体，切换/新建都在这里 -->
           <div class="card">
             <h2>👤 账户配置 <span class="badge info" id="profileBadge">0 个</span></h2>
             <p class="desc">
               可以为多个 Cloudflare 账号各存一份配置，随时切换。
-              每份配置独立保存 Token 与该账号下的选择，互不干扰。
+              每份配置独立保存 Token 与该账号下选择的 KV，互不干扰。<br>
+              凭据只保存在本机 <code>~/.cfpilot-gui/secrets.json</code>，不会上传到任何服务器。
             </p>
 
             <div class="field">
               <label>当前使用</label>
               <select id="profileSelect">
-                <option value="">— 还没有账户配置，点下方「新建」—</option>
+                <option value="">— 还没有账户配置 —</option>
               </select>
               <p class="tip" id="profileHint">
-                切换账户后需要重新点「检测账号」，因为不同账号下的 KV 完全不同。
+                选「新建账户」并填入 Token 即可添加第二个账号；选已有账户则显示该账号的信息。
               </p>
             </div>
 
-            <div class="btn-row">
-              <button class="btn btn-ghost" id="btnProfileNew">新建账户</button>
-              <button class="btn btn-ghost" id="btnProfileRename">重命名</button>
-              <button class="btn btn-danger" id="btnProfileDelete">删除此账户</button>
-            </div>
-            <p class="tip" style="margin-top:8px">
-              「删除此账户」只删除本机保存的配置，<b>不会影响 Cloudflare 上已部署的项目</b>。
-            </p>
-          </div>
-
-          <div class="card">
-            <h2>🔑 Cloudflare API Token <span class="badge info" id="tokenBadge">未保存</span></h2>
-            <p class="desc">
-              用于调用 Cloudflare 官方 API 完成部署。只保存在本机
-              <code>~/.cfpilot-gui/secrets.json</code>，不会上传到任何服务器。
-            </p>
-
             <div class="field">
-              <label>API Token</label>
+              <label>Cloudflare API Token <span class="badge info" id="tokenBadge">未保存</span></label>
               <div class="row">
                 <input type="password" id="cfToken" placeholder="粘贴 Cloudflare API Token" />
-                <button class="btn btn-ghost" id="btnSaveToken" style="flex:0 0 auto">保存</button>
+                <button class="btn btn-primary" id="btnSaveToken" style="flex:0 0 auto">添加并保存</button>
               </div>
               <p class="tip">
                 没有令牌？<a href="#" data-url="https://dash.cloudflare.com/profile/api-tokens">点此创建</a>。
                 需要哪些权限见下方说明。<br>
-                已保存过时输入框是空的 —— 出于安全考虑不回显明文，要改就直接粘贴新的。
+                已保存过时输入框是空的 —— 出于安全考虑不回显明文，要改就粘贴新的再点「修改并保存」。
               </p>
             </div>
 
             <div class="field">
               <label>面板密码</label>
-              <input type="password" id="panelPassword" placeholder="留空则随机生成" />
-              <p class="tip">面板的登录密码。留空会自动生成随机密码并在部署后显示。</p>
+              <div class="row">
+                <input type="password" id="panelPassword" placeholder="留空则部署时随机生成" />
+                <button class="btn btn-ghost" id="btnSavePanelPw" style="flex:0 0 auto">修改密码</button>
+              </div>
+              <p class="tip">
+                面板的登录密码，会随部署写入。留空则由部署时随机生成并在日志中显示。
+              </p>
             </div>
 
             <div class="btn-row">
               <button class="btn btn-primary" id="btnDetect">检测账号</button>
-              <button class="btn btn-danger" id="btnWipe">清除本机全部凭据</button>
+              <button class="btn btn-danger" id="btnProfileDelete">删除本地账户/凭据</button>
             </div>
+            <p class="tip" style="margin-top:8px">
+              「删除本地账户/凭据」只删除这台电脑上保存的配置，
+              <b>不会影响 Cloudflare 上已部署的项目</b>，也不影响订阅地址。
+            </p>
           </div>
 
           <div class="card">
             <h2>📦 检测结果</h2>
             <div class="kv-row"><span class="k">目标账号</span><span class="v" id="detAccount">—</span></div>
+            <p class="tip" id="detHint">选择账户后会自动检测。检测到已部署实例会提示你去下方选择 KV。</p>
           </div>
 
           <div class="card">
@@ -384,6 +378,16 @@
                 <b>更新现有部署</b>：沿用原 UUID 与 WS 路径，<b>客户端订阅地址不用改</b>。<br>
                 <b>全新部署</b>：忽略旧记录，重新建项目并生成新凭据 ——
                 需要一个<b>未被占用</b>的 KV（在「Cloudflare 凭据」页新建）。
+              </p>
+            </div>
+
+            <div class="field">
+              <label>面板密码（可选，建议手填）</label>
+              <input type="password" id="deployPanelPassword" placeholder="留空 = 由系统随机生成" />
+              <p class="tip">
+                部署后登录面板用的密码。<b>留空会随机生成</b>并在部署日志里显示出来；
+                手填一个自己记得住的更省事。<br>
+                已有的部署更新时留空 = <b>沿用原密码不变</b>。
               </p>
             </div>
 

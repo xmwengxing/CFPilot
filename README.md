@@ -322,17 +322,17 @@ TCP 9ms 的 IP 握手可能要 3.5 秒，客户端超时就是 `-1`。
 
 ```text
 CFPilot/
-├── AGENTS.md              # 架构铁律与编码规范（改代码前必读）
 ├── HANDOVER.md            # 交接文档：真机结论与决策记录
 └── packages/
-    ├── worker-core/       # 边缘内核 + 中文面板（Pages/Workers 产物）
+    ├── worker-core/       # 边缘内核 + 中文面板（Pages 产物）
     ├── scanner-cli/       # cfpilot-scanner —— 本地真连接优选器
     ├── deploy-wizard/     # cfpilot-deploy —— 全中文部署向导
-    └── gui/               # Electron 图形化工具
+    ├── gui/               # Electron 图形化工具（过渡形态）
+    └── desktop/           # Go 桌面版（单二进制 + 托盘）
 ```
 
 更多实现细节（协议格式、出站选路、DoH 判定、TLS 约束等）见
-[AGENTS.md](AGENTS.md) 的 29 条架构铁律，真机取证过程见 [HANDOVER.md](HANDOVER.md)。
+[HANDOVER.md](HANDOVER.md) 的真机取证与决策记录。
 
 ---
 

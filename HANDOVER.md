@@ -38,7 +38,7 @@ CFPilot 已是一个**功能完整、经真机验证**的 Cloudflare 代理微�
 - npm 发布兜底：`scanner-cli` / `deploy-wizard` 的 `prepublishOnly` 会自动再同步一次
   （历史事故：npm 上是 0.3.0、CLI `--version` 报 0.2.0，因 `version.ts` 是硬编码常量漏改）。
 - GUI 发版 tag 必须与根版本一致（如 `gui-v0.3.0`），CI 会校验，不一致直接失败。
-- 完整政策见 AGENTS.md「版本号政策」专节。
+- 完整政策见本文「版本号政策」专节。
 
 ### 0.4 已验证的核心能力（真机）
 
@@ -56,7 +56,7 @@ CFPilot 已是一个**功能完整、经真机验证**的 Cloudflare 代理微�
 
 1. **数据面默认自研，vendor 可回退**：`resolveDataPlaneImpl()` 缺省 `self`；
    `DATAPLANE=vendor` 切回 CFNext（`src/vendor/cfnext-dataplane.js`，**勿改**）。
-   ⚠️ 本文旧版与 AGENTS.md 旧版写的「必须用 CFNext 数据面、不要改回自研」**已作废**
+   ⚠️ 本文旧版写的「必须用 CFNext 数据面、不要改回自研」**已作废**
    （自 2026-10-23 §0.20.10 起自研为默认）。
 2. **控制面与数据面必须分开部署**（两个 Pages 项目共用同一 KV）。
    控制面走 `dist/control.js`（无 sockets），数据面走 `dist/dataplane.js`。
@@ -1570,7 +1570,6 @@ SOCKS5 / HTTP / HTTPS 代理 / 反代入口多种出站，四层优选池订阅�
 
 ```text
 CFPilot/
-├── AGENTS.md                     # 架构铁律 + 版本号政策（改代码前必读）
 ├── HANDOVER.md                   # 本文件
 ├── README.md                     # 用户向文档（中文，含免责声明）
 ├── cloudflare项目方案.md          # 原始需求方案 + 5 阶段执行计划
@@ -1627,7 +1626,7 @@ CFPilot/
 ### worker-core（边缘内核）
 
 - **入站**：`VLESS-WS` / `Trojan-WS`（SHA-224 口令校验，纯 TS 实现）/ `VLESS-XHTTP(stream-one)`。
-  协议响应头**先回**、出站后台进行（铁律，见 AGENTS.md 10）。
+  协议响应头**先回**、出站后台进行（见本文「协议响应头」专节）。
 - **出站**：直连 TCP、并发竞速拨号、ProxyIP 池故障转移、NAT64 前缀合成、
   SOCKS5 / HTTP CONNECT / HTTPS 代理池（`#sni=` 显式 SNI、域名自动推导 SNI）、
   **反代入口池**（`relayPool` 可自配、colo 优先、30s 缓存、`USE_BUILTIN_RELAY` 可关）、
@@ -1725,7 +1724,7 @@ CFPilot/
 
 ## 6. 接手前必须知道的架构铁律
 
-> **完整清单以 AGENTS.md 为准**（28 条架构铁律 + 版本号政策专节，2026-10-23 版）。
+> **完整清单见本文「架构铁律」与「版本号政策」专节**（2026-10-23 版）。
 > 以下只列最容易违反、违反即出线上故障的几条：
 
 1. **配置优先级恒为** `KV(CONFIG) > 环境变量 > 内置默认值`；新增配置项必须三层都支持并在 `config.ts` 登记。

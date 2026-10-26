@@ -392,9 +392,15 @@ export async function detectAccount(
  *
  * `ownership` 说明这个命名空间当前归谁：
  * - `instance`  本工具部署的实例（含清单）
- * - `foreign`   被其他项目占用（键不重叠，可共存）
+ * - `foreign`   **被其他项目占用 —— 不可选，部署会被拒绝**（2026-10-26 起）
  * - `cfpilot`   含 CFPilot 配置但无清单（残留）
  * - `empty`     空命名空间
+ *
+ * ## `foreign` 为什么不可选
+ *
+ * CFPilot 的数据面已完全自研（vendor 于 2026-10-25 移除），
+ * 不再与其他项目共用 KV：共存会共享配额、混淆 schema、让排查变难。
+ * 因此界面上直接禁用该选项，服务端也会在 `assertKvOwnership` 里硬拒绝。
  */
 export interface KvOption {
   id: string

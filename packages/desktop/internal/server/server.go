@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/config"
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/store"
 )
 
 //go:embed all:assets
@@ -58,6 +59,16 @@ type Server struct {
 	listener  net.Listener
 	httpSrv   *http.Server
 	startedAt time.Time
+	// store 是凭据库（与 Electron 版共用同一份 secrets.json）
+	store *store.Store
+	// events 是 SSE 事件总线（推送日志 / 部署状态 / 扫描结果）
+	events *eventBus
+	// deploy 是部署任务状态（同一时刻只允许一个部署）
+	deploy deployState
+	// scan 是优选任务状态（同一时刻只允许一个扫描）
+	scan scanState
+	// update 是更新下载状态
+	update updateState
 }
 
 // New 创建一个服务实例（不启动监听）。
@@ -70,7 +81,14 @@ func New(settings config.DesktopSettings) (*Server, error) {
 		settings:  settings,
 		bootToken: boot,
 		startedAt: time.Now(),
+		store:     store.New(""),
+		events:    newEventBus(),
 	}, nil
+}
+
+// SetStore 注入凭据库（测试用；生产环境用默认目录）。
+func (s *Server) SetStore(st *store.Store) {
+	s.store = st
 }
 
 // BootToken 返回一次性启动令牌（供托盘「打开界面」拼接 URL）。
@@ -80,7 +98,23 @@ func (s *Server) BootToken() string {
 
 // WelcomeURL 返回带启动令牌的欢迎地址。
 func (s *Server) WelcomeURL() string {
-	return fmt.Sprintf("http://%s:%d/?t=%s", s.settings.Host, s.port(), s.bootToken)
+	return fmt.Sprintf("http://%s:%d/?t=%s", browseHost(s.settings.Host), s.port(), s.bootToken)
+}
+
+// ServiceURL 返回独立服务管理页的地址。
+func (s *Server) ServiceURL() string {
+	return fmt.Sprintf("http://%s:%d/service", browseHost(s.settings.Host), s.port())
+}
+
+// browseHost 把监听地址转成浏览器可访问的地址。
+//
+// `0.0.0.0` / `::` 是「监听所有网卡」的表示，不能直接放进 URL ——
+// 浏览器访问 `http://0.0.0.0:19726` 在部分系统上是未定义行为。
+func browseHost(host string) string {
+	if host == "" || host == config.AnyHost || host == "::" {
+		return config.LoopbackHost
+	}
+	return host
 }
 
 func (s *Server) port() int {
@@ -231,18 +265,50 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/api/service/port", s.guard(s.handleServicePort))
 	mux.HandleFunc("/api/service/stop", s.guard(s.handleServiceStop))
 
+	// 账户与凭据 API
+	s.registerCredRoutes(mux)
+
+	// SSE 事件推送（日志 / 部署状态 / 扫描结果）
+	s.registerEventRoutes(mux)
+
+	// 部署 / KV / 账号检测 API
+	s.registerDeployRoutes(mux)
+
+	// 优选 / 环境检测 API
+	s.registerScanRoutes(mux)
+
+	// 检查更新 API
+	s.registerUpdateRoutes(mux)
+
 	return s.withCommonHeaders(mux)
 }
 
 // withCommonHeaders 统一加安全响应头与 Host 校验。
+//
+// ## Host 校验的两种模式（2026-10-26 起支持局域网）
+//
+// 校验 Host 头的目的是**防 DNS Rebinding**：
+// 恶意网页把自己的域名解析到 127.0.0.1，再让浏览器请求本服务。
+// 浏览器发请求时 Host 头会是 `evil.com`，我们据此拒绝。
+//
+//   - **仅本机模式**（默认）：Host 必须是回环地址
+//     （`127.0.0.1` / `localhost` / `[::1]` / 本机网卡 IP）。
+//   - **局域网模式**（用户显式开启）：额外放行私有网段的 IP 与
+//     本机主机名 —— 否则同事用 `http://192.168.1.10:19726`
+//     访问时 Host 是 `192.168.1.10`，会被判成非法而打不开。
+//
+// ⚠️ 局域网模式下**仍然拒绝任意域名**（`evil.com` 一律 403），
+// 所以 DNS Rebinding 依然防得住 —— 攻击者无法让 Host 头变成内网 IP。
 func (s *Server) withCommonHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		allowLAN := s.Settings().AllowLAN
+
 		// Host 校验：防 DNS Rebinding
-		if !isLoopbackHost(r.Host) {
+		if !hostAllowed(r.Host, allowLAN) {
 			http.Error(w, "非法 Host", http.StatusForbidden)
 			return
 		}
-		// 同源校验：带 Origin 时必须是本站
+		// 同源校验：带 Origin 时必须是同 Host
 		if origin := r.Header.Get("Origin"); origin != "" && !s.originAllowed(origin, r.Host) {
 			http.Error(w, "非法 Origin", http.StatusForbidden)
 			return
@@ -256,6 +322,55 @@ func (s *Server) withCommonHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// hostAllowed 判断 Host 头是否可接受。
+//
+// allowLAN 为 true 时，额外放行私有网段地址与主机名（局域网访问场景）。
+func hostAllowed(hostport string, allowLAN bool) bool {
+	host, _, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host = hostport
+	}
+	host = strings.Trim(host, "[]")
+
+	// 回环 / localhost 永远放行
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// 非 IP 的 Host（如主机名）。仅本机模式下一律拒绝，
+		// 局域网模式下放行「看起来像内网主机名」的简单名称。
+		if !allowLAN {
+			return false
+		}
+		return isSimpleHostname(host)
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	if !allowLAN {
+		return false
+	}
+	// 局域网模式：只放行私有网段（10/8、172.16/12、192.168/16、fc00::/7、fe80::/10）
+	return ip.IsPrivate() || ip.IsLinkLocalUnicast()
+}
+
+// isSimpleHostname 判断是否是简单主机名（不含点，或含点但不是公网域名）。
+//
+// 用于局域网模式下允许 `http://my-pc:19726` 这种访问。
+// 明确排除带公网后缀的名称，避免被 DNS Rebinding 利用。
+func isSimpleHostname(host string) bool {
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	// 不含点 → 是本地主机名（如 DESKTOP-ABC），放行
+	if !strings.Contains(host, ".") {
+		return true
+	}
+	// 含点的一律拒绝：`evil.com` 可能被解析到 127.0.0.1
+	return false
 }
 
 // guard 校验会话 Cookie，未通过直接 401。

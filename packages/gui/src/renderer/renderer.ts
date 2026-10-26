@@ -109,7 +109,10 @@
       if (item.ownership === 'instance') {
         opt.textContent = `● ${item.title} — 实例 ${item.controlProject}/${item.dataProject}（${item.at ?? ''}）`
       } else if (item.ownership === 'foreign') {
-        opt.textContent = `○ ${item.title} — 已被其他项目占用`
+        // 被其他项目占用的命名空间：直接禁用，不给选中的机会。
+        // 服务端 assertKvOwnership 也会硬拒绝，这里是第一道防线。
+        opt.textContent = `✕ ${item.title} — 已被其他项目占用（不可用）`
+        opt.disabled = true
       } else if (item.ownership === 'cfpilot') {
         opt.textContent = `○ ${item.title} — 含 CFPilot 残留配置`
       } else {
@@ -142,9 +145,10 @@
       deployKv.textContent = `${item.title}（${item.id}）`
     } else if (item.ownership === 'foreign') {
       hint.textContent =
-        '此命名空间正被另一个项目使用（键名与本工具不重叠，可以共存），' +
-        '但建议为 CFPilot 单独建一个，避免混淆。'
-      deployKv.textContent = `${item.title}（${item.id}）`
+        '此命名空间已被其他项目占用，不能用于 CFPilot。' +
+        'CFPilot 的数据面已完全自研，两者不再共用同一 KV' +
+        '（会共享配额、混淆配置、让排查变难）。请点上方「新建 KV」单独建一个。'
+      deployKv.textContent = `${item.title}（${item.id}）— 不可用`
     } else if (item.ownership === 'cfpilot') {
       hint.textContent =
         '此命名空间含 CFPilot 的 CONFIG 键但没有部署清单（残留配置）。' +
@@ -1085,52 +1089,164 @@
     const logHead = $('logHead')
 
     /**
-     * 记住折叠前的拖拽高度。
+     * 折叠 / 展开日志面板。
      *
-     * `resize: vertical` 会把高度写成内联 `style.height`。折叠时若只隐藏 .log
-     * 而不清掉这个高度，标题条会留在原面板中段并溢出到窗口外 ——
-     * 因为 .log-panel 有 overflow:hidden 且底部贴着窗口下沿，
-     * 用户既看不到也点不到折叠按钮，只能重启程序。
-     *
-     * 所以折叠前先把内联高度摘下来存着，展开时还回去。
+     * 折叠后高度是 auto（只剩标题条），展开后高度由 CSS 的 --log-ratio 决定。
+     * 两者互不干扰，所以这里只切 class。
      */
-    let savedLogHeight = ''
-
     logHead.addEventListener('click', () => {
-      const willCollapse = !logPanel.classList.contains('collapsed')
-      if (willCollapse) {
-        savedLogHeight = logPanel.style.height
-        logPanel.style.height = ''
-      } else if (savedLogHeight) {
-        logPanel.style.height = savedLogHeight
-      }
       const collapsed = logPanel.classList.toggle('collapsed')
       logHead.title = collapsed ? '点击展开日志' : '点击折叠日志'
     })
 
+    /* ------------------------------------------------------------------ */
+    /* 日志区拖拽调高                                                     */
+    /* ------------------------------------------------------------------ */
+
     /**
-     * 兜底：窗口高度变化后，如果日志面板（含标题条）已经超出视口，
-     * 强制把它压回可用高度内。
+     * 拖动日志面板上边缘调整高度。
      *
-     * CSS 的 flex-shrink 已经能处理大部分情况，但用户手动拖拽出来的高度
-     * 是内联 style，某些时序下仍可能算错一帧 —— 这里每次 resize 后
-     * 直接量一次真实几何，发现越界就夹回去，保证标题条永远可点。
+     * ## 为什么记录「比例」而不是「像素」（2026-10-26 第三次迭代）
+     *
+     * 第一版用 CSS `resize: vertical`，它把高度写成**内联固定 px**，
+     * 因此在 2K / 1080P / 缩放窗口后全部错位：
+     *   - 2K 折叠后标题条只露一半
+     *   - 1080P 展开后溢出窗口下沿，日志看不见
+     *
+     * 现在拖拽时算的是 **占视口的比例**（0.15 ~ 0.75），
+     * 存进 CSS 变量 --log-ratio；.log 的高度是
+     * `calc(var(--log-ratio) * (100vh - 110px))`。
+     *
+     * 好处：
+     *   - 换分辨率 / 缩放窗口时比例不变，永远不越界
+     *   - 百分比有上下限钳制，内容区至少留 25%
+     *   - 不存在内联 px，CSS 是唯一真相
      */
-    const clampLogPanel = (): void => {
-      const headRect = logHead.getBoundingClientRect()
-      const overflow = headRect.bottom - window.innerHeight
-      if (overflow > 0) {
-        // 标题条底部超出窗口：把面板高度减去超出的部分
-        const current = logPanel.getBoundingClientRect().height
-        const next = Math.max(30, current - overflow)
-        logPanel.style.height = `${next}px`
-        if (logPanel.classList.contains('collapsed')) logPanel.classList.remove('collapsed')
+    const logRatioKey = 'cfpilot.logRatio'
+    const RATIO_MIN = 0.15
+    const RATIO_MAX = 0.75
+
+    /** 应用比例到 CSS 变量（并做边界钳制） */
+    const applyLogRatio = (ratio: number): void => {
+      const r = Math.min(RATIO_MAX, Math.max(RATIO_MIN, ratio))
+      logPanel.style.setProperty('--log-ratio', String(r))
+    }
+
+    // 恢复上次拖拽的比例
+    try {
+      const saved = Number(localStorage.getItem(logRatioKey))
+      if (Number.isFinite(saved) && saved > 0) {
+        applyLogRatio(saved)
+      }
+    } catch {
+      /* localStorage 不可用就忽略，用默认值 */
+    }
+
+    const resizer = document.getElementById('logResizer')
+
+    if (resizer) {
+      let dragging = false
+      let startY = 0
+      let startHeight = 0
+
+      const onMove = (e: MouseEvent): void => {
+        if (!dragging) return
+        // 向上拖（y 变小）→ 日志变高
+        const delta = startY - e.clientY
+        const nextHeight = startHeight + delta
+        // 换算成比例：可用高度 = 视口 - 固定占用
+        const usable = Math.max(200, window.innerHeight - 110)
+        applyLogRatio(nextHeight / usable)
+      }
+
+      const onUp = (): void => {
+        if (!dragging) return
+        dragging = false
+        logPanel.classList.remove('resizing')
+        document.body.classList.remove('resizing-log')
+        window.removeEventListener('mousemove', onMove)
+        window.removeEventListener('mouseup', onUp)
+        // 记住这次的比例
+        try {
+          const cur = parseFloat(logPanel.style.getPropertyValue('--log-ratio'))
+          if (Number.isFinite(cur)) localStorage.setItem(logRatioKey, String(cur))
+        } catch {
+          /* 存不了就算了 */
+        }
+      }
+
+      resizer.addEventListener('mousedown', (e) => {
+        // 折叠状态下不允许拖（没内容可拖）
+        if (logPanel.classList.contains('collapsed')) return
+        e.preventDefault()
+        e.stopPropagation()
+        dragging = true
+        startY = e.clientY
+        // 起点高度取当前日志容器的真实高度
+        const box = document.getElementById('logBox')
+        startHeight = box ? box.getBoundingClientRect().height : 180
+        logPanel.classList.add('resizing')
+        document.body.classList.add('resizing-log')
+        window.addEventListener('mousemove', onMove)
+        window.addEventListener('mouseup', onUp)
+      })
+
+      // 双击手柄 = 恢复默认高度
+      resizer.addEventListener('dblclick', (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        applyLogRatio(0.28)
+        try {
+          localStorage.removeItem(logRatioKey)
+        } catch {
+          /* 忽略 */
+        }
+      })
+    }
+
+    /**
+     * 兜底：极端情况下（窗口被拖得极矮）保证标题条仍可见。
+     *
+     * 若标题条底部超出视口，就强制折叠（折叠后高度 auto，必然可见）。
+     */
+    const ensureLogHeadVisible = (): void => {
+      const rect = logHead.getBoundingClientRect()
+      if (rect.bottom > window.innerHeight + 1) {
+        logPanel.classList.add('collapsed')
+        logHead.title = '点击展开日志'
       }
     }
-    window.addEventListener('resize', clampLogPanel)
-    // 首次也校正一次：避免用极小窗口启动时就已越界
-    clampLogPanel()
+    window.addEventListener('resize', ensureLogHeadVisible)
+    ensureLogHeadVisible()
 
+    /**
+     * 初始化各步骤**互相隔离**。
+     *
+     * ## 为什么必须这样写（2026-10-26 真实故障）
+     *
+     * 早期实现是一串裸 await：
+     *
+     *     await refreshProfiles()
+     *     await refreshCredState()
+     *     renderKvOptions()
+     *     void fillCountryOptions()   ← 前面任何一步抛异常，这行永远不执行
+     *
+     * 用户在 Go 版里遇到的现象是「机房国家列表一直停在『正在加载国家列表…』」，
+     * 但后端接口实测返回 39 个国家完全正常 ——
+     * 说明**初始化在某一步中断了**，后面的 fillCountryOptions 根本没被调用。
+     *
+     * 任何一个可选功能（账户列表、凭据状态、KV 列表、国家列表）出问题，
+     * 都不应该拖累其它功能。所以每步各自 try/catch 独立执行。
+     */
+    const runStep = async (name: string, fn: () => void | Promise<void>): Promise<void> => {
+      try {
+        await fn()
+      } catch (err) {
+        // 只记录，不中断后续步骤
+        console.error(`[cfpilot] 初始化步骤「${name}」失败：`, err)
+        log(`初始化「${name}」失败：${err instanceof Error ? err.message : String(err)}`, 'warn')
+      }
+    }
 
     bindProfiles()
     bindCredentials()
@@ -1138,10 +1254,15 @@
     bindScan()
     bindUpdater()
     bindPush()
-    await refreshProfiles()
-    await refreshCredState()
-    renderKvOptions()
-    void fillCountryOptions()
+
+    await runStep('账户列表', refreshProfiles)
+    await runStep('凭据状态', refreshCredState)
+    await runStep('KV 选项', () => {
+      renderKvOptions()
+    })
+    // 国家列表：不 await，避免拖慢界面；失败也不影响其它功能
+    void runStep('国家列表', fillCountryOptions)
+
     log('CFPilot GUI 已就绪')
     log('凭据只保存在本机，不会上传')
   })

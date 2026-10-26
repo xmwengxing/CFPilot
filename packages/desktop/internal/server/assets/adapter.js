@@ -35,6 +35,76 @@
   'use strict'
 
   /* ------------------------------------------------------------------ */
+  /* 会话建立（关键：一切 API 的前置条件）                                */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * 用 URL 里的 `?t=<启动令牌>` 换取会话 Cookie。
+   *
+   * ## 为什么必须有这一步（2026-10-26 真实故障）
+   *
+   * 后端的安全模型是：
+   *   1. 启动时生成一次性令牌，拼在欢迎 URL 里：`/?t=abc123`
+   *   2. 前端用这个令牌请求 `/__session?t=abc123`，后端返回
+   *      `Set-Cookie: cfpilot_session=...; HttpOnly; SameSite=Strict`
+   *   3. 之后所有 `/api/*` 请求靠这个 Cookie 鉴权
+   *
+   * **但最初的实现里，前端从来没有调用过 `/__session`** ——
+   * 结果所有 API 都是 401，界面上「添加并保存」直接报
+   * 「未授权：请从托盘菜单打开界面」。
+   *
+   * 更隐蔽的是：我用 curl / Invoke-WebRequest 测试时**手动调了 `/__session`**，
+   * 所以自动化测试全过 —— 典型的「测试用手动步骤掩盖了真实缺陷」。
+   * 只有真实浏览器打开界面才暴露。
+   *
+   * ## 为什么要返回 Promise
+   *
+   * 会话建立必须**先完成**，否则后续 window.cfpilot 的任何调用都会 401。
+   * 所以这里把 Promise 存起来，`call()` 里 await 它。
+   */
+  const sessionReady = (function establishSession() {
+    // 从 URL 取启动令牌
+    var params = new URLSearchParams(location.search)
+    var bootToken = params.get('t') || ''
+
+    if (!bootToken) {
+      // 没有令牌：可能是刷新后 URL 被清理，或用户直接访问根路径。
+      // 不在这里报错（Cookie 可能仍然有效），交给后续 API 判断。
+      return Promise.resolve(false)
+    }
+
+    return fetch('/__session?t=' + encodeURIComponent(bootToken), {
+      method: 'GET',
+      credentials: 'same-origin',
+    })
+      .then(function (res) {
+        if (!res.ok) {
+          console.error('[cfpilot] 会话建立失败（HTTP ' + res.status + '），可能是启动令牌已失效')
+          return false
+        }
+        return true
+      })
+      .catch(function (err) {
+        console.error('[cfpilot] 会话建立失败', err)
+        return false
+      })
+      .then(function (ok) {
+        // 令牌用过就从地址栏抹掉，避免：
+        //   1. 刷新页面时重复使用（后端一次性令牌，第二次会 403）
+        //   2. 截图/分享时泄露令牌
+        try {
+          if (ok && location.search) {
+            var clean = location.pathname + location.hash
+            history.replaceState(null, '', clean)
+          }
+        } catch (e) {
+          /* 某些环境（file://）不支持，忽略 */
+        }
+        return ok
+      })
+  })()
+
+  /* ------------------------------------------------------------------ */
   /* 基础请求                                                            */
   /* ------------------------------------------------------------------ */
 
@@ -44,8 +114,13 @@
    * 约定：后端返回 { error: '...' } 时抛异常 ——
    * 与 Electron 版 ipcRenderer.invoke 抛异常的行为对齐，
    * 界面的 try/catch 不用改。
+   *
+   * ⚠️ 所有请求都先 `await sessionReady`：会话没建好就发请求必然 401。
    */
   async function call(method, path, body) {
+    // 等会话建立完成（已建立则立即返回）
+    await sessionReady
+
     const opts = {
       method: method,
       headers: { 'Content-Type': 'application/json' },

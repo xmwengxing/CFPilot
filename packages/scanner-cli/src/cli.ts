@@ -22,7 +22,7 @@ import {
 } from './speed-url'
 import { formatEntries, runScan, type ScanEvent, type ScanEntry, formatCopyable } from './scan'
 import { normalizeCountryFilter } from './countries'
-import { postResults } from './callback'
+import { postResults, fetchScannerToken } from './callback'
 import { BRIDGE_VERSION, DEFAULT_BRIDGE_PORT, startBridge } from './server'
 import { NAME, VERSION } from './version'
 
@@ -41,8 +41,11 @@ CFPilot 本地真连接优选器 —— 用你自己的 Worker 域名做 SNI/Hos
 scan 选项:
   --host <domain>        必填：你的 Worker 自定义域名（作为 TLS SNI 与 HTTP Host）
   --port <port>          端口，默认 443
-  --token <token>        回填令牌（面板生成的一次性令牌或 SCANNER_TOKEN）
-  --callback <url>       回填地址，默认 https://<host>/api/v1/preferred-ips
+  --panel <domain>       控制面域名（如 cpmanager.pages.dev），回填必填
+                         与 --host 不同：--host 是数据面，面板接口在控制面
+  --panel-password <pw>  面板密码，配合 --panel 自动获取临时令牌
+  --token <token>        回填令牌（不想给密码时手动指定）
+  --callback <url>       自定义回填地址（默认由 --panel 推导）
   --no-callback          只打印结果，不回填
   --path <path>          阶段二校验的 WebSocket 路径，默认 /__edge_probe
                          （对接其它项目时填它自己的 WS 路径，例如 /vless 或 /<uuid>）
@@ -65,7 +68,7 @@ scan 选项:
   --concurrency <n>      阶段一 TCP 并发，默认 300
   --tls-concurrency <n>  阶段一 TLS 握手并发，默认 64
                           TLS 握手是 CPU 密集型操作，过高会让本机成为瓶颈
-  --sample <n>           候选 IP 采样数，默认 20000
+  --sample <n>           候选 IP 采样数，默认 6556（与界面一致；不宜超过 23000）
                           建议 6556 起：阶段一按 TLS 握手耗时筛选，而握手快慢
                           与 TCP 延迟几乎无关（实测 TCP 9ms 的 IP 可能要 3.5 秒），
                           采样小了根本碰不到握手快的 IP
@@ -204,7 +207,7 @@ async function resolveCandidatesFromArgs(args: ReturnType<typeof parseArgs>): Pr
   }
 
   return resolveCandidates({
-    sample: flagNumber(args, 'sample', 20000),
+    sample: flagNumber(args, 'sample', 6556),
     cidr: flagList(args, 'cidr'),
     seed: flagNumber(args, 'seed', 24301),
   })
@@ -275,7 +278,7 @@ async function commandScan(args: ReturnType<typeof parseArgs>): Promise<void> {
 
   const port = flagNumber(args, 'port', 443)
   const top = flagNumber(args, 'top', 15)
-  const token = flagString(args, 'token')
+  let token = flagString(args, 'token')
   const noCallback = flagBool(args, 'no-callback')
   const wsPath = normalizeWsPath(flagString(args, 'path'), '/__edge_probe')
   const probePath = normalizeWsPath(flagString(args, 'probe-path'), '/__edge_probe')
@@ -284,9 +287,57 @@ async function commandScan(args: ReturnType<typeof parseArgs>): Promise<void> {
   const verifyPayload = !flagBool(args, 'no-verify')
   // 国家过滤：不选 = 全量。无效代码在 normalizeCountryFilter 里被丢弃
   const countries = normalizeCountryFilter(flagList(args, 'countries'))
+  /**
+   * 回填地址与令牌（2026-10-27 重构，与图形版行为对齐）
+   *
+   * ## 两个改动
+   *
+   * 1. **回填地址必须指向控制面**，不能用 --host（那是数据面）
+   *
+   *    真机实测：
+   *      控制面 /api/v1/login → {"ok":true} + 令牌     ✅
+   *      数据面 /api/v1/*     → Pages 的 Welcome HTML  ❌
+   *
+   *    拆分部署时面板只在控制面。早期默认用 `https://${host}/...`
+   *    （host 是数据面），回填必然失败。
+   *
+   *    现在用 --panel 指定控制面；不给则回落到 --host（兼容单项目部署）。
+   *
+   * 2. **自动获取临时令牌**：给 --panel + --panel-password 即可，
+   *    不必手动去面板点「生成令牌」。
+   *
+   *    令牌 10 分钟有效，而这里是**扫描结束后**才获取，
+   *    所以不存在「扫描太久令牌过期」的问题 —— 与图形版同一思路。
+   */
+  const panelHost = flagString(args, 'panel')
+  const panelPassword = flagString(args, 'panel-password')
+  const callbackBase = panelHost || host
+
+  let autoTokenUsed = false
+  if (!token && !noCallback && panelHost && panelPassword) {
+    if (!quiet) {
+      process.stdout.write(`正在向 ${panelHost} 申请临时令牌…\n`)
+    }
+    const tk = await fetchScannerToken(panelHost, panelPassword)
+    if (tk.ok && tk.token) {
+      token = tk.token
+      autoTokenUsed = true
+      if (!quiet) {
+        process.stdout.write('✓ 已获取临时令牌（10 分钟有效）\n')
+      }
+    } else if (!quiet) {
+      process.stderr.write(`⚠ 自动获取令牌失败：${tk.error}\n`)
+      process.stderr.write('  可改用 --token <令牌> 手动指定\n')
+    }
+  }
+
   const callback = noCallback
     ? ''
-    : flagString(args, 'callback', token ? `https://${host}/api/v1/preferred-ips` : '')
+    : flagString(
+        args,
+        'callback',
+        token || autoTokenUsed ? `https://${callbackBase}/api/v1/preferred-ips` : ''
+      )
 
   if (!quiet) {
     process.stdout.write(`\n${NAME} v${VERSION}\n`)

@@ -69,6 +69,12 @@ type deployRequest struct {
 
 	// KVNamespaceID 可选，留空用当前账户里保存的
 	KVNamespaceID string `json:"kvNamespaceId"`
+
+	// PanelPassword 是**本次部署**要设置的面板密码（可选）。
+	//
+	// 留空表示随机生成（首次）或沿用清单原密码（更新）。
+	// ⚠️ 与账户里的 PanelPassword（用于改已部署面板的密码）严格分开。
+	PanelPassword string `json:"panelPassword"`
 }
 
 // handleDeployRun 启动部署（异步）。
@@ -144,18 +150,26 @@ func (s *Server) handleDeployRun(w http.ResponseWriter, r *http.Request) {
 	opt.DataProject = req.DataProject
 	opt.PanelPath = req.PanelPath
 	opt.WSPath = req.WSPath
-	// ⚠️ 面板密码必须从账户里读（2026-10-27 用户反馈）
+	// ⚠️ 部署密码只读 DeployPanelPassword，**绝不读 PanelPassword**
+	// （2026-10-27 用户明确要求两个用途彻底分开）
 	//
-	// 界面把用户填的面板密码通过 saveCredentials 写进了账户，
-	// 但早期**部署时从来不读 profile.PanelPassword** ——
-	// 于是每次都走「随机生成新密码」，更新部署把用户原来的密码覆盖掉，
-	// 而云端环境变量是加密的，用户再也读不到，面板进不去。
+	// 历史教训：
+	//   早期两个输入框都写同一个 PanelPassword 字段 ——
+	//     凭据页「修改已部署面板的密码」→ saveCredentials({panelPassword})
+	//     部署时                        → opt.PanelPassword = profile.PanelPassword
+	//   结果在凭据页改了密码，下次部署的密码也跟着变，
+	//   而云端环境变量加密，用户完全不知道自己改了部署密码，
+	//   于是面板登不进去（真机踩过）。
 	//
-	// 正确语义：
-	//   - 用户在部署页填了密码 → 界面先 saveCredentials 写入账户 → 这里读它
-	//   - 用户没填 → profile.PanelPassword 为空 → 部署层随机生成
-	//   - 更新模式 + 没填 → 由 mergeCredentials 从清单沿用原密码
-	opt.PanelPassword = profile.PanelPassword
+	// 现在语义清晰：
+	//   - DeployPanelPassword：部署页填的，只在部署时用
+	//   - PanelPassword：凭据页填的，只用于「登录已部署面板去改密码」
+	//   - 都没填 → 首次部署随机生成 / 更新部署沿用清单原密码
+	if v := strings.TrimSpace(req.PanelPassword); v != "" {
+		opt.PanelPassword = v
+	} else {
+		opt.PanelPassword = strings.TrimSpace(profile.DeployPanelPassword)
+	}
 	opt.LocalBuild = build
 	// 「重新生成凭据」= 不沿用清单里的
 	opt.KeepCredentials = !req.NewCredentials

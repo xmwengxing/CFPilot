@@ -11,13 +11,13 @@
 //   2. adapter 里每处 `post('/api/...')` / `get('/api/...')` 都必须是后端真实路由
 import { readFileSync, existsSync } from 'node:fs'
 
-const rendererPath = 'packages/gui/dist/renderer/renderer.js'
+const rendererPath = 'packages/ui/dist/renderer.js'
 const adapterPath = 'packages/desktop/webui/adapter.js'
 const serverDir = 'packages/desktop/internal/server'
 
 for (const p of [rendererPath, adapterPath]) {
   if (!existsSync(p)) {
-    console.error(`缺少文件：${p}（先跑 npm run build -w @cfpilot/gui）`)
+    console.error(`缺少文件：${p}（先跑 npm run build -w @cfpilot/ui）`)
     process.exit(1)
   }
 }

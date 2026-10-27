@@ -383,11 +383,20 @@
             <div class="field">
               <label>面板密码</label>
               <div class="row">
-                <input type="password" id="panelPassword" placeholder="留空则部署时随机生成" />
-                <button class="btn btn-ghost" id="btnSavePanelPw" style="flex:0 0 auto">修改密码</button>
+                <input
+                  type="password"
+                  id="panelPassword"
+                  placeholder="仅用于修改【已部署】面板的登录密码"
+                />
+                <button class="btn btn-ghost" id="btnSavePanelPw" style="flex:0 0 auto">
+                  修改密码
+                </button>
               </div>
               <p class="tip">
                 快捷修改面板密码。从未部署请勿填写，移步至一键部署页中首填。
+                <br />
+                <b>注意</b>：这里填的密码<b>只用于登录已部署的面板改密码</b>，
+                <b>不会</b>成为下次部署的密码 —— 部署密码请到「一键部署」页填写。
               </p>
             </div>
 
@@ -438,9 +447,17 @@
 
             <div class="btn-row">
               <button class="btn btn-ghost" id="btnKvRefresh">刷新 KV 列表</button>
-              <button class="btn btn-ghost" id="btnKvNew">新建 KV（部署新实例）</button>
               <button class="btn btn-ghost" id="btnKvSave">保存此选择</button>
             </div>
+              <!--
+                已移除「新建 KV」按钮（2026-10-27 用户要求）
+              
+                原因：单独一个「新建 KV」按钮很容易误触，每点一次就在
+                Cloudflare 账号下建一个独立命名空间，白白消耗免费额度。
+              
+                现在改为：全新部署时如果没有可用 KV，**自动建一个**。
+                用户不需要多操作一步，也不会误建多余的 KV。
+              -->
             <p class="tip" style="margin-top:8px">
               选中后点「保存此选择」会记住它；不保存则每次部署都使用下面这个下拉框里的当前项。
             </p>
@@ -623,7 +640,7 @@
                 <label>Worker 域名</label>
                 <div class="row">
                   <input type="text" id="optHost" placeholder="如 cfp-dat.pages.dev 或你的自定义域名" />
-                  <button class="btn btn-ghost" id="btnAutoHost" style="flex:0 0 auto">自动识别域名</button>
+                  <button class="btn btn-ghost" id="btnAutoDetect" style="flex:0 0 auto">自动识别</button>
                 </div>
                 <p class="tip">
                   · <b>建议使用自定义域名</b>，<code>*.pages.dev</code> 生产链接可能被阻断<br>
@@ -634,7 +651,6 @@
                 <label>WS 路径</label>
                 <div class="row">
                   <input type="text" id="optPath" placeholder="如 /vless 或 /（根路径）" />
-                  <button class="btn btn-ghost" id="btnAutoPath" style="flex:0 0 auto">自动识别 WS 路径</button>
                 </div>
                 <p class="tip">
                   · <b>必须与实际 WebSocket 路径完全一致</b>，否则无法优选 IP <br>

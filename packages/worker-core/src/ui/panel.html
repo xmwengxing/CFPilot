@@ -907,15 +907,37 @@
     return (state.status && state.status.nodeDomain) || location.hostname;
   }
 
-  /** 生成命令；withToken=false 时不带 --token 与 --callback */
+  /**
+   * 生成 CLI 命令；withToken=false 时不带回填参数。
+   *
+   * ## 域名语义（2026-10-27 与 CLI 对齐）
+   *
+   *   --host   数据面（代理所在项目）→ 用于 TLS SNI / HTTP Host
+   *   --panel  控制面（面板所在项目）→ 用于回填
+   *
+   * 面板自己跑在控制面上，所以 location.hostname 就是 --panel 的值。
+   * 早期只给了 --host（数据面）+ --callback（硬编码控制面地址），
+   * 能用但绕；现在显式带上 --panel，语义清楚，
+   * 且用户可以只留 --panel 让 CLI 自己推导 callback。
+   *
+   * ⚠️ 注意：面板签发的一次性令牌（--token）10 分钟有效。
+   * 如果用户是先复制命令、过一会儿才跑，令牌可能已过期 ——
+   * 所以这里额外给一份「不带令牌」的版本，用户可自行改密码回填。
+   */
   function buildCmd(token, withToken) {
     var host = scanHost();
+    var panelHost = location.hostname;
     var o = readOpts();
     var parts = ['npx -y cfpilot-scanner@latest'];
     parts.push('--host "' + host + '"');
+
+    // --panel：控制面域名，与 --host（数据面）区分开
+    if (panelHost && panelHost !== host) {
+      parts.push('--panel "' + panelHost + '"');
+    }
+
     if (withToken && token) {
       parts.push('--token "' + token + '"');
-      parts.push('--callback "' + location.origin + '/api/v1/preferred-ips"');
     }
     if (o.noCallback || !withToken) parts.push('--no-callback');
     parts.push('--port ' + o.port);

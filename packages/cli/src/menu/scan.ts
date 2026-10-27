@@ -5,32 +5,120 @@
 import type { ParsedArgs } from '../shared/args'
 import { c, box, status } from './ui'
 import { ask, confirm, multiSelect, select } from './prompt'
-import { loadConfig, saveConfig } from './store'
+import { loadConfig, saveConfig, resolveToken } from './store'
 import { SUPPORTED_COUNTRIES } from '../scan/countries'
+import { CloudflareClient } from '../deploy/cf-api'
+import { listCfPilotNamespaces } from '../deploy/pages-deploy'
 
 /** 构造子命令参数对象。 */
 function makeArgs(flags: Record<string, string | boolean>): ParsedArgs {
   return { command: '', flags, positionals: [] }
 }
 
-/** 本地优选。 */
-export async function menuScan(): Promise<void> {
+interface Instance {
+  id: string
+  controlProject: string
+  dataProject: string
+  controlSubdomain: string
+  dataSubdomain: string
+  wsPath: string
+}
+
+/** 拉取账号下的 CFPilot 实例；失败返回空数组。 */
+async function fetchInstances(token: string): Promise<Instance[]> {
+  try {
+    const client = new CloudflareClient({ token })
+    const cfg = loadConfig()
+    const accounts = await client.listAccounts()
+    const accountId = cfg.accountId || accounts[0]?.id
+    if (!accountId) return []
+
+    const list = await listCfPilotNamespaces(client, accountId)
+    return list.map((i) => ({
+      id: i.id,
+      controlProject: i.manifest.controlProject,
+      dataProject: i.manifest.dataProject,
+      controlSubdomain: i.manifest.controlSubdomain,
+      dataSubdomain: i.manifest.dataSubdomain,
+      wsPath: i.manifest.credentials?.wsPath ?? '',
+    }))
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 选择要使用的实例，并把域名与 WS 路径写入配置。
+ *
+ * 返回选中的实例；无实例时返回 null。
+ */
+async function pickInstance(token: string): Promise<Instance | null> {
   const cfg = loadConfig()
 
+  status('info', '正在识别账号下的实例…')
+  const instances = await fetchInstances(token)
+  if (instances.length === 0) {
+    status('warn', '没有识别到已部署的 CFPilot 实例')
+    return null
+  }
+
+  let chosen: Instance
+  if (instances.length === 1) {
+    chosen = instances[0]!
+    status('ok', `实例：${chosen.controlProject} / ${chosen.dataProject}`)
+  } else {
+    const picked = await select(
+      '选择要优选的实例',
+      instances.map((i) => ({
+        label: `${i.controlProject} / ${i.dataProject}`,
+        value: i.id,
+        hint: i.dataSubdomain,
+      })),
+      { initial: Math.max(0, instances.findIndex((i) => i.id === cfg.kvNamespaceId)) }
+    )
+    chosen = instances.find((i) => i.id === picked) ?? instances[0]!
+  }
+
+  // 自动填好域名与 WS 路径
+  saveConfig({
+    kvNamespaceId: chosen.id,
+    panelHost: chosen.controlSubdomain,
+    dataHost: chosen.dataSubdomain,
+    wsPath: chosen.wsPath,
+  })
+
+  return chosen
+}
+
+/** 本地优选。 */
+export async function menuScan(): Promise<void> {
+  const token = resolveToken()
+  if (!token) {
+    status('warn', '尚未配置 API Token')
+    status('info', '请先到「配置」菜单添加')
+    return
+  }
+
+  // ---- 1. 先选实例，自动填域名与 WS 路径 ----
+  const instance = await pickInstance(token)
+  if (!instance) {
+    const manual = await ask('手动输入数据面域名（留空取消）', { allowEmpty: true })
+    if (!manual) {
+      status('info', '已取消')
+      return
+    }
+    saveConfig({ dataHost: manual })
+  }
+
+  const cfg = loadConfig()
+  process.stdout.write('\n')
   box('本地优选', [
-    `${c.gray('目标域名')} ${cfg.dataHost || c.yellow('待填写')}`,
-    `${c.gray('WS 路径')}  ${cfg.wsPath || c.gray('（自动探测）')}`,
+    `${c.gray('目标域名')} ${cfg.dataHost || c.yellow('未配置')}`,
+    `${c.gray('WS 路径')}  ${cfg.wsPath || c.gray('（默认探针路径）')}`,
   ])
   process.stdout.write('\n')
 
-  const host = await ask('数据面域名（如 cpdata-xxx.pages.dev）', { fallback: cfg.dataHost })
-  if (!host) {
-    status('warn', '必须填写数据面域名（代理所在的那个项目）')
-    return
-  }
-  if (host !== cfg.dataHost) saveConfig({ dataHost: host })
-
-  // 国家筛选（可选）
+  // ---- 2. 参数 ----
   const wantFilter = await confirm('要按机房地区筛选吗？（不筛选跑全量）', false)
   let countries: string[] = []
   if (wantFilter) {
@@ -51,7 +139,7 @@ export async function menuScan(): Promise<void> {
   process.stdout.write('\n')
 
   const flags: Record<string, string | boolean> = {
-    host,
+    host: cfg.dataHost ?? '',
     sample: String(sample),
     'no-callback': true,
   }
@@ -64,27 +152,26 @@ export async function menuScan(): Promise<void> {
 
 /** 回填优选结果到面板。 */
 export async function menuScanPush(): Promise<void> {
-  const cfg = loadConfig()
+  const token = resolveToken()
+  if (!token) {
+    status('warn', '尚未配置 API Token')
+    return
+  }
 
+  const instance = await pickInstance(token)
+  if (!instance) {
+    status('warn', '需要先有一个已部署的实例')
+    return
+  }
+
+  const cfg = loadConfig()
+  process.stdout.write('\n')
   box('回填到面板', [
-    '优选结果会写入面板的「手动优选 IP」',
-    c.gray('需要控制面域名 + 面板密码'),
+    `${c.gray('控制面')} ${cfg.panelHost}`,
+    `${c.gray('数据面')} ${cfg.dataHost}`,
+    '结果会写入面板的「手动优选 IP」',
   ])
   process.stdout.write('\n')
-
-  const host = await ask('控制面域名（如 cpmanager.pages.dev）', { fallback: cfg.panelHost })
-  if (!host) {
-    status('warn', '必须填写控制面域名（面板所在的那个项目）')
-    return
-  }
-  if (host !== cfg.panelHost) saveConfig({ panelHost: host })
-
-  const dataHost = await ask('数据面域名（优选目标）', { fallback: cfg.dataHost })
-  if (!dataHost) {
-    status('warn', '必须填写数据面域名')
-    return
-  }
-  if (dataHost !== cfg.dataHost) saveConfig({ dataHost })
 
   const password = await ask('面板密码（用于申请回填令牌）', {
     password: true,
@@ -92,6 +179,7 @@ export async function menuScanPush(): Promise<void> {
   })
   if (!password) {
     status('warn', '需要面板密码才能申请令牌')
+    status('info', '密码在部署时生成，可到「部署」页或面板凭据里查')
     return
   }
 
@@ -103,8 +191,8 @@ export async function menuScanPush(): Promise<void> {
   process.stdout.write('\n')
 
   const flags: Record<string, string | boolean> = {
-    host: dataHost,
-    panel: host,
+    host: cfg.dataHost ?? '',
+    panel: cfg.panelHost ?? '',
     'panel-password': password,
     sample: '6556',
   }

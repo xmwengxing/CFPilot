@@ -2,16 +2,25 @@ name: Publish npm
 
 # 打 tag 时自动发布两个公开 npm 包。
 #
-# ## 为什么用 automation token 而不是 OTP
+# ## 关于 2FA 与令牌类型（2026-10-27 更新）
 #
-# 你提到每次 `npm publish` 都要输 2FA 验证码，很麻烦。
-# CI 里没法交互输入 OTP，所以需要：
+# npm 在 2025 收紧了令牌权限：新建 token 只能拿到 **Staged Publish** 类型，
+# 直接 `npm publish` 会报：
 #
-#   1. 到 npm 网站创建一个 **Automation** 类型的 Access Token
-#      （Automation token 可以绕过 2FA，Classic 的 "Publish" 类型不行）
-#   2. 把它存进 GitHub 仓库 Secrets，名字 `NPM_TOKEN`
+#     403 This token can only publish to a staging area.
 #
-# 配置一次，之后打 tag 就全自动了。
+# 这实际是更好的流程 —— CI 只负责「推到暂存区」，2FA 批准由人做：
+#
+#   1. CI（本工作流）：`npm stage publish` → 包进入 npm 暂存区
+#   2. 你（本地，一次性）：`npm stage list` 看 ID
+#                         `npm stage approve <stage-id>` 输 2FA 批准上线
+#
+# 2FA 始终掌握在你手里，而 CI 不需要交互输入 OTP。
+#
+# ## 需要的配置
+#
+#   1. npm 网站创建 Access Token（Staged Publish 类型即可）
+#   2. 存进 GitHub 仓库 Secrets，名字 `NPM_TOKEN`
 #
 # ## 触发条件
 #
@@ -115,17 +124,29 @@ jobs:
       - name: 发布 cfpilot-scanner
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_USE_STAGE: '1'
         run: |
           node scripts/publish-npm.mjs cfpilot-scanner
 
       - name: 发布 cfpilot-deploy
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_USE_STAGE: '1'
         run: |
           node scripts/publish-npm.mjs cfpilot-deploy
 
-      - name: 验证发布结果
-        # 发布后等一下让 registry 生效，再查一次
+      - name: 提示后续操作
+        # stage 发布后包还没上线，需要人工批准，所以这里不做版本校验
+        # （校验会在本地批准后由维护者跑 npm run verify:npm 完成）
+        if: always()
         run: |
-          sleep 15
-          node scripts/verify-npm-publish.mjs
+          echo ""
+          echo "=========================================="
+          echo "包已推送到 npm 暂存区。"
+          echo ""
+          echo "接下来在你本地执行（需要 2FA）："
+          echo "  npm stage list                    # 查看待批准的包"
+          echo "  npm stage approve <stage-id>       # 批准上线"
+          echo "  npm run verify:npm                # 确认版本已上线"
+          echo "=========================================="
+          echo "" 

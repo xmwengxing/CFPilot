@@ -54,6 +54,16 @@ export interface StartScanRequest {
   family?: IpFamily
   /** 国家 / 地区过滤（可多选，如 ["HK","JP"]；空 / 不传 = 全量） */
   countries?: string[]
+  /** 阶段二校验的 WebSocket 路径（对接第三方项目时填它自己的路径） */
+  wsPath?: string
+  /** 探针端点路径（默认 /__edge_probe） */
+  probePath?: string
+  /** 是否做响应体内容校验（默认 true；目标无探针端点时应传 false） */
+  verifyPayload?: boolean
+  /** 测速方式：probe = 目标探针端点；url = 公开测速地址 */
+  speedMode?: 'probe' | 'url'
+  /** url 模式的测速地址 */
+  speedUrl?: string
 }
 
 /** 候选来源：手动指定 / 请求显式携带 / 服务端自动生成 */
@@ -128,6 +138,41 @@ export interface BridgeHandle {
 const jobs = new Map<string, Job>()
 let jobCounter = 0
 
+/** 任务记录的最长保留时间（10 分钟）；超时的旧任务会被清理 */
+const JOB_TTL_MS = 10 * 60 * 1000
+/** 最多保留的历史任务数 */
+const MAX_JOBS = 5
+
+/**
+ * 清理历史任务，防止内存泄漏。
+ *
+ * 每次扫描会累积数千条 ScanEvent（进度上报很频繁），
+ * 而 jobs Map 只增不减 —— 长时间开着桥接服务会持续涨内存。
+ *
+ * 策略：删掉「已结束且超过 TTL」的任务；结束后仍超量则删最老的。
+ */
+function pruneJobs(): void {
+  const now = Date.now()
+  for (const [id, job] of jobs) {
+    if (job.finished && now - job.startedAt > JOB_TTL_MS) {
+      jobs.delete(id)
+    }
+  }
+  const sorted = [...jobs.values()].sort((a, b) => a.startedAt - b.startedAt)
+  while (jobs.size > MAX_JOBS && sorted.length > 0) {
+    const oldest = sorted.shift()!
+    jobs.delete(oldest.id)
+  }
+}
+
+/** 是否有正在运行的任务 */
+function hasRunningJob(): Job | null {
+  for (const job of jobs.values()) {
+    if (!job.finished) return job
+  }
+  return null
+}
+
 function corsHeaders(): Record<string, string> {
   return {
     'Access-Control-Allow-Origin': '*',
@@ -135,6 +180,57 @@ function corsHeaders(): Record<string, string> {
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Access-Control-Max-Age': '86400',
   }
+}
+
+/**
+ * 校验回填地址（callback）。
+ *
+ * ## 为什么要校验
+ *
+ * 桥接服务开着 `Access-Control-Allow-Origin: *`，
+ * 任何第三方网页都能让本机服务发起扫描，并让携带 token 的
+ * `postResults` POST 到**任意地址** —— 这是 SSRF 形态：
+ * 攻击者可以让本机代他去访问内网服务（探测端口、读响应）。
+ *
+ * 约束：
+ *   1. 必须是 https（回填走公网控制面）；
+ *   2. 主机名不能是内网 / 本地地址（localhost、回环、RFC1918、.local）。
+ *
+ * 注：不限制「必须是自家控制面」—— 面板可能部署在任意自定义域名，
+ * 硬绑域名会误伤用户。CORS 也保持宽松（面板在浏览器标签页里跑，
+ * 同源限制对它不适用）。
+ */
+export function validateCallbackUrl(
+  raw: string | undefined
+): { ok: true } | { ok: false; error: string } {
+  if (!raw || !raw.trim()) return { ok: true }
+  let url: URL
+  try {
+    url = new URL(raw.trim())
+  } catch {
+    return { ok: false, error: 'callback 不是合法 URL' }
+  }
+  if (url.protocol !== 'https:') {
+    return { ok: false, error: 'callback 必须是 https 地址' }
+  }
+  // IPv6 的 hostname 带方括号（`[::1]`），先剥掉
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  const isLocal =
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '::1' ||
+    host === '0.0.0.0' ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal') ||
+    /^10\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(host) ||
+    /^169\.254\./.test(host)
+  if (isLocal) {
+    return { ok: false, error: 'callback 不能指向本机或内网地址' }
+  }
+  return { ok: true }
 }
 
 function sendJson(res: ServerResponse, status: number, data: unknown): void {
@@ -264,6 +360,30 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       return
     }
 
+    // ---- 并发互斥 ----
+    //
+    // 面板上重复点「一键优选」会同时跑多个 300 并发扫描，
+    // 打满本机端口与路由器 NAT 表 → **所有测速结果失真**。
+    // 直接拒绝第二次请求。
+    const running = hasRunningJob()
+    if (running) {
+      sendJson(res, 409, {
+        ok: false,
+        error: `已有扫描任务在运行（${running.id}），请等它结束`,
+        jobId: running.id,
+      })
+      return
+    }
+
+    // ---- 回填地址校验（SSRF 防护）----
+    const callbackCheck = validateCallbackUrl(body.callback)
+    if (!callbackCheck.ok) {
+      sendJson(res, 400, { ok: false, error: callbackCheck.error })
+      return
+    }
+
+    pruneJobs()
+
     const job: Job = {
       id: `job-${Date.now()}-${++jobCounter}`,
       startedAt: Date.now(),
@@ -301,6 +421,17 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           // 国家过滤（可多选）：不传 = 全量；无效代码在 normalizeCountryFilter 里被丢弃
           countries: Array.isArray(body.countries) ? body.countries : undefined,
           top: body.top ?? 15,
+          // ⚠️ 必须透传这些参数，否则桥接服务永远用默认值：
+          //   wsPath / probePath —— 对接第三方项目（路径不是 /__edge_probe）时，
+          //     阶段二会硬连默认探针路径 → 全军覆没
+          //   verifyPayload —— 目标没有探针端点时，内容校验必然失败，
+          //     应自动退回纯 101 校验
+          //   speedMode / speedUrl —— 面板可以指定用探针端点还是公开测速地址
+          wsPath: body.wsPath,
+          probePath: body.probePath,
+          verifyPayload: body.verifyPayload,
+          speedMode: body.speedMode,
+          speedUrl: body.speedUrl,
           onProgress: (event) => broadcast(job, event),
         })
         job.result = summary.entries

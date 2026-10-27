@@ -104,7 +104,24 @@ export interface ThroughputOptions {
   timeoutMs?: number
 }
 
-const USER_AGENT = 'CFPilot-Scanner/1.0 (+https://github.com/xmwengxing/CFPilot)'
+/**
+ * 探测请求的 User-Agent。
+ *
+ * 用常见桌面浏览器标识，不用工具自身的名字。
+ *
+ * ## 为什么
+ *
+ * 扫描会在几秒内向**用户自己的域名**发起上百次探测请求。
+ * 若带 `CFPilot-Scanner/1.0 (+github.com/...)`，Cloudflare 边缘日志会
+ * 直接记录「这是某个扫描工具」—— 一是暴露工具指纹，二是让自家域名的
+ * 访问日志出现明显的机器流量特征（可能触发额外风控）。
+ *
+ * 用浏览器标识后，这些请求与普通访问无异。
+ *
+ * ⚠️ 本地回传结果 / 日志输出仍用工具自身标识（见 callback.ts），不混淆。
+ */
+const USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 
 function extractColo(text: string): string {
   const match = /cf-ray:\s*[0-9a-f]+-([A-Z]{3})/i.exec(text)
@@ -538,7 +555,25 @@ export function measureDownload(
     let headerEnd = -1
     let received = 0
     let settled = false
-    let buffer = ''
+    /**
+     * 响应头缓冲（Buffer 累积，不转字符串）。
+     *
+     * 旧实现每收一个 chunk 就 `chunk.toString('latin1')` 拼成字符串，
+     * 再 `indexOf('\r\n\r\n')` 找边界，找到后又 `Buffer.from(buffer, 'latin1')`
+     * 转回 Buffer —— 大吞吐测速时每秒几十兆的编解码与内存分配纯属浪费。
+     * 直接在 Buffer 上找分隔符即可。
+     */
+    let headerBuf: Buffer = Buffer.alloc(0)
+    /** HTTP 状态码；未拿到响应头前为 0 */
+    let status = 0
+    /**
+     * 判定「有效载荷」的最小字节数。
+     *
+     * ⚠️ 不能只判 `received > 0`：404 / 403 的报错页也有几百字节 HTML，
+     * 会被当成「测速成功」，产出一个速度极低的假阳性节点。
+     * 要求至少收到 32KB 才认为拿到了真正的二进制流。
+     */
+    const minPayload = Math.min(bytes, 32 * 1024)
 
     const finish = (result: Omit<DownloadResult, 'ms'>): void => {
       if (settled) return
@@ -552,11 +587,30 @@ export function measureDownload(
       resolve({ ...result, ms: Date.now() - started })
     }
 
+    /**
+     * 统一判定「这次测速算不算成功」。
+     *
+     * 三个条件缺一不可：
+     *   1. 状态码 200（探针端点正常响应）
+     *   2. 载荷量达到 minPayload（不是几十字节的报错页）
+     *   3. 超时 / 提前结束走同一条判定，避免「连接断了但算成功」
+     */
+    const judge = (): { ok: boolean; error?: string } => {
+      if (status !== 200) {
+        return { ok: false, error: status === 0 ? '未收到响应头' : `HTTP ${status}` }
+      }
+      if (received < minPayload) {
+        return { ok: false, error: `载荷不足（${received}/${minPayload} 字节）` }
+      }
+      return { ok: true }
+    }
+
     const request = [
       `GET ${path}?bytes=${bytes} HTTP/1.1`,
       `Host: ${host}`,
       `User-Agent: ${USER_AGENT}`,
-      `Accept: */*`,
+      'Accept: */*',
+      'Accept-Encoding: identity',
       '',
       '',
     ].join('\r\n')
@@ -576,21 +630,23 @@ export function measureDownload(
 
     const timer = setTimeout(() => {
       const seconds = Math.max(0.001, (Date.now() - started) / 1000)
+      const v = judge()
       finish({
-        ok: received > 0,
+        ok: v.ok,
         bytes: received,
-        speedMBps: received / 1024 / 1024 / seconds,
-        error: received > 0 ? undefined : '测速超时',
+        speedMBps: v.ok ? received / 1024 / 1024 / seconds : 0,
+        error: v.ok ? undefined : v.error ?? '下载超时',
       })
     }, timeoutMs)
 
     socket.setTimeout(timeoutMs, () => {
       const seconds = Math.max(0.001, (Date.now() - started) / 1000)
+      const v = judge()
       finish({
-        ok: received > 0,
+        ok: v.ok,
         bytes: received,
-        speedMBps: received / 1024 / 1024 / seconds,
-        error: received > 0 ? undefined : '测速超时',
+        speedMBps: v.ok ? received / 1024 / 1024 / seconds : 0,
+        error: v.ok ? undefined : v.error ?? '下载超时',
       })
     })
 
@@ -601,21 +657,39 @@ export function measureDownload(
     const settle = (): void => {
       if (settled) return
       const seconds = Math.max(0.001, (Date.now() - started) / 1000)
-      finish({ ok: received > 0, bytes: received, speedMBps: received / 1024 / 1024 / seconds })
+      const v = judge()
+      finish({
+        ok: v.ok,
+        bytes: received,
+        speedMBps: v.ok ? received / 1024 / 1024 / seconds : 0,
+        error: v.ok ? undefined : v.error ?? '未收到完整响应',
+      })
     }
 
     socket.on('data', (chunk: Buffer) => {
       if (headerEnd < 0) {
-        buffer += chunk.toString('latin1')
-        const idx = buffer.indexOf('\r\n\r\n')
+        headerBuf = headerBuf.length === 0 ? chunk : Buffer.concat([headerBuf, chunk])
+        // 在 Buffer 上直接找分隔符（避免 latin1 编解码往返）
+        const idx = headerBuf.indexOf('\r\n\r\n')
         if (idx < 0) {
-          if (buffer.length > 8192) finish({ ok: false, bytes: 0, speedMBps: 0, error: '响应头异常' })
+          if (headerBuf.length > 8192) finish({ ok: false, bytes: 0, speedMBps: 0, error: '响应头异常' })
+          return
+        }
+        // ⚠️ 必须校验状态码：探针端点返回 404 / 403 时，
+        // 报错页也有字节数，不校验就会被当成「测速成功」。
+        const head = headerBuf.subarray(0, idx).toString('latin1')
+        const code = /^HTTP\/1\.[01]\s+(\d{3})/.exec(head)?.[1]
+        status = code ? Number(code) : 0
+        if (status !== 200) {
+          finish({ ok: false, bytes: 0, speedMBps: 0, error: `HTTP ${status || '?'}` })
           return
         }
         headerEnd = idx + 4
-        const body = Buffer.from(buffer, 'latin1').subarray(headerEnd)
+        const body = headerBuf.subarray(headerEnd)
         received += body.byteLength
         headerEnd = 0
+        // 释放已消费的缓冲（避免大响应时一直持有）
+        headerBuf = Buffer.alloc(0)
       } else {
         received += chunk.byteLength
       }
@@ -729,7 +803,14 @@ export function measureThroughput(options: ThroughputOptions): Promise<Throughpu
     /** 单条连接的接收逻辑 */
     const openOne = (): void => {
       let headerDone = false
-      let headerBuffer = ''
+      /**
+       * 响应头缓冲（Buffer 累积）。
+       *
+       * 旧实现每收一个 chunk 就 toString('latin1') 拼字符串，
+       * 找到边界后又 Buffer.from 转回去 —— 测速时每秒几十兆，
+       * 这点编解码与分配是纯浪费。直接在 Buffer 上找分隔符。
+       */
+      let headerBuffer: Buffer = Buffer.alloc(0)
 
       const socket = tls.connect(
         {
@@ -760,7 +841,7 @@ export function measureThroughput(options: ThroughputOptions): Promise<Throughpu
 
       socket.on('data', (chunk: Buffer) => {
         if (!headerDone) {
-          headerBuffer += chunk.toString('latin1')
+          headerBuffer = headerBuffer.length === 0 ? chunk : Buffer.concat([headerBuffer, chunk])
           const idx = headerBuffer.indexOf('\r\n\r\n')
           if (idx < 0) {
             if (headerBuffer.length > 8192) {
@@ -769,7 +850,7 @@ export function measureThroughput(options: ThroughputOptions): Promise<Throughpu
             }
             return
           }
-          const head = headerBuffer.slice(0, idx)
+          const head = headerBuffer.subarray(0, idx).toString('latin1')
           const status = /^HTTP\/1\.[01]\s+(\d{3})/.exec(head)?.[1]
           if (status !== '200') {
             lastError = `HTTP ${status ?? '?'}`
@@ -777,10 +858,10 @@ export function measureThroughput(options: ThroughputOptions): Promise<Throughpu
             return
           }
           headerDone = true
-          const body = Buffer.from(headerBuffer, 'latin1').subarray(idx + 4)
+          const body = headerBuffer.subarray(idx + 4)
           totalBytes += body.byteLength
           windowBytes += body.byteLength
-          headerBuffer = ''
+          headerBuffer = Buffer.alloc(0)
         } else {
           totalBytes += chunk.byteLength
           windowBytes += chunk.byteLength

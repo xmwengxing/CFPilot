@@ -167,6 +167,10 @@ export interface ScanSummary {
     countries: string[]
     /** 国家筛选后进入测速的候选数（未筛选时 = wsOk） */
     wsFiltered: number
+    /** 国家筛选未命中任何候选、已放宽为全量（此时 countries 为空） */
+    countryFilterRelaxed?: boolean
+    /** 因已攒够目标国家节点而提前结束阶段二 */
+    stoppedEarly?: boolean
   }
 }
 
@@ -198,15 +202,23 @@ async function tcpPing(ip: string, port: number, timeoutMs: number): Promise<Tcp
   })
 }
 
+/**
+ * 并发池。
+ *
+ * @param shouldStop 可选的提前终止判定。返回 true 时不再领取新任务
+ *   （已在跑的任务会跑完）。用于「已经拿到足够多的目标结果就收工」。
+ */
 async function pool<T, R>(
   items: T[],
   concurrency: number,
-  worker: (item: T, index: number) => Promise<R>
+  worker: (item: T, index: number) => Promise<R>,
+  shouldStop?: () => boolean
 ): Promise<R[]> {
   const out: R[] = new Array(items.length)
   let cursor = 0
   const runners = Array.from({ length: Math.max(1, Math.min(concurrency, items.length)) }, async () => {
     for (;;) {
+      if (shouldStop?.()) return
       const index = cursor++
       if (index >= items.length) return
       out[index] = await worker(items[index]!, index)
@@ -214,6 +226,17 @@ async function pool<T, R>(
   })
   await Promise.all(runners)
   return out
+}
+
+/**
+ * 判断错误是否属于「超时」。
+ *
+ * 超时意味着「这个 IP 在当前网络下不可用」，重试一次也是同样结果，
+ * 只会让并发槽位多占一个超时周期。偶发错误（连接重置等）才值得重试。
+ */
+function isTimeoutError(error: string | undefined): boolean {
+  if (!error) return false
+  return /超时|timeout|timed out|ETIMEDOUT/i.test(error)
 }
 
 /**
@@ -231,17 +254,21 @@ async function pool<T, R>(
  *
  * @param attempts 总尝试次数（含首次），≥1
  * @param isOk 判定「本次是否算成功」；默认看 `ok === true`
+ * @param shouldRetry 判定「失败后是否还值得再试」；返回 false 则立即停止重试
  */
 async function withRetry<T>(
   attempts: number,
   fn: () => Promise<T>,
-  isOk: (result: T) => boolean = (r) => (r as { ok?: boolean }).ok === true
+  isOk: (result: T) => boolean = (r) => (r as { ok?: boolean }).ok === true,
+  shouldRetry: (result: T) => boolean = () => true
 ): Promise<T> {
   const total = Math.max(1, Math.floor(attempts))
   let last: T
   for (let i = 0; i < total; i++) {
     last = await fn()
     if (isOk(last)) return last
+    // 本次失败不值得再试（如超时）→ 立刻返回
+    if (!shouldRetry(last)) return last
   }
   return last!
 }
@@ -253,7 +280,14 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   const tcpTimeoutMs = options.tcpTimeoutMs ?? 1200
   const retries = options.retries ?? 2
   const tlsConcurrency = options.tlsConcurrency ?? 64
-  const tlsTimeoutMs = options.tlsTimeoutMs ?? 4000
+  /**
+   * TLS 握手超时。
+   *
+   * 默认 2000ms（旧值 4000ms）：优选场景下握手超过 2 秒的节点已无实用价值，
+   * 而超时后**不再重试**（见 withRetry 的 shouldRetry），
+   * 所以单 IP 最坏只占 2 秒而不是 8 秒。
+   */
+  const tlsTimeoutMs = options.tlsTimeoutMs ?? 2000
   const maxLatencyMs = options.maxLatencyMs ?? 0
   const probeLimit = options.probeLimit ?? 120
   const probeConcurrency = options.probeConcurrency ?? 24
@@ -263,6 +297,24 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   const speedTimeoutMs = options.speedTimeoutMs ?? 12000
   const speedBytes = options.speedBytes ?? 5 * 1024 * 1024
   const top = options.top ?? 15
+  /**
+   * 国家 / 地区筛选（作用于已识别机房的候选）。
+   *
+   * 机房（colo）只有 WS 101 响应里才有，TCP / TLS 阶段无从得知，
+   * 所以筛选只能在阶段二之后做 —— 这带来一个结构性问题：
+   * 进入阶段二的候选是「按 TLS 耗时排序后的前 N 个」，
+   * 若用户所在网络到 HK / US 延迟最低，这 N 个会被 HK/US 占满，
+   * 后面稍微慢几毫秒的 JP / SG 节点早已被截断掉。
+   *
+   * 因此**带国家筛选时自动扩大阶段二候选池**，
+   * 让目标国家有机会进入探测范围。
+   */
+  const countryFilter = normalizeCountryFilter(options.countries ?? [])
+  const hasCountryFilter = countryFilter.length > 0
+  /** 阶段二候选池大小：带国家筛选时放大 4 倍（最少 500） */
+  const effectiveProbeLimit = hasCountryFilter
+    ? Math.max(probeLimit * 4, 500)
+    : probeLimit
 
   const candidates = options.candidates
   const report = options.onProgress ?? (() => {})
@@ -297,23 +349,44 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   //
   // 因此这里对 TCP 通过的候选追加 TLS 握手探测，并以**握手耗时**作为
   // 阶段一的主排序键；TCP 延迟只作次键（两者都通过时优先握手快的）。
-  report({ type: 'stage', stage: 1, name: 'TLS 握手筛选', total: filtered.length })
+  //
+  // ⚠️ **先粗筛再握手**：TCP 通过的候选可能有几千个，但最终只有
+  // effectiveProbeLimit 个能进阶段二。为后面几千名做 CPU 密集的 TLS 握手
+  // 纯属浪费（而且假通 IP 会占满并发槽位）。
+  // 先按 TCP 延迟升序取前 max(effectiveProbeLimit * 4, 600) 个再做 TLS 握手。
+  //
+  // ⚠️ 注意：粗筛只用 **TCP 延迟**排序，**不改变最终的排序依据** ——
+  // 最终排序仍然是 TLS 握手耗时（唯一有区分度的指标）。
+  // TCP 延迟只在这里当「粗筛的便宜代理指标」用。
+  const tlsCandidateLimit = Math.max(effectiveProbeLimit * 4, 600)
+  const tlsInput = filtered
+    .slice()
+    .sort((a, b) => a.latency - b.latency)
+    .slice(0, tlsCandidateLimit)
+
+  report({ type: 'stage', stage: 1, name: 'TLS 握手筛选', total: tlsInput.length })
   let tlsDone = 0
-  const tlsResults = await pool(filtered, tlsConcurrency, async (item) => {
+  const tlsResults = await pool(tlsInput, tlsConcurrency, async (item) => {
     // TLS 探测的「成功」判定是 tlsMs > 0（它没有 ok 字段）
+    //
+    // ⚠️ 超时不重试：TLS 握手超时说明这个 IP 在当前网络下就是不可用，
+    // 再试一次也是同样的结果，却要让并发槽位多占 4 秒。
+    // 只有「连接被重置」这类偶发错误才值得重试。
     const probe = await withRetry<TlsProbeResult>(
       retries,
       () => probeTlsHandshake(item.ip, options.port, options.host, tlsTimeoutMs),
-      (r) => r.tlsMs > 0
+      (r) => r.tlsMs > 0,
+      // 第 4 个参数：上次失败原因是超时就不要再试
+      (r) => !isTimeoutError(r.error)
     )
     tlsDone++
-    if (tlsDone % 200 === 0 || tlsDone === filtered.length) {
+    if (tlsDone % 200 === 0 || tlsDone === tlsInput.length) {
       report({
         type: 'progress',
         stage: 1,
         done: tlsDone,
-        total: filtered.length,
-        message: `TLS 握手 ${tlsDone}/${filtered.length}${probe.tlsMs > 0 ? ` ${probe.tlsMs}ms` : ' ✗'}`,
+        total: tlsInput.length,
+        message: `TLS 握手 ${tlsDone}/${tlsInput.length}${probe.tlsMs > 0 ? ` ${probe.tlsMs}ms` : ' ✗'}`,
       })
     }
     return { ...item, tls: probe }
@@ -324,7 +397,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   // 主排序键：TLS 握手耗时（升序）；次键：TCP 延迟
   const stage1 = tlsOk
     .sort((a, b) => a.tls.tlsMs - b.tls.tlsMs || a.latency - b.latency)
-    .slice(0, probeLimit)
+    .slice(0, effectiveProbeLimit)
 
   // ---- 阶段二：WebSocket 101 + 响应体内容校验 ----
   //
@@ -336,15 +409,23 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   // `--no-verify` 可退回纯 101 校验（对接第三方项目时用，
   // 因为它们没有 CFPilot 的 PING 机制）。
   //
-  // ⚠️ **内容校验必须走 `/__edge_probe`，不能用 WS 入站路径**（真机实测）：
-  // 探针端点的 WS 分支内置 PING/PONG，而 VLESS/Trojan 入站路径期待的是
-  // 协议头（`[0,0]`）而非 PING 文本 —— 对它发 PING 会永远等不到响应。
-  // 同一批 IP：探针路径 16/20 通过，WS 路径 0/20 全部超时。
+  // ⚠️ **内容校验优先走探针端点**（真机实测）：
+  // CFPilot 的 `/__edge_probe` 内置 PING/PONG，而 VLESS/Trojan 入站路径
+  // 期待的是协议头（`[0,0]`）而非 PING 文本 —— 对它发 PING 会永远等不到响应。
+  // 同一批 IP：探针路径 16/20 通过，WS 入站路径 0/20 全部超时。
   //
-  // WS 入站路径（`options.wsPath`）只用于**非严格模式**的 101 校验，
-  // 以及阶段三测速（那时走的是 HTTP GET，不是 WS）。
+  // 但**不能把路径写死**：用户显式传 `--probe-path` / `--path` 时必须尊重，
+  // 否则「对接第三方项目」（它们的 WS 路径不是 /__edge_probe）永远测不出结果。
+  //
+  // 优先级：显式 probePath > 显式 wsPath（仅当它看起来像探针端点时）> 默认探针路径
   const strictProbe = options.verifyPayload !== false
-  const strictProbePath = '/__edge_probe'
+  const explicitProbePath = options.probePath?.trim()
+  const explicitWsPath = options.wsPath?.trim()
+  const strictProbePath =
+    explicitProbePath ||
+    // 用户的 wsPath 以 /__edge_probe 开头 → 视为探针端点
+    (explicitWsPath?.startsWith('/__edge_probe') ? explicitWsPath : '') ||
+    '/__edge_probe'
   report({
     type: 'stage',
     stage: 2,
@@ -353,25 +434,57 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   })
   let probeDone = 0
   let verifiedCount = 0
-  const probeResults = await pool(stage1, probeConcurrency, async (item) => {
-    const probeFn = strictProbe ? probeWsPing : probeWs101
-    const probePath = strictProbe ? strictProbePath : options.wsPath ?? '/__edge_probe'
-    const result: WsProbeResult = await withRetry(retries, () =>
-      probeFn(item.ip, options.port, options.host, probeTimeoutMs, probePath)
-    )
-    probeDone++
-    if (result.pongVerified) verifiedCount++
-    report({
-      type: 'progress',
-      stage: 2,
-      done: probeDone,
-      total: stage1.length,
-      message: strictProbe
-        ? `101+PING 校验 ${probeDone}/${stage1.length}${result.ok ? ` ✓ ${result.colo}` : result.pongVerified === false ? ' ✗ 无响应' : ''}`
-        : `101 校验 ${probeDone}/${stage1.length}${result.ok ? ` ✓ ${result.colo}` : ''}`,
-    })
-    return { ...item, probe: result }
-  })
+  /**
+   * 早期退出：带国家筛选时，攒够够用的目标国家节点就收工。
+   *
+   * 为什么要提前退：扩大候选池（effectiveProbeLimit）后阶段二最多要探 500 个，
+   * 但用户只要 speedLimit 个节点 —— 探完 500 个里的第 20 个时就可以停，
+   * 省掉后面几百次 WS 探测（每次 3 秒超时）。
+   *
+   * 阈值取 speedLimit * 1.5，留出余量应对后续测速淘汰。
+   */
+  const earlyExitTarget = hasCountryFilter ? Math.ceil(speedLimit * 1.5) : Infinity
+  let matchedCount = 0
+  let stoppedEarly = false
+
+  const probeResults = await pool(
+    stage1,
+    probeConcurrency,
+    async (item) => {
+      const probeFn = strictProbe ? probeWsPing : probeWs101
+      const probePath = strictProbe ? strictProbePath : explicitWsPath || '/__edge_probe'
+      const result: WsProbeResult = await withRetry(retries, () =>
+        probeFn(item.ip, options.port, options.host, probeTimeoutMs, probePath)
+      )
+      probeDone++
+      if (result.pongVerified) verifiedCount++
+      // 统计命中目标国家的数量（早期退出判据）
+      if (
+        hasCountryFilter &&
+        result.ok &&
+        countryFilter.includes(countryOfColo(result.colo || ''))
+      ) {
+        matchedCount++
+      }
+      report({
+        type: 'progress',
+        stage: 2,
+        done: probeDone,
+        total: stage1.length,
+        message: strictProbe
+          ? `101+PING 校验 ${probeDone}/${stage1.length}${result.ok ? ` ✓ ${result.colo}` : result.pongVerified === false ? ' ✗ 无响应' : ''}`
+          : `101 校验 ${probeDone}/${stage1.length}${result.ok ? ` ✓ ${result.colo}` : ''}`,
+      })
+      return { ...item, probe: result }
+    },
+    () => {
+      if (matchedCount >= earlyExitTarget) {
+        stoppedEarly = true
+        return true
+      }
+      return false
+    }
+  )
 
   // 严格模式下，只保留**通过内容校验**的候选。
   // 非严格模式（第三方项目）退化为只看 101。
@@ -381,13 +494,16 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
 
   // ---- 国家 / 地区过滤（可选，作用于已识别机房的候选）----
   //
-  // 为什么放在这里：机房（colo）只有 101 握手响应里才有，TCP 阶段无从得知。
-  // 筛完为空说明采样不足或该地区候选太少——此时忽略筛选而不是返回空结果，
-  // 与订阅侧 filterByCountries 的回落语义保持一致。
-  const countryFilter = normalizeCountryFilter(options.countries ?? [])
+  // 为什么放在这里：机房（colo）只有 101 握手响应里才有，TCP / TLS 阶段无从得知。
+  //
+  // ⚠️ 筛不到时的行为：**不再静默忽略筛选**。
+  // 旧行为是「筛不到就忽略筛选、返回全部」—— 用户以为只要了 JP，
+  // 实际拿到的是全球节点，只在进度行里留一句提示，极易看漏。
+  // 现在明确告知「已放宽为全量」，并在结果里标记筛选未生效。
   let wsFiltered = wsOk
   let appliedCountries: string[] = []
-  if (countryFilter.length > 0 && wsOk.length > 0) {
+  let countryFilterRelaxed = false
+  if (hasCountryFilter && wsOk.length > 0) {
     const matched = wsOk.filter((r) => countryFilter.includes(countryOfColo(r.probe.colo || '')))
     if (matched.length > 0) {
       wsFiltered = matched
@@ -400,12 +516,13 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
         message: `国家筛选 ${countryFilter.join('/')}：保留 ${matched.length}/${wsOk.length}，进入测速`,
       })
     } else {
+      countryFilterRelaxed = true
       report({
         type: 'progress',
         stage: 2,
         done: wsOk.length,
         total: wsOk.length,
-        message: `国家筛选 ${countryFilter.join('/')} 后无候选，已忽略（采样太小？调到 500~1000 再试）`,
+        message: `⚠️ 国家筛选 ${countryFilter.join('/')} 后无候选 —— 已放宽为全量（${wsOk.length} 条）。可加大 --sample 或换地区重试`,
       })
     }
   }
@@ -470,7 +587,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
         options.host,
         speedBytes,
         speedTimeoutMs,
-        options.probePath ?? '/__edge_probe'
+        strictProbePath
       )
       speedDone++
       report({
@@ -517,6 +634,10 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
       elapsedMs: Date.now() - started,
       countries: appliedCountries,
       wsFiltered: wsFiltered.length,
+      /** 国家筛选未命中任何候选、已放宽为全量 */
+      countryFilterRelaxed,
+      /** 因已攒够目标国家节点而提前结束阶段二 */
+      stoppedEarly,
     },
   }
   report({ type: 'done', count: entries.length })
@@ -524,14 +645,36 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
 }
 
 /**
+ * 主机部分（IPv6 必须加方括号）。
+ *
+ * ## 为什么必须加
+ *
+ * 数据面 `sub-engine.ts` 的解析器按冒号数量分流：
+ *
+ *   `[2606:4700::1]:443`  → 方括号形式 → host=2606:4700::1, port=443 ✓
+ *   `2606:4700::1:443`    → 冒号数 > 1 → 整个串当成 IPv6 地址
+ *                            → host=2606:4700::1:443, port=默认 ✗ IP 错了
+ *
+ * 即裸 IPv6 带端口会被误解析成「一个更长的 IPv6 地址」，
+ * 订阅里就会指向一个不存在的地址。AGENTS.md 铁律 6 也要求解析器
+ * 兼容 `[IPv6]:Port#备注` 形式 —— 产出方必须与之一致。
+ */
+export function formatHost(ip: string): string {
+  return ip.includes(':') ? `[${ip}]` : ip
+}
+
+/**
  * 可直接复制粘贴到同类项目「自定义 IP / 优选 IP」输入框的格式：
  *   `1.2.3.4:443#NRT`  一行一个
+ *   `[2606:4700::1]:443#NRT`（IPv6 带方括号）
  */
 export function formatCopyable(entries: ScanEntry[]): string {
-  return entries.map((e) => `${e.ip}:${e.port}#${e.colo}`).join('\n')
+  return entries.map((e) => `${formatHost(e.ip)}:${e.port}#${e.colo}`).join('\n')
 }
 
 /** 转换为面板回填格式：IP:Port#机房_延迟_速度 */
 export function formatEntries(entries: ScanEntry[]): string[] {
-  return entries.map((e) => `${e.ip}:${e.port}#${e.colo}_${e.latency}_${e.speed}`)
+  return entries.map(
+    (e) => `${formatHost(e.ip)}:${e.port}#${e.colo}_${e.latency}_${e.speed}`
+  )
 }

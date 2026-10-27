@@ -14,6 +14,7 @@ import {
 } from '../shared/args'
 import {
   formatCopyable,
+  formatHost,
   runScan,
   type ScanEntry,
   type ScanEvent,
@@ -107,7 +108,7 @@ function printTable(entries: ScanEntry[]): void {
   process.stdout.write('─'.repeat(66) + '\n')
   entries.forEach((entry, index) => {
     const rank = String(index + 1).padStart(2, ' ')
-    const address = `${entry.ip}:${entry.port}`.padEnd(24, ' ')
+    const address = `${formatHost(entry.ip)}:${entry.port}`.padEnd(24, ' ')
     const colo = (entry.colo || 'UNK').padEnd(6, ' ')
     const tls = String(entry.tlsMs).padStart(7, ' ')
     const latency = String(entry.latency).padStart(7, ' ')
@@ -186,8 +187,6 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
   const wsPath = normalizeWsPath(flagString(args, 'path'), '/__edge_probe')
   const probePath = normalizeWsPath(flagString(args, 'probe-path'), '/__edge_probe')
   const noSpeed = flagBool(args, 'no-speed')
-  // 阶段二是否做响应体内容校验（默认做；--no-verify 关闭）
-  const verifyPayload = !flagBool(args, 'no-verify')
   // 国家过滤：不选 = 全量。无效代码在 normalizeCountryFilter 里被丢弃
   const countries = normalizeCountryFilter(flagList(args, 'countries'))
   /**
@@ -287,6 +286,53 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
   let skipSpeed = noSpeed
   let speedMode: 'probe' | 'url' = 'probe'
   let speedUrl = flagString(args, 'speed-url', DEFAULT_SPEED_URL)
+  /**
+   * 阶段二是否做响应体内容校验。
+   *
+   * 初始值由 `--no-verify` 决定，但**预检发现目标没有探针端点时会自动关闭**：
+   * 内容校验依赖探针端点的 PING/PONG 机制，第三方项目没有这个机制，
+   * 硬发 PING 会一直等不到响应 → 阶段二全军覆没。
+   *
+   * 预检已经知道「没有探针」，此时再坚持严格校验毫无意义。
+   */
+  let verifyPayload = !flagBool(args, 'no-verify')
+  /** 预检结论：目标是否有 CFPilot 风格的探针端点（null = 未预检） */
+  let hasProbeEndpoint: boolean | null = null
+
+  /**
+   * 探测目标有没有 CFPilot 风格的探针端点。
+   *
+   * 结论被两处使用：
+   *   1. 决定测速方式（探针端点 vs 公开测速地址）
+   *   2. 决定要不要做响应体内容校验（没有探针端点就必然失败）
+   *
+   * 所以必须**无条件预检**（哪怕 --no-speed 也要做），
+   * 否则「没有探针端点 + 内容校验开着」会得到 0 条结果。
+   */
+  const detectProbeEndpoint = async (): Promise<boolean | null> => {
+    // 返回值语义：
+    //   true  = 确认是 CFPilot 探针端点
+    //   false = 确认不是（请求成功，但响应里没有 x-probe-bytes 头）
+    //   null  = **不知道**（网络错误 / 超时）—— 此时不能降级！
+    //
+    // ⚠️ 区分 false 与 null 很重要：网络抖动导致的失败不代表「目标没有探针」，
+    // 若据此关闭内容校验，阶段二会从「严格校验」退化成「只看 101」，
+    // 反而放进来一批「101 通但不响应」的 IP。
+    try {
+      const probe = await fetch(`https://${host}${probePath}?bytes=1024`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(8000),
+      })
+      return Boolean(probe.headers.get('x-probe-bytes'))
+    } catch {
+      return null
+    }
+  }
+
+  // 显式 --no-verify 时不必预检（用户已经表态不要内容校验了）
+  if (verifyPayload) {
+    hasProbeEndpoint = await detectProbeEndpoint()
+  }
 
   if (!skipSpeed) {
     const forcedMode = flagString(args, 'speed-mode') // 'probe' | 'url' | ''
@@ -298,16 +344,10 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
       speedMode = 'probe'
     } else {
       // 自动：探测目标是否有 CFPilot 风格的探针端点
-      let hasProbe = false
-      try {
-        const probe = await fetch(`https://${host}${probePath}?bytes=1024`, {
-          method: 'GET',
-          signal: AbortSignal.timeout(8000),
-        })
-        hasProbe = Boolean(probe.headers.get('x-probe-bytes'))
-      } catch {
-        hasProbe = false
+      if (hasProbeEndpoint === null) {
+        hasProbeEndpoint = await detectProbeEndpoint()
       }
+      const hasProbe = hasProbeEndpoint
 
       if (hasProbe) {
         speedMode = 'probe'
@@ -326,6 +366,17 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
     }
   }
 
+  // ---- 内容校验自动降级 ----
+  //
+  // 预检已确认目标**没有**探针端点 → 内容校验（PING→PONG）必然失败，
+  // 阶段二会全军覆没。此时退回纯 101 校验（--no-verify 的语义）。
+  if (hasProbeEndpoint === false && verifyPayload) {
+    verifyPayload = false
+    if (!quiet) {
+      process.stdout.write('\n提示：目标无探针端点，已自动关闭响应体校验（退回纯 101 校验）\n')
+    }
+  }
+
   const summary = await runScan({
     host,
     port,
@@ -339,7 +390,7 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
     retries: flagNumber(args, 'retries', 2),
     tcpTimeoutMs: flagNumber(args, 'timeout', 1200),
     tlsConcurrency: flagNumber(args, 'tls-concurrency', 64),
-    tlsTimeoutMs: flagNumber(args, 'tls-timeout', 4000),
+    tlsTimeoutMs: flagNumber(args, 'tls-timeout', 2000),
     maxLatencyMs: flagNumber(args, 'max-latency', 0),
     probeLimit: flagNumber(args, 'probe-limit', 120),
     probeTimeoutMs: flagNumber(args, 'probe-timeout', 3000),

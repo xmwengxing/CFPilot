@@ -31,7 +31,7 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { CloudflareClient, CloudflareError, type PagesDeployment } from './cf-api'
 import { randomPanelPath, randomPassword, randomWorkerName, randomWsPath } from './utils'
-import { extractBuildVersion, loadKernelBundle } from './kernel-remote'
+import { extractBuildVersion, loadBuiltinBundle, loadKernelBundle } from './kernel-remote'
 import { compareSemver } from '../shared/version-util'
 import { VERSION } from '../shared/version'
 
@@ -502,16 +502,36 @@ async function resolveKernel(
   log: (message: string) => void,
   warnings: string[]
 ): Promise<{ control: string; data: string; version: string; build: string; source: string }> {
-  // ---- 1. 调用方显式指定（测试 / 嵌入场景）----
   const explicitControl = options.bundles?.control ?? ''
   const explicitData = options.bundles?.data ?? ''
-  if (explicitControl && explicitData) {
-    return {
-      control: explicitControl,
-      data: explicitData,
-      version: options.kernelVersion ?? '',
-      build: extractBuildVersion(explicitControl),
-      source: '调用方指定',
+
+  // ---- 1. 调用方显式指定（测试 / 嵌入场景）----
+  //
+  // ⚠️ 只要指定了**其中一份**产物，就**不联网**：
+  // 控制面与数据面必须来自同一套内核（版本不一致会让面板与数据面对不上），
+  // 因此缺的那份从**内置**产物里补，而不是从远程拿。
+  if (explicitControl || explicitData) {
+    try {
+      const control = explicitControl || (await loadBuiltinBundle('control.js'))
+      const data = explicitData || (await loadBuiltinBundle('dataplane.js'))
+      return {
+        control,
+        data,
+        version: options.kernelVersion ?? '',
+        build: extractBuildVersion(control),
+        source: '调用方指定',
+      }
+    } catch (err) {
+      warnings.push(
+        `内核产物加载失败：${err instanceof Error ? err.message : String(err)}`
+      )
+      return {
+        control: explicitControl,
+        data: explicitData,
+        version: options.kernelVersion ?? '',
+        build: extractBuildVersion(explicitControl),
+        source: '不可用',
+      }
     }
   }
 
@@ -519,13 +539,11 @@ async function resolveKernel(
   try {
     const bundle = await loadKernelBundle(VERSION, { log })
     log(`· 内核来源：${bundle.source}`)
-    const control = explicitControl || bundle.control
-    const data = explicitData || bundle.data
     return {
-      control,
-      data,
+      control: bundle.control,
+      data: bundle.data,
       version: options.kernelVersion ?? bundle.version,
-      build: extractBuildVersion(control),
+      build: extractBuildVersion(bundle.control),
       source: bundle.source,
     }
   } catch (err) {
@@ -535,10 +553,10 @@ async function resolveKernel(
       `内核产物加载失败：${err instanceof Error ? err.message : String(err)}`
     )
     return {
-      control: explicitControl,
-      data: explicitData,
+      control: '',
+      data: '',
       version: options.kernelVersion ?? '',
-      build: extractBuildVersion(explicitControl),
+      build: '',
       source: '不可用',
     }
   }

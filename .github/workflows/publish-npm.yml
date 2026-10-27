@@ -60,6 +60,15 @@ jobs:
           cache: npm
           registry-url: 'https://registry.npmjs.org'
 
+      # ⚠️ Node 20 自带 npm 10，没有 `npm stage` 命令（需要 npm 11.6+）
+      # `npm stage publish` 是这个工作流的核心（令牌只支持暂存发布），
+      # 所以必须先升级 npm。
+      - name: 升级 npm（stage 命令需要 11.6+）
+        run: |
+          npm install -g npm@latest
+          npm --version
+          npm stage --help > /dev/null && echo "npm stage 可用" 
+
       - name: 安装依赖
         run: npm ci
 

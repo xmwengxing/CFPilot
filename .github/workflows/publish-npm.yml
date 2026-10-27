@@ -101,7 +101,7 @@ jobs:
           npm run build -w @cfpilot/worker-core
           npm run build -w cfpilot
 
-          if git diff --exit-code packages/deploy-wizard/assets/cfpilot-worker.js; then
+          if git diff --exit-code packages/cli/assets/cfpilot-worker.js; then
             echo "内置内核资产与最新构建一致 ✅"
             exit 0
           fi
@@ -117,12 +117,12 @@ jobs:
           echo "检测到差异，正在排除 BUILD_VERSION 的影响…"
 
           # 把两边的版本串都替换成占位符再比
-          cp packages/deploy-wizard/assets/cfpilot-worker.js /tmp/committed.js
+          cp packages/cli/assets/cfpilot-worker.js /tmp/committed.js
           # 提交版：替换掉形如 "xxxxxxxx-xxxxxxxx" 的版本串
           sed -E 's/"[0-9a-f]{7,10}-[0-9a-f]{4,16}"/"<BUILD>"/g' /tmp/committed.js > /tmp/committed.norm.js
           # 当前构建版
           sed -E 's/"[0-9a-f]{7,10}-[0-9a-f]{4,16}"/"<BUILD>"/g' \
-            packages/deploy-wizard/assets/cfpilot-worker.js > /tmp/fresh.norm.js
+            packages/cli/assets/cfpilot-worker.js > /tmp/fresh.norm.js
 
           if diff -q /tmp/committed.norm.js /tmp/fresh.norm.js > /dev/null; then
             echo "✅ 除版本串外完全一致（版本串含 git hash，CI 上必然不同，属正常）"

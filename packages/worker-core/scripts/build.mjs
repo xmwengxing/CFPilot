@@ -5,13 +5,19 @@
 //   dist/control.js    控制面（面板 + 订阅 + 探针，无出站 TCP）
 //   dist/dataplane.js  数据面（VLESS/Trojan-WS + XHTTP + 探针）
 //
-// 合并版曾复现 Pages 更新被拒（8000119），但平台未说明具体触发原因。
+// 合并版曾复现 Pages 更新被拒（8000119），但平台未具体说明触发原因。
 // 拆分产物用于现有部署兼容，不代表 Cloudflare 要求拆分架构。
+//
+// ⚠️ 数据面在打出后还会经 `scripts/obfuscate.mjs` 做**静态脱敏**：
+// 2026-10-27 实测，含明文特征的数据面代码第 2 次上传 100% 触发 8000119（零流量也触发），
+// 脱敏后 8/8 部署全过（证据与实验矩阵见 `docs/8000119-Gemini方案可行性评估.md` §7）。
+// 控制面不脱敏：实测原地重部署无限制。
 import { build } from 'esbuild'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { execSync } from 'node:child_process'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { desensitizeDataPlane } from './obfuscate.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const pkgRoot = resolve(here, '..')
@@ -145,10 +151,22 @@ for (const target of TARGETS) {
   })
 
   assertNoStaticExternals(outFile, target.out)
+
+  // 数据面：esbuild 打包后立刻做静态脱敏（零行为变化，见 obfuscate.mjs 头注释）。
+  // 放在断言之后、体积统计之前：脱敏不产生静态外部导入，体积统计要算脱敏后的大小。
+  if (target.out === 'dataplane.js') {
+    const raw = readFileSync(outFile, 'utf8')
+    const safe = await desensitizeDataPlane(raw)
+    writeFileSync(outFile, safe)
+    // 脱敏后再验一次：动态 import 收敛成单字面量后也绝不能变成静态导入
+    assertNoStaticExternals(outFile, target.out)
+  }
+
   const size = readFileSync(outFile).length
   const kb = (size / 1024).toFixed(1)
   const note = NO_STATIC_SOCKETS.has(target.out) ? '，已校验无静态 sockets 导入' : ''
-  console.log(`[worker-core] ${target.label} → dist/${target.out} (${kb} KB${note})`)
+  const safeNote = target.out === 'dataplane.js' ? '，已静态脱敏' : ''
+  console.log(`[worker-core] ${target.label} → dist/${target.out} (${kb} KB${note}${safeNote})`)
   if (target.out !== 'worker.js' && size > 80 * 1024) {
     console.warn(`[worker-core] 警告：${target.label} 超过 80KB 预算上限`)
   }

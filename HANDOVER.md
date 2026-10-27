@@ -20,8 +20,7 @@ CFPilot 是一个 **Cloudflare Pages 双项目代理工具**：控制面提供�
 | 路径 | 状态 | 入口 |
 |---|---|---|
 | **Go 桌面版** | ✅ 唯一图形版本 | `cfpilot-<版本>-windows-amd64.exe`（8.3 MB）<br>`cfpilot-<版本>-linux-{amd64,arm64}` |
-| CLI 优选器 | ✅ npm 已发布 0.6.5 | `npx -y cfpilot-scanner@latest scan --host <数据面域名> --panel <控制面域名>` |
-| CLI 部署向导 | ✅ npm 已发布 0.6.5 | `npx -y cfpilot-deploy@latest`（默认 pages-split） |
+| CLI 工具 | ✅ npm 已发布 | `npx -y cfpilot@latest`（交互菜单）<br>`npx -y cfpilot@latest deploy` / `scan` / `status` |
 | 线上部署 | ✅ 运行中 | 控制面 `cpmanager.pages.dev`，数据面 `cpdata-efj9-byq5.pages.dev` |
 
 **Electron 版已于 2026-10-27 停发**（78 MB vs Go 版 8.3 MB，功能完全一致）。
@@ -40,8 +39,7 @@ CFPilot 是一个 **Cloudflare Pages 双项目代理工具**：控制面提供�
 ```
 packages/
 ├── worker-core/      边缘内核（控制面 control.js / 数据面 dataplane.js / 面板）
-├── scanner-cli/      cfpilot-scanner —— 本地真连接优选器（npm 包）
-├── deploy-wizard/    cfpilot-deploy —— 部署向导（npm 包）
+├── cli/              cfpilot —— 部署 + 优选（npm 包，含交互菜单）
 ├── ui/               界面源码（唯一来源，Go 版复用）
 └── desktop/          Go 桌面版（单二进制 + 托盘）
 ```
@@ -256,10 +254,10 @@ desktop（Go 版，唯一的图形外壳）
 ```bash
 # 1. 内核
 npm run build -w @cfpilot/worker-core
-npm run build -w cfpilot-deploy          # 同步 assets/cfpilot-worker.js
+npm run build -w cfpilot                  # 含内核资产校验
 
 # 2. CLI 实跑（不要只看 typecheck）
-npm run build -w cfpilot-scanner
+npm run build -w cfpilot
 node packages/scanner-cli/dist/cli.js scan --help
 node packages/scanner-cli/dist/cli.js scan --host <真实数据面> \
      --panel <真实控制面> --panel-password <密码> --sample 200
@@ -449,12 +447,12 @@ npm run version:bump -- 0.6.6
 npm run verify:npm
 
 # 部署（CLI）
-npx -y cfpilot-deploy@latest                          # 默认 pages-split
-npx -y cfpilot-deploy@latest --new-kv                 # 部署第 2+ 个实例
-npx -y cfpilot-deploy@latest token --check            # 检查 Token 权限
+npx -y cfpilot@latest deploy
+npx -y cfpilot@latest deploy --new-kv
+npx -y cfpilot@latest token --check            # 检查 Token 权限
 
 # 优选（CLI）
-npx -y cfpilot-scanner@latest scan \
+npx -y cfpilot@latest scan \
   --host <数据面域名> --panel <控制面域名> --panel-password <密码>
 ```
 

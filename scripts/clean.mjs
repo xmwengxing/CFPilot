@@ -8,8 +8,7 @@ const root = resolve(here, '..')
 
 const targets = [
   'packages/worker-core/dist',
-  'packages/scanner-cli/dist',
-  'packages/deploy-wizard/dist',
+  'packages/cli/dist',
   'packages/worker-core/.wrangler',
   'packages/worker-core/src/ui/panel.generated.ts',
 ]

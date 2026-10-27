@@ -42,8 +42,7 @@ if (!pkgName) {
 // 包名与目录名不一定相同（cfpilot-scanner 在 packages/scanner-cli），
 // 所以用一个显式映射表，而不是猜。
 const DIR_MAP = {
-  'cfpilot-scanner': 'scanner-cli',
-  'cfpilot-deploy': 'deploy-wizard',
+  cfpilot: 'cli',
 }
 const dirName = DIR_MAP[pkgName]
 if (!dirName) {

@@ -21,9 +21,8 @@
     "ip-optimization"
   ],
   "workspaces": [
+    "packages/cli",
     "packages/worker-core",
-    "packages/scanner-cli",
-    "packages/deploy-wizard",
     "packages/ui"
   ],
   "engines": {

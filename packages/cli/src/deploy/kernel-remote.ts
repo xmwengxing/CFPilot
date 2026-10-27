@@ -56,6 +56,8 @@ const MAX_ASSET_BYTES = 10 * 1024 * 1024
 const CACHE_DIR_ENV = 'CFPILOT_KERNEL_CACHE_DIR'
 /** 本地内置内核目录的环境变量（测试 / 开发用）。 */
 const LOCAL_DIR_ENV = 'CFPILOT_KERNEL_DIR'
+/** 关闭远程内核获取的环境变量（设为 0 / false / off 即关闭）。 */
+const REMOTE_OFF_ENV = 'CFPILOT_KERNEL_REMOTE'
 
 /**
  * 构建指纹的正则。
@@ -135,6 +137,9 @@ export function versionFromTag(tag: string): string {
 export async function fetchRemoteKernelInfo(
   options: { timeoutMs?: number } = {}
 ): Promise<RemoteKernelInfo | null> {
+  // 显式关闭远程（受限网络 / 离线环境 / 自动化流水线）
+  if (isRemoteDisabled()) return null
+
   let releases: GitHubRelease[]
   try {
     const response = await fetch(`${RELEASES_API}?per_page=20`, {
@@ -178,6 +183,18 @@ function findAssetUrl(assets: GitHubAsset[], name: string): string {
     if (asset.name.trim().toLowerCase() === name) return asset.browser_download_url
   }
   return ''
+}
+
+/**
+ * 远程内核是否被显式关闭。
+ *
+ * 受限网络 / 离线环境里，每次部署都去连 GitHub 会平白拖慢；
+ * 设 `CFPILOT_KERNEL_REMOTE=0` 即可只用内置内核。
+ */
+function isRemoteDisabled(): boolean {
+  const raw = process.env[REMOTE_OFF_ENV]?.trim().toLowerCase()
+  if (!raw) return false
+  return ['0', 'false', 'no', 'off'].includes(raw)
 }
 
 /** 收窄 GitHub Releases 的响应项。 */

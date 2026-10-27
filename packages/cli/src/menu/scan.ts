@@ -138,10 +138,12 @@ export async function menuScan(): Promise<void> {
   status('info', '开始优选…')
   process.stdout.write('\n')
 
+  // 回填参数随扫描一起传下去，扫描结束后会交互询问
   const flags: Record<string, string | boolean> = {
     host: cfg.dataHost ?? '',
     sample: String(sample),
-    'no-callback': true,
+    'ask-callback': true,
+    panel: cfg.panelHost ?? '',
   }
   if (skipSpeed) flags['no-speed'] = true
   if (countries.length > 0) flags['countries'] = countries.join(',')

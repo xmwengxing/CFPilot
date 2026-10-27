@@ -122,6 +122,17 @@ func TestProbeWS101Success(t *testing.T) {
 			t.Errorf("Host 应为 test.example.com，实际 %q", r.Host)
 		}
 
+		// ⚠️ 延迟 5ms 再回 101。
+		//
+		// 探针的延迟是 `time.Since(start).Milliseconds()`（整毫秒），
+		// 而回环地址的 TLS 握手 + 101 交换常常**不足 1 毫秒** →
+		// 延迟被截断成 0 → 下面的 `Latency > 0` 断言随机失败。
+		//
+		// 这是**测试的缺陷**而非生产代码的问题：真机网络延迟是 10~200ms，
+		// 毫秒粒度足够；CLI 版用 Date.now() 差值，粒度相同、语义一致。
+		// 这里加一点延迟把测试变成确定性的。
+		time.Sleep(5 * time.Millisecond)
+
 		// 伪造 101 响应
 		w.Header().Set("Cf-Ray", "8a1b2c3d4e5f-NRT")
 		w.Header().Set("Upgrade", "websocket")

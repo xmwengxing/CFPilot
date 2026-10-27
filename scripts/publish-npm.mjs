@@ -62,6 +62,36 @@ const name = pkg.name
 const version = pkg.version
 console.log(`\n=== ${name}@${version} ===`)
 
+/**
+ * 查暂存区里是否已有该版本。
+ *
+ * npm 对「已暂存的版本」再次 `npm stage publish` 会报：
+ *   409 Conflict - Cannot stage previously published version "0.7.3"
+ *
+ * 典型场景：同一个 tag 被推送两次（重打 tag、或误操作），
+ * 第一次已经进暂存区，第二次就不该再失败 ——
+ * 包其实已经在暂存区等着批准了，用户没受影响。
+ */
+function versionStaged() {
+  try {
+    const out = execSync('npm stage list --json', {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 30000,
+    })
+    const list = JSON.parse(out)
+    const items = Array.isArray(list) ? list : list?.packages ?? []
+    return items.some((it) => {
+      // `npm stage list --json` 的真实字段：packageName / version
+      const n = it?.packageName ?? it?.name ?? it?.package?.name
+      const v = it?.version ?? it?.package?.version
+      return n === name && v === version
+    })
+  } catch {
+    return false
+  }
+}
+
 /** 查 registry 上是否已存在该版本。 */
 function versionExists() {
   try {
@@ -84,6 +114,12 @@ if (!process.env.NODE_AUTH_TOKEN) {
 
 if (versionExists()) {
   console.log(`✓ ${name}@${version} 已存在于 npm，跳过发布`)
+  process.exit(0)
+}
+
+// 已暂存但未上线：同样跳过（包在暂存区等着批准，不需要重复 stage）
+if (versionStaged()) {
+  console.log(`✓ ${name}@${version} 已在 npm 暂存区（等待批准上线），跳过重复暂存`)
   process.exit(0)
 }
 
@@ -142,6 +178,12 @@ try {
 
   const msg = err instanceof Error ? err.message : String(err)
   const isStagingOnly = /only publish to a staging area|stage publish/i.test(msg)
+
+  // 已被暂存（重复触发同一个 tag）：视为成功
+  if (/Cannot stage previously published version|409 Conflict/i.test(msg) && versionStaged()) {
+    console.log(`✓ ${name}@${version} 已在 npm 暂存区（等待批准上线），视为成功`)
+    process.exit(0)
+  }
 
   // 令牌是 Staged Publish 类型：自动回退到 stage 流程
   if (!forceStage && isStagingOnly) {

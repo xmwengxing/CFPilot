@@ -16,11 +16,16 @@ import (
 
 // 阶段默认参数（与 Electron 版逐一对齐）。
 const (
-	defConcurrency      = 300   // 阶段一并发
-	defTCPTimeoutMs     = 1200  // 阶段一超时
-	defRetries          = 2     // 每个探测的尝试次数（含首次）
-	defTLSConcurrency   = 64    // 阶段一之二并发（TLS 握手吃 CPU，过高会让本机成瓶颈）
-	defTLSTimeoutMs     = 4000  // 阶段一之二超时
+	defConcurrency    = 300  // 阶段一并发
+	defTCPTimeoutMs   = 1200 // 阶段一超时
+	defRetries        = 2    // 每个探测的尝试次数（含首次）
+	defTLSConcurrency = 64   // 阶段一之二并发（TLS 握手吃 CPU，过高会让本机成瓶颈）
+	// 阶段一之二超时。
+	//
+	// 默认 2000ms（旧值 4000ms）：优选场景下握手超过 2 秒的节点已无实用价值，
+	// 而超时后**不再重试**（见下方 tlsProbe 的 shouldRetry），
+	// 所以单 IP 最坏只占 2 秒而不是 8 秒。
+	defTLSTimeoutMs     = 2000
 	defProbeLimit       = 120   // 进入阶段二的候选数
 	defProbeConcurrency = 24    // 阶段二并发
 	defProbeTimeoutMs   = 3000  // 阶段二超时
@@ -157,6 +162,24 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 		}
 	}
 
+	// 阶段二候选池大小。
+	//
+	// 机房（colo）只有 WS 101 响应里才有，TCP / TLS 阶段无从得知，
+	// 所以地区筛选只能在阶段二之后做 —— 这带来一个结构性问题：
+	// 进入阶段二的候选是「按 TLS 耗时排序后的前 N 个」，
+	// 若用户所在网络到某些地区延迟最低，这 N 个会被占满，
+	// 后面稍微慢几毫秒的目标地区节点早已被截断掉。
+	//
+	// 因此**带地区筛选时自动扩大阶段二候选池**，
+	// 让目标地区有机会进入探测范围。
+	effectiveProbeLimit := opt.ProbeLimit
+	if len(opt.Countries) > 0 {
+		effectiveProbeLimit = opt.ProbeLimit * 4
+		if effectiveProbeLimit < 500 {
+			effectiveProbeLimit = 500
+		}
+	}
+
 	stats := map[string]int{
 		"candidates": len(opt.Candidates),
 	}
@@ -178,7 +201,7 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 		return last, false
 	}, func(done int) {
 		report(Progress{Stage: "tcp", Done: done, Total: len(opt.Candidates), Message: "阶段一：TCP 握手初筛"})
-	})
+	}, nil)
 
 	stats["tcpOk"] = len(tcpResults)
 	if len(tcpResults) == 0 {
@@ -194,16 +217,50 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 	// 这种 IP 进了客户端就是 -1。所以必须实测 TLS 握手。
 	report(Progress{Stage: "tls", Total: len(tcpResults), Message: "阶段一之二：TLS 握手筛选"})
 
-	tlsOK := forEachIP(ctx, tcpResults, opt.TLSConcurrency, func(t TCPResult) (TLSResult, bool) {
-		r := ProbeTLS(ctx, t.IP, opt.Port, opt.Host, msDuration(opt.TLSTimeoutMs))
-		return r, r.OK
+	// ⚠️ **先粗筛再握手**：TCP 通过的候选可能有几千个，但最终只有
+	// effectiveProbeLimit 个能进阶段二。为后面几千名做 CPU 密集的 TLS 握手
+	// 纯属浪费（而且假通 IP 会占满并发槽位）。
+	// 先按 TCP 延迟升序取前 max(limit*4, 600) 个再做 TLS 握手。
+	//
+	// 注意：粗筛只用 **TCP 延迟**排序，**不改变最终的排序依据** ——
+	// 最终排序仍然是 TLS 握手耗时（唯一有区分度的指标）。
+	tlsInput := tcpResults
+	tlsCandidateLimit := effectiveProbeLimit * 4
+	if tlsCandidateLimit < 600 {
+		tlsCandidateLimit = 600
+	}
+	if len(tlsInput) > tlsCandidateLimit {
+		sorted := make([]TCPResult, len(tlsInput))
+		copy(sorted, tlsInput)
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i].Latency < sorted[j].Latency })
+		tlsInput = sorted[:tlsCandidateLimit]
+	}
+
+	tlsOK := forEachIP(ctx, tlsInput, opt.TLSConcurrency, func(t TCPResult) (TLSResult, bool) {
+		// ⚠️ 超时不重试：TLS 握手超时说明这个 IP 在当前网络下就是不可用，
+		// 再试一次也是同样的结果，却要让并发槽位多占一个超时周期。
+		// 只有「连接被重置」这类偶发错误才值得重试。
+		r := TLSResult{}
+		for attempt := 0; attempt < opt.Retries; attempt++ {
+			r = ProbeTLS(ctx, t.IP, opt.Port, opt.Host, msDuration(opt.TLSTimeoutMs))
+			if r.OK {
+				return r, true
+			}
+			if ctx.Err() != nil {
+				return r, false
+			}
+			if isTimeoutError(r.Error) {
+				break
+			}
+		}
+		return r, false
 	}, func(done int) {
-		report(Progress{Stage: "tls", Done: done, Total: len(tcpResults), Message: "阶段一之二：TLS 握手筛选"})
-	})
+		report(Progress{Stage: "tls", Done: done, Total: len(tlsInput), Message: "阶段一之二：TLS 握手筛选"})
+	}, nil)
 
 	stats["tlsOk"] = len(tlsOK)
 	if len(tlsOK) == 0 {
-		report(Progress{Stage: "tls", Done: len(tcpResults), Total: len(tcpResults),
+		report(Progress{Stage: "tls", Done: len(tlsInput), Total: len(tlsInput),
 			Message: "TLS 握手全部失败 —— 检查域名是否正确、或换个采样数重试"})
 		return &Summary{Entries: []Entry{}, Stats: stats}, nil
 	}
@@ -219,19 +276,34 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 		return tlsMsOf[sortedTLS[i]] < tlsMsOf[sortedTLS[j]]
 	})
 	stage2 := sortedTLS
-	if len(stage2) > opt.ProbeLimit {
-		stage2 = stage2[:opt.ProbeLimit]
+	if len(stage2) > effectiveProbeLimit {
+		stage2 = stage2[:effectiveProbeLimit]
 	}
 	stats["stage2Input"] = len(stage2)
 
 	// ================= 阶段二：WS 101 校验（强制前置） =================
 	report(Progress{Stage: "probe", Total: len(stage2), Message: "阶段二：WebSocket 101 校验"})
 
+	// 早期退出判据：带地区筛选时，攒够够用的目标地区节点就收工。
+	//
+	// 阈值取 SpeedLimit * 1.5，留出余量应对后续测速淘汰。
+	earlyExitTarget := opt.SpeedLimit * 3 / 2
+	matchedCount := 0
+	// 目标地区集合（阶段二拿到 colo 后比对）
+	//
+	// 用 ExpandCountryFilter：国家代码（US）展开成该国全部机房，
+	// 机房代码（LAX）直接匹配 —— 与 CLI 版语义一致。
+	wantCountries := ExpandCountryFilter(opt.Countries)
+
 	wsOK := forEachIP(ctx, stage2, opt.ProbeConcurrency, func(ip string) (WSResult, bool) {
 		var last WSResult
 		for attempt := 0; attempt < opt.Retries; attempt++ {
 			last = ProbeWS101(ctx, ip, opt.Port, opt.Host, msDuration(opt.ProbeTimeoutMs), opt.WSPath)
 			if last.OK {
+				// 统计命中目标地区的数量（早期退出判据）
+				if len(wantCountries) > 0 && wantCountries[strings.ToUpper(last.Colo)] {
+					matchedCount++
+				}
 				return last, true
 			}
 			if ctx.Err() != nil {
@@ -241,6 +313,15 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 		return last, false
 	}, func(done int) {
 		report(Progress{Stage: "probe", Done: done, Total: len(stage2), Message: "阶段二：WebSocket 101 校验"})
+	}, func() bool {
+		// 早期退出：带地区筛选时，攒够够用的目标地区节点就收工。
+		//
+		// 为什么要提前退：扩大候选池后阶段二最多要探 500 个，
+		// 但用户只要 SpeedLimit 个节点 —— 探到第 20 个时就可以停，
+		// 省掉后面几百次 WS 探测（每次 3 秒超时）。
+		//
+		// 阈值取 SpeedLimit * 1.5，留出余量应对后续测速淘汰。
+		return len(opt.Countries) > 0 && matchedCount >= earlyExitTarget
 	})
 
 	stats["wsOk"] = len(wsOK)
@@ -253,10 +334,7 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 	// 地区过滤（机房信息来自阶段二的 101 响应）
 	wsFiltered := wsOK
 	if len(opt.Countries) > 0 {
-		want := make(map[string]bool, len(opt.Countries))
-		for _, c := range opt.Countries {
-			want[strings.ToUpper(strings.TrimSpace(c))] = true
-		}
+		want := ExpandCountryFilter(opt.Countries)
 		var keep []WSResult
 		for _, r := range wsOK {
 			if want[strings.ToUpper(r.Colo)] {
@@ -300,7 +378,7 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 		return speedOut{ws: r, dl: dl}, dl.OK
 	}, func(done int) {
 		report(Progress{Stage: "speed", Done: done, Total: len(stage3), Message: "阶段三：真实下行测速"})
-	})
+	}, nil)
 
 	// 组装结果：只保留测速成功的
 	entries := make([]Entry, 0, len(speedResults))
@@ -346,15 +424,25 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 //
 // 泛型签名是 `func(In) (Out, bool)` —— 输入与输出类型可以不同
 // （例如阶段一是 IP → TCPResult，阶段三是 WSResult → speedOut）。
+// forEachIP 并发遍历。
+//
+// shouldStop 可选：返回 true 时不再派发新任务（已在跑的任务会跑完）。
+// 用于「已经拿到足够多的目标结果就收工」。
 func forEachIP[In any, Out any](
 	ctx context.Context,
 	items []In,
 	concurrency int,
 	fn func(In) (Out, bool),
 	onProgress func(done int),
+	shouldStop ...func() bool,
 ) []Out {
 	if concurrency < 1 {
 		concurrency = 1
+	}
+	// 可选的提前终止判定（variadic，保持旧调用点不变）
+	var stop func() bool
+	if len(shouldStop) > 0 {
+		stop = shouldStop[0]
 	}
 
 	jobs := make(chan In)
@@ -389,6 +477,9 @@ func forEachIP[In any, Out any](
 	func() {
 		defer close(jobs)
 		for _, it := range items {
+			if stop != nil && stop() {
+				return
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -404,4 +495,21 @@ func forEachIP[In any, Out any](
 // msDuration 把毫秒数转成 time.Duration。
 func msDuration(ms int) time.Duration {
 	return time.Duration(ms) * time.Millisecond
+}
+
+// isTimeoutError 判断错误是否属于「超时」。
+//
+// 超时意味着「这个 IP 在当前网络下不可用」，重试一次也是同样结果，
+// 只会让并发槽位多占一个超时周期。偶发错误（连接重置等）才值得重试。
+//
+// 对应 CLI 版 packages/cli/src/scan/scan.ts 的 isTimeoutError。
+func isTimeoutError(errMsg string) bool {
+	if errMsg == "" {
+		return false
+	}
+	lower := strings.ToLower(errMsg)
+	return strings.Contains(lower, "超时") ||
+		strings.Contains(lower, "timeout") ||
+		strings.Contains(lower, "timed out") ||
+		strings.Contains(lower, "etimedout")
 }

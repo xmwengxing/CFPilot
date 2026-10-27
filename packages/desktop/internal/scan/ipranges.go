@@ -104,6 +104,40 @@ const DefaultCIDRWeight = 0.2
 //  1. 精确命中权重表 → 用它
 //  2. 否则找**最长前缀**的父网段（例：`162.159.1.0/24` 落到 `162.159.0.0/16`）
 //  3. 都没有 → DefaultCIDRWeight
+//
+// weightEntry 权重表的预解析条目。
+type weightEntry struct {
+	ones   int
+	base   uint32
+	weight float64
+}
+
+// weightTable 权重表的预解析结果（包加载时构建一次）。
+//
+// 旧实现每次调用 CIDRWeight 都重新 net.ParseCIDR 整张表 ——
+// 表里有几十条网段，而 SampleCandidates 会对每个网段调用一次，
+// 相当于重复解析几千次常量。
+var weightTable = func() []weightEntry {
+	out := make([]weightEntry, 0, len(ipv4CidrWeights))
+	for tableCidr, w := range ipv4CidrWeights {
+		_, tNet, err := net.ParseCIDR(tableCidr)
+		if err != nil {
+			continue
+		}
+		tOnes, _ := tNet.Mask.Size()
+		base := binary.BigEndian.Uint32(tNet.IP.To4())
+		out = append(out, weightEntry{ones: tOnes, base: base, weight: w})
+	}
+	// 预先按「前缀长度降序」排好 —— 最长前缀优先，省掉每次调用的 sort
+	sort.Slice(out, func(a, b int) bool {
+		if out[a].ones != out[b].ones {
+			return out[a].ones > out[b].ones
+		}
+		return out[a].base > out[b].base
+	})
+	return out
+}()
+
 func CIDRWeight(cidr string) float64 {
 	normalized := normalizeCIDR(cidr)
 	if w, ok := ipv4CidrWeights[normalized]; ok {
@@ -127,37 +161,20 @@ func CIDRWeight(cidr string) float64 {
 	// 于是 `198.41.130.0/24`（属于实测 0/12 的网段）回落成默认权重 0.2，
 	// 让本该完全不采样的网段漏进了候选池。
 	//
-	// 多个命中时按前缀长度降序取第一个（最长 = 最具体），
-	// 同长度再按网段起点降序（避免 map 遍历顺序带来的不确定性）。
-	type hit struct {
-		ones   int
-		base   uint32
-		weight float64
-	}
-	var hits []hit
-	for tableCidr, w := range ipv4CidrWeights {
-		_, tNet, err := net.ParseCIDR(tableCidr)
-		if err != nil {
-			continue
-		}
-		tOnes, _ := tNet.Mask.Size()
+	// weightTable 已按「前缀长度降序」排好，命中第一个即可。
+	for _, e := range weightTable {
 		// 只要「更宽的网段」（前缀更短）且真的包含这个 IP
-		if tOnes >= ones || !tNet.Contains(ip) {
+		if e.ones >= ones {
 			continue
 		}
-		base := binary.BigEndian.Uint32(tNet.IP.To4())
-		hits = append(hits, hit{ones: tOnes, base: base, weight: w})
-	}
-	if len(hits) == 0 {
-		return DefaultCIDRWeight
-	}
-	sort.Slice(hits, func(a, b int) bool {
-		if hits[a].ones != hits[b].ones {
-			return hits[a].ones > hits[b].ones
+		// 用起点 + 前缀长度判断覆盖关系（避免每次 Contains 分配）
+		mask := ^uint32(0) << uint(32-e.ones)
+		if binary.BigEndian.Uint32(ip.To4())&mask != e.base&mask {
+			continue
 		}
-		return hits[a].base > hits[b].base
-	})
-	return hits[0].weight
+		return e.weight
+	}
+	return DefaultCIDRWeight
 }
 
 // normalizeCIDR 去掉多余空白并统一成 `a.b.c.d/n` 形式。
@@ -514,4 +531,26 @@ func isHostname(s string) bool {
 		}
 	}
 	return true
+}
+
+// FormatHost 返回可安全拼接端口的主机部分。
+//
+// ## 为什么 IPv6 必须加方括号
+//
+// 数据面 sub-engine.ts 的解析器按冒号数量分流：
+//
+//	[2606:4700::1]:443  → 方括号形式 → host=2606:4700::1, port=443 ✓
+//	2606:4700::1:443    → 冒号数 > 1 → 整个串当成 IPv6 地址
+//	                      → host=2606:4700::1:443, port=默认 ✗ IP 错了
+//
+// 即裸 IPv6 带端口会被误解析成「一个更长的 IPv6 地址」，
+// 订阅里就会指向一个不存在的地址。
+// AGENTS.md 铁律 6 也要求解析器兼容 `[IPv6]:Port#备注` —— 产出方必须与之一致。
+//
+// 对应 CLI 版 packages/cli/src/scan/scan.ts 的 formatHost()。
+func FormatHost(ip string) string {
+	if strings.Contains(ip, ":") {
+		return "[" + ip + "]"
+	}
+	return ip
 }

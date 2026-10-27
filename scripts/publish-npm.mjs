@@ -88,9 +88,31 @@ if (versionExists()) {
   process.exit(0)
 }
 
-console.log(`正在发布 ${name}@${version} …`)
-try {
-  execSync('npm publish --access public', {
+/**
+ * 用哪种方式发布。
+ *
+ * ## 为什么用 `npm stage publish` 而不是 `npm publish`（2026-10-27）
+ *
+ * npm 在 2025 收紧了令牌权限：新建的 token 只能拿到
+ * **Staged Publish** 类型，直接 `npm publish` 会报：
+ *
+ *     403 This token can only publish to a staging area.
+ *         Run `npm stage publish` ...
+ *
+ * 这实际上是**更好的流程**：CI 只负责「把包推到暂存区」，
+ * 真正的 2FA 批准由维护者在本地 `npm stage approve` 做一次。
+ * 2FA 仍然掌握在人手里，而 CI 不需要交互输入 OTP。
+ *
+ * ## 两种方式都支持
+ *
+ * - 环境变量 `NPM_USE_STAGE=1` → 强制用 stage
+ * - 否则先试普通 publish，遇到 403 staging 错误自动回退到 stage
+ */
+function runPublish(useStage) {
+  const cmd = useStage
+    ? 'npm stage publish --access public'
+    : 'npm publish --access public'
+  execSync(cmd, {
     cwd: dir,
     stdio: 'inherit',
     env: {
@@ -100,7 +122,17 @@ try {
     },
     timeout: 180000,
   })
-  console.log(`✅ ${name}@${version} 发布成功`)
+}
+
+console.log(`正在发布 ${name}@${version} …`)
+const forceStage = process.env.NPM_USE_STAGE === '1'
+try {
+  runPublish(forceStage)
+  console.log(
+    forceStage
+      ? `✅ ${name}@${version} 已推送到暂存区（需本地 npm stage approve 批准上线）`
+      : `✅ ${name}@${version} 发布成功`
+  )
 } catch (err) {
   // 竞态：两个 job 同时发同一个版本时，后到的会 403。
   // 这种情况再查一次，确认是「已被别人发了」就当作成功。
@@ -108,6 +140,24 @@ try {
     console.log(`✓ ${name}@${version} 已存在（可能是并发发布），视为成功`)
     process.exit(0)
   }
-  console.error(`❌ 发布失败：${err instanceof Error ? err.message : String(err)}`)
+
+  const msg = err instanceof Error ? err.message : String(err)
+  const isStagingOnly = /only publish to a staging area|stage publish/i.test(msg)
+
+  // 令牌是 Staged Publish 类型：自动回退到 stage 流程
+  if (!forceStage && isStagingOnly) {
+    console.log('检测到令牌仅支持暂存发布，改用 npm stage publish …')
+    try {
+      runPublish(true)
+      console.log(`✅ ${name}@${version} 已推送到暂存区`)
+      console.log('   接下来需在本地执行：npm stage approve <stage-id>')
+      process.exit(0)
+    } catch (err2) {
+      console.error(`❌ 暂存发布也失败：${err2 instanceof Error ? err2.message : String(err2)}`)
+      process.exit(1)
+    }
+  }
+
+  console.error(`❌ 发布失败：${msg}`)
   process.exit(1)
 }

@@ -806,7 +806,7 @@ func buildSupportedCountries() []map[string]string {
 		for _, colo := range scan.CountryColosOf(country) {
 			out = append(out, map[string]string{
 				"code": colo,
-				"name": colo + "（" + scan.CountryNameOf(country) + "）",
+				"name": scan.ColoNameOf(colo),
 			})
 		}
 	}

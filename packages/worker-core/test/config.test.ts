@@ -52,11 +52,16 @@ describe('mergeConfig', () => {
 })
 
 describe('loadConfig', () => {
-  it('首次加载自动生成 UUID 与 Trojan 密码并写回', async () => {
+  it('非持久存储不自动生成凭据：保持空值 fail-closed（多实例行为一致）', async () => {
+    // 回归背景（2026-10-27 核实，Gemini 性能方案 一.3）：
+    // 生产上未绑定 KV 时 createStore 每个请求都 new MemoryStore()，
+    // 「生成并写回」等于每个请求一个不同的随机 UUID —— 客户端按面板
+    // 显示的 UUID 连接会随机失败。现只在持久化（KV）存储上自动生成；
+    // 内存存储保持空值 → 所有实例一致地拒绝认证（fail-closed）。
     const store = new MemoryStore()
     const config = await loadConfig(store, {} as Env)
-    expect(config.uuid).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
-    expect(config.trojanPassword.length).toBeGreaterThan(8)
+    expect(config.uuid).toBe('')
+    expect(config.trojanPassword).toBe('')
 
     const second = await loadConfig(store, {} as Env)
     expect(second.uuid).toBe(config.uuid)

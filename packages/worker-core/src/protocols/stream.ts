@@ -22,6 +22,29 @@ export class ByteStream {
     this.reader = stream.getReader()
   }
 
+  /**
+   * 从底层读取一个数据块进入内部缓冲（不消费）。
+   *
+   * 返回新到达的字节数；底层流结束返回 null。
+   * 调用方配合 `peek()` + `skip()` 实现「按块扫描、精确消费」——
+   * 对比逐字节 `readExactly(1)`，一次读取解析整段协议头（省上百次 Promise/Timer）。
+   */
+  async fill(): Promise<number | null> {
+    for (;;) {
+      if (this.done) return null
+      const { done, value } = await this.reader.read()
+      if (done) {
+        this.done = true
+        return null
+      }
+      if (value && value.byteLength > 0) {
+        this.chunks.push(value)
+        this.size += value.byteLength
+        return value.byteLength
+      }
+    }
+  }
+
   /** 精确读取 n 字节；流结束则返回 null */
   async readExactly(n: number): Promise<Uint8Array | null> {
     if (n === 0) return new Uint8Array(0)

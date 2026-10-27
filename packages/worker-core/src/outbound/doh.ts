@@ -233,9 +233,15 @@ export async function resolveEndpointIps(
 
   const answers: DnsAnswer[] = []
 
-  // 1) TXT：优选 IP 库（反代入口等无 TXT 的场合可跳过，见 skipTxt）
+  // 1) TXT（优选 IP 库）与 A 记录**并行**查询 ——
+  // 顺序查时 TXT 没命中（绝大多数域名）要白等一整轮 DoH 往返（50~300ms 首包延迟）；
+  // 并行后总耗时取决于更快的一支，语义仍是「TXT 优先、A 兑底」。
+  const [txt, aRecords] = await Promise.all([
+    opts.skipTxt ? Promise.resolve([] as string[]) : queryAll(target, 'TXT', opts),
+    queryAll(target, 'A', opts),
+  ])
+
   if (!opts.skipTxt) {
-    const txt = await queryAll(target, 'TXT', opts)
     for (const raw of txt) {
       const parsed = parseTxtIps(raw, port)
       if (parsed.length > 0) {
@@ -248,21 +254,19 @@ export async function resolveEndpointIps(
     }
   }
 
-  // 2) A 记录
+  // 2) A 记录（TXT 未给出优选库时兑底）
   if (answers.length === 0) {
-    const a = await queryAll(target, 'A', opts)
-    for (const ip of a) {
+    for (const ip of aRecords) {
       if (isIpv4(ip)) answers.push({ hostname: ip, port })
     }
   }
 
-  // 3) AAAA 记录
-  if (answers.length === 0) {
-    const aaaa = await queryAll(target, 'AAAA', opts)
-    for (const ip of aaaa) {
-      if (isIpv6(ip)) answers.push({ hostname: ip, port })
-    }
-  }
+  // 3) AAAA 已停用 —— 2026-10-27 真机实测裁决（复核铁律20）：
+  //    Workers 的 connect() 连 IPv6 字面量被运行时**快速拒绝**
+  //    （close 1011「出站被 Cloudflare 拒绝」344ms 实测），
+  //    查 AAAA 只会产出不可用候选，并多花 1~3 次子请求
+  //    （免费版单请求 50 次子请求配额）。IPv6-only 域名退回域名直连，
+  //    运行时解析失败时同样有分级诊断，行为一致且可解释。
 
   const deduped: DnsAnswer[] = []
   const seen = new Set<string>()

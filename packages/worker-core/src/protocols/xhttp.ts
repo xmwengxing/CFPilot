@@ -85,16 +85,15 @@ export async function handleXhttp(
     },
   })
 
-  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>()
-
   // 上行：请求体剩余部分 → 出站
   //
   // ⚠️ `closeTarget: false` —— 关闭 socket 的写流等于关闭整个 TCP 连接，
   // 目标站会收到 RST 而来不及把响应发回来。
   // 对比：WebSocket 入站路径只 releaseLock 不 close，是正常的。
   void relay(parsed.payload, dialResult.writable, undefined, false)
-  // 下行：出站 → 响应体（这里是 HTTP 响应体，结束时 close 是正确的）
-  void relay(dialResult.readable, writable)
+  // 下行：出站 → 响应体，由下方 combined 流**直接**从 dialResult.readable 拉取。
+  // 此前还经过一层 TransformStream + relay 中转，同一份下行在 Worker 内存里
+  // 被搬运两次（性能方案 三.3）；去掉后少一次拷贝与一对流控制器。
 
   // VLESS 响应头：版本(1) + Addons 长度(1) + Addons（原样回显请求里的 Addons）。
   // Xray 客户端要求先读到这个头才认为入站已建立，缺失时会把后续下行数据当作协议错误丢弃。
@@ -127,7 +126,7 @@ export async function handleXhttp(
     },
     async pull(controller) {
       if (!headerSent) return
-      if (!downReader) downReader = readable.getReader()
+      if (!downReader) downReader = dialResult.readable.getReader()
       try {
         const { done, value } = await downReader.read()
         if (done) {
@@ -144,7 +143,7 @@ export async function handleXhttp(
       }
     },
     cancel(reason) {
-      void readable.cancel(reason)
+      void dialResult.readable.cancel(reason)
     },
   })
 

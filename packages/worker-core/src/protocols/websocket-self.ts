@@ -166,6 +166,35 @@ export interface WsDiagnostics {
 }
 
 /**
+ * 解析 `Sec-WebSocket-Protocol` 里的 0-RTT 早期数据（Xray `?ed=2048`）。
+ *
+ * 主流客户端（Xray / sing-box / Mihomo）开启 early data 后把首包 Base64
+ * 编码塞进子协议头随升级请求一起送达，省掉 WS 建连后的一个往返。
+ * 此前本实现忽略该头：开了 `ed` 的客户端会永远等不到服务端消费它的首包
+ * （握手数据只在头里、不作为首帧重发），表现为连接必挂。
+ *
+ * 解码失败或过短（< 17 字节，连 VLESS 版本+UUID 都不够）一律忽略 ——
+ * 普通客户端的非 early-data 子协议头（如 `graphql-ws`）不受影响。
+ * 解码后限 8192 字节：early data 只承载首包，正常远小于此值。
+ */
+function decodeEarlyData(headerValue: string | null): Uint8Array {
+  if (!headerValue) return new Uint8Array(0)
+  const raw = headerValue.trim()
+  if (!raw || raw.length > 16384) return new Uint8Array(0)
+  try {
+    const b64 = raw.replace(/-/g, '+').replace(/_/g, '/')
+    const pad = b64.length % 4 === 0 ? '' : '='.repeat(4 - (b64.length % 4))
+    const bin = atob(b64 + pad)
+    if (bin.length < 17 || bin.length > 8192) return new Uint8Array(0)
+    const out = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+    return out
+  } catch {
+    return new Uint8Array(0)
+  }
+}
+
+/**
  * 处理 WebSocket 升级请求，返回 101 响应并启动双向中继。
  *
  * 认证：VLESS 校验 UUID，Trojan 校验 SHA224 口令。
@@ -194,8 +223,11 @@ export async function handleWebSocket(
   // workerd 下 event.data 可能是 Blob，用 arraybuffer 统一拿字节
   server.binaryType = 'arraybuffer'
 
-  // 攒包缓冲：协议头可能跨多个数据帧
-  let buffer = new Uint8Array(0)
+  // 攒包缓冲：协议头可能跨多个数据帧。
+  // 0-RTT：Xray 等客户端开 `?ed=2048` 后会把首包 Base64 放进
+  // `Sec-WebSocket-Protocol` 随升级请求送达（不再作为首帧重发）——
+  // 直接作为种子；忽略该头时行为与原来完全一致。
+  let buffer = decodeEarlyData(request.headers.get('sec-websocket-protocol'))
   let established = false
   let dialed: DialResult | null = null
   let writer: WritableStreamDefaultWriter<Uint8Array> | null = null
@@ -246,6 +278,7 @@ export async function handleWebSocket(
   }
 
   const cleanup = (): void => {
+    clearRetained()
     if (firstPacketTimer) {
       clearTimeout(firstPacketTimer)
       firstPacketTimer = null
@@ -277,6 +310,36 @@ export async function handleWebSocket(
   /** 反代重拨次数 */
   let relayRedialCount = 0
 
+  /**
+   * 下行首字节确认前的上行留存（反代重拨重放用）。
+   *
+   * 真机缺陷（Gemini 性能方案 一.1 定位，2026-10-27 代码核实确认）：
+   * 直连可能「假活」—— TCP 通了但目标站收不到数据，写进去的上行被静默丢弃。
+   * 早前 `establish` 把首包写进直连后**立即清空 buffer**，
+   * 假活触发反代重拨时重放的是空缓冲 —— 反代永远收不到 TLS ClientHello，
+   * 连接必然卡死到超时（假活重拨形同虚设）。
+   *
+   * 现在：下行首字节到达（= 通路确认）之前，所有上行都留存一份；
+   * 重拨时整体重放，直到新通路首字节确认后再释放。
+   */
+  let retained: Uint8Array[] = []
+  let retainedBytes = 0
+
+  const retain = (bytes: Uint8Array): void => {
+    if (bytes.byteLength === 0 || downlinkBytes > 0) return // 通路已确认，无需留存
+    if (retainedBytes + bytes.byteLength > MAX_RELAY_BUFFER_BYTES) {
+      closeWith(1009, '未确认通路的上行数据过多')
+      return
+    }
+    retained.push(bytes)
+    retainedBytes += bytes.byteLength
+  }
+
+  const clearRetained = (): void => {
+    retained = []
+    retainedBytes = 0
+  }
+
   /** 下行：出站 → 客户端 */
   const pumpDown = async (): Promise<void> => {
     if (!dialed) return
@@ -300,7 +363,9 @@ export async function handleWebSocket(
         const { done, value } = await reader.read()
         if (done) break
         if (value && value.byteLength > 0) {
+          const firstByte = downlinkBytes === 0
           downlinkBytes += value.byteLength
+          if (firstByte) clearRetained() // 通路确认，释放重放留存
           send(value)
         }
       }
@@ -473,7 +538,11 @@ export async function handleWebSocket(
     // buffer（见 message 处理器里 `if (!writer)` 分支），
     // 因此这里必须整段补写，而不是只写第一帧。
     const payload = buffer.byteLength > parsed.headerLength ? buffer.slice(parsed.headerLength) : new Uint8Array(0)
-    if (payload.byteLength > 0) await pumpUp(payload)
+    if (payload.byteLength > 0) {
+      // 先留存再写：直连可能假活，首字节确认前上行必须可重放
+      retain(payload)
+      await pumpUp(payload)
+    }
     buffer = new Uint8Array(0)
 
     ctx?.waitUntil(pumpDown())
@@ -500,9 +569,10 @@ export async function handleWebSocket(
    *
    * ## 数据不丢
    *
-   * 重拨前已写入假活连接的上行数据会丢（目标站没收到），
-   * 但客户端会在应用层重试（TCP 重传 / TLS 重传）——
-   * 反代建连成功后 `establish` 里会把 `buffer` 里暂存的首包一起补写。
+   * 重拨前已写入假活连接的上行数据目标站收不到，但 `retained` 里留有
+   * 下行首字节确认前的完整上行副本 —— 反代建连成功后整体重放，
+   * TLS ClientHello / HTTP 首包不会丢。（此前 buffer 被 establish 提前清空，
+   * 重放恒为空 —— 是 2026-10-27 代码核实确认的致命缺陷。）
    */
   const redialViaRelay = async (): Promise<void> => {
     // target 理论上一定已解析（本函数只在 establish 成功后由静默检测触发），
@@ -569,10 +639,19 @@ export async function handleWebSocket(
         // 客户端与目标站直接完成 TLS。所以反代收到的就是客户端的原始
         // ClientHello（SNI = 目标站）—— 无需 Worker 做任何改写，直通即可。
         //
-        // 把暂存的首包补写进去（含协议头之后的负载）
-        if (buffer.byteLength > 0) {
-          await writer.write(buffer)
-          buffer = new Uint8Array(0)
+        // 重放首字节确认前的全部上行（TLS ClientHello / HTTP 首包等）。
+        // ⚠️ 不在这里清空 —— 要等新通路的下行首字节确认后再释放（pumpDown）；
+        // 多个反代入口依次尝试时，每个都能拿到完整的重放数据。
+        if (retained.length > 0) {
+          let total = 0
+          for (const c of retained) total += c.byteLength
+          const replay = new Uint8Array(total)
+          let off = 0
+          for (const c of retained) {
+            replay.set(c, off)
+            off += c.byteLength
+          }
+          await writer.write(replay)
         }
 
         recordDiagnostics(
@@ -630,6 +709,8 @@ export async function handleWebSocket(
         }
         return
       }
+      // 首字节确认前的上行留存（假活时反代重拨要重放，见 retain 注释）
+      retain(bytes)
       await pumpUp(bytes)
     })()
   })
@@ -639,6 +720,12 @@ export async function handleWebSocket(
   }
   server.addEventListener('close', onClose)
   server.addEventListener('error', onClose)
+
+  // 0-RTT：early data 里可能已是完整协议头，主动触发 establish ——
+  // 客户端在收到下行前不会再发帧，不主动触发会白等到超时。
+  if (buffer.byteLength > 0) {
+    void establish(false).catch((err) => closeWith(1011, String(err)))
+  }
 
   // Node（vitest）的 Response 不接受 101 状态码，只有 workerd 支持；
   // 因此这里用 200 + webSocket 选项，在 workerd 下同样完成升级。

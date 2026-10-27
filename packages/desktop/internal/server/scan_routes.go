@@ -229,7 +229,7 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 				}
 				s.logLevel(fmt.Sprintf("%4d  %-23s  %-4s  %6d  %7d  %9.3f",
 					i+1,
-					fmt.Sprintf("%s:%d", e.IP, e.Port),
+					fmt.Sprintf("%s:%d", scan.FormatHost(e.IP), e.Port),
 					orDash(e.Colo),
 					e.TLSMs,
 					e.Latency,
@@ -654,7 +654,7 @@ func (s *Server) doPanelCallback(ctx context.Context, host string, entries []sca
 		if label == "" {
 			label = "CF"
 		}
-		lines = append(lines, fmt.Sprintf("%s:%d#%s", e.IP, e.Port, label))
+		lines = append(lines, fmt.Sprintf("%s:%d#%s", scan.FormatHost(e.IP), e.Port, label))
 	}
 
 	s.logLevel("正在回填到面板："+url, "info")
@@ -762,7 +762,7 @@ func formatCopyable(entries []scan.Entry) string {
 		if tag == "" {
 			tag = "CF"
 		}
-		fmt.Fprintf(&sb, "%s:%d#%s\n", e.IP, e.Port, tag)
+		fmt.Fprintf(&sb, "%s:%d#%s\n", scan.FormatHost(e.IP), e.Port, tag)
 	}
 	return sb.String()
 }
@@ -792,44 +792,23 @@ func isPortOpen(host string, port int, timeout time.Duration) bool {
 }
 
 // supportedCountries 是支持的地区列表（机房代码 → 中文名）。
-var supportedCountries = []map[string]string{
-	{"code": "HKG", "name": "香港"},
-	{"code": "TPE", "name": "台北"},
-	{"code": "NRT", "name": "东京"},
-	{"code": "KIX", "name": "大阪"},
-	{"code": "ICN", "name": "首尔"},
-	{"code": "SIN", "name": "新加坡"},
-	{"code": "BKK", "name": "曼谷"},
-	{"code": "KUL", "name": "吉隆坡"},
-	{"code": "CGK", "name": "雅加达"},
-	{"code": "MNL", "name": "马尼拉"},
-	{"code": "SGN", "name": "胡志明"},
-	{"code": "BOM", "name": "孟买"},
-	{"code": "SYD", "name": "悉尼"},
-	{"code": "MEL", "name": "墨尔本"},
-	{"code": "AKL", "name": "奥克兰"},
-	{"code": "LAX", "name": "洛杉矶"},
-	{"code": "SJC", "name": "圣何塞"},
-	{"code": "SEA", "name": "西雅图"},
-	{"code": "DFW", "name": "达拉斯"},
-	{"code": "ORD", "name": "芝加哥"},
-	{"code": "IAD", "name": "华盛顿"},
-	{"code": "EWR", "name": "纽瓦克"},
-	{"code": "YYZ", "name": "多伦多"},
-	{"code": "LHR", "name": "伦敦"},
-	{"code": "MAN", "name": "曼彻斯特"},
-	{"code": "AMS", "name": "阿姆斯特丹"},
-	{"code": "FRA", "name": "法兰克福"},
-	{"code": "CDG", "name": "巴黎"},
-	{"code": "MAD", "name": "马德里"},
-	{"code": "MXP", "name": "米兰"},
-	{"code": "ARN", "name": "斯德哥尔摩"},
-	{"code": "WAW", "name": "华沙"},
-	{"code": "IST", "name": "伊斯坦布尔"},
-	{"code": "DXB", "name": "迪拜"},
-	{"code": "TLV", "name": "特拉维夫"},
-	{"code": "JNB", "name": "约翰内斯堡"},
-	{"code": "GRU", "name": "圣保罗"},
-	{"code": "EZE", "name": "布宜诺斯艾利斯"},
-	{"code": "MEX", "name": "墨西哥城"},
+//
+// ⚠️ 数据来源必须是 scan 包里的映射（与 CLI 版 countries.ts 同源），
+// 不要在这里另写一份 —— 两份表会漂移。
+var supportedCountries = buildSupportedCountries()
+
+// buildSupportedCountries 从 scan 包的「国家 → 机房」映射生成界面列表。
+//
+// 输出顺序：按国家代码字典序，同一国家的机房按映射里的顺序。
+func buildSupportedCountries() []map[string]string {
+	out := make([]map[string]string, 0, 64)
+	for _, country := range scan.SupportedCountries() {
+		for _, colo := range scan.CountryColosOf(country) {
+			out = append(out, map[string]string{
+				"code": colo,
+				"name": colo + "（" + scan.CountryNameOf(country) + "）",
+			})
+		}
+	}
+	return out
 }

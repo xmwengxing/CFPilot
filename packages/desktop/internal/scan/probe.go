@@ -34,10 +34,14 @@ import (
 	"io"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+// httpStatusRE 从 HTTP 响应头里取状态码。
+var httpStatusRE = regexp.MustCompile(`^HTTP/1\.[01]\s+(\d{3})`)
 
 // UserAgent 是探测请求的 UA。
 //
@@ -291,18 +295,50 @@ func MeasureDownload(
 	}
 
 	start := time.Now()
+	// 判定「有效载荷」的最小字节数。
+	//
+	// ⚠️ 不能只判 received > 0：404 / 403 的报错页也有几百字节 HTML，
+	// 会被当成「测速成功」，产出一个速度极低的假阳性节点。
+	// 要求至少收到 32KB 才认为拿到了真正的二进制流。
+	minPayload := bytesWanted
+	if minPayload > 32*1024 {
+		minPayload = 32 * 1024
+	}
+	// HTTP 状态码；未拿到响应头前为 0
+	status := 0
+
+	// finish 统一判定「这次测速算不算成功」：
+	// 状态码 200 + 载荷够大，两个条件缺一不可。
 	finish := func(received int64, errMsg string) DownloadResult {
 		seconds := time.Since(start).Seconds()
 		if seconds < 0.001 {
 			seconds = 0.001
 		}
+		ok := status == 200 && received >= int64(minPayload)
+		msg := errMsg
+		if ok {
+			msg = ""
+		} else if msg == "" {
+			switch {
+			case status == 0:
+				msg = "未收到响应头"
+			case status != 200:
+				msg = fmt.Sprintf("HTTP %d", status)
+			default:
+				msg = fmt.Sprintf("载荷不足（%d/%d 字节）", received, minPayload)
+			}
+		}
+		speed := 0.0
+		if ok {
+			speed = float64(received) / 1024 / 1024 / seconds
+		}
 		return DownloadResult{
 			IP:        ip,
-			OK:        received > 0,
+			OK:        ok,
 			Bytes:     received,
-			SpeedMBps: float64(received) / 1024 / 1024 / seconds,
+			SpeedMBps: speed,
 			MS:        time.Since(start).Milliseconds(),
-			Error:     errMsg,
+			Error:     msg,
 		}
 	}
 
@@ -359,6 +395,17 @@ func MeasureDownload(
 					}
 					continue
 				}
+				// ⚠️ 必须校验状态码：探针端点返回 404 / 403 时，
+				// 报错页也有字节数，不校验就会被当成「测速成功」。
+				head := text[:idx]
+				if m := httpStatusRE.FindStringSubmatch(head); m != nil {
+					if code, err := strconv.Atoi(m[1]); err == nil {
+						status = code
+					}
+				}
+				if status != 200 {
+					return finish(0, fmt.Sprintf("HTTP %d", status))
+				}
 				headerEnd = int64(idx + 4)
 				// 响应头之后的字节才算负载
 				bodyOffset := headerEnd - int64(len(text)-n)
@@ -373,9 +420,6 @@ func MeasureDownload(
 			}
 		}
 		if readErr != nil {
-			if received > 0 {
-				return finish(received, "")
-			}
 			return finish(received, "测速超时")
 		}
 	}

@@ -70,17 +70,19 @@ export async function ask(question: string, options: AskOptions = {}): Promise<s
         const value = buf.trim()
         if (!value && !fallback && !allowEmpty) {
           // 必填项为空：提示后继续
-          stdout.write(`\r${c.yellow('!')} 不能为空，请重新输入${c.gray(': ')}${password ? '' : buf}`)
+          stdout.write(
+            `\r${c.yellow('!')} 不能为空，请重新输入${c.gray(': ')}${password ? '*'.repeat(buf.length) : buf}`
+          )
           return
         }
         finish(value || fallback)
         return
       }
       if (key?.name === 'backspace') {
+        if (buf.length === 0) return
         buf = buf.slice(0, -1)
-        if (!password) {
-          stdout.write('\b \b')
-        }
+        // 密码模式回退一个星号（多字节字符也按一个 * 处理）
+        stdout.write('\b \b')
         return
       }
       if (key?.name === 'escape') {
@@ -93,7 +95,8 @@ export async function ask(question: string, options: AskOptions = {}): Promise<s
       }
       if (str && !key?.ctrl && str >= ' ') {
         buf += str
-        if (!password) stdout.write(str)
+        // 密码模式回显 *，让用户知道输入成功（否则完全看不到反馈）
+        stdout.write(password ? '*' : str)
       }
     }
 

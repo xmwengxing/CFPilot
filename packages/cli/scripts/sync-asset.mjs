@@ -14,9 +14,28 @@ const source = resolve(monorepo, 'packages/worker-core/dist/worker.js')
 const targetDir = resolve(pkgRoot, 'assets')
 const target = resolve(targetDir, 'cfpilot-worker.js')
 
+// 产物缺失时自动构建 worker-core
+//
+// ⚠️ npm workspaces 按字母序执行：cli < worker-core，
+// 所以 `npm run build --workspaces` 时 cli 会先跑，
+// 那时 worker-core/dist 还不存在。这里自动补构建。
 if (!existsSync(source)) {
-  console.error('[cfpilot] 未找到 worker-core 构建产物')
-  console.error('[cfpilot] 请先执行：npm run build -w @cfpilot/worker-core')
+  console.log('[cfpilot] worker-core 产物缺失，正在构建…')
+  const { execSync } = await import('node:child_process')
+  try {
+    execSync('npm run build -w @cfpilot/worker-core', {
+      cwd: monorepo,
+      stdio: 'inherit',
+    })
+  } catch {
+    console.error('[cfpilot] 自动构建 worker-core 失败')
+    console.error('[cfpilot] 请手动执行：npm run build -w @cfpilot/worker-core')
+    process.exit(1)
+  }
+}
+
+if (!existsSync(source)) {
+  console.error('[cfpilot] 构建后仍找不到 worker-core/dist/worker.js')
   process.exit(1)
 }
 

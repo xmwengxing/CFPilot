@@ -25,6 +25,7 @@
  * 启动时并行探测各候选地址，优先用可用的那个。
  */
 import * as tls from 'node:tls'
+import * as net from 'node:net'
 
 /** 内置测速地址（都不含协议前缀，端口按目标端口推断） */
 export const SPEED_URL_PRESETS: Array<{ url: string; label: string }> = [
@@ -156,8 +157,11 @@ export function checkSpeedUrlAvailable(
         ? tls.connect(connectOptions, () => socket.write(request))
         : // http 明文：用 net 连接
           (() => {
-            // eslint-disable-next-line @typescript-eslint/no-var-requires
-            const net = require('node:net') as typeof import('node:net')
+            // ⚠️ 必须用顶层 import 的 net，不能写 require('node:net')。
+            // 本包是 ESM（format: 'esm'），esbuild 会把 require 改写成
+            // __require() 垫片，运行时抛：
+            //   Error: Dynamic require of "node:net" is not supported
+            // 实测：http:// 测速地址直接崩，https:// 正常。
             const s = net.connect({ host: parsed.host, port: 80 }, () => s.write(request))
             return s as unknown as tls.TLSSocket
           })()
@@ -176,7 +180,21 @@ export function checkSpeedUrlAvailable(
   })
 }
 
-const USER_AGENT_FOR_CHECK = 'CFPilot-Scanner/1.0 (+https://github.com/xmwengxing/CFPilot)'
+/**
+ * 测速预检用的 User-Agent。
+ *
+ * 用常见桌面浏览器标识，不用工具自身的名字。
+ *
+ * ## 为什么
+ *
+ * 预检请求打的是**公开测速地址**（speed.cloudflare.com 等第三方），
+ * 带 `CFPilot-Scanner/1.0 (+github.com/...)` 会在对方的访问日志里
+ * 留下明确的「这是某个工具」指纹。几百次扫描下来很容易被识别并限流。
+ *
+ * 本地回传结果 / 日志输出仍用工具自身标识（见 callback.ts），不混淆。
+ */
+const USER_AGENT_FOR_CHECK =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 
 /**
  * 依次预检候选测速地址，返回第一个可用的。

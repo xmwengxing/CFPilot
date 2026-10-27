@@ -114,6 +114,29 @@ export const DEFAULT_CIDR_WEIGHT = 0.2
  * 因此这里用**最长前缀匹配**：把候选网段与表中每一项比对，
  * 取前缀长度最长（最具体）且能覆盖候选的那个权重。
  */
+/**
+ * 权重表的预解析结果（模块加载时构建一次）。
+ *
+ * 旧实现每次调用 cidrWeight 都重新 parseCidr 整张表 ——
+ * 表里有几十条网段，而 expandCidrs 会对每个网段调用一次，
+ * 相当于重复解析几千次常量。
+ */
+interface WeightEntry {
+  base: bigint
+  prefix: number
+  weight: number
+}
+
+const WEIGHT_TABLE: WeightEntry[] = (() => {
+  const out: WeightEntry[] = []
+  for (const [cidr, weight] of Object.entries(IPV4_CIDR_WEIGHTS)) {
+    const parsed = parseCidr(cidr)
+    if (!parsed || parsed.family !== 4) continue
+    out.push({ base: parsed.base, prefix: parsed.prefix, weight })
+  }
+  return out
+})()
+
 export function cidrWeight(cidr: string): number {
   const normalized = cidr.trim()
   // 1) 精确匹配优先
@@ -125,21 +148,19 @@ export function cidrWeight(cidr: string): number {
 
   let bestPrefix = -1
   let bestWeight = DEFAULT_CIDR_WEIGHT
-  for (const [tableCidr, weight] of Object.entries(IPV4_CIDR_WEIGHTS)) {
-    const tableParsed = parseCidr(tableCidr)
-    if (!tableParsed || tableParsed.family !== 4) continue
-    // tableParsed 必须能覆盖 parsed：前缀更短（或相等）
-    if (tableParsed.prefix > parsed.prefix) continue
-    // 对齐检查：都归一到「前 tableParsed.prefix 位」再比。
-    // parsed 的前 tableParsed.prefix 位 = parsed.base >> (32 - tableParsed.prefix)
+  for (const entry of WEIGHT_TABLE) {
+    // entry 必须能覆盖 parsed：前缀更短（或相等）
+    if (entry.prefix > parsed.prefix) continue
+    // 对齐检查：都归一到「前 entry.prefix 位」再比。
+    // parsed 的前 entry.prefix 位 = parsed.base >> (32 - entry.prefix)
     //   （parsed.base 已按更长的 parsed.prefix 掩过，主机位为 0，直接右移即可）
-    // table 的前 tableParsed.prefix 位 = tableParsed.base >> (32 - tableParsed.prefix)
-    const parsedNorm = parsed.base >> BigInt(32 - tableParsed.prefix)
-    const tableNorm = tableParsed.base >> BigInt(32 - tableParsed.prefix)
+    // table 的前 entry.prefix 位 = entry.base >> (32 - entry.prefix)
+    const parsedNorm = parsed.base >> BigInt(32 - entry.prefix)
+    const tableNorm = entry.base >> BigInt(32 - entry.prefix)
     if (parsedNorm !== tableNorm) continue
-    if (tableParsed.prefix > bestPrefix) {
-      bestPrefix = tableParsed.prefix
-      bestWeight = weight
+    if (entry.prefix > bestPrefix) {
+      bestPrefix = entry.prefix
+      bestWeight = entry.weight
     }
   }
   return bestWeight
@@ -497,12 +518,33 @@ export function expandCidrs(cidrs: string[], options: IpRangeOptions = {}): stri
         continue
       }
       const step = Math.floor(Number(cidr.size) / count)
-      const offset = Math.floor(random() * step)
       for (let i = 0; i < count; i++) {
-        const offsetValue = BigInt(offset + Math.floor(i * step))
-        if (offsetValue >= cidr.size) break
-        const value = cidr.base + offsetValue
-        out.push(family === 4 ? bigIntToIpv4(value) : bigIntToIpv6(value))
+        // ⚠️ 每个桶独立抖动，不能在循环外只摇一次。
+        //
+        // 旧实现：`offset = random() * step` 在循环外只算一次，
+        // 于是同一网段采出的所有 IP 是**固定步长的等差数列**。
+        // 当 step 是 256 的倍数时（/16 取 64 个 → step=1024），
+        // **全部样本的末位相同**；offset 末位若落在 .0 / .255，
+        // 整个网段的样本全部是网络地址或广播地址 → 100% 浪费。
+        //
+        // 现在每个桶各自在 [i*step, (i+1)*step) 区间内随机取点，
+        // 末位分布均匀，且避开 .0 / .255。
+        const jitter = Math.floor(random() * step)
+        let offsetValue = BigInt(i * step + jitter)
+        if (offsetValue >= cidr.size) offsetValue = cidr.size - 1n
+
+        let value = cidr.base + offsetValue
+        if (cidr.family === 4) {
+          // 跳过网络地址（.0）与广播地址（.255）
+          const lastOctet = value & 0xffn
+          if (lastOctet === 0n) value += 1n
+          else if (lastOctet === 255n) value -= 1n
+          // 越界回退（只可能发生在 /31 /32 这种极小网段）
+          if (value < cidr.base || value >= cidr.base + cidr.size) {
+            value = cidr.base + offsetValue
+          }
+        }
+        out.push(cidr.family === 4 ? bigIntToIpv4(value) : bigIntToIpv6(value))
       }
     }
   }

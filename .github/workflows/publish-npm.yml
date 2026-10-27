@@ -99,7 +99,7 @@ jobs:
       - name: 校验内置内核资产与最新构建一致
         run: |
           npm run build -w @cfpilot/worker-core
-          npm run build -w cfpilot-deploy
+          npm run build -w cfpilot
 
           if git diff --exit-code packages/deploy-wizard/assets/cfpilot-worker.js; then
             echo "内置内核资产与最新构建一致 ✅"
@@ -132,20 +132,13 @@ jobs:
           echo "::error::内置内核资产与源码不一致（排除版本串后仍有差异）"
           diff -u /tmp/committed.norm.js /tmp/fresh.norm.js | head -60
           echo ""
-          echo "修复：本地执行 npm run build -w @cfpilot/worker-core && npm run build -w cfpilot-deploy 后提交"
-      - name: 发布 cfpilot-scanner
+          echo "修复：本地执行 npm run build -w @cfpilot/worker-core && npm run build -w cfpilot 后提交"
+      - name: 发布 cfpilot
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_USE_STAGE: '1'
         run: |
-          node scripts/publish-npm.mjs cfpilot-scanner
-
-      - name: 发布 cfpilot-deploy
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_USE_STAGE: '1'
-        run: |
-          node scripts/publish-npm.mjs cfpilot-deploy
+          node scripts/publish-npm.mjs cfpilot
 
       - name: 提示后续操作
         # stage 发布后包还没上线，需要人工批准，所以这里不做版本校验

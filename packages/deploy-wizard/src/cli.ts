@@ -47,7 +47,7 @@ CFPilot 全中文部署向导 —— 自动创建 KV、部署 Worker 内核、�
   ${NAME} --version           显示版本
 
   ⚠️ 已归档：${NAME} workers（Workers 单脚本形态）
-     2026-10-24 停用 —— 数据面在 Workers 上 522 无解，
+     停用 —— 数据面在 Workers 上 522 无解，
      且实验账号在少量部署后被平台封禁。仅保留供历史排查。
 
 选项:
@@ -72,7 +72,7 @@ CFPilot 全中文部署向导 —— 自动创建 KV、部署 Worker 内核、�
    pages-split（Pages 双项目，推荐）
    真机复现：合并包部署到 Pages，第一次成功、第二次 HTTP 400 / 8000119 blocked；
    拆成控制面与数据面两个项目后，两边都能原地更新。
-   1. 创建两个 Pages 项目（控制面无 sockets，数据面用 旧版第三方实现 实现）
+   1. 创建两个 Pages 项目（控制面无 sockets，数据面提供代理服务）
    2. 配置 KV 绑定与环境变量（Pages 的绑定只对之后的部署生效）
    3. 先部署数据面，再部署控制面（控制面需要数据面域名生成订阅）
 
@@ -112,7 +112,7 @@ const PAGES_HELP = `
 ${NAME} pages-split —— Pages 双项目部署（控制面 + 数据面）
 
 ⚠️ 这是**当前唯一实测可用的部署形态**，不是 Cloudflare 的硬性要求。
-   2026-10-22 真机复现：合并包部署到 Pages，第一次成功、第二次
+   真机复现：合并包部署到 Pages，第一次成功、第二次
    HTTP 400 / 8000119 blocked。拆成两个项目后两边都能原地更新。
    Cloudflare 未说明具体触发原因，详见 docs/cloudflare-deployment-diagnosis.md。
 
@@ -460,10 +460,10 @@ async function main(): Promise<void> {
     return
   }
 
-  // ⚠️ 默认命令改为 pages-split（2026-10-27）
+  // ⚠️ 默认命令改为 pages-split
   //
   // 架构铁律：部署形态唯一 = Pages 双项目。
-  // 旧的 `deploy()`（Workers 单脚本）已于 2026-10-24 全线归档：
+  // 旧的 `deploy()`（Workers 单脚本）已于 全线归档：
   //   - 数据面在 Workers 上 522 无解
   //   - 实验用干净账号在少量部署后被 Cloudflare 封禁
   //
@@ -480,7 +480,7 @@ async function main(): Promise<void> {
 
   process.stderr.write(
     '\n⚠️  你正在使用已归档的 Workers 单脚本部署形态。\n' +
-      '   该形态已于 2026-10-24 停用：数据面在 Workers 上 522 无解，\n' +
+      '   该形态已于 停用：数据面在 Workers 上 522 无解，\n' +
       '   且实验账号在少量部署后被平台封禁。\n' +
       '   → 请改用 `cfpilot-deploy pages-split`（Pages 双项目，唯一受支持形态）。\n\n'
   )

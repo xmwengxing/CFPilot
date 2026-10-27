@@ -7,7 +7,7 @@
  *   1. 模块启动阶段不依赖 sockets，拨号失败只影响本次出站，不影响整个 Worker；
  *   2. 产物里不出现完整的 `cloudflare:sockets` 特征串（部署期静态特征查杀友好）。
  *
- * ## ⚠️ 2026-10-23 更正：曾经的错误归因
+ * ## ⚠️ 更正：曾经的错误归因
  *
  * 本文件此前写着「静态导入 sockets 会让 isolate 启动阶段失败（1101）」，
  * 并称「一个只导入 sockets 的 30 行脚本同样复现 TCP Loop detected」。
@@ -298,7 +298,7 @@ async function dialViaProxy(
   //
   // ⚠️ 必须用 `starttls` + `startTls()`，**不能**用 `secureTransport: 'on'`。
   //
-  // 原因（2026-10-23 真机实测，Cloudflare 边缘）：
+  // 原因：
   //   - `secureTransport: 'on'` → `socket.opened` 直接 reject：
   //     「proxy request failed, cannot connect to the specified address」
   //   - `secureTransport: 'starttls'` + `startTls()` → 能进入 TLS 握手阶段
@@ -501,7 +501,7 @@ export async function dial(options: DialOptions): Promise<DialResult> {
   // 选路：代理 → 直连目标 → 优选 IP。
   // Cloudflare 网段的候选会被降权到最后（Worker 连不回 CF 自己的 Anycast 入口）。
   //
-  // ⚠️ **域名直连的降权（2026-10-23 真机验证发现）**
+  // ⚠️ **域名直连的降权**
   //
   // 目标域名解析到 Cloudflare 网段时（如 `example.com` → `172.66.147.243`、
   // `104.20.23.154`），把域名丢给 `connect()` 让运行时自己解析，

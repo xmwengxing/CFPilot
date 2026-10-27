@@ -285,7 +285,7 @@ func (s *Server) routes() http.Handler {
 
 // withCommonHeaders 统一加安全响应头与 Host 校验。
 //
-// ## Host 校验的两种模式（2026-10-26 起支持局域网）
+// ## Host 校验的两种模式
 //
 // 校验 Host 头的目的是**防 DNS Rebinding**：
 // 恶意网页把自己的域名解析到 127.0.0.1，再让浏览器请求本服务。
@@ -431,7 +431,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
-		// ⚠️ 用 Lax 而不是 Strict（2026-10-26 修正）。
+		// ⚠️ 用 Lax 而不是 Strict。
 		//
 		// Strict 的语义是「任何跨站来源的请求都不带 Cookie」，
 		// 包括**从地址栏直接粘贴 URL 打开**这种场景在某些浏览器上

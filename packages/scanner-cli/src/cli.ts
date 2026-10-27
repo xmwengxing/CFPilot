@@ -288,7 +288,7 @@ async function commandScan(args: ReturnType<typeof parseArgs>): Promise<void> {
   // 国家过滤：不选 = 全量。无效代码在 normalizeCountryFilter 里被丢弃
   const countries = normalizeCountryFilter(flagList(args, 'countries'))
   /**
-   * 回填地址与令牌（2026-10-27 重构，与图形版行为对齐）
+   * 回填地址与令牌
    *
    * ## 两个改动
    *

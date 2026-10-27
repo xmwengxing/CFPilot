@@ -640,7 +640,7 @@ export class CloudflareClient {
    *
    * ## 为什么不直接用 `project.domains`
    *
-   * 真机实测（2026-10-25）：刚绑定的域名在 `initializing` 期间**不出现在**
+   * 真机实测：刚绑定的域名在 `initializing` 期间**不出现在**
    * `GET /pages/projects/<name>` 的 `domains` 数组里 —— 只有 `active` 的才列出。
    *
    * 而 8000119 换名重建是随时可能发生的：若此时用户刚绑了一个还没生效的域名，
@@ -667,7 +667,7 @@ export class CloudflareClient {
   /**
    * 从 Pages 项目解绑自定义域名。
    *
-   * ## 为什么迁移前必须先解绑（2026-10-25 真机踩坑）
+   * ## 为什么迁移前必须先解绑
    *
    * Pages 的同一个自定义域名**同时只能挂在一个项目上**。
    * 直接把域名加到新项目会报：

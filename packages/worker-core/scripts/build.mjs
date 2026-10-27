@@ -29,11 +29,11 @@ const TARGETS = [
 /**
  * 哪些产物**不允许**出现静态 `cloudflare:sockets` 导入。
  *
- * 真机对照（2026-10-22）证明静态导入会让 isolate 在启动阶段失败
+ * 真机对照证明静态导入会让 isolate 在启动阶段失败
  * （1101 且 Observability 无事件）。因此自研出站代码改用动态导入
  * （见 outbound/dial.ts 的 getConnect()）。
  *
- * 旧版第三方实现（`wsHandler`）已于 2026-10-25 **完全移除** ——
+ * 历史第三方实现（`wsHandler`）已完全移除 ——
  * 它占数据面产物体积 77% 且自带 sockets 静态 import。现在所有产物
  * 都是纯自研代码，因此断言覆盖**全部**产物。
  */
@@ -95,7 +95,7 @@ async function buildVersion() {
       for (const name of readdirSync(dir)) {
         const p = resolve(dir, name)
         if (statSync(p).isDirectory()) walk(p)
-        // ⚠️ 必须排除构建产物（2026-10-27 修复版本号永不收敛）
+        // ⚠️ 必须排除构建产物
         //
         // `ui/panel.generated.ts` 是 panel.html 压缩后的中间产物，
         // 每次构建都会重新生成。把它算进哈希会出两个问题：

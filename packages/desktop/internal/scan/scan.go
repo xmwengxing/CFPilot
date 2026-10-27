@@ -45,7 +45,7 @@ type Options struct {
 	WSPath string
 	// ProbePath 是**测速探针端点**，默认 /__edge_probe。
 	//
-	// ## 为什么必须与 WSPath 分开（2026-10-27 严重缺陷）
+	// ## 为什么必须与 WSPath 分开
 	//
 	// 早期实现把 WSPath 同时用于两个用途：
 	//   - 阶段二 WS 101 校验（正确：要校验代理路径真的能升级）
@@ -189,7 +189,7 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 
 	// ================= 阶段一之二：TLS 握手筛选 =================
 	//
-	// -1 的根因修复（2026-10-24）：只过 TCP 不够。
+	// -1 的根因修复：只过 TCP 不够。
 	// 有些 IP 能建 TCP，但 TLS 握手极慢或直接失败 ——
 	// 这种 IP 进了客户端就是 -1。所以必须实测 TLS 握手。
 	report(Progress{Stage: "tls", Total: len(tcpResults), Message: "阶段一之二：TLS 握手筛选"})

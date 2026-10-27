@@ -136,7 +136,7 @@ describe('Clash YAML：Clash Verge 兼容性', () => {
   })
 
   it('不下发 RULE-SET（缺 rule-providers 会让订阅整体加载失败）', () => {
-    // 2026-10-26 线上事故：早前把远端 ruleset 翻译成 `RULE-SET,<name>,<策略>`，
+    // 线上事故：早前把远端 ruleset 翻译成 `RULE-SET,<name>,<策略>`，
     // 但没有配套的 `rule-providers:` 段，Clash 报
     // `rules[3] [RULE-SET,CFnat,DIRECT] error: rule set [CFnat] not found`。
     const yaml = renderClash(makeCtx())

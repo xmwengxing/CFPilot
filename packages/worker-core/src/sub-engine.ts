@@ -1238,7 +1238,7 @@ export function renderClash(ctx: RenderContext): string {
   // 分流规则：优先用 ini 里能安全翻译的（仅内联 GEOIP 类），
   // 否则回落到**内置 GEOSITE/GEOIP 规则**（零外部依赖）。
   //
-  // ⚠️ 绝不使用 `RULE-SET`（2026-10-26 线上事故）：
+  // ⚠️ 绝不使用 `RULE-SET`：
   // 它需要配套的 `rule-providers:` 段，缺了就报
   // `rule set [CFnat] not found` 而**整个订阅加载失败**。
   // 内置 GEOSITE/GEOIP 由 Clash 内核自带地理库驱动，无此问题。

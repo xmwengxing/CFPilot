@@ -1,7 +1,7 @@
 /**
  * 响应体内容校验（PING → PONG）—— 回归测试。
  *
- * 守护 2026-10-25 新增的阶段二严格校验：
+ * 守护 新增的阶段二严格校验：
  * 只做 WS 101 握手无法分辨「IP 能服务我们的域名、数据面真的在干活」
  * 与「IP 到 CF 边缘通、但数据面对该请求不响应」。
  * 后者会带着虚假的希望进入测速，最终导入客户端全是 -1。
@@ -81,7 +81,7 @@ function decodeWsFrame(buf: Buffer): { frame: DecodedFrame; rest: Buffer } | nul
 
 describe('WS 帧编解码', () => {
   it('PING 必须用 text 帧（opcode 1）—— 数据面只认 string', () => {
-    // ⚠️ 真机实测（2026-10-25）：用 binary 帧（opcode 2）发 PING，
+    // ⚠️ 真机实测：用 binary 帧（opcode 2）发 PING，
     // 数据面 `typeof event.data === 'string' ? event.data : ''` 会把它当成
     // 空字符串忽略，8/8 个 IP 全部 PING 超时。
     // 因此 opcode 必须是 1（text）。

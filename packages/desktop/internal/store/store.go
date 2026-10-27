@@ -62,7 +62,7 @@ type Profile struct {
 	KVNamespaceID string `json:"kvNamespaceId"`
 	// PanelPassword 是**面板密码**（敏感）。
 	//
-	// ## 语义（2026-10-27 用户明确要求）
+	// ## 语义
 	//
 	// 这个字段只用于**修改已部署面板的登录密码**，
 	// **绝不参与部署时的密码设置**。

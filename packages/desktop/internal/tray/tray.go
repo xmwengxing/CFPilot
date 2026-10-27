@@ -92,7 +92,7 @@ func (a *App) SetExitHandler(fn func()) { a.onExit = fn }
 // 因此这里捕获 panic，并在 Run 返回后由调用方决定是否降级为「无托盘模式」
 // （服务继续跑，用户用浏览器访问）。
 func (a *App) Run() {
-	// ⚠️ **必须锁定 OS 线程**（2026-10-26 实测踩坑）
+	// ⚠️ **必须锁定 OS 线程**
 	//
 	// Win32 的窗口类注册、CreateWindowEx、Shell_NotifyIcon 全都绑定在
 	// **创建它们的那个 OS 线程**上，且该线程必须有消息队列。
@@ -133,7 +133,7 @@ func (a *App) onReady() {
 				log.Printf("[cfpilot] 托盘图标加载失败（忽略，继续启动菜单）：%v", r)
 			}
 		}()
-		// ⚠️ 必须用 32×32，不能用 16×16（2026-10-26 实测）
+		// ⚠️ 必须用 32×32，不能用 16×16
 		//
 		// systray 在 Windows 上走 `LoadImage(..., IMAGE_ICON, 0, 0, LR_DEFAULTSIZE)`，
 		// `LR_DEFAULTSIZE` 会按**系统大图标尺寸**（通常是 32×32）加载。

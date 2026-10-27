@@ -19,7 +19,6 @@
     return document.getElementById(id) as unknown as HTMLElement
   }
 
-  /* ---------------- 导航 ---------------- */
   function switchPage(name: string): void {
     document.querySelectorAll('#nav button').forEach((b) => {
       b.classList.toggle('active', (b as HTMLElement).dataset.page === name)
@@ -31,7 +30,6 @@
     ;(document.activeElement as HTMLElement | null)?.blur()
   }
 
-  /* ---------------- 日志 ---------------- */
   function log(message: string, level: 'info' | 'ok' | 'warn' | 'err' = 'info'): void {
     const box = $('logBox')
     const line = document.createElement('div')
@@ -61,7 +59,6 @@
     return s.replace(/[&<>"']/g, (c) => map[c]!)
   }
 
-  /* ---------------- 凭据 ---------------- */
 
   /**
    * 部署状态的形状（对应 Electron 的 DeployStatus / Go 版的 /api/deploy/check）。
@@ -87,10 +84,7 @@
   /**
    * 渲染「部署状态」卡片的函数引用（模块级）。
    *
-   * ## 为什么用「可空引用 + 定义处赋值」而不是直接定义函数
-   *
    * `checkDeployed()` 的返回值**不会自动渲染**，需要调用方把结果喂进来。
-   * 最初它只挂在 `onDeployStatus` 事件上，而「检查状态」按钮只
    * `await` 了返回值却丢弃结果 —— 用户点完按钮界面上什么都不变。
    *
    * 修法：把渲染逻辑提取成具名函数，两个入口都调它。
@@ -138,9 +132,8 @@
     $('panelPassword').value = ''
     if (state.accountId) currentAccountId = state.accountId
 
-    // 自动刷新 KV 列表（2026-10-27 用户要求减少点击）
+    // 自动刷新 KV 列表
     //
-    // 早期需要手动点「刷新 KV 列表」。但用户已经在账户页了，
     // 系统也知道账号 ID，没理由还让用户点一次。
     // 这里只在「本地缓存为空」时触发，避免每次刷新都打 API。
     if (kvOptions.length === 0 && currentAccountId) {
@@ -154,7 +147,7 @@
       }
     }
 
-    // 自动选中当前账户保存的 KV（2026-10-27 用户要求）
+    // 自动选中当前账户保存的 KV
     //
     // 多账户场景下，每个账户通常对应一个 KV（一个 KV = 一个实例）。
     // 切来切去时如果不同步 KV 下拉框，用户很容易在 A 账户下
@@ -255,7 +248,6 @@
     log(`共 ${kvOptions.length} 个命名空间`, 'ok')
   }
 
-  /* ---------------- 多账户（profile） ---------------- */
 
   /** 「当前使用」下拉框里代表「新建账户」的哨兵值（不会与真实 profile id 冲突） */
   const NEW_PROFILE_VALUE = '__new__'
@@ -267,8 +259,6 @@
    * 重新拉取账户列表并渲染下拉框。
   /**
    * 重新拉取账户列表并渲染下拉框。
-   *
-   * ## 下拉框的两种选项（2026-10-26 重构交互）
    *
    * - **`__new__`「＋ 新建账户」**：始终放在最下面。
    *   选中它 = 进入「新建」模式，Token 输入框后面显示「添加并保存」。
@@ -448,7 +438,7 @@
   /**
    * 检测账号并给出「下一步该做什么」的引导。
    *
-   * 用户要求（2026-10-26）：
+   * 用户要求：
    *   - 检测到已有 CFPilot 实例 → 提示去下方 KV 里选本次要用的那个，再点「保存此选择」
    *   - 没检测到 → 提示在下方新建 KV 并保存
    */
@@ -508,9 +498,8 @@
     /**
      * 保存 Token。
      *
-     * ## 关键：新建 vs 修改必须走不同路径（2026-10-26 修复）
+     * ## 关键：新建 vs 修改必须走不同路径
      *
-     * 早前无论什么情况都调 `saveCredentials()`，而它写的是「当前激活 profile」——
      * 于是用户想新建第二个账户时，Token 把**当前账户**覆盖了，
      * 永远建不出第二个。这也是「新建按钮没反应」背后的真实后果。
      */
@@ -523,7 +512,6 @@
       }
 
       if (isNewMode()) {
-        // ---- 新建：createProfile + 立刻写入 Token ----
         const created = await window.cfpilot.createProfile()
         const saved = await window.cfpilot.updateProfile(created.id, { cfToken: token })
         if (!saved.ok) {
@@ -539,7 +527,6 @@
         return
       }
 
-      // ---- 修改：写到当前激活账户 ----
       await window.cfpilot.saveCredentials({ cfToken: token })
       log('Token 已更新到当前账户', 'ok')
       resetAccountContext()
@@ -603,9 +590,8 @@
       log('已保存本次选择的 KV', 'ok')
     })
 
-    // KV 下拉框改变时**自动保存**（2026-10-27 用户要求「不要增加操作步骤」）
+    // KV 下拉框改变时**自动保存**
     //
-    // 早期需要额外点「保存此选择」按钮，属于多余步骤：
     // 用户既然在这个下拉框里选了，意图已经明确。
     // 现在选完立刻落盘，那个按钮可以不用点（保留是为了兼容旧习惯）。
     $('kvSelect').addEventListener('change', async () => {
@@ -627,7 +613,6 @@
     })
   }
 
-  /* ---------------- 部署 ---------------- */
   function readMode(): 'auto' | 'fresh' | 'update' {
     const el = document.querySelector('input[name="mode"]:checked') as HTMLInputElement | null
     return (el?.value ?? 'auto') as 'auto' | 'fresh' | 'update'
@@ -661,10 +646,7 @@
     /**
      * 渲染「部署状态」卡片的函数引用。
      *
-     * ## 为什么用这种写法（2026-10-26 修复「检查状态没反应」）
-     *
      * `checkDeployed()` 的返回值**不会自动渲染**，需要调用方把结果喂进来。
-     * 最初它只挂在 `onDeployStatus` 事件上，而「检查状态」按钮只
      * `await` 了返回值却丢弃结果 —— 用户点完按钮界面上什么都不变，
      * 日志里只有一句「检查线上部署状态…」。
      *
@@ -678,12 +660,9 @@
      *   - 赋值发生在 bindDeploy 执行过程中，早于任何用户点击
      */
     document.getElementById('btnDeploy')!.addEventListener('click', async () => {
-      // 用下拉框当前选中的 KV；没有选中则自动新建（2026-10-27 用户要求）
-      //
-      // ## 为什么自动建而不是让用户先去建
+      // 用下拉框当前选中的 KV；没有选中则自动新建
       //
       // 全新部署本来就必须有一个 KV（内核的配置键全局平铺在里面）。
-      // 早期让用户先到「Cloudflare 凭据」页点「新建 KV」，
       // 属于多此一举 —— 部署这一步已经知道需要 KV 了，直接建就好。
       //
       // 而且那个按钮很容易误触，每点一次就在账号下多一个命名空间，
@@ -719,7 +698,7 @@
       log('── 开始部署 ──')
 
       // 部署页的面板密码**直接随部署请求传下去**，不写进账户
-      // （2026-10-27 用户明确要求两个用途分开）。
+      // 。
       //
       // 历史问题：早期这里调 saveCredentials({panelPassword}) 把部署密码
       // 写进了账户的「修改已部署面板密码」字段，导致：
@@ -751,7 +730,7 @@
         const status = document.getElementById('deployStatus')!
         status.textContent = result.ok ? '✅ 部署完成' : '❌ 部署失败：' + (result.error ?? '')
 
-        // 成功时**不再重复打印**面板地址与密码（2026-10-26 用户反馈）。
+        // 成功时**不再重复打印**面板地址与密码。
         //
         // 部署向导本身在结束时就会打印一次「控制面 / 数据面 / UUID / WS 路径 /
         // 面板密码」的汇总块，这里再打一遍等于同一份信息出现两次，
@@ -776,9 +755,8 @@
       const btn = document.getElementById('btnCheck') as HTMLButtonElement | null
       if (btn) btn.disabled = true
       try {
-        // ⚠️ 必须把返回值渲染出来（2026-10-26 修复）
+        // ⚠️ 必须把返回值渲染出来
         //
-        // 早前只 `await` 不接收结果 → 用户点完按钮界面上什么都不变，
         // 日志里只有一句「检查线上部署状态…」然后就没了。
         const status = (await window.cfpilot.checkDeployed(
           select.value || undefined
@@ -797,12 +775,9 @@
       }
     })
 
-    /* ---------------- 查看面板凭据 ---------------- */
 
     /**
      * 显示部署清单里保存的面板凭据。
-     *
-     * ## 为什么需要（2026-10-27 用户反馈）
      *
      * Cloudflare 平台上的环境变量是**加密的**（页面只显示 `****`），
      * 所以部署完成后如果没记下面板密码，用户就再也拿不回来，面板进不去。
@@ -837,7 +812,7 @@
         set('credWsPath', r.wsPath ?? '')
         box.hidden = false
 
-        // 自动复制到剪贴板（2026-10-27 用户要求减少点击）
+        // 自动复制到剪贴板
         //
         // 用户点「查看面板凭据」几乎总是为了拿去登录面板，
         // 再点一次「复制全部」属于多余步骤。
@@ -877,7 +852,6 @@
     })
   }
 
-  /* ---------------- 优选 ---------------- */
 
   /** 读取国家多选框的选中值（空数组 = 不筛选，跑全量） */
   function readOptCountries(): string[] {
@@ -951,7 +925,6 @@
     const speedHead = table.querySelectorAll('th')[5]
     if (speedHead) speedHead.textContent = payload.skippedSpeed ? '下行(已跳过)' : '下行(MB/s)'
 
-    // ---- 记录结果并启用「回填面板」按钮（2026-10-27 交互改版）----
     //
     // 回填改为结果出来后手动触发，所以这里要把可复制格式保存下来，
     // 供按钮点击时使用。
@@ -1001,13 +974,12 @@
           speedUrl,
           speedConnections: Number($('optSpeedConns').value) || 3,
           speedDurationMs: (Number($('optSpeedDur').value) || 6) * 1000,
-          // ⚠️ 必须把「不回填」勾选状态传给后端（2026-10-27 修复）
+          // ⚠️ 必须把「不回填」勾选状态传给后端
           //
-          // 早期完全不传这个参数：Go 后端没有回填实现，
           // 界面也没有读取勾选状态的地方 —— 于是用户取消勾选后
           // 点开始优选，界面重渲染时又把默认值（checked）勾了回去，
           // 看起来像「勾选被自动恢复」，实际是整个开关没接线。
-          // 优选阶段**不回填**（2026-10-27 交互改版）
+          // 优选阶段**不回填**
           //
           // 回填改为结果出来后手动点「回填面板」按钮再执行。
           // 好处：
@@ -1026,7 +998,6 @@
       }
     })
 
-    /* ---------------- 优选结果：复制 / 回填 ---------------- */
 
     document.getElementById('btnCopyResult')!.addEventListener('click', () => {
       const text = $('scanOut').textContent ?? ''
@@ -1040,10 +1011,7 @@
     /**
      * 回填面板：把这批 IP 写进面板的「手动优选 IP」。
      *
-     * ## 为什么放在「优选之后」才做（2026-10-27 交互改版）
-     *
      * 回填需要临时令牌（面板签发，10 分钟有效）。
-     * 早期是「优选前先取令牌」，但优选本身要跑几分钟 ——
      * 令牌很容易在回填前就过期，而且界面上多一个令牌输入框，
      * 用户还得理解「令牌」是什么东西。
      *
@@ -1062,7 +1030,6 @@
       if (hint) hint.textContent = '正在申请临时令牌…'
 
       try {
-        // ---- 1. 现取临时令牌（10 分钟有效，足够用）----
         const tokenRes = await window.cfpilot.fetchScannerToken()
         if (!tokenRes || !tokenRes.ok) {
           const msg = (tokenRes && tokenRes.error) || '未知错误'
@@ -1071,7 +1038,6 @@
           return
         }
 
-        // ---- 2. 回填 ----
         if (hint) hint.textContent = '正在回填到面板…'
         const result = await window.cfpilot.pushScanResults(lastScanLines)
         if (!result || !result.ok) {
@@ -1097,9 +1063,8 @@
     })
 
     /**
-     * 自动识别：一次填好域名 + WS 路径（2026-10-27 用户要求减少点击）。
+     * 自动识别：一次填好域名 + WS 路径。
      *
-     * 早期是两个按钮（「自动识别域名」+「自动识别 WS 路径」），
      * 但它们读的是同一份部署清单，用户总是要连点两次 —— 属于多余步骤。
      *
      * 现在一次点击同时调两个接口，任一失败不影响另一个。
@@ -1110,7 +1075,6 @@
       log('自动识别域名与 WS 路径…')
 
       try {
-        // ---- 域名 ----
         try {
           const host = await window.cfpilot.detectScanHost()
           if (host.ok && host.host) {
@@ -1129,7 +1093,6 @@
           log('识别域名异常：' + (err instanceof Error ? err.message : String(err)), 'err')
         }
 
-        // ---- WS 路径 ----
         try {
           const path = await window.cfpilot.detectScanPath()
           if (path.ok && path.path) {
@@ -1151,9 +1114,8 @@
       const btn = document.getElementById('btnEnvCheck') as HTMLButtonElement | null
       if (btn) btn.disabled = true
       try {
-        // ⚠️ 必须**总是**输出结果（2026-10-27 用户反馈「按钮没效果」）
+        // ⚠️ 必须**总是**输出结果
         //
-        // 早期只在 `if (result.clean)` 分支里 log，环境不干净时
         // **一个字都不打** —— 用户点了按钮看到日志里只有「检测网络环境…」
         // 然后什么都没有，看起来就是按钮坏了。
         //
@@ -1184,7 +1146,6 @@
     })
   }
 
-  /* ---------------- 应用内更新 ---------------- */
   let pendingUpdateUrl = ''
 
   function bindUpdater(): void {
@@ -1245,7 +1206,6 @@
     })
   }
 
-  /* ---------------- 复制 ---------------- */
   function copy(text: string): void {
     if (!text) { log('没有可复制的内容', 'warn'); return }
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -1272,14 +1232,13 @@
     document.body.removeChild(ta)
   }
 
-  /* ---------------- 主进程推送 ---------------- */
   function bindPush(): void {
     window.cfpilot.onLog((entry) => log(entry.message, entry.level as never))
 
     /**
      * 渲染部署状态，并**同步驱动部署按钮的语义**。
      *
-     * 交互设计（2026-10-25 重构，解决「这页选项和按钮有点乱」）：
+     * 交互设计：
      *   - 状态卡只回答「现在什么情况」，不承载操作；
      *   - 部署卡的按钮文案随状态变化：
      *       none     → 「开始首次部署」
@@ -1364,7 +1323,6 @@
         return
       }
 
-      // ---- outdated ----
       // 三种子情况分开表达，绝不让用户看到 `unknown` 这种占位符
       if (!status.build) {
         // 线上没有版本记录（早期部署的，或当时没读到本地版本）
@@ -1441,7 +1399,6 @@
     })
   }
 
-  /* ---------------- 启动 ---------------- */
   document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('nav')!.addEventListener('click', (e) => {
       const btn = (e.target as HTMLElement).closest('button[data-page]') as HTMLElement | null
@@ -1467,14 +1424,10 @@
       logHead.title = collapsed ? '点击展开日志' : '点击折叠日志'
     })
 
-    /* ------------------------------------------------------------------ */
     /* 日志区拖拽调高                                                     */
-    /* ------------------------------------------------------------------ */
 
     /**
      * 拖动日志面板上边缘调整高度。
-     *
-     * ## 为什么记录「比例」而不是「像素」（2026-10-26 第三次迭代）
      *
      * 第一版用 CSS `resize: vertical`，它把高度写成**内联固定 px**，
      * 因此在 2K / 1080P / 缩放窗口后全部错位：
@@ -1590,9 +1543,7 @@
     /**
      * 初始化各步骤**互相隔离**。
      *
-     * ## 为什么必须这样写（2026-10-26 真实故障）
-     *
-     * 早期实现是一串裸 await：
+     * ## 为什么必须这样写
      *
      *     await refreshProfiles()
      *     await refreshCredState()

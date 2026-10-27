@@ -1,13 +1,8 @@
 /**
  * 界面层类型声明（@cfpilot/ui 专用）
  *
- * ## 这个文件为什么在 ui 包里
- *
- * 2026-10-27 界面源码从 packages/gui/src/renderer 抽到 packages/ui，
  * 连同它的类型声明一起搬过来 —— 界面只依赖 `window.cfpilot` 这个契约，
  * 不依赖任何 Electron 或 Node 类型。
- *
- * ## 与外壳的分工
  *
  *   本文件声明的 `window.cfpilot` 是**契约**，
  *   由各外壳实现：
@@ -81,7 +76,6 @@ interface CFPilotKvOption {
 
 interface Window {
   cfpilot: {
-    // ---- 多账户（profile）管理 ----
     /** 列出所有账户配置（不含 Token 明文） */
     listProfiles(): Promise<CFPilotProfileView[]>
     /** 新建账户配置并激活 */
@@ -192,7 +186,6 @@ interface Window {
        * 为 true 表示「只输出列表，不回填面板」。
        *
        * 界面上的同名勾选框控制它；Go 后端据此跳过回填。
-       * 早期这个开关完全没接线，导致用户无法测试回填是否工作。
        */
       noCallback?: boolean
       /** 回填用的扫描令牌（面板一次性令牌 / SCANNER_TOKEN） */

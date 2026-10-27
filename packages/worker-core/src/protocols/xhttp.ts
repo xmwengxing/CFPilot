@@ -65,7 +65,7 @@ export async function handleXhttp(
     proxies,
     nat64: config.nat64,
     concurrent: config.concurrentDial,
-    // ⚠️ 这两项必须与 WS 入站路径保持一致（2026-10-23 真机发现）：
+    // ⚠️ 这两项必须与 WS 入站路径保持一致：
     // 少了它们，XHTTP 会**用运行时自己的 DNS 解析**目标域名 ——
     // 而运行时的解析结果可能落在 Cloudflare 网段（Worker 不能连回自家 Anycast），
     // 表现为「XHTTP 节点延迟全是 -1」，但服务端看不出任何错误。
@@ -90,8 +90,7 @@ export async function handleXhttp(
   // 上行：请求体剩余部分 → 出站
   //
   // ⚠️ `closeTarget: false` —— 关闭 socket 的写流等于关闭整个 TCP 连接，
-  // 目标站会收到 RST 而来不及把响应发回来（2026-10-23 真机发现，
-  // 症状是「XHTTP 节点延迟全是 -1」）。
+  // 目标站会收到 RST 而来不及把响应发回来。
   // 对比：WebSocket 入站路径只 releaseLock 不 close，是正常的。
   void relay(parsed.payload, dialResult.writable, undefined, false)
   // 下行：出站 → 响应体（这里是 HTTP 响应体，结束时 close 是正确的）
@@ -109,7 +108,7 @@ export async function handleXhttp(
   header.set(addons, 2)
 
   // 把响应头与下行流拼接：头部先行，下行数据随后。
-  // ⚠️ **不能用 async start 承载整个下行**（2026-10-23 真机发现）：
+  // ⚠️ **不能用 async start 承载整个下行**：
   //
   // `start` 返回的 Promise 未完成时，流的 `pull` 不会被调用，
   // 而消费者（`fetch` / Xray 客户端）会一直等 —— 表现为

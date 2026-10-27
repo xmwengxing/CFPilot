@@ -97,7 +97,7 @@ type Options struct {
 
 // New 创建客户端。
 //
-// ## 为什么要自定义 Transport（2026-10-27 真机故障修复）
+// ## 为什么要自定义 Transport
 //
 // 最初用 `&http.Client{Timeout: timeout}`，即 Go 默认 Transport。
 // 真机部署时出现大量：
@@ -642,7 +642,7 @@ type PagesDeployOptions struct {
 // 正确的 metadata 只有 { main_module: "_worker.js", bindings: {} }。
 func (c *Client) DeployPagesWorker(ctx context.Context, opts PagesDeployOptions) (*PagesDeployment, error) {
 	// ================================================================
-	// ⚠️ Pages 部署 API 的表单结构（2026-10-27 真机修正）
+	// ⚠️ Pages 部署 API 的表单结构
 	//
 	// 早期实现直接发 `_worker.js` + `metadata` 两个顶层字段，
 	// **100% 失败**。真实错误是：

@@ -5,7 +5,7 @@
  * 内联进内核，使 Clash / mihomo 订阅**自带分流规则** ——
  * 用户导入订阅后不用再自己找规则，YouTube / Netflix / OpenAI 等自动走代理。
  *
- * ## 设计取舍（2026-10-25）
+ * ## 设计取舍
  *
  * **方案 A：构建期内联**，不在运行时发外网请求。
  * 理由：
@@ -257,7 +257,7 @@ export function renderRouteProfile(
 
   // ---- 分流规则 ----
   //
-  // ## ⚠️ 绝不能用 RULE-SET（2026-10-26 修正线上事故）
+  // ## ⚠️ 绝不能用 RULE-SET
   //
   // 早前实现把 ini 里的远端 `ruleset=<策略组>,<URL>` 翻译成
   // `RULE-SET,<name>,<策略>`，但**没有生成配套的 `rule-providers:` 段** ——
@@ -295,10 +295,10 @@ export function renderRouteProfile(
  * 1. **零外部依赖**：只用 `GEOSITE` / `GEOIP`，Clash 内核自带地理库，
  *    不需要 `rule-providers`、不需要下载、不会出现 `rule set not found`。
  * 2. **只用「确实存在」的分类**：下面每个 GEOSITE 分类名都经过
- *    `geosite.dat` 实际解析验证（见 2026-10-26 §事故记录）。
+ *    `geosite.dat` 实际解析验证（见 §事故记录）。
  * 3. **顺序即优先级**：具体站点先匹配，再看通用代理/直连，最后 MATCH 兜底。
  *
- * ## ⚠️ 事故记录：分类名必须实测（2026-10-26）
+ * ## ⚠️ 事故记录：分类名必须实测
  *
  * 上一版用了 `GEOSITE,wikipedia`，Clash Verge 报：
  *
@@ -382,7 +382,7 @@ function yamlStr(value: string): string {
 /**
  * 高层入口：解析 ini 文本并渲染成 Clash 订阅的 rules / proxy-groups 段。
  *
- * ## 用途（2026-10-26 起收窄）
+ * ## 用途
  *
  * 内核**默认不再内嵌**任何规则配置文件，`renderClash` 会直接用
  * `buildBuiltinRules()` 生成 GEOSITE/GEOIP 规则。

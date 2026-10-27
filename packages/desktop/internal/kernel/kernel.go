@@ -1,6 +1,6 @@
 // Package kernel 内嵌 Worker 内核产物（control.js / dataplane.js）。
 //
-// ## 为什么必须内嵌（2026-10-26 严重缺陷）
+// ## 为什么必须内嵌
 //
 // Go 版最初的设计是「exe 旁边放 worker-core/dist 目录」，
 // 构建脚本也没把产物拷进去。结果：

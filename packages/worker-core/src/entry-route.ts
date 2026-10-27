@@ -2,7 +2,7 @@
  * 单文件合并入口（供「上游文件 + 我们的控制面」拼接使用）。
  *
  * 与 `entry-control.ts` 的区别：匹配不到时返回 **null**，
- * 交给上游（旧版第三方实现）的 fetch 继续处理代理路径。
+ * 交给上游的 fetch 继续处理代理路径。
  */
 import type { Env } from './types'
 import { routeControlPlane } from './routes/control'

@@ -5,9 +5,9 @@
  * 真机实测：控制面与数据面拆开后，两边都能在 Pages 上原地更新；
  * 合并成一个 bundle 会被 Cloudflare 判定为完整代理服务并在二次部署时封禁（8000119）。
  *
- * ## 只有一套数据面实现（2026-10-25）
+ * ## 只有一套数据面实现
  *
- * 旧版第三方实现（`wsHandler`）已于 2026-10-25 **完全移除**：
+ * 历史第三方实现（`wsHandler`）已于 **完全移除**：
  * 它占产物体积 77%（250KB 里 193KB），让数据面长期超出 80KB 预算，
  * 且自带 `cloudflare:sockets` 静态 import。自研实现（`websocket-self.ts`）
  * 覆盖 VLESS-WS / Trojan-WS / XHTTP + 代理池 + 分级诊断，早已是生产默认。
@@ -50,7 +50,7 @@ export async function routeDataPlane(
 
   // 版本端点：让外部能问「这个数据面跑的是哪一版内核」。
   //
-  // ## 为什么需要（2026-10-26）
+  // ## 为什么需要
   //
   // 早前 GUI 的「检查状态」只能读 KV 清单里的 `build` 字段 —— 那是
   // **部署时自己写进去的**，不是从线上读回来的。因此存在盲区：
@@ -77,7 +77,7 @@ export async function routeDataPlane(
       JSON.stringify(
         {
           ok: true,
-          // 只有一套实现了（vendor 已于 2026-10-25 移除），固定返回 self
+          // 只有一套实现了（vendor 已于 移除），固定返回 self
           impl: 'self',
           // 版本号：排查「线上跑的到底是哪一版」时最直接的依据
           build: BUILD_VERSION,

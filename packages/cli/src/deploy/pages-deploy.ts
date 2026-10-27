@@ -28,12 +28,12 @@
  * 建项目 → 设变量/绑 KV → 最后才部署。
  * Pages 的绑定与变量只对**之后的**部署生效，先部署再配置等于白配。
  */
-import { readFile } from 'node:fs/promises'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { CloudflareClient, CloudflareError, type PagesDeployment } from './cf-api'
 import { randomPanelPath, randomPassword, randomWorkerName, randomWsPath } from './utils'
+import { extractBuildVersion, loadKernelBundle } from './kernel-remote'
+import { compareSemver } from '../shared/version-util'
+import { VERSION } from '../shared/version'
 
 export interface PagesSplitDeployOptions {
   token: string
@@ -102,6 +102,13 @@ export interface PagesSplitDeployOptions {
    * 键为 control / data，值为对应 JS 源码。
    */
   bundles?: { control?: string; data?: string }
+  /**
+   * 本次部署所用的**内核版本**（semver）。
+   *
+   * 不传则由内核解析自动得出（远程内核取 Release 版本号，
+   * 内置内核取应用版本）。只在调用方**自己提供**产物时需要显式指定。
+   */
+  kernelVersion?: string
   log?: (message: string) => void
 }
 
@@ -159,6 +166,24 @@ export interface DeployManifest {
   dataCustomDomain?: string
   /** 上次部署的构建版本 */
   build: string
+  /**
+   * 本次部署所用的内核版本（semver）；旧清单没有这个字段 = 未知。
+   *
+   * ## 为什么 build 指纹不够用
+   *
+   * build 指纹形如 `a946dfa-1f2e3d4c`（git 短 hash + 源码哈希），
+   * 它是**精确**的，但**没有大小顺序** ——
+   * 「线上 build ≠ 本地 build」只能说明「不一样」，
+   * 说不清「谁更新」。
+   *
+   * semver 自带大小顺序，因此清单里要**同时**记两份：
+   *   - build        → 判断「是不是同一份产物」
+   *   - kernelVersion → 判断「谁更新」
+   *
+   * ⚠️ 读不到就写空串（语义 = 未知），**绝不写 "unknown"** ——
+   * 假值会让「检查状态」显示「线上内核 unknown ≠ 本地 xxx」，用户看不懂。
+   */
+  kernelVersion?: string
   /** 上次部署时间（ISO） */
   at: string
   /** 创建时生成的凭据（更新时沿用，避免客户端订阅地址失效） */
@@ -454,52 +479,69 @@ async function writeEffectiveConfig(
 }
 
 /**
- * 当前模块所在目录（同时兼容 ESM 与 CJS）。
+ * 部署实际要用的内核。
  *
- * CLI 以 ESM 运行（import.meta.url 可用），
- * GUI 会把本模块打成 CJS 库（import.meta 为 undefined，需用 __dirname）。
+ * ## 优先级
+ *
+ *   1. `options.bundles` —— 调用方**显式指定**的产物，优先级最高，不覆盖
+ *   2. **远程**内核 —— Release 上有比当前应用更新的内核时用远程的
+ *   3. **内置**内核 —— 远程查不到 / 下载失败时回退
+ *
+ * ## 为什么远程优先
+ *
+ * 内核产物原先内置在 npm 包里，**部署用的代码被应用版本绑死**：
+ * 用户没升级 npm 包，就只能部署旧内核。
+ * 改成从 Release 拉取后，应用版本与内核版本解耦。
+ *
+ * @param options 部署选项
+ * @param log 日志回调
+ * @param warnings 告警收集（产物缺失时往里塞）
  */
-function moduleDir(): string {
-  // ESM 优先
-  try {
-    const meta = import.meta
-    if (meta && typeof meta.url === 'string') return dirname(fileURLToPath(meta.url))
-  } catch {
-    /* CJS 产物：import.meta 不存在，走下面的 __dirname */
-  }
-  // CJS 兜底
-  return typeof __dirname === 'string' ? __dirname : process.cwd()
-}
-
-/**
- * 读取 worker-core 的构建产物。
- *
- * 打包后 `here` 是 `packages/deploy-wizard/dist`，所以 worker-core 在
- * `../worker-core/dist/`；开发时（ts 源码直接跑）`here` 是 `src/`，
- * 需要 `../../worker-core/dist/`。两种情况都试。
- *
- * ⚠️ 本模块既会被 CLI（ESM）直接跑，也会被 GUI 打成 CJS 库后 require。
- * 因此不能用 import.meta.url（CJS 下是 undefined），
- * 也不能只用 __dirname（ESM 下不存在）——两个都做兼容。
- */
-async function loadBundle(fileName: string): Promise<string> {
-  const here = moduleDir()
-  const candidates = [
-    resolve(here, `../worker-core/dist/${fileName}`),
-    resolve(here, `../../worker-core/dist/${fileName}`),
-    resolve(here, `../assets/${fileName}`),
-    resolve(process.cwd(), `packages/worker-core/dist/${fileName}`),
-  ]
-  for (const candidate of candidates) {
-    try {
-      return await readFile(candidate, 'utf8')
-    } catch {
-      /* 尝试下一个 */
+async function resolveKernel(
+  options: PagesSplitDeployOptions,
+  log: (message: string) => void,
+  warnings: string[]
+): Promise<{ control: string; data: string; version: string; build: string; source: string }> {
+  // ---- 1. 调用方显式指定（测试 / 嵌入场景）----
+  const explicitControl = options.bundles?.control ?? ''
+  const explicitData = options.bundles?.data ?? ''
+  if (explicitControl && explicitData) {
+    return {
+      control: explicitControl,
+      data: explicitData,
+      version: options.kernelVersion ?? '',
+      build: extractBuildVersion(explicitControl),
+      source: '调用方指定',
     }
   }
-  throw new Error(
-    `未找到 ${fileName}，请先执行 npm run build -w @cfpilot/worker-core`
-  )
+
+  // ---- 2. 远程优先，内置兜底 ----
+  try {
+    const bundle = await loadKernelBundle(VERSION, { log })
+    log(`· 内核来源：${bundle.source}`)
+    const control = explicitControl || bundle.control
+    const data = explicitData || bundle.data
+    return {
+      control,
+      data,
+      version: options.kernelVersion ?? bundle.version,
+      build: extractBuildVersion(control),
+      source: bundle.source,
+    }
+  } catch (err) {
+    // 内置产物也读不到 —— 部署无法继续，但**不抛错**，
+    // 由 deployWithBlockRetry 报「产物为空，跳过部署」。
+    warnings.push(
+      `内核产物加载失败：${err instanceof Error ? err.message : String(err)}`
+    )
+    return {
+      control: explicitControl,
+      data: explicitData,
+      version: options.kernelVersion ?? '',
+      build: extractBuildVersion(explicitControl),
+      source: '不可用',
+    }
+  }
 }
 
 /**
@@ -621,6 +663,22 @@ export async function deployPagesSplit(
 
   const kv = { KV: { namespace_id: options.kvNamespaceId } }
 
+  /* ---------------- 0. 解析本次要部署的内核 ---------------- */
+
+  // ⚠️ 必须在「同版本跳过」判断**之前**完成。
+  //
+  // 跳过的依据是「线上跑的产物」和「本次要部署的产物」是不是同一份。
+  // 而「本次要部署的产物」可能是**远程更新的内核**（版本与应用版本无关），
+  // 因此必须先解析出内核、拿到它的构建指纹，才能正确判断该不该跳过。
+  //
+  // 解析失败不抛错：产物为空时由 deployWithBlockRetry 报「产物为空，跳过部署」。
+  const kernel = await resolveKernel(options, log, warnings)
+
+  // 本次要部署的产物的构建指纹。
+  //
+  // 优先用**实际要部署的产物**里提取的指纹（远程内核有自己的指纹），
+  // 提取不到时回退到调用方给的 localBuild。
+  const effectiveBuild = kernel.build || (options.localBuild ?? '').trim()
   /* ---------------- 0. 读部署清单，判断首次还是更新 ---------------- */
 
   const manifest = await readManifest(client, options.accountId, options.kvNamespaceId)
@@ -672,16 +730,46 @@ export async function deployPagesSplit(
     }
 
     // 同版本跳过：避免无谓触发平台审核
-    if (skipSameVersion && options.localBuild && manifest.build === options.localBuild) {
-      log(`✅ 线上已是最新版本（${options.localBuild}），跳过部署`)
+    //
+    // ⚠️ 比对的是**实际要部署的产物**的指纹（effectiveBuild），
+    // 不是「本地内置产物」的指纹 —— 因为线上跑的很可能是远程更新的内核。
+    // 用本地指纹比对会把「线上已是最新远程内核」误判成「版本不同」，
+    // 从而每次都重新部署（白白触发平台审核）。
+    const onlineBuild = manifest.build?.trim() ?? ''
+    const onlineVersion = manifest.kernelVersion?.trim() ?? ''
+    const sameBuild = !!effectiveBuild && onlineBuild === effectiveBuild
+
+    // 降级保护：本次要部署的内核比线上**旧**时不部署。
+    //
+    // 什么时候会发生：线上跑的是远程更新的内核（如 0.7.6），
+    // 而这次远程不可达（离线 / 限流）→ 回退到内置的旧内核。
+    // 此时若照常部署，会把用户的线上内核**降级**到旧版本 ——
+    // 一次网络抖动不该导致内核回退。
+    const wouldDowngrade =
+      !!onlineVersion &&
+      !!kernel.version &&
+      compareSemver(kernel.version, onlineVersion) < 0
+
+    if (skipSameVersion && (sameBuild || wouldDowngrade)) {
+      if (wouldDowngrade && !sameBuild) {
+        log(
+          `✅ 线上内核 ${onlineVersion} 比本次可用内核 ${kernel.version} 更新，跳过部署（避免降级）`
+        )
+      } else {
+        log(`✅ 线上已是最新版本（${effectiveBuild}），跳过部署`)
+      }
       result.panelPath = effective.panelPath
       result.uuid = effective.uuid
       result.wsPath = effective.wsPath
       result.panelPassword = effective.panelPassword
       return result
     }
-    if (manifest.build && options.localBuild && manifest.build !== options.localBuild) {
-      log(`· 版本变化：${manifest.build} → ${options.localBuild}`)
+    if (onlineBuild && effectiveBuild && onlineBuild !== effectiveBuild) {
+      log(`· 版本变化：${onlineBuild} → ${effectiveBuild}`)
+    }
+    // 内核的 semver 变化也要说一声 —— 用户能据此判断「线上是不是比我旧」
+    if (onlineVersion && kernel.version && onlineVersion !== kernel.version) {
+      log(`· 内核版本变化：${onlineVersion} → ${kernel.version}`)
     }
   } else if (manifest && mode === 'fresh') {
     log('· 指定了首次部署模式，忽略已有清单')
@@ -792,22 +880,11 @@ export async function deployPagesSplit(
   )
 
   /* ---------------- 3. 部署（先数据面，控制面的 DATA_HOST 才有效） ---------------- */
-  let dataCode = options.bundles?.data ?? ''
-  let controlCode = options.bundles?.control ?? ''
-  if (!dataCode) {
-    try {
-      dataCode = await loadBundle('dataplane.js')
-    } catch (err) {
-      warnings.push(err instanceof Error ? err.message : String(err))
-    }
-  }
-  if (!controlCode) {
-    try {
-      controlCode = await loadBundle('control.js')
-    } catch (err) {
-      warnings.push(err instanceof Error ? err.message : String(err))
-    }
-  }
+  // 内核产物已在第 0 步解析好（远程优先，内置兜底）。
+  //
+  // ⚠️ `options.bundles` 优先级最高：调用方显式指定的产物不会被覆盖。
+  const dataCode = kernel.data
+  const controlCode = kernel.control
 
   /* ---------------- 3. 部署（先数据面，控制面的 DATA_HOST 才有效） ---------------- */
 
@@ -938,7 +1015,19 @@ export async function deployPagesSplit(
     // 用户完全看不懂。
     //
     // 正确做法：**读不到就写空串**（语义 = 未知），由读取方按「无版本号」处理。
-    const build = (options.localBuild ?? '').trim()
+    //
+    // ⚠️ 记的是**实际部署的产物**的指纹（可能是远程更新的内核），
+    // 不是本地内置产物的指纹 —— 否则清单会谎报线上跑的是哪份代码。
+    const build = effectiveBuild
+
+    // 内核的语义化版本（semver）：远程的填远程版本，内置的填应用版本。
+    //
+    // 与 build 的分工：
+    //   - build        → 判断「是不是同一份产物」（精确，但比不出新旧）
+    //   - kernelVersion → 判断「谁更新」（有大小顺序）
+    //
+    // 同样读不到就写空串，绝不写 "unknown"。
+    const kernelVersion = kernel.version.trim()
 
     await writeManifest(client, options.accountId, options.kvNamespaceId, {
       v: 1,
@@ -950,6 +1039,7 @@ export async function deployPagesSplit(
       // 自定义域名：本次迁过来的，或旧项目上原有的（下次更新还要靠它迁移）
       dataCustomDomain: dataCustomDomain || manifest?.dataCustomDomain || '',
       build,
+      kernelVersion,
       at: new Date().toISOString(),
       credentials: {
         panelPath: effective.panelPath,

@@ -19,28 +19,59 @@ import {
   listCfPilotNamespaces,
   type PagesSplitDeployResult,
 } from './pages-deploy'
+import {
+  extractBuildVersion,
+  fetchRemoteKernelInfo,
+  loadBuiltinBundle,
+} from './kernel-remote'
 import { randomWorkerName } from './utils'
 import { DEPLOY_HELP } from './help'
 import { renderTokenCheck, checkTokenPermissions } from './token-check'
+import { compareSemver } from '../shared/version-util'
+import { VERSION } from '../shared/version'
 
 export async function listKvInstances(client: CloudflareClient, accountId: string): Promise<void> {
   const namespaces = await client.listKvNamespaces(accountId)
   process.stdout.write(`账号下共 ${namespaces.length} 个 KV 命名空间：\n`)
   const instances = await listCfPilotNamespaces(client, accountId)
   const instanceIds = new Set(instances.map((i) => i.id))
+
+  // 远程最新内核版本：查不到就是 null（离线 / 限流 / 没有带内核的发行版）。
+  //
+  // ⚠️ 这里**不阻塞**主流程 —— 查不到时只是少一行「远程」信息，
+  // 绝不能因为 GitHub 不可达就让「检查状态」失败。
+  const remote = await fetchRemoteKernelInfo({ timeoutMs: 8000 })
+
   for (const ns of namespaces) {
     const instance = instances.find((i) => i.id === ns.id)
     if (instance) {
+      // 线上内核版本：清单里的 kernelVersion（semver）。
+      // 旧清单没有这个字段 → 空串 → 显示「未知」，绝不显示 "unknown"。
+      const online = instance.manifest.kernelVersion?.trim() || '未知'
       process.stdout.write(
         `  ● ${ns.id}  ${ns.title}\n` +
           `      实例：控制面 ${instance.manifest.controlProject} / 数据面 ${instance.manifest.dataProject}\n` +
           `      域名：${instance.manifest.controlSubdomain} / ${instance.manifest.dataSubdomain}\n` +
-          `      部署于 ${instance.manifest.at}，版本 ${instance.manifest.build}\n`
+          `      部署于 ${instance.manifest.at}，版本 ${instance.manifest.build}\n` +
+          `      内核版本：线上 ${online} ｜ 内置 ${VERSION} ｜ 远程 ${remote?.version ?? '未知'}\n`
       )
     } else {
       process.stdout.write(`  ○ ${ns.id}  ${ns.title}  （不含 CFPilot 实例）\n`)
     }
   }
+
+  // 内置 vs 远程：semver 能比出**谁更新**，build 指纹只能说明「不一样」。
+  if (remote) {
+    const cmp = compareSemver(remote.version, VERSION)
+    const hint =
+      cmp > 0
+        ? `远程内核 ${remote.version} 比内置 ${VERSION} 更新，部署时会自动使用远程内核。`
+        : cmp === 0
+          ? `远程内核 ${remote.version} 与内置版本一致。`
+          : `远程内核 ${remote.version} 比内置 ${VERSION} 旧，将使用内置内核。`
+    process.stdout.write(`\n${hint}\n`)
+  }
+
   process.stdout.write(
     `\n共 ${instances.length} 个 CFPilot 实例。\n` +
       (instanceIds.size > 0
@@ -202,31 +233,19 @@ export async function runDeployCommand(args: ParsedArgs): Promise<void> {
  * 版本号在构建时由 esbuild 的 define 注入为 `__CFP_BUILD__` 常量，
  * 打包后会以字符串形式出现在产物里。读不到时返回 undefined，
  * 此时不做版本跳过（保守起见仍然部署）。
+ *
+ * ⚠️ 早期这里的正则只认**纯数字时间戳**格式（`abc1234-202610221430`），
+ * 而现在的构建指纹是 `<git 短 hash>-<源码 hash>`（如 `c431307-65b74f9b`），
+ * 两者都是十六进制 —— 于是正则**匹配不到**，版本号恒为 undefined，
+ * 「同版本跳过」与清单里的 build 字段因此一直是空的。
+ * 现在统一走 shared 的 extractBuildVersion，两种格式都认。
  */
-
 async function readLocalBuild(): Promise<string | undefined> {
   try {
-    const { readFile } = await import('node:fs/promises')
-    const { dirname, resolve } = await import('node:path')
-    const { fileURLToPath } = await import('node:url')
-    const here = dirname(fileURLToPath(import.meta.url))
-    const candidates = [
-      resolve(here, '../worker-core/dist/control.js'),
-      resolve(here, '../../worker-core/dist/control.js'),
-      resolve(process.cwd(), 'packages/worker-core/dist/control.js'),
-    ]
-    for (const candidate of candidates) {
-      try {
-        const code = await readFile(candidate, 'utf8')
-        // 匹配形如 "abc1234-202610221430" 的版本串
-        const m = /["']([0-9a-f]{7,10}-\d{12})["']/.exec(code)
-        if (m) return m[1]
-      } catch {
-        /* 试下一个 */
-      }
-    }
+    const code = await loadBuiltinBundle('control.js')
+    return extractBuildVersion(code) || undefined
   } catch {
-    /* 忽略 */
+    /* 读不到就当没有版本号 */
   }
   return undefined
 }

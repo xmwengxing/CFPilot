@@ -144,7 +144,7 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 		Port:       req.Port,
 		Candidates: candidates,
 		// ⚠️ WSPath 与 ProbePath 必须**分别赋值**，不能互相回落
-		// （2026-10-27 修复「所有节点下行接近 0」）
+		//
 		//
 		// 早期写成 firstNonEmpty(req.WSPath, req.ProbePath, default)，
 		// 于是只传 wsPath 时 ProbePath 也变成了代理路径，
@@ -214,7 +214,7 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 			"host":     host,
 		}
 
-		// ---- 结果明细分条打到日志（2026-10-27 用户反馈）----
+		// ---- 结果明细分条打到日志----
 		//
 		// 早期只在日志里打一行「优选完成：N 个可用节点，最快 X MB/s」，
 		// 具体每个 IP 的机房 / TLS / TCP / 下行全都不显示 ——
@@ -386,7 +386,7 @@ func (s *Server) handleScanDetectPath(w http.ResponseWriter, r *http.Request) {
 
 // handleScanPushResults 把优选结果回填到面板。
 //
-// ## 与「优选时自动回填」的区别（2026-10-27 交互改版）
+// ## 与「优选时自动回填」的区别
 //
 // 早期是优选过程中顺带回填，但那需要提前申请令牌（10 分钟有效），
 // 而优选本身要跑几分钟，令牌很容易在回填前过期。
@@ -492,7 +492,7 @@ func (s *Server) resolvePanelAccess(ctx context.Context, profile *store.Profile)
 
 // handleScanScannerToken 自动获取面板的一次性扫描令牌。
 //
-// ## 为什么需要（2026-10-27 用户需求）
+// ## 为什么需要
 //
 // 「回填优选结果」需要 Bearer 令牌，令牌来自面板的
 // `POST /api/v1/scanner-token`，而那个接口要求面板会话。
@@ -531,7 +531,7 @@ func (s *Server) handleScanScannerToken(w http.ResponseWriter, r *http.Request) 
 	// ---- 确定控制面地址 ----
 	//
 	// ⚠️ 必须用**清单里的 ControlSubdomain**，不能用界面传的 host
-	// （2026-10-27 真机故障修复）
+	//
 	//
 	// 原因：界面「目标域名」填的是**数据面**（cpdata.pages.dev），
 	// 因为优选要用数据面做 SNI/Host。但面板登录接口 /api/v1/login
@@ -619,7 +619,7 @@ func (s *Server) handleScanScannerToken(w http.ResponseWriter, r *http.Request) 
 //
 // 对应界面上的「不回填面板，只输出列表」勾选框。
 //
-// ## 为什么之前是空壳（2026-10-27 用户反馈）
+// ## 为什么之前是空壳
 //
 // 界面有那个勾选框，但 Go 版**从未实现回填** ——
 // 勾选状态在渲染层被读取的地方压根不存在，

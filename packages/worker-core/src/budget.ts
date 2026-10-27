@@ -86,7 +86,7 @@ export async function relay(
    * ⚠️ 对 `cloudflare:sockets` 的 writable 必须传 `false`：
    * `close()` 会关闭整个 TCP 连接（表现为 RST），
    * 目标站可能来不及把响应发回来 ——
-   * 现象是「握手成功但永远收不到数据」（2026-10-23 真机发现，影响 XHTTP 入站）。
+   * 现象是「握手成功但永远收不到数据」。
    *
    * 对普通 TransformStream（如 HTTP 响应体）保持默认 true 即可 ——
    * 那正是「流结束」的语义。

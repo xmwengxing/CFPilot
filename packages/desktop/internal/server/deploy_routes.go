@@ -151,7 +151,7 @@ func (s *Server) handleDeployRun(w http.ResponseWriter, r *http.Request) {
 	opt.PanelPath = req.PanelPath
 	opt.WSPath = req.WSPath
 	// ⚠️ 部署密码只读 DeployPanelPassword，**绝不读 PanelPassword**
-	// （2026-10-27 用户明确要求两个用途彻底分开）
+	//
 	//
 	// 历史教训：
 	//   早期两个输入框都写同一个 PanelPassword 字段 ——
@@ -201,7 +201,7 @@ func (s *Server) handleDeployRun(w http.ResponseWriter, r *http.Request) {
 				s.logLevel("部署完成", "ok")
 			}
 
-			// ⚠️ 必须把面板凭据完整打印出来（2026-10-27 用户反馈）
+			// ⚠️ 必须把面板凭据完整打印出来
 			//
 			// 早期 Go 版**完全没有这段汇总**，导致：
 			//   - 部署成功后界面看不到面板密码 / 路径
@@ -228,7 +228,7 @@ func (s *Server) handleDeployRun(w http.ResponseWriter, r *http.Request) {
 //
 // 实际实现在 internal/kernel 包里 —— 那边用 go:embed 把产物**内嵌进 exe**。
 //
-// ## 为什么改成内嵌（2026-10-26 严重缺陷）
+// ## 为什么改成内嵌
 //
 // 最初的设计假设「exe 旁边有 worker-core/dist 目录」，但构建脚本
 // 从来没把产物拷进去。用户下载的单文件 exe 完全不包含内核，
@@ -346,7 +346,7 @@ func (s *Server) handleDeployCheck(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		// ⚠️ 字段名必须与 Electron 版 DeployStatus **逐字段一致**
-		// （2026-10-27 修复「检查状态是空壳按钮」）
+		//
 		//
 		// 界面代码（renderer.ts 的 applyDeployStatus）读的是：
 		//   status.build        ← 线上内核版本
@@ -374,7 +374,7 @@ func (s *Server) handleDeployCheck(w http.ResponseWriter, r *http.Request) {
 
 // handleDeployCredentials 返回清单里保存的面板凭据（供界面随时查看）。
 //
-// ## 为什么需要这个接口（2026-10-27 用户需求）
+// ## 为什么需要这个接口
 //
 // Cloudflare 平台上的环境变量是**加密的**（页面只显示 `****`），
 // 所以一旦部署完成时没记下面板密码，用户就彻底拿不回来了。
@@ -448,7 +448,7 @@ func (s *Server) handleDeployCredentials(w http.ResponseWriter, r *http.Request)
 
 // logSummary 打印部署完成后的凭据汇总。
 //
-// ## 为什么必须有（2026-10-27 用户反馈）
+// ## 为什么必须有
 //
 // 用户部署成功后**看不到面板密码**，而 Cloudflare 平台上的环境变量
 // 是加密的（页面只显示 `****`），所以密码一旦没记录就彻底找不回来，

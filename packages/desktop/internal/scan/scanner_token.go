@@ -2,7 +2,7 @@ package scan
 
 // 自动获取面板的一次性扫描令牌。
 //
-// ## 为什么需要（2026-10-27 用户需求）
+// ## 为什么需要
 //
 // 「回填优选结果到面板」需要 `Bearer` 令牌。令牌从面板的
 // `POST /api/v1/scanner-token` 拿，而那个接口要求**面板会话**。
@@ -62,7 +62,7 @@ func FetchScannerToken(ctx context.Context, baseURL, password string, timeout ti
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 
-	// ⚠️ 不用 cookiejar，改为**手动提取并回传** Cookie（2026-10-27 故障修复）
+	// ⚠️ 不用 cookiejar，改为**手动提取并回传** Cookie
 	//
 	// 真机报错：「令牌响应解析失败：<!DOCTYPE html>...<title>Welcome</title>」
 	//
@@ -119,7 +119,7 @@ func FetchScannerToken(ctx context.Context, baseURL, password string, timeout ti
 
 	// ---- 先判断登录是否成功（顺序很重要）----
 	//
-	// ⚠️ 状态码检查必须在 Cookie 检查**之前**（2026-10-27 修复）
+	// ⚠️ 状态码检查必须在 Cookie 检查**之前**
 	//
 	// 早期把 Cookie 检查放在前面，于是密码错误（401，无 Cookie）时
 	// 报的是「登录成功但服务端没有下发会话 Cookie」——

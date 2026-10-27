@@ -1,7 +1,7 @@
 /**
  * 分流规则 —— 回归测试。
  *
- * ## 2026-10-26 重要修正
+ * ## 重要修正
  *
  * 早前实现把 ACL4SSR 风格的 ini 用 gzip+base64 内嵌进部署代码，
  * 并把其中远端 `ruleset=` 翻译成 `RULE-SET,<name>,<策略>`，
@@ -122,7 +122,7 @@ describe('renderRouteProfile', () => {
   })
 
   it('远端 ruleset 被完全忽略（不再生成 RULE-SET）', () => {
-    // ⚠️ 2026-10-26 线上事故回归：
+    // ⚠️ 线上事故回归：
     // 早前把 `ruleset=<组>,<URL>` 翻译成 `RULE-SET,<name>,<策略>`，
     // 但没有配套的 `rule-providers:` 段 → Clash 报
     // `rule set [CFnat] not found`，**整个订阅加载失败**。
@@ -294,7 +294,7 @@ describe('buildBuiltinRules：内核内置分流规则', () => {
   })
 })
 
-describe('GEOSITE 分类安全（2026-10-26 事故回归）', () => {
+describe('GEOSITE 分类安全', () => {
   const rules = buildBuiltinRules('CFPilot')
   const categories = rules
     .filter((r) => r.includes('GEOSITE,'))

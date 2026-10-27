@@ -3,7 +3,7 @@
  *
  * ## 背景
  *
- * 2026-10-22 真机复现：合并包部署到 Pages，第一次成功、第二次
+ * 真机复现：合并包部署到 Pages，第一次成功、第二次
  * `HTTP 400 / 8000119 Your Pages project has been blocked`。
  * 拆成两个项目后两边都能原地更新。
  *
@@ -233,9 +233,9 @@ async function writeManifest(
  * - `foreign`　含其他项目的 `config` 键 → 已被占用，**必须拒绝**
  * - `stale`　含 CFPilot 的 `CONFIG` 键但没有清单 → 残留配置
  *
- * ## ⚠️ `foreign` 为什么从「只提醒」改成「阻断」（2026-10-26）
+ * ## ⚠️ `foreign` 为什么从「只提醒」改成「阻断」
  *
- * CFPilot 早已是**纯自研数据面**（vendor 于 2026-10-25 完全移除）。
+ * CFPilot 早已是**纯自研数据面**（vendor 于 完全移除）。
  * 继续往已被其他项目使用的 KV 里部署会带来三个问题：
  *
  *   1. **共享配额**：对方的用量与本实例互相挤占，两边都可能被限流；
@@ -301,7 +301,7 @@ export async function inspectKvOwnership(
       verdict: 'foreign',
       manifest: null,
       detail: '含其他项目的 config 键，该命名空间正被别的项目使用',
-      // ⚠️ 阻断（2026-10-26 由 false 改为 true）：
+      // ⚠️ 阻断：
       // CFPilot 已是纯自研数据面，不再与其他项目共存于同一 KV。
       // 理由见上方 KvOwnership 的注释（配额共享 / 语义污染 / 用户预期）。
       blocking: true,
@@ -351,7 +351,7 @@ export async function assertKvOwnership(
   }
 
   if (info.verdict === 'foreign') {
-    // ⚠️ 阻断（2026-10-26）：CFPilot 是纯自研数据面，不与其他项目共用 KV。
+    // ⚠️ 阻断：CFPilot 是纯自研数据面，不与其他项目共用 KV。
     // 即使加 --force / 勾选「强制」也**不允许**继续 —— 这是硬约束，
     // 因为共存会让两个项目在同一命名空间上互相影响（配额、schema、排查难度），
     // 而用户往往意识不到。要部署就换一个干净的 KV。
@@ -811,7 +811,7 @@ export async function deployPagesSplit(
 
   /* ---------------- 3. 部署（先数据面，控制面的 DATA_HOST 才有效） ---------------- */
 
-  // ⚠️ 已知平台行为（2026-10-22 实测，含旧版原文件对照）：
+  // ⚠️ 已知平台行为：
   //    Pages 对含代理入站 + 出站拨号的项目，**第二次部署必然返回
   //    HTTP 400 / 8000119 blocked**，与项目名、是否二次打包、
   //    是否改动源码均无关（原版文件 + 全新随机项目名同样 1/3）。
@@ -820,7 +820,7 @@ export async function deployPagesSplit(
   //    因此「原地更新」对数据面不可用。妥协方案：命中 8000119 时
   //    自动换一个新的随机项目名重新部署，保证上游有更新时仍能上线。
   //
-  //    换名后的两件收尾（2026-10-25 新增，均为用户反馈的痛点）：
+  //    换名后的两件收尾：
   //      1. **自定义域名自动迁移** —— 旧项目上绑的域名迁到新项目，
   //         否则用户订阅里的地址全部失效（以前要用户手动迁移）；
   //      2. **删除旧项目** —— 否则每次更新都留一个孤立项目，
@@ -871,7 +871,7 @@ export async function deployPagesSplit(
     result.data.subdomain = dataAttempt.subdomain
   }
 
-  // ⚠️ **数据面换名后必须重配控制面**（2026-10-23 真机踩坑）
+  // ⚠️ **数据面换名后必须重配控制面**
   //
   // 流程上控制面的环境变量是**部署前**配好的（Pages 要求先配变量再部署），
   // 那时 `result.data.subdomain` 还是**旧值**（来自部署清单或空）。
@@ -930,7 +930,7 @@ export async function deployPagesSplit(
   /* ---------------- 4. 写回部署清单（下次更新靠它识别同源项目） ---------------- */
 
   if (result.control.subdomain && result.data.subdomain) {
-    // ⚠️ 不要写 `'unknown'` 这种假版本号（2026-10-25 修正）。
+    // ⚠️ 不要写 `'unknown'` 这种假版本号。
     //
     // 早年这里写 `options.localBuild ?? 'unknown'`，于是清单里留下真正的字符串
     // `"build": "unknown"`。而读清单的一方（GUI 的「检查状态」）无法区分
@@ -1107,7 +1107,7 @@ async function deployWithBlockRetry(params: {
    * ```
    *
    * 跳过第 1 步会报 `You have already added this custom domain`
-   * （2026-10-25 真机踩到）；第 3 步必须在第 2 步之后，
+   * ；第 3 步必须在第 2 步之后，
    * 否则域名会在一段时间内指向不存在的项目。
    */
   const migrateAndCleanup = async (newName: string): Promise<void> => {
@@ -1155,7 +1155,7 @@ async function deployWithBlockRetry(params: {
   /**
    * 同一个项目重试的次数。
    *
-   * `8000119` 的风控判定分两种形态（2026-10-23 实测）：
+   * `8000119` 的风控判定分两种形态：
    *   1. **新项目/未承载流量的项目**：间歇性，原样重试即可成功
    *      （同配置连做 6 次全部成功；最初失败的新项目原样重试也成功）
    *   2. **已服务真实代理流量的数据面项目**：持久性，重试无意义

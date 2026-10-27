@@ -3,7 +3,7 @@ import { normalizeNodeDomain } from '../src/routes/control'
 
 /**
  * `DATA_HOST` / `subDomain` 会被原样用作订阅节点的 SNI / host。
- * 用户手填完整 URL 是真实发生过的坑（2026-10-23 线上事故），
+ * 用户手填完整 URL 是真实发生过的坑，
  * 这里守住「进去的必须是裸域名」。
  */
 describe('normalizeNodeDomain', () => {

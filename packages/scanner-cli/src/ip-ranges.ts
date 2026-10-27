@@ -4,7 +4,7 @@
  * 优先从 cloudflare.com/ips-v4、/ips-v6 拉取权威列表，
  * 网络不可用时回退到内置的 Free Plan 友好型网段。
  *
- * ## 网段可用率加权（2026-10-25 实测）
+ * ## 网段可用率加权
  *
  * Cloudflare 的 IPv4 空间里大部分是区域/租户专用分配，对普通站点没有配置。
  * 真机实测（VLESS over WS 101 校验，每段 12 个 IP，用户域名
@@ -66,7 +66,7 @@ export const BUILTIN_IPV4_CIDRS: string[] = [
  *   - 权重高的网段拿到更多候选
  *
  * ⚠️ **粒度问题**：权重是按整段给的，但 Cloudflare 的实际可用性可能细到 /24。
- * 实测（2026-10-25）：同一个 `103.21.244.0/22` 里 `103.21.244.x` 16/16 全过，
+ * 实测：同一个 `103.21.244.0/22` 里 `103.21.244.x` 16/16 全过，
  * 而 `103.21.245.x` 0/14 全挂。因此低权重的网段仍会采到一些废 IP ——
  * 这是「宁可多采不可漏采」的权衡，真正的剔除靠阶段二的 101 + PING 校验。
  */
@@ -305,7 +305,7 @@ function bigIntToIpv6(value: bigint): string {
 /**
  * 把网段按「权重区」拆分成子网段。
  *
- * ## 为什么需要（2026-10-25 真机发现的缺陷）
+ * ## 为什么需要
  *
  * 官方返回的网段是 `162.158.0.0/15`，它**横跨两个权重区**：
  *   - `162.158.x.x`：边缘节点，权重 0.2
@@ -380,7 +380,7 @@ function splitByWeight(cidr: ParsedCidr): ParsedCidr[] {
  *   - 最后按预算收口：每网段保底 1 个会让总数略超，从计数最大的网段
  *     依次减 1 压回预算内（网段数超过预算时如实保留每网段 1 个）。
  *
- * ## 网段拆分（2026-10-25 新增）
+ * ## 网段拆分
  *
  * 进入采样前先把网段按权重区拆开（见 `splitByWeight`），
  * 否则 `162.158.0.0/15` 这种跨权重区的网段会让细粒度权重失效。
@@ -417,7 +417,7 @@ export function expandCidrs(cidrs: string[], options: IpRangeOptions = {}): stri
     const hasOtherFamily = parsed.some((c) => c.family !== family)
     const familyBudget = Math.max(1, Math.round(hasOtherFamily ? sample / 2 : sample))
 
-    // 可用率加权（2026-10-25 实测驱动）：
+    // 可用率加权：
     //
     // Cloudflare 的 IPv4 空间大部分是区域/租户专用分配，对普通站点没有配置。
     // 真机实测（101 校验，每段 12 IP）：6 个官方网段 0/12 完全不可用，

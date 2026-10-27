@@ -1,7 +1,7 @@
 /**
  * HTTPS 代理的 SNI / 证书名校验推导。
  *
- * ## 背景（2026-10-23 真机实测）
+ * ## 背景
  *
  * Cloudflare 边缘的 TLS 握手**校验证书链 + 主机名**：
  * workerd 的 TLS 能力只有 `TlsOptions = { expectedServerHostname?: string }`，

@@ -76,7 +76,7 @@ export function resolveFormat(value: string | null): SubFormat {
 /**
  * 把「节点域名」配置规范化成裸域名。
  *
- * ## 为什么需要（2026-10-23 真机踩坑）
+ * ## 为什么需要
  *
  * `DATA_HOST` / `subDomain` 的值会被**原样**用作订阅节点里的
  * `sni` / `host` / `servername` / Clash `Host` 头。

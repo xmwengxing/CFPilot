@@ -35,7 +35,7 @@ export interface WsProbeResult {
 /**
  * TLS 握手探测结果。
  *
- * ## 为什么单列一个指标（2026-10-24 真机定位的 -1 根因）
+ * ## 为什么单列一个指标
  *
  * 实测（电信千兆，两个不同网络环境）：
  *
@@ -272,7 +272,7 @@ function decodeWsFrame(buf: Buffer): { frame: DecodedFrame; rest: Buffer } | nul
 /**
  * 阶段二（严格版）：WS 101 握手 + **响应体内容校验**。
  *
- * ## 为什么在 101 之外还要验内容（2026-10-25 新增）
+ * ## 为什么在 101 之外还要验内容
  *
  * 借鉴 CFData-WEB 的「链路复验」思路：它不只做 TLS 握手，
  * 还解析响应体、校验其中的标记字段（`probe` / `ip`）。

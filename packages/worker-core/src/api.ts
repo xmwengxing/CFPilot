@@ -179,7 +179,7 @@ export async function handleApi(
     return json({ ok: true })
   }
 
-  // 手动保存本地池（2026-10-27 用户需求）
+  // 手动保存本地池
   //
   // ## 与「手动填写 ADD」的区别
   //

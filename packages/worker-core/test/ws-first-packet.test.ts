@@ -1,14 +1,14 @@
 /**
  * 拨号期间到达的数据帧不丢 —— 回归测试。
  *
- * 守护 2026-10-23 真机复现的缺陷：
+ * 守护 真机复现的缺陷：
  * 真实客户端（Xray / v2rayN / Clash 等）把 VLESS 协议头和首个数据包
  * 作为**两个独立的 WS 帧背靠背**发出，不等协议响应头。
  * 第二帧到达时 `established` 已置位、但 `writer` 尚未就绪（还在拨号），
  * 早前实现让它走 pumpUp → `if (!writer) return` **静默丢弃** →
  * 真机表现为「WS 升级 101、VLESS 认证通过，但隧道挂起、永远等不到响应」。
  *
- * 旧版第三方实现的实测形态是暂存回缓冲区，writer 就绪后整体补写：
+ * 实测形态是暂存回缓冲区，writer 就绪后整体补写：
  *   i ? (s ? await s.write(e) : l = l ? concat(l, e) : e) : await u(e)
  */
 import { describe, expect, it, vi } from 'vitest'

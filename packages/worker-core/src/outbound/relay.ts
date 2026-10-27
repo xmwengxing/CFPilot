@@ -27,16 +27,14 @@
  * 因为出口是第三方 VPS 而非 Cloudflare 自己的边缘，
  * **不触发 Worker 的 TCP Loop 限制** —— 这是唯一能打通 CF 网段目标的办法。
  *
- * ## 与 旧版第三方实现的关系
+ * ## 内置表与可配置性
  *
- * vendor 内置了一张第三方反代域名表（`proxyip.{hk,us,jp,...}.cmliussss.net`），
- * 运行时解析出 IP 后直连。本模块实现同一机制，但：
+ * 内置一张第三方反代域名表（`proxyip.{hk,us,jp,...}.cmliussss.net`），
+ * 运行时解析出 IP 后直连。同时支持：
  *
- *   - **入口来源可配置**：用户可在面板填自己的反代入口（不依赖第三方）；
- *   - **默认表可关闭**：`useBuiltinRelay: false` 时完全不用第三方；
- *   - **入口既支持 IP 也支持域名**（域名走 DoH 解析）。
- *
- * 兼容性：默认表与 vendor 同构，因此开箱即用的表现与 vendor 一致。
+ *   - **自配入口**：用户可在面板填自己的反代入口（不依赖第三方）；
+ *   - **关闭内置表**：`useBuiltinRelay: false` 时完全不用第三方；
+ *   - **入口支持 IP 与域名**（域名走 DoH 解析）。
  */
 import { isIpv4, isIpv6 } from '../protocols/address'
 import { resolveEndpointIps } from './doh'
@@ -132,7 +130,7 @@ export function sortEndpointsByRegion(
 /**
  * 内置反代入口域名表。
  *
- * 与 旧版第三方实现内置的 `Rt` 同构：`proxyip.<地区>.<主域名>`。
+ * 命名规则：`proxyip.<地区>.<主域名>`。
  * 这些是社区维护的第三方反代入口，解析出的 IP 分布在不同地区/线路。
  *
  * ⚠️ **这是对第三方服务的依赖**：该服务不可用时，内置入口会一起失效
@@ -183,7 +181,7 @@ export const BUILTIN_RELAY_DOMAINS: readonly string[] = [
  * 用途：**按当前机房所在国家优先选反代入口** ——
  * 边缘机房位置 ≈ 用户位置，从同地区的反代入口出去最快也最稳。
  *
- * 这与 旧版第三方实现的 `_Zc()` 同构。
+ * 这与 地区回落逻辑。
  */
 export const COLO_TO_COUNTRY: Readonly<Record<string, string>> = {
   HKG: 'HK',
@@ -299,7 +297,7 @@ const BUILTIN_PER_DOMAIN = 4
  * 下一批在前一批全失败时才发起。这样既覆盖全部入口，
  * 又不会一次性几十个连接同时打出去。
  *
- * ⚠️ **2026-10-23 修正：批次大小受 Worker 子请求预算约束**。
+ * ⚠️ **修正：批次大小受 Worker 子请求预算约束**。
  * `connect()` 与 `fetch()` 都计入单次调用 50 个子请求的上限（免费计划），
  * 32 个并发连接 + DoH 解析轻松超限（真机实测
  * `Too many subrequests by single Worker invocation`）。
@@ -311,7 +309,7 @@ export const RELAY_BATCH_SIZE = 8
 /**
  * 默认选取的内置反代域名数。
  *
- * ⚠️ 与 旧版第三方实现同构：**当前 colo 地区 + 2 个备用**。
+ * ⚠️ 与内置表一致：**当前 colo 地区 + 2 个备用**。
  * vendor 的 `Rt` 选择逻辑是 `[当前地区, ...其他].slice(0, 2)`，
  * 每个域名取 2/1 个 IP —— 少量但地区精确的候选，
  * 比 14 个域名全解析（42 次 DoH 子请求）可靠得多，也更省预算。
@@ -478,7 +476,7 @@ export function selectRelayDomains(
  *
  * 顺序：**用户自配优先**（用户明确指定的更可信），其次内置表。
  *
- * ⚠️ **内置表按地区精选，不是全量**（2026-10-23 修正）：
+ * ⚠️ **内置表按地区精选，不是全量**：
  * 14 个域名全解析 = 每个域名 TXT(3 提供商全失败) + A ≈ 4~6 次 DoH，
  * 合计 56~84 次子请求，加上连接竞速必然顶穿 Worker 50 次/调用 上限
  * （真机实测 CF 网段目标 100% 报 "Too many subrequests"）。

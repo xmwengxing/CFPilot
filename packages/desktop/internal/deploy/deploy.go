@@ -233,7 +233,7 @@ func (d *Deployer) Run(ctx context.Context) (*Result, error) {
 	//
 	// 归属校验必须用它，不能用被清单覆盖后的 controlName ——
 	// 后者在有清单时恒等于 manifest.ControlProject，拿它去比对永远相等，
-	// 归属校验形同虚设（2026-10-26 测试发现的真实缺陷）。
+	// 归属校验形同虚设。
 	requestedControl := strings.TrimSpace(d.opt.ControlProject)
 	// previousDataProject 必须在被 manifest 覆盖**之前**捕获，
 	// 否则两边相等就判断不出「换过名」。
@@ -503,9 +503,9 @@ const (
 //   - 小写 `config`   → CFNext 原版在用 → foreign
 //   - 大写 `CONFIG`   → CFPilot 残留 → stale
 //
-// ## ⚠️ foreign 为什么是硬阻断（2026-10-26）
+// ## ⚠️ foreign 为什么是硬阻断
 //
-// CFPilot 已是纯自研数据面（vendor 2026-10-25 移除），
+// CFPilot 已是纯自研数据面（vendor 移除），
 // 不与 CFNext 共用 KV：会共享配额、混淆 schema、让排查变难。
 // 因此 foreign **连 Force 都不放行** —— 要部署就换一个干净的 KV。
 func (d *Deployer) inspectKvOwnership(ctx context.Context, manifest *Manifest, requestedControl string) (Ownership, string) {
@@ -778,7 +778,7 @@ type deployAttemptResult struct {
 
 // sameProjectAttempts 是同一个项目重试的次数。
 //
-// 8000119 的风控判定分两种形态（2026-10-23 实测）：
+// 8000119 的风控判定分两种形态：
 //  1. 新项目 / 未承载流量的项目：间歇性，原样重试即可成功
 //  2. 已服务真实代理流量的数据面项目：持久性，重试无意义
 //
@@ -811,7 +811,7 @@ func (d *Deployer) deployWithBlockRetry(ctx context.Context, p deployAttemptPara
 				blocked := isBlocked(err)
 				isLast := attempt == sameProjectAttempts
 
-				// ⚠️ 网络错误绝不能当成 8000119 处理（2026-10-27 真机修复）
+				// ⚠️ 网络错误绝不能当成 8000119 处理
 				//
 				// 真机日志里出现过：
 				//   Post ".../pages/projects": EOF
@@ -868,7 +868,7 @@ func (d *Deployer) deployWithBlockRetry(ctx context.Context, p deployAttemptPara
 					}
 					d.log("  → 已创建并配置 " + next)
 
-					// ⚠️ 换名成功后必须清理旧项目（2026-10-27 用户反馈）
+					// ⚠️ 换名成功后必须清理旧项目
 					//
 					// 真机故障：网络抖动导致反复换名重试，账号下堆积了
 					// 8 个孤儿项目（4 组 cpdata + 4 组 cpmanager）。
@@ -931,7 +931,7 @@ func (d *Deployer) deployWithBlockRetry(ctx context.Context, p deployAttemptPara
 			//    （网络抖动 / 8000119 反复重试产生的中间项目）→ 全部清理
 			//
 			// 两件事互补，缺任何一件都会留下孤儿项目。
-			// 2026-10-27 用户实测：只做第 1 件事，结果账号下堆了 8 个项目。
+			// 用户实测：只做第 1 件事，结果账号下堆了 8 个项目。
 			d.migrateAndCleanup(ctx, p, name)
 			// ⚠️ 传的是「刚成功的项目名」而不是 index+1
 			//
@@ -955,7 +955,7 @@ func orUnknown(s string) string {
 
 // isNetworkError 判断是否是「网络层面」的错误（而非平台业务拒绝）。
 //
-// ## 为什么必须区分（2026-10-27 真机故障）
+// ## 为什么必须区分
 //
 // 真机部署时出现过：
 //
@@ -1005,7 +1005,7 @@ func isBlocked(err error) bool {
 
 // cleanupSupersededProjects 清理被换名淘汰的项目。
 //
-// ## 为什么需要（2026-10-27 真机故障）
+// ## 为什么需要
 //
 // 网络抖动（如开启了 TUN 模式的代理）会让部署反复失败并换名重试。
 // 早期实现只在「8000119 换名成功后」清理旧项目，**网络错误路径不清理**，
@@ -1049,7 +1049,7 @@ func (d *Deployer) cleanupSupersededProjects(
 		return
 	}
 
-	// ⚠️ 活跃项目保护名单（2026-10-27 误删事故修复）
+	// ⚠️ 活跃项目保护名单
 	//
 	// 真机事故：更新部署时 p.preferredName 恰好**等于清单里活跃的数据面项目名**
 	// （如 cpdata-ux7t-li8f）。一旦发生换名重试，finalName 变成
@@ -1130,7 +1130,7 @@ func (d *Deployer) cleanupSupersededProjects(
 //  2. 新项目绑定域名
 //  3. 删除旧项目
 //
-// 跳过第 1 步会报 `You have already added this custom domain`（2026-10-25 真机踩到）。
+// 跳过第 1 步会报 `You have already added this custom domain`。
 // 第 3 步必须在第 2 步之后，否则域名会在一段时间内指向不存在的项目。
 func (d *Deployer) migrateAndCleanup(ctx context.Context, p deployAttemptParams, newName string) {
 	oldName := p.oldProject
@@ -1228,7 +1228,7 @@ func RandomWorkerName() string {
 
 // RandomPanelPath 生成面板路径（**带前导斜杠**）。
 //
-// ## 为什么必须带斜杠（2026-10-27 用户反馈）
+// ## 为什么必须带斜杠
 //
 // 早期返回的是裸串（如 `g8ih0p7amfsh`），而 WS 路径是带斜杠的
 // （`/fthiqeowoe`）。两者不一致带来三个问题：

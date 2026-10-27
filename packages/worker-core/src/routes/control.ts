@@ -60,7 +60,7 @@ async function handleSubscription(
   //
   // KV 的 `ROUTE_PROFILE` 可写入自定义 ini 覆盖它（高级用法，留空即用内置）。
   //
-  // ## 为什么不内嵌一份规则配置文件（2026-10-26 修正线上事故）
+  // ## 为什么不内嵌一份规则配置文件
   //
   // 早前把一份 ACL4SSR 风格的 ini 用 gzip+base64 嵌进部署代码，问题有三：
   //   1. 那份 ini 的 `ruleset=` 指向远端规则集，需要配套 `rule-providers:`，

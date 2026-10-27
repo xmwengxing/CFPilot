@@ -38,7 +38,7 @@ export async function postResults(
 /**
  * 用面板密码登录控制面，换取一次性扫描令牌。
  *
- * ## 为什么需要（2026-10-27 新增，与图形版对齐）
+ * ## 为什么需要
  *
  * 回填需要 Bearer 令牌，令牌来自面板 `POST /api/v1/scanner-token`，
  * 而它要求面板会话。CLI 用密码换会话再取令牌，用户不必手动去

@@ -1,7 +1,7 @@
 /**
  * 出站选路：决定「往哪里连」。
  *
- * ## 核心约束（2026-10-23 真机实测，勿推翻）
+ * ## 核心约束
  *
  * Worker 运行时**不能主动连回 Cloudflare 自家的 Anycast 地址**：
  * `1.1.1.1` / `cloudflare.com` / `104.16.0.1` 等一律被拒，
@@ -167,7 +167,7 @@ export interface RouteInput {
  *
  * `https` 的语义：代理服务器本身走 TLS（需要 `connect({secureTransport:'on'})`），
  * 与 HTTP 代理的「明文 CONNECT 到代理、再由代理做 CONNECT」不同。
- * 这是 edgetunnel 有、旧版第三方实现没有的能力。
+ * 这是本项目相对 edgetunnel 的增强。
  */
 export type ProxyKind = 'direct' | 'socks5' | 'http' | 'https'
 

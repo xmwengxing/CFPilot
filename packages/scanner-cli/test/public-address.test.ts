@@ -1,7 +1,7 @@
 /**
  * 公网地址校验 —— 回归测试。
  *
- * 守护 2026-10-25 借鉴 cfnew `isPublicAddress` 的增强：
+ * 守护 借鉴 cfnew `isPublicAddress` 的增强：
  * 把私网 / 保留 / CGNAT / fake-ip / 组播地址从候选里剔除，
  * 避免浪费探测配额在毫无意义的地址上。
  */

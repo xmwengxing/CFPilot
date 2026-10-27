@@ -3,9 +3,9 @@
  *
  * ## 与 vendor 数据面的关系
  *
- * 旧版第三方实现（`wsHandler`）目前仍在生产使用，作为回退实现保留。
+ * 历史第三方实现（`wsHandler`）目前仍在生产使用，作为回退实现保留。
  * 本文件是自研实现，取三家成熟项目之长：
- *   - **旧版第三方实现**：出站三级候选（代理 → 直连 → 优选 IP）与竞速语义
+ *   - **历史实现**：出站三级候选（代理 → 直连 → 优选 IP）与竞速语义
  *   - **BPB**：先回协议响应头再中继（客户端据此判定入站已建立）
  *   - **cfnew**：首包数据缓存（竞速期间客户端已发的数据不能丢）
  *   - **edgetunnel**：出站失败必须**可诊断**，不能吞异常
@@ -38,7 +38,7 @@ const DIAL_TIMEOUT_MS = 5000
 /**
  * 下行静默检测窗口（ms）。
  *
- * ## 为什么需要（2026-10-25 真机定位 + edgetunnel 源码对照）
+ * ## 为什么需要
  *
  * Cloudflare Workers 的 `connect()` **只保证 TCP 能建连，不保证能收到数据**。
  * 真机实测（电信千兆，VLESS over WS 到 443 目标）：
@@ -358,9 +358,9 @@ export async function handleWebSocket(
   /**
    * 解析协议头并建立出站连接。
    *
-   * ## 顺序（重要，2026-10-23 本地真机验证发现）
+   * ## 顺序（重要，本地真机验证发现）
    *
-   * **先回协议响应头，再做���站** —— 与 旧版第三方实现和 BPB 一致：
+   * **先回协议响应头，再做出站** —— 与 BPB 一致：
    *
    * ```js
    * // vendor: 认证通过立刻发头，后续处理异步做
@@ -482,7 +482,7 @@ export async function handleWebSocket(
   /**
    * 下行无数据时改走反代入口重拨。
    *
-   * ## 背景（2026-10-25 真机定位 + edgetunnel 源码对照）
+   * ## 背景
    *
    * Cloudflare Workers 的 `connect()` 对部分目标（Google / YouTube / GitHub
    * 等 443）**TCP 能建连但一个字节都收不到**。这不是我们的代码问题，
@@ -619,7 +619,7 @@ export async function handleWebSocket(
       // 而 writer 仍为 null → `if (!writer) return` 静默丢弃 →
       // 表现为「VLESS 认证通过但隧道挂起、永远等不到响应」。
       //
-      // 旧版第三方实现的实测形态：暂存回 buffer，writer 就绪后与首包一起补写：
+      // 实测形态：暂存回 buffer，writer 就绪后与首包一起补写：
       //   i ? (s ? await s.write(e) : l = l ? concat(l, e) : e) : await u(e)
       if (!writer) {
         buffer = concatBytes(buffer, bytes)

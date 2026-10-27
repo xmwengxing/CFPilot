@@ -218,7 +218,7 @@ describe('部署参数校验', () => {
     await withMockServer(
       // KV 读取返回 404（= 键不存在），让归属判定落到 empty；
       // 不能用「200 + 空 result」——那种响应会被 getKvValue 当成真实的
-      // 空字符串值返回，从而误判成「命名空间被 旧版第三方实现 占用」。
+      // 空字符串值返回，从而误判成「命名空间已被占用」。
       (req) =>
         req.url?.includes('/values/')
           ? { status: 404, body: { success: false, errors: [{ code: 10009, message: 'not found' }] } }
@@ -269,7 +269,7 @@ describe('部署参数校验', () => {
   it('项目名留空时生成随机名（GUI 可选输入框场景）', async () => {
     const { deployPagesSplit } = await import('../src/pages-deploy')
     await withMockServer(
-      // 同前：KV 读取必须是 404，否则会被误判成被 旧版第三方实现 占用
+      // 同前：KV 读取必须是 404，否则会被误判成已被占用
       (req) =>
         req.url?.includes('/values/')
           ? { status: 404, body: { success: false, errors: [{ code: 10009, message: 'not found' }] } }
@@ -1253,7 +1253,7 @@ describe('Pages 双项目部署流程', () => {
 })
 
 /**
- * 8000119 换名重建后的收尾（2026-10-25 新增，用户反馈的两个痛点）。
+ * 8000119 换名重建后的收尾。
  *
  * 1. **自定义域名自动迁移** —— 旧项目绑的域名迁到新项目，
  *    否则用户订阅里的地址全部失效（以前要用户手动迁移）。
@@ -1429,7 +1429,7 @@ describe('8000119 换名后的域名迁移与旧项目清理', () => {
   })
 
   it('域名迁移顺序：旧项目解绑 → 新项目绑定 → 删旧项目', async () => {
-    // ⚠️ 真机踩坑（2026-10-25）：Pages 的同一自定义域名同时只能挂一个项目，
+    // ⚠️ 真机踩坑：Pages 的同一自定义域名同时只能挂一个项目，
     // 直接绑到新项目会报 `You have already added this custom domain`。
     // 因此必须先解绑旧项目。三步顺序都不能变。
     const { calls } = await runScenario({ hasDomain: true })
@@ -1471,7 +1471,7 @@ describe('8000119 换名后的域名迁移与旧项目清理', () => {
 })
 
 /**
- * 自定义域名读取：必须用 `/domains` 子接口（2026-10-25 真机踩坑）。
+ * 自定义域名读取：必须用 `/domains` 子接口。
  *
  * `GET /pages/projects/<name>` 的 `domains` 数组**只列 active 的域名** ——
  * 刚绑定的域名在 `initializing` 期间不在里面。

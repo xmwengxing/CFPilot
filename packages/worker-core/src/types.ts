@@ -21,25 +21,16 @@ export interface Env {
   UUID?: string
   /** Trojan 密码（明文，仅用于生成订阅与数据面认证） */
   TROJAN_PASSWORD?: string
-  /**
-   * WebSocket 路径。
-   *
-   * `PATH` 是 旧版的历史命名，`WS_PATH` 是本项目的命名，两者等价。
-   * 部署向导注入 `PATH`，这里两个都读，避免被静默忽略。
-   */
+  /** WebSocket 路径（`WS_PATH` 优先，兼容 `PATH`） */
   WS_PATH?: string
   PATH?: string
-  /** 是否启用 Trojan 入站（`TROJAN` 为 旧版历史命名） */
+  /** 是否启用 Trojan 入站（兼容旧名 `TROJAN`） */
   ENABLE_TROJAN?: string
   TROJAN?: string
-  /** 是否启用 XHTTP 入站（`XHTTP` 为 旧版历史命名） */
+  /** 是否启用 XHTTP 入站（兼容旧名 `XHTTP`） */
   ENABLE_XHTTP?: string
   XHTTP?: string
-  /**
-   * 数据面实现选择：`vendor`（默认，生产验证过）或 `self`（自研）。
-   *
-   * 见 `protocols/websocket.ts` 顶部说明。
-   */
+  /** 数据面实现（仅 `self`，纯自研） */
   DATAPLANE?: string
   /** 是否在订阅节点里启用 ECH（客户端侧能力） */
   ECH?: string
@@ -141,17 +132,17 @@ export interface UserConfig {
   /**
    * 是否启用**内置**反代入口表。
    *
-   * 内置表与 旧版第三方实现同构（`proxyip.<地区>.cmliussss.net` 等 14 个域名），
+   * 内置表与内置表一致（`proxyip.<地区>.cmliussss.net` 等 14 个域名），
    * 依赖社区第三方服务。关闭后只用用户在 `relayPool` 里自配的入口 ——
    * 自配入口不依赖任何第三方。
    *
-   * 默认 true（与 vendor 行为一致，开箱即用不劣于 vendor）。
+   * 默认 true（开箱即用）。
    */
   useBuiltinRelay: boolean
   /**
    * 是否在出站前自动用 DoH 解析目标域名以获得优选 IP 候选。
    *
-   * 机制与 旧版第三方实现的 `Ft()`、edgetunnel 的「预加载竞速」一致：
+   * 机制与 DoH 逐级回退、edgetunnel 的「预加载竞速」一致：
    * TXT 记录里的社区优选 IP 库优先，回退 A / AAAA。
    *
    * 为什么需要：Worker **连不回 Cloudflare 自家的 Anycast 地址**

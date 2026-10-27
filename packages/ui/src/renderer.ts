@@ -19,6 +19,19 @@
     return document.getElementById(id) as unknown as HTMLElement
   }
 
+  /**
+   * 切到「说明」页时自动跑一次更新检查。
+   *
+   * 为什么：之前只有手点「检查更新」按钮才会检查，
+   * 用户不点就永远不知道有新版 —— 那个按钮实际上等于没有。
+   * 切到说明页本来就是用户想看「有没有新东西」的时刻，
+   * 这时自动查一次最自然。
+   *
+   * 声明在这里是因为 runUpdateCheck 定义在后面（函数声明会提升，
+   * 但为了可读性用可空引用）。
+   */
+  let autoCheckOnAbout: (() => void) | null = null
+
   function switchPage(name: string): void {
     document.querySelectorAll('#nav button').forEach((b) => {
       b.classList.toggle('active', (b as HTMLElement).dataset.page === name)
@@ -28,6 +41,10 @@
     })
     // 切页时把焦点从输入框移开，避免背景页仍可 Tab 到
     ;(document.activeElement as HTMLElement | null)?.blur()
+    // 说明页：自动查一次更新
+    if (name === 'about' && autoCheckOnAbout) {
+      autoCheckOnAbout()
+    }
   }
 
   function log(message: string, level: 'info' | 'ok' | 'warn' | 'err' = 'info'): void {
@@ -72,6 +89,22 @@
     reason?: 'no-token' | 'no-account' | 'no-kv'
     build?: string
     localBuild?: string
+    /**
+     * 线上已部署的内核版本（semver）。
+     *
+     * 与 `build`（build 指纹 `<hash>-<hash>`，只能判断「一样不一样」）
+     * 不同，**这个能判断新旧** —— 部署代码可以独立于应用版本更新，
+     * 所以必须有一个可比较的版本号。
+     */
+    kernelVersion?: string
+    /** 应用内嵌的内核版本（semver） */
+    localKernelVersion?: string
+    /** 远程最新的内核版本（semver）；查不到时为空串 */
+    remoteKernelVersion?: string
+    /** 远程内核比线上新 → 可更新部署 */
+    kernelUpdatable?: boolean
+    /** 查远程失败的原因（不阻断其它状态） */
+    kernelRemoteError?: string
     controlProject?: string
     dataProject?: string
     controlSubdomain?: string
@@ -1148,37 +1181,61 @@
 
   let pendingUpdateUrl = ''
 
-  function bindUpdater(): void {
-    document.getElementById('btnCheckUpdate')!.addEventListener('click', async () => {
-      const badge = document.getElementById('updateBadge')!
-      const hint = document.getElementById('updateHint')!
+  /**
+   * 执行一次更新检查并渲染结果。
+   *
+   * 抽成函数是为了让「说明」页打开时能**自动跑一次** ——
+   * 之前只有手点按钮才会检查，用户不点就永远不知道有新版。
+   */
+  async function runUpdateCheck(quiet = false): Promise<void> {
+    const badge = document.getElementById('updateBadge')
+    const hint = document.getElementById('updateHint')
+    const btn = document.getElementById('btnCheckUpdate') as HTMLButtonElement | null
+    if (!badge || !hint) return
+
+    if (!quiet) {
       badge.textContent = '检查中…'
       badge.className = 'badge info'
-      try {
-        const result = await window.cfpilot.checkUpdate()
-        if (result.error) {
-          badge.textContent = '检查失败'
-          badge.className = 'badge err'
-          hint.textContent = '检查失败：' + result.error
-          return
-        }
-        if (!result.hasUpdate) {
-          badge.textContent = '已是最新'
-          badge.className = 'badge ok'
-          hint.textContent = '当前版本 ' + result.current + '，没有新版本。'
-          ;(document.getElementById('btnUpdate') as HTMLButtonElement).disabled = true
-          return
-        }
-        badge.textContent = '有新版 ' + (result.latest ?? '')
-        badge.className = 'badge warn'
-        hint.textContent = '发现新版本 ' + result.latest + '（当前 ' + result.current + '）。点击「下载并安装」。'
-        pendingUpdateUrl = result.downloadUrl ?? ''
-        ;(document.getElementById('btnUpdate') as HTMLButtonElement).disabled = !pendingUpdateUrl
-      } catch (err) {
+    }
+    if (btn) btn.disabled = true
+
+    try {
+      const result = await window.cfpilot.checkUpdate()
+      if (result.error) {
         badge.textContent = '检查失败'
         badge.className = 'badge err'
-        hint.textContent = '检查失败：' + (err instanceof Error ? err.message : String(err))
+        hint.textContent = '检查失败：' + result.error + '（网络问题，稍后再试）'
+        return
       }
+      if (!result.hasUpdate) {
+        badge.textContent = '已是最新'
+        badge.className = 'badge ok'
+        hint.textContent = '当前版本 ' + result.current + '，没有新版本。'
+        ;(document.getElementById('btnUpdate') as HTMLButtonElement).disabled = true
+        return
+      }
+      badge.textContent = '有新版 ' + (result.latest ?? '')
+      badge.className = 'badge warn'
+      hint.textContent = '发现新版本 ' + result.latest + '（当前 ' + result.current + '）。点击「下载并安装」。'
+      pendingUpdateUrl = result.downloadUrl ?? ''
+      ;(document.getElementById('btnUpdate') as HTMLButtonElement).disabled = !pendingUpdateUrl
+    } catch (err) {
+      badge.textContent = '检查失败'
+      badge.className = 'badge err'
+      hint.textContent = '检查失败：' + (err instanceof Error ? err.message : String(err))
+    } finally {
+      if (btn) btn.disabled = false
+    }
+  }
+
+  function bindUpdater(): void {
+    // 说明页自动检查（切到该页时触发）
+    autoCheckOnAbout = () => {
+      void runUpdateCheck(true)
+    }
+
+    document.getElementById('btnCheckUpdate')!.addEventListener('click', async () => {
+      await runUpdateCheck(false)
     })
 
     document.getElementById('btnUpdate')!.addEventListener('click', async () => {
@@ -1312,14 +1369,54 @@
         ? '<br><span style="color:var(--muted)">上次部署：' + escapeHtml(status.at) + '</span>'
         : ''
 
+      /**
+       * 内核版本信息行。
+       *
+       * `build` 是 build 指纹（`<hash>-<hash>`），只能判断「一样不一样」，
+       * **判断不了新旧** —— 而部署代码现在可以独立于应用版本更新，
+       * 所以必须用可比较的 semver（`kernelVersion`）来判断。
+       */
+      const kernelLine = (): string => {
+        const parts: string[] = []
+        if (status.kernelVersion) {
+          parts.push('线上内核 <code>' + escapeHtml(status.kernelVersion) + '</code>')
+        }
+        if (status.localKernelVersion) {
+          parts.push('应用内置 <code>' + escapeHtml(status.localKernelVersion) + '</code>')
+        }
+        if (status.remoteKernelVersion) {
+          parts.push('最新可用 <code>' + escapeHtml(status.remoteKernelVersion) + '</code>')
+        }
+        if (parts.length === 0) return ''
+        return '<br>' + parts.join(' · ')
+      }
+
+      /**
+       * 「内核可更新」提示。
+       *
+       * 远程内核比线上新时出现 —— 告诉用户点哪个按钮。
+       */
+      const kernelUpdateHint = (): string => {
+        if (!status.kernelUpdatable) return ''
+        const target = status.remoteKernelVersion ? '（可更新到 ' + escapeHtml(status.remoteKernelVersion) + '）' : ''
+        return (
+          '<br><span style="color:var(--warn)">👉 线上内核有新版' + target +
+          '，点下面的「更新部署」即可升级 —— <b>不需要升级本程序</b></span>'
+        )
+      }
+
       if (status.state === 'latest') {
         el.innerHTML =
           '<span class="badge ok">已是最新</span><br>' +
           '实例：' + instance + '<br>' +
           '内核版本 <code>' + escapeHtml(status.localBuild ?? '') + '</code>' +
-          deployedAt
+          kernelLine() + kernelUpdateHint() + deployedAt
         setBtn('重新部署', false)
-        if (hint) hint.textContent = '线上与本地内核版本一致，通常不需要再部署。'
+        if (hint) {
+          hint.textContent = status.kernelUpdatable
+            ? '线上内核与本地一致，但远程有更新的内核可用 —— 点「重新部署」会升到最新版。'
+            : '线上与本地内核版本一致，通常不需要再部署。'
+        }
         return
       }
 
@@ -1331,7 +1428,7 @@
           '实例：' + instance + '<br>' +
           '线上部署记录里<b>没有内核版本号</b>（较早版本部署的）<br>' +
           '本地内核版本：<code>' + escapeHtml(status.localBuild ?? '读取失败') + '</code>' +
-          deployedAt
+          kernelLine() + kernelUpdateHint() + deployedAt
         setBtn('更新并记录版本', true)
         if (hint) {
           hint.textContent =
@@ -1346,7 +1443,8 @@
           '<span class="badge err">本地产物异常</span><br>' +
           '实例：' + instance + '<br>' +
           '线上内核版本：<code>' + escapeHtml(status.build) + '</code><br>' +
-          '但<b>读不到本地内核版本</b> —— 应用内的内核产物可能缺失' + deployedAt
+          '但<b>读不到本地内核版本</b> —— 应用内的内核产物可能缺失' +
+          kernelLine() + deployedAt
         setBtn('重新部署', false)
         if (hint) hint.textContent = '请重新安装或联系维护者；直接部署可能上传不完整的产物。'
         return
@@ -1358,7 +1456,7 @@
         '实例：' + instance + '<br>' +
         '线上内核 <code>' + escapeHtml(status.build) + '</code>' +
         ' → 本地 <code>' + escapeHtml(status.localBuild) + '</code>' +
-        deployedAt
+        kernelLine() + kernelUpdateHint() + deployedAt
       setBtn('更新到最新内核', true)
       if (hint) {
         hint.textContent =
@@ -1573,6 +1671,23 @@
     bindScan()
     bindUpdater()
     bindPush()
+
+    /**
+     * 托盘菜单跳转。
+     *
+     * 托盘点「检查部署更新」会打开 `?t=<令牌>&page=deploy`，
+     * 界面读到 `page` 参数就切到对应页签 ——
+     * 这样用户点完托盘菜单，落地时已经在正确的页面上，
+     * 而不是停在「Cloudflare 凭据」页再自己找。
+     */
+    const pageParam = new URLSearchParams(location.search).get('page')
+    if (pageParam) {
+      const valid = ['cred', 'deploy', 'scan', 'about']
+      if (valid.includes(pageParam)) {
+        switchPage(pageParam)
+        log('已跳转到「' + pageParam + '」页')
+      }
+    }
 
     await runStep('账户列表', refreshProfiles)
     await runStep('凭据状态', refreshCredState)

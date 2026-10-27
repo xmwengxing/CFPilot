@@ -22,22 +22,27 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/config"
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/kernel"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/notify"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/server"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/tray"
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/update"
 )
 
 // Version 由构建时通过 -ldflags 注入（见 scripts/build-desktop.mjs）。
@@ -159,6 +164,71 @@ func main() {
 		_ = srv.Stop()
 		os.Exit(0)
 	})
+
+	// ---- 后台更新检查 ----
+	//
+	// 两个独立的版本：
+	//   应用更新 = 换 exe（外壳 / 界面 / 优选器）
+	//   部署更新 = 换线上内核（数据面 / 控制面）
+	//
+	// 部署更新的「远程最新内核版本」来自 GitHub Release，
+	// 与应用自身版本比较 —— 远程更新时托盘菜单会出现「（有新版 x.y.z）」。
+	// 真正的「线上 vs 最新」对比在界面的一键部署页里显示。
+	checker := tray.NewUpdateChecker(
+		func(ctx context.Context) (*update.CheckResult, error) {
+			return update.Check(ctx, server.Version()), nil
+		},
+		func(ctx context.Context) (*tray.DeployCheckResult, error) {
+			info, err := kernel.FetchRemoteInfo(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if info == nil {
+				return &tray.DeployCheckResult{}, nil
+			}
+			return &tray.DeployCheckResult{
+				RemoteVersion: info.Version,
+				RemoteNewer:   kernel.CompareSemver(info.Version, server.Version()) > 0,
+			}, nil
+		},
+	)
+	app.SetUpdateChecker(checker)
+
+	// 点菜单项的行为：
+	//   「检查应用更新」→ 立刻查一次 + 打开说明页（有新版时说明页已有提示）
+	//   「检查部署更新」→ 立刻查一次 + 打开一键部署页
+	app.SetCheckAppUpdateHandler(func() {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			st := checker.Check(ctx)
+			logUpdateState(st)
+			openPage(url, "about")
+		}()
+	})
+	app.SetCheckDeployUpdateHandler(func() {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			st := checker.Check(ctx)
+			logUpdateState(st)
+			openPage(url, "deploy")
+		}()
+	})
+
+	// 平时自动检查：启动 20 秒后查一次，之后每小时一次。
+	//
+	// 延迟 20 秒是为了不和用户第一次打开界面抢网络。
+	checker.StartAutoCheck(context.Background(), 20*time.Second, time.Hour, func(st *tray.UpdateState) {
+		logUpdateState(st)
+		if st.AppHasUpdate {
+			notify.ShowViaShell(notify.Message{
+				Title: "CFPilot 有新版本",
+				Body:  fmt.Sprintf("发现新版本 %s，可从托盘菜单「检查应用更新」查看。", st.AppLatest),
+			})
+		}
+	})
+
 	app.Run()
 
 	// 走到这里有两种可能：
@@ -192,6 +262,38 @@ func waitForSignal() {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
 	<-ch
+}
+
+// openPage 打开管理界面的指定页签。
+//
+// 界面读 URL 的 `page` 参数决定初始页签（cred / deploy / scan / about），
+// 所以托盘菜单点「检查部署更新」能直接落到「一键部署」页。
+func openPage(baseURL, page string) {
+	u := baseURL
+	if strings.Contains(u, "?") {
+		u += "&page=" + url.QueryEscape(page)
+	} else {
+		u += "?page=" + url.QueryEscape(page)
+	}
+	if err := openBrowser(u); err != nil {
+		log.Printf("[cfpilot] 打开浏览器失败：%v", err)
+	}
+}
+
+// logUpdateState 把检查结果记到日志。
+func logUpdateState(st *tray.UpdateState) {
+	if st == nil {
+		return
+	}
+	if st.AppHasUpdate {
+		log.Printf("[cfpilot] 应用有新版本：%s（当前 %s）", st.AppLatest, server.Version())
+	}
+	if st.DeployHasUpdate {
+		log.Printf("[cfpilot] 线上内核有新版本可用：%s", st.DeployLatest)
+	}
+	if st.Err != "" {
+		log.Printf("[cfpilot] 更新检查部分失败：%s", st.Err)
+	}
 }
 
 // openBrowser 用系统默认浏览器打开 URL。

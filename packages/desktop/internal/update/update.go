@@ -40,8 +40,10 @@ import (
 // Repo 是 GitHub 仓库。
 const Repo = "xmwengxing/CFPilot"
 
-// apiBase 是 GitHub Releases API（测试可覆盖）。
-var apiBase = "https://api.github.com/repos/" + Repo + "/releases"
+// APIBase 是 GitHub Releases API（测试可覆盖）。
+//
+// 生产环境不要改；单元测试用 httptest 假服务器把它指向本地地址。
+var APIBase = "https://api.github.com/repos/" + Repo + "/releases"
 
 // Mirror 是一个下载镜像。
 type Mirror struct {
@@ -152,10 +154,44 @@ func Check(ctx context.Context, current string) *CheckResult {
 //
 // tag 前缀同时兼容 `desktop-v*` 与旧的 `gui-v*`。
 func fetchReleases(ctx context.Context) ([]Release, error) {
+	all, err := fetchAllReleases(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Release, 0, len(all))
+	for _, r := range all {
+		asset := pickAsset(r.Assets)
+		if asset == nil {
+			continue // 这个发行版没有本平台的包，跳过
+		}
+		r.URL = asset.URL
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+// FetchReleases 查询全部有效发行版（按版本降序）。
+//
+// ## 与包内私有 fetchReleases 的区别
+//
+//   - fetchReleases：只保留**带本平台安装包**的发行版（检查更新用）
+//   - FetchReleases：保留全部有效发行版，并带上它们的**全部附件**
+//
+// kernel 包用它找「远程可用的内核产物」——
+// 内核产物（cfpilot-kernel-*.js）与平台无关，
+// 不能按平台过滤，否则会漏掉只发内核不发安装包的发行版。
+func FetchReleases(ctx context.Context) ([]Release, error) {
+	return fetchAllReleases(ctx)
+}
+
+// fetchAllReleases 拉取发行版列表，只做「tag 合法 + 非草稿 + 非预发布」的过滤。
+//
+// 不按平台过滤资产 —— 平台过滤留给调用方（见 fetchReleases）。
+func fetchAllReleases(ctx context.Context) ([]Release, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, apiBase+"?per_page=20", nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, APIBase+"?per_page=20", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -202,18 +238,17 @@ func fetchReleases(ctx context.Context) ([]Release, error) {
 			continue
 		}
 
-		asset := pickAsset(r.Assets)
-		if asset == nil {
-			continue // 这个发行版没有本平台的包，跳过
-		}
-
-		out = append(out, Release{
+		rel := Release{
 			Tag:     r.Tag,
 			Version: releaseVersion(r.Tag),
-			URL:     asset.URL,
 			Notes:   r.Body,
 			Assets:  r.Assets,
-		})
+		}
+		// URL 尽力填成本平台安装包（没有就留空，调用方按需自己找资产）
+		if asset := pickAsset(r.Assets); asset != nil {
+			rel.URL = asset.URL
+		}
+		out = append(out, rel)
 	}
 
 	sort.Slice(out, func(i, j int) bool {

@@ -58,5 +58,9 @@ packages/worker-core/src/route-profile.generated.ts
 /CLAUDE.md
 /.cursorrules
 release_body.md
+
+# 发布说明按版本存放，默认不入库；
+# 需要随 Release 发布时用 `git add -f .release-notes/<版本>.md` 单独带上
+/.release-notes/
 # go-winres 生成的 Windows 资源（构建时重新生成，不入库）
 /packages/desktop/cmd/cfpilot/*.syso

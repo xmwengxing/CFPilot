@@ -27,19 +27,15 @@ func TestLoadSettingsDefaultsWhenMissing(t *testing.T) {
 	if s.Host != "127.0.0.1" {
 		t.Errorf("Host 必须固定回环，实际 %q", s.Host)
 	}
-	if !s.OpenBrowserOnStart {
-		t.Error("默认应自动打开浏览器")
-	}
 }
 
 func TestSaveAndLoadRoundTrip(t *testing.T) {
 	withTempHome(t)
 
 	want := DesktopSettings{
-		Port:               20001,
-		Host:               "127.0.0.1",
-		OpenBrowserOnStart: false,
-		KeepRunningInTray:  true,
+		Port:              20001,
+		Host:              "127.0.0.1",
+		KeepRunningInTray: true,
 	}
 	if err := SaveSettings(want); err != nil {
 		t.Fatalf("保存失败：%v", err)

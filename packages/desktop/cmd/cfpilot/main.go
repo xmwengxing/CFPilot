@@ -117,7 +117,13 @@ func main() {
 	url := srv.WelcomeURL()
 	log.Printf("[cfpilot] 管理界面：%s", url)
 
-	if !*noBrowser && settings.OpenBrowserOnStart {
+	// 启动后自动打开 WebUI。
+	//
+	// ⚠️ 不再受设置项 OpenBrowserOnStart 控制（2026-10-28）：
+	// 那是个默认 false 的开关，用户第一次双击 exe 时浏览器不打开，
+	// 表现为「双击了但什么都没发生」—— 极难自解释。
+	// 现在只有 --no-browser 能关掉它。
+	if !*noBrowser {
 		// 给监听器一点时间就绪，再打开浏览器
 		go func() {
 			time.Sleep(300 * time.Millisecond)

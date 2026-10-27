@@ -42,8 +42,6 @@ type DesktopSettings struct {
 	//   2. 便于界面回填与二次确认
 	//   3. Host 由它推导，避免出现「Host 是 0.0.0.0 但开关是关的」这种矛盾状态
 	AllowLAN bool `json:"allowLan"`
-	// OpenBrowserOnStart 决定启动后是否自动打开浏览器。
-	OpenBrowserOnStart bool `json:"openBrowserOnStart"`
 	// KeepRunningInTray 决定关掉浏览器页面后是否继续在托盘驻留。
 	KeepRunningInTray bool `json:"keepRunningInTray"`
 }
@@ -57,11 +55,10 @@ const AnyHost = "0.0.0.0"
 // DefaultSettings 返回一份合理的出厂设置。
 func DefaultSettings() DesktopSettings {
 	return DesktopSettings{
-		Port:               DefaultPort,
-		Host:               LoopbackHost,
-		AllowLAN:           false,
-		OpenBrowserOnStart: true,
-		KeepRunningInTray:  true,
+		Port:              DefaultPort,
+		Host:              LoopbackHost,
+		AllowLAN:          false,
+		KeepRunningInTray: true,
 	}
 }
 

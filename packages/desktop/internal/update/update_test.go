@@ -163,18 +163,42 @@ func TestCheckSkipsDraftAndPrerelease(t *testing.T) {
 	}
 }
 
+// 正式发行版的 tag 是 `v<版本>`（2026-10-27 起与 npm 发布共用）。
+//
+// ⚠️ 这条曾经是**真 bug**：早期只认 `desktop-v*` / `gui-v*`，
+// 而 release-desktop.yml 产出的是 `v*` → 一个发行版都找不到 →
+// 界面「检查更新」按钮永远显示「检查失败」。
+func TestCheckAcceptsVPrefix(t *testing.T) {
+	assetName := "cfpilot-0.6.0-" + runtime.GOOS + "-" + runtime.GOARCH
+	srv := fakeGitHub(t, []any{
+		releaseJSON("v0.6.0", assetName, false, false),
+	})
+	withAPIBase(t, srv.URL)
+
+	res := Check(context.Background(), "0.5.5")
+	if res.Error != "" {
+		t.Fatalf("不应报错，实际 %q", res.Error)
+	}
+	if res.Latest != "0.6.0" {
+		t.Errorf("应认 v* 前缀，最新应为 0.6.0，实际 %q", res.Latest)
+	}
+	if !res.HasUpdate {
+		t.Error("0.5.5 → 0.6.0 应判定有新版")
+	}
+}
+
 // 不相关的 tag 前缀要跳过。
 func TestCheckIgnoresUnrelatedTags(t *testing.T) {
 	assetName := "cfpilot-0.6.0-" + runtime.GOOS + "-" + runtime.GOARCH
 	srv := fakeGitHub(t, []any{
-		releaseJSON("v9.9.9", assetName, false, false), // 没有 desktop-/gui- 前缀
+		releaseJSON("release-0.6.0", assetName, false, false), // 无关前缀
 		releaseJSON("desktop-v0.6.0", assetName, false, false),
 	})
 	withAPIBase(t, srv.URL)
 
 	res := Check(context.Background(), "0.5.5")
 	if res.Latest != "0.6.0" {
-		t.Errorf("应只认 desktop-v*/gui-v*，实际 %q", res.Latest)
+		t.Errorf("应只认 v*/desktop-v*/gui-v*，实际 %q", res.Latest)
 	}
 }
 
@@ -192,6 +216,25 @@ func TestCheckAcceptsGuiPrefix(t *testing.T) {
 	res := Check(context.Background(), "0.5.5")
 	if res.Latest != "0.6.0" {
 		t.Errorf("应兼容 gui-v 前缀，实际 %q", res.Latest)
+	}
+}
+
+// isReleaseTag / releaseVersion 的单元测试。
+func TestReleaseVersion(t *testing.T) {
+	cases := map[string]string{
+		"v0.7.5":         "0.7.5",
+		"desktop-v0.7.5": "0.7.5",
+		"gui-v0.7.5":     "0.7.5",
+		"v0.7":           "",
+		"v0.7.5-rc1":     "0.7.5-rc1", // 保留后缀（版本号比较只取数字三段）
+		"release-0.7.5":  "",
+		"vfoo":           "",
+		"":               "",
+	}
+	for tag, want := range cases {
+		if got := releaseVersion(tag); got != want {
+			t.Errorf("releaseVersion(%q) = %q，期望 %q", tag, got, want)
+		}
 	}
 }
 

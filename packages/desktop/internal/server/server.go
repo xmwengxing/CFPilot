@@ -458,7 +458,6 @@ func (s *Server) handleServiceStatus(w http.ResponseWriter, r *http.Request) {
 		"url":           fmt.Sprintf("http://%s:%d/", st.Host, st.Port),
 		"uptimeSeconds": int(time.Since(s.startedAt).Seconds()),
 		"keepInTray":    st.KeepRunningInTray,
-		"openOnStart":   st.OpenBrowserOnStart,
 		"settingsFile":  config.SettingsPathForDisplay(),
 		"pid":           osGetpid(),
 	})

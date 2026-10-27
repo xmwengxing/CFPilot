@@ -43,10 +43,20 @@ packages/worker-core/src/route-profile.generated.ts
 /packages/desktop/internal/server/assets/renderer.js
 /packages/desktop/cfpilot-*
 
-/docs/
+# 开发过程文档（不入库，内容已整合进 README / 本地 HANDOVER.md）
+/docs/*.md
+/docs/*.ini
+/docs/tist.ini
+# 但 README 引用的截图必须入库
+!/docs/images/
+!/docs/images/**
+
+# 本地开发规范与交接文档（不入库）
 /HANDOVER.md
+/RELEASE_NOTES.md
 /AGENTS.md
 /CLAUDE.md
 /.cursorrules
+release_body.md
 # go-winres 生成的 Windows 资源（构建时重新生成，不入库）
 /packages/desktop/cmd/cfpilot/*.syso

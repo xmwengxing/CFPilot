@@ -90,7 +90,16 @@ type Options struct {
 	ResolvePreferred *bool
 
 	// ---- 版本号（用于同版本跳过与写清单）----
+	// LocalBuild 是**构建指纹**（`<hash>-<hash>`），精确但没有大小顺序
 	LocalBuild string
+	// LocalKernelVersion 是**本次要部署的内核的语义化版本**（如 "0.7.6"）。
+	//
+	// 与 LocalBuild 的分工：
+	//   - LocalBuild  → 写进清单的 build 字段，用于判断「是不是同一份产物」
+	//   - LocalKernelVersion → 写进清单的 kernelVersion 字段，用于判断「谁更新」
+	//
+	// 远程内核的版本号就是 Release 的版本号；内嵌内核的是应用版本。
+	LocalKernelVersion string
 
 	// ---- 高级 ----
 	// APIBase 覆盖 Cloudflare API 地址（测试用，生产留空）
@@ -129,16 +138,22 @@ type Slot struct {
 
 // Manifest 是部署清单（存在 KV 里）。
 type Manifest struct {
-	V                int         `json:"v"`
-	KVNamespaceID    string      `json:"kvNamespaceId"`
-	ControlProject   string      `json:"controlProject"`
-	DataProject      string      `json:"dataProject"`
-	ControlSubdomain string      `json:"controlSubdomain"`
-	DataSubdomain    string      `json:"dataSubdomain"`
-	DataCustomDomain string      `json:"dataCustomDomain"`
-	Build            string      `json:"build"`
-	At               string      `json:"at"`
-	Credentials      Credentials `json:"credentials"`
+	V                int    `json:"v"`
+	KVNamespaceID    string `json:"kvNamespaceId"`
+	ControlProject   string `json:"controlProject"`
+	DataProject      string `json:"dataProject"`
+	ControlSubdomain string `json:"controlSubdomain"`
+	DataSubdomain    string `json:"dataSubdomain"`
+	DataCustomDomain string `json:"dataCustomDomain"`
+	// Build 是内核**构建指纹**（`<hash>-<hash>`），读不到为空串
+	Build string `json:"build"`
+	// KernelVersion 是内核**语义化版本**（如 "0.7.6"）。
+	//
+	// ⚠️ 旧清单没有这个字段 → 读出来是空串 → 视为「版本未知」。
+	// 空串**绝不**写成 "unknown"（假值会让用户看不懂）。
+	KernelVersion string      `json:"kernelVersion"`
+	At            string      `json:"at"`
+	Credentials   Credentials `json:"credentials"`
 }
 
 // Credentials 是清单里保存的凭据。
@@ -268,6 +283,11 @@ func (d *Deployer) Run(ctx context.Context) (*Result, error) {
 		}
 		if manifest.Build != "" && d.opt.LocalBuild != "" && manifest.Build != d.opt.LocalBuild {
 			d.log(fmt.Sprintf("· 版本变化：%s → %s", manifest.Build, d.opt.LocalBuild))
+		}
+		// 内核的 semver 变化也要说一声 —— 用户能据此判断「线上是不是比我旧」
+		if manifest.KernelVersion != "" && d.opt.LocalKernelVersion != "" &&
+			manifest.KernelVersion != d.opt.LocalKernelVersion {
+			d.log(fmt.Sprintf("· 内核版本变化：%s → %s", manifest.KernelVersion, d.opt.LocalKernelVersion))
 		}
 	} else if manifest != nil && d.opt.Mode == "fresh" {
 		d.log("· 指定了首次部署模式，忽略已有清单")
@@ -598,6 +618,9 @@ func (d *Deployer) writeManifest(ctx context.Context, old *Manifest, eff effecti
 	// 假值会让「检查状态」显示「线上内核 unknown ≠ 本地 xxx」，用户看不懂。
 	build := strings.TrimSpace(d.opt.LocalBuild)
 
+	// 内核的语义化版本（semver）。同样读不到就写空串。
+	kernelVersion := strings.TrimSpace(d.opt.LocalKernelVersion)
+
 	// 自定义域名：本次迁过来的，或旧项目上原有的（下次更新还要靠它迁移）
 	if customDomain == "" && old != nil {
 		customDomain = old.DataCustomDomain
@@ -612,6 +635,7 @@ func (d *Deployer) writeManifest(ctx context.Context, old *Manifest, eff effecti
 		DataSubdomain:    d.result.Data.Subdomain,
 		DataCustomDomain: customDomain,
 		Build:            build,
+		KernelVersion:    kernelVersion,
 		At:               time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
 		Credentials: Credentials{
 			PanelPath:      eff.panelPath,

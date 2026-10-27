@@ -28,6 +28,16 @@
 //  1. 环境变量 CFPILOT_KERNEL_DIR（开发期直接指仓库，免去拷贝）
 //  2. exe 同目录的 worker-core/dist（允许用户热替换内核）
 //  3. **内嵌产物**（默认路径，永远可用）
+//
+// ## 远程内核（remote.go）
+//
+// 内嵌把「部署用的代码」和「应用版本」绑死了 —— 用户没升级应用
+// 就只能部署旧内核。现在 Release 会附带内核产物，
+// 桌面版可以在运行时拉取**更新的内核**用于部署：
+//
+//	kernel.LoadPreferred(ctx, 应用版本)
+//
+// 查不到 / 离线时自动回退到内嵌产物，不影响部署。
 package kernel
 
 import (
@@ -49,8 +59,20 @@ type Artifacts struct {
 	// Data 是数据面产物（dataplane.js）
 	Data []byte
 	// Build 是版本串（形如 a946dfa-1f2e3d4c），读不到为空串
+	//
+	// ⚠️ 它是**构建指纹**：精确，但**没有大小顺序**，
+	// 只能判断「一样 / 不一样」，判断不了「谁更新」。
 	Build string
-	// Source 说明产物来源（嵌入 / 目录），便于排查
+	// Version 是内核的语义化版本（semver，如 "0.7.6"），读不到为空串。
+	//
+	// 与 Build 的分工：
+	//   - Build 用来精确判断「线上跑的是不是同一份产物」
+	//   - Version 用来判断「线上比我旧还是新」（可比较）
+	//
+	// 内嵌内核的 Version 由调用方传入（应用版本，
+	// 见 LoadPreferred）；远程内核的 Version 是 Release 的版本号。
+	Version string
+	// Source 说明产物来源（嵌入 / 目录 / 远程），便于排查
 	Source string
 }
 

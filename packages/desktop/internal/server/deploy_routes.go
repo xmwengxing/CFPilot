@@ -117,11 +117,20 @@ func (s *Server) handleDeployRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 读内核产物
-	controlScript, dataScript, build, err := s.loadKernelArtifacts()
+	//
+	// ⚠️ 用 LoadPreferred 而不是 Load：远程若有**更新的内核**，
+	// 就用远程的部署（应用版本不再绑死部署用的代码）。
+	loadCtx, cancelLoad := context.WithTimeout(context.Background(), 90*time.Second)
+	artifacts, err := s.loadKernelArtifacts(loadCtx)
+	cancelLoad()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	controlScript := artifacts.Control
+	dataScript := artifacts.Data
+	build := artifacts.Build
+	kernelVersion := artifacts.Version
 
 	// 同一时刻只允许一个部署
 	s.deploy.mu.Lock()
@@ -171,6 +180,7 @@ func (s *Server) handleDeployRun(w http.ResponseWriter, r *http.Request) {
 		opt.PanelPassword = strings.TrimSpace(profile.DeployPanelPassword)
 	}
 	opt.LocalBuild = build
+	opt.LocalKernelVersion = kernelVersion
 	// 「重新生成凭据」= 不沿用清单里的
 	opt.KeepCredentials = !req.NewCredentials
 	opt.SkipSameVersion = req.Mode != "update" // 显式更新时不跳过
@@ -224,9 +234,10 @@ func (s *Server) handleDeployRun(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// loadKernelArtifacts 读取内核产物（control.js / dataplane.js）。
+// loadKernelArtifacts 读取「应该用于部署」的内核产物（control.js / dataplane.js）。
 //
-// 实际实现在 internal/kernel 包里 —— 那边用 go:embed 把产物**内嵌进 exe**。
+// 实际实现在 internal/kernel 包里 —— 那边用 go:embed 把产物**内嵌进 exe**，
+// 同时支持从 GitHub Release 拉取**更新的内核**（见 kernel.LoadPreferred）。
 //
 // ## 为什么改成内嵌
 //
@@ -235,17 +246,46 @@ func (s *Server) handleDeployRun(w http.ResponseWriter, r *http.Request) {
 // 点「开始部署」直接报「找不到内核产物」—— 部署功能 100% 不可用。
 //
 // 现在产物编译进二进制，真正的单文件分发。
-func (s *Server) loadKernelArtifacts() (control, data []byte, build string, err error) {
-	a, err := kernel.Load()
-	if err != nil {
-		return nil, nil, "", fmt.Errorf(
+//
+// ## 为什么还要远程内核
+//
+// 内嵌意味着「部署用的代码被应用版本绑死」—— 用户没升级应用就
+// 只能部署旧内核。远程内核把两者解耦：应用不升级也能部署新内核。
+//
+// ⚠️ 远程不可用（离线）时**自动回退到内嵌产物**，绝不让部署失败。
+func (s *Server) loadKernelArtifacts(ctx context.Context) (*kernel.Artifacts, error) {
+	a, info, err := kernel.LoadPreferred(ctx, Version())
+	if err != nil && a == nil {
+		return nil, fmt.Errorf(
 			"内核产物不可用：%w\n"+
 				"  这通常意味着构建时漏了拷贝内核产物。\n"+
 				"  请重新执行 node scripts/build-desktop.mjs（它会自动拷贝）", err)
 	}
-	log.Printf("[cfpilot] 内核产物已加载（%s，control=%dKB data=%dKB，build=%s）",
-		a.Source, len(a.Control)/1024, len(a.Data)/1024, a.Build)
-	return a.Control, a.Data, a.Build, nil
+	if err != nil {
+		// 降级（远程下载失败之类）：给出警告，但继续用可用的内核部署
+		s.logLevel("⚠ "+err.Error(), "warn")
+	}
+	if a == nil {
+		return nil, fmt.Errorf("内核产物不可用")
+	}
+	log.Printf("[cfpilot] 内核产物已加载（%s，control=%dKB data=%dKB，build=%s，内核版本=%s）",
+		a.Source, len(a.Control)/1024, len(a.Data)/1024, a.Build, a.Version)
+	if info != nil && info.Version != a.Version {
+		log.Printf("[cfpilot] 远程可用内核版本：%s（本次未采用）", info.Version)
+	}
+	return a, nil
+}
+
+// localKernelBuild 返回本地内核的构建指纹（不联网）。
+//
+// 「检查状态」只需要 build 指纹做「线上 ≠ 本地」的判断，
+// 不该为了拿指纹去连 GitHub。
+func localKernelBuild() string {
+	a, err := kernel.Load()
+	if err != nil {
+		return ""
+	}
+	return a.Build
 }
 
 // readBuildVersion 从产物里提取版本串。
@@ -273,6 +313,14 @@ func readBuildVersion(dir string, fallback []byte) string {
 //	{ state: 'none'|'outdated'|'latest'|'blocked',
 //	  reason?: 'no-token'|'no-account'|'no-kv',
 //	  localBuild, remoteBuild, controlProject, dataProject, ... }
+//
+// 另外还返回**内核版本对比**（build 指纹比不出新旧，semver 可以）：
+//
+//	{ kernelVersion:       线上已部署的内核版本（清单里的；旧清单为空 = 未知）
+//	  localKernelVersion:  应用内嵌的内核版本（= 应用版本）
+//	  remoteKernelVersion: 远程最新的内核版本（查不到就是空串）
+//	  kernelUpdatable:     远程是否比线上新
+//	  kernelRemoteError:   远程查询失败的原因（没有失败就是空串） }
 func (s *Server) handleDeployCheck(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "仅支持 POST"})
@@ -322,10 +370,7 @@ func (s *Server) handleDeployCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	localBuild := ""
-	if _, _, b, e := s.loadKernelArtifacts(); e == nil {
-		localBuild = b
-	}
+	localBuild := localKernelBuild()
 
 	// 线上版本：优先读数据面的 /__version 端点（最权威）
 	remoteBuild := m.Build
@@ -344,7 +389,58 @@ func (s *Server) handleDeployCheck(w http.ResponseWriter, r *http.Request) {
 		state = "outdated"
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	// ---------------- 内核版本对比 ----------------
+	//
+	// ⚠️ 远程查询**必须能失败**（离线时不能让整个检查状态失败）。
+	// 查不到就返回空串 + kernelUpdatable=false，并给出说明字段。
+	ks := kernelStatus{Deployed: strings.TrimSpace(m.KernelVersion), Local: Version()}
+	remoteCtx, cancelRemote := context.WithTimeout(ctx, 8*time.Second)
+	if info, e := kernel.FetchRemoteInfo(remoteCtx); e != nil {
+		ks.RemoteErr = e.Error()
+		s.logLevel("⚠ 查询远程内核版本失败："+e.Error(), "warn")
+	} else if info != nil {
+		ks.Remote = info.Version
+	}
+	cancelRemote()
+
+	writeJSON(w, http.StatusOK, buildDeployStatusResponse(&m, state, localBuild, remoteBuild, ks))
+}
+
+// kernelStatus 是内核版本的对比结果。
+type kernelStatus struct {
+	// Deployed 是线上已部署的内核版本（清单里的；旧清单为空 = 版本未知）
+	Deployed string
+	// Local 是应用内嵌的内核版本（= 应用版本）
+	Local string
+	// Remote 是远程最新的内核版本（查不到就是空串）
+	Remote string
+	// RemoteErr 是远程查询失败的原因（没有失败就是空串）
+	RemoteErr string
+}
+
+// Updatable 判断远程内核是否比线上更新。
+//
+// ⚠️ 线上版本未知（空串）时，CompareSemver 把空串当成「更旧」，
+// 于是结果为 true —— 这是**故意的**：
+// 线上版本都读不出来，用户更应该重新部署一次拿到确定的版本。
+//
+// 远程版本查不到（离线）时永远是 false —— 不能凭「查不到」就催用户更新。
+func (k kernelStatus) Updatable() bool {
+	if strings.TrimSpace(k.Remote) == "" {
+		return false
+	}
+	return kernel.CompareSemver(k.Remote, strings.TrimSpace(k.Deployed)) > 0
+}
+
+// buildDeployStatusResponse 组装「检查状态」的响应体。
+//
+// 抽成纯函数是为了能直接测字段契约（界面读的就是这些字段名）。
+func buildDeployStatusResponse(
+	m *deploy.Manifest,
+	state, localBuild, remoteBuild string,
+	ks kernelStatus,
+) map[string]any {
+	return map[string]any{
 		// ⚠️ 字段名必须与 Electron 版 DeployStatus **逐字段一致**
 		//
 		//
@@ -369,7 +465,20 @@ func (s *Server) handleDeployCheck(w http.ResponseWriter, r *http.Request) {
 		"controlSubdomain": m.ControlSubdomain,
 		"dataSubdomain":    m.DataSubdomain,
 		"customDomain":     m.DataCustomDomain,
-	})
+
+		// ---- 内核版本对比（新增）----
+		//
+		// kernelVersion         线上已部署的内核版本（清单里的，旧清单为空 = 未知）
+		// localKernelVersion    应用内嵌的内核版本（= 应用版本）
+		// remoteKernelVersion   远程最新的内核版本（查不到就是空串）
+		// kernelUpdatable       远程是否比线上新
+		// kernelRemoteError     远程查询失败的原因（没有失败就是空串）
+		"kernelVersion":       ks.Deployed,
+		"localKernelVersion":  ks.Local,
+		"remoteKernelVersion": ks.Remote,
+		"kernelUpdatable":     ks.Updatable(),
+		"kernelRemoteError":   ks.RemoteErr,
+	}
 }
 
 // handleDeployCredentials 返回清单里保存的面板凭据（供界面随时查看）。

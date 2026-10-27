@@ -84,9 +84,9 @@ func fakeGitHub(t *testing.T, payload any) *httptest.Server {
 // withAPIBase 临时替换 API 地址。
 func withAPIBase(t *testing.T, base string) {
 	t.Helper()
-	old := apiBase
-	apiBase = base + "/releases"
-	t.Cleanup(func() { apiBase = old })
+	old := APIBase
+	APIBase = base + "/releases"
+	t.Cleanup(func() { APIBase = old })
 }
 
 // releaseJSON 造一条发行版记录。
@@ -216,6 +216,48 @@ func TestCheckAcceptsGuiPrefix(t *testing.T) {
 	res := Check(context.Background(), "0.5.5")
 	if res.Latest != "0.6.0" {
 		t.Errorf("应兼容 gui-v 前缀，实际 %q", res.Latest)
+	}
+}
+
+// FetchReleases 不过滤平台资产 —— 内核产物与平台无关。
+//
+// kernel 包用它找「远程可用的内核产物」：
+// 如果按平台过滤，发在没有 windows 安装包的发行版会被整个丢掉。
+func TestFetchReleasesKeepsAssetsWithoutPlatformPackage(t *testing.T) {
+	srv := fakeGitHub(t, []any{
+		map[string]any{
+			"tag_name":   "v0.7.6",
+			"draft":      false,
+			"prerelease": false,
+			"body":       "notes",
+			"assets": []map[string]any{
+				{
+					"name":                 "cfpilot-kernel-control.js",
+					"browser_download_url": "https://example.com/control.js",
+					"size":                 10,
+				},
+				{
+					"name":                 "cfpilot-kernel-dataplane.js",
+					"browser_download_url": "https://example.com/dataplane.js",
+					"size":                 20,
+				},
+			},
+		},
+	})
+	withAPIBase(t, srv.URL)
+
+	releases, err := FetchReleases(context.Background())
+	if err != nil {
+		t.Fatalf("不该报错：%v", err)
+	}
+	if len(releases) != 1 {
+		t.Fatalf("应有 1 个发行版，实际 %d", len(releases))
+	}
+	if releases[0].Version != "0.7.6" {
+		t.Errorf("版本号应是 0.7.6，实际 %q", releases[0].Version)
+	}
+	if len(releases[0].Assets) != 2 {
+		t.Errorf("应保留全部附件，实际 %d", len(releases[0].Assets))
 	}
 }
 

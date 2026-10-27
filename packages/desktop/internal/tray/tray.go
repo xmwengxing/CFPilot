@@ -52,11 +52,24 @@ type App struct {
 	mLAN *systray.MenuItem
 	// mPortItems 是端口子菜单里的各项，用于打勾标记当前端口
 	mPortItems []*systray.MenuItem
+	// mCheckAppUpdate 是「检查应用更新」菜单项
+	mCheckAppUpdate *systray.MenuItem
+	// mCheckDeployUpdate 是「检查部署更新」菜单项
+	mCheckDeployUpdate *systray.MenuItem
+
+	// updateState 保存最近一次自动检查的结果（用于菜单项上的提示文字）。
+	updateState *UpdateState
 
 	// onOpenUI 回调：打开浏览器到指定地址
 	onOpenUI func(url string)
 	// onExit 回调：退出整个进程
 	onExit func()
+	// onCheckAppUpdate 回调：检查应用更新（由 main 注入）
+	onCheckAppUpdate func()
+	// onCheckDeployUpdate 回调：检查部署更新（由 main 注入）
+	onCheckDeployUpdate func()
+	// checker 是后台更新检查器（可为 nil）
+	checker *UpdateChecker
 }
 
 // portChoices 是托盘菜单里可选的端口。
@@ -76,6 +89,48 @@ func (a *App) SetOpenHandler(fn func(url string)) { a.onOpenUI = fn }
 
 // SetExitHandler 设置退出实现。
 func (a *App) SetExitHandler(fn func()) { a.onExit = fn }
+
+// SetUpdateChecker 注入后台更新检查器。
+func (a *App) SetUpdateChecker(c *UpdateChecker) {
+	a.checker = c
+	if c != nil {
+		c.SetOnChange(func(st *UpdateState) { a.refreshUpdateLabels(st) })
+	}
+}
+
+// SetCheckAppUpdateHandler 设置「检查应用更新」的实现。
+func (a *App) SetCheckAppUpdateHandler(fn func()) { a.onCheckAppUpdate = fn }
+
+// SetCheckDeployUpdateHandler 设置「检查部署更新」的实现。
+func (a *App) SetCheckDeployUpdateHandler(fn func()) { a.onCheckDeployUpdate = fn }
+
+// refreshUpdateLabels 按检查结果刷新两个菜单项的标题。
+//
+// 有新版时把版本号写进标题 —— 用户不用点开就知道。
+func (a *App) refreshUpdateLabels(st *UpdateState) {
+	if a.mCheckAppUpdate == nil || a.mCheckDeployUpdate == nil {
+		return
+	}
+	if st == nil {
+		return
+	}
+	a.mCheckAppUpdate.SetTitle(menuLabel("检查应用更新", st.AppHasUpdate, st.AppLatest))
+	a.mCheckDeployUpdate.SetTitle(menuLabel("检查部署更新", st.DeployHasUpdate, st.DeployLatest))
+}
+
+// handleCheckAppUpdate 点击「检查应用更新」。
+func (a *App) handleCheckAppUpdate() {
+	if a.onCheckAppUpdate != nil {
+		a.onCheckAppUpdate()
+	}
+}
+
+// handleCheckDeployUpdate 点击「检查部署更新」。
+func (a *App) handleCheckDeployUpdate() {
+	if a.onCheckDeployUpdate != nil {
+		a.onCheckDeployUpdate()
+	}
+}
 
 // Run 启动托盘（阻塞，直到退出）。
 //
@@ -174,6 +229,17 @@ func (a *App) onReady() {
 		port := p
 		item.Click(func() { a.switchPort(port) })
 	}
+
+	// ---- 更新检查 ----
+	//
+	// 「检查应用更新」→ 换 exe（外壳 / 界面 / 优选器）
+	// 「检查部署更新」→ 换线上内核（数据面 / 控制面）
+	//
+	// 两个版本独立：外壳可以是 0.7.5 而线上内核还是 0.7.3。
+	a.mCheckAppUpdate = systray.AddMenuItem("检查应用更新", "检查是否有新版本可下载")
+	a.mCheckDeployUpdate = systray.AddMenuItem("检查部署更新", "检查线上内核是否有新版本")
+	a.mCheckAppUpdate.Click(func() { a.onCheckAppUpdate() })
+	a.mCheckDeployUpdate.Click(func() { a.onCheckDeployUpdate() })
 
 	// ---- 局域网访问（复选菜单项）----
 	a.mLAN = systray.AddMenuItemCheckbox("允许局域网访问", "同一网络的其它设备可访问", false)

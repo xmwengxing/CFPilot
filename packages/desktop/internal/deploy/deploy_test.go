@@ -390,6 +390,96 @@ func TestManifestBuildNotUnknown(t *testing.T) {
 	}
 }
 
+// 清单里要记「本次实际部署的内核版本」（semver）。
+//
+// ⚠️ 它与 build 指纹是**两回事**，两个字段都要写：
+//   - build        构建指纹（`<hash>-<hash>`），精确但比不出新旧
+//   - kernelVersion semver（如 "0.7.6"），能判断「谁更新」
+func TestManifestRecordsKernelVersion(t *testing.T) {
+	f := newFakeCF()
+	d, _ := newTestDeployer(t, f, func(o *Options) {
+		o.LocalBuild = "abc1234-deadbeef"
+		o.LocalKernelVersion = "0.7.6"
+	})
+
+	if _, err := d.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	raw := f.kvWrites["CFP_DEPLOY_MANIFEST"]
+	if raw == "" {
+		t.Fatal("应写入部署清单")
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["kernelVersion"] != "0.7.6" {
+		t.Errorf("清单里的 kernelVersion 应是 0.7.6，实际 %v", m["kernelVersion"])
+	}
+	// build 指纹必须保留（两个字段语义不同）
+	if m["build"] != "abc1234-deadbeef" {
+		t.Errorf("清单里的 build 应保留，实际 %v", m["build"])
+	}
+}
+
+// 读不到内核版本时写空串（绝不写 "unknown"）。
+func TestManifestKernelVersionNotUnknown(t *testing.T) {
+	f := newFakeCF()
+	d, _ := newTestDeployer(t, f, func(o *Options) {
+		o.LocalKernelVersion = "" // 故意留空
+	})
+
+	if _, err := d.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	raw := f.kvWrites["CFP_DEPLOY_MANIFEST"]
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["kernelVersion"] == "unknown" {
+		t.Error("读不到内核版本时应写空串，绝不能写 \"unknown\"")
+	}
+	if m["kernelVersion"] != "" {
+		t.Errorf("kernelVersion 应为空串，实际 %v", m["kernelVersion"])
+	}
+}
+
+// 旧清单没有 kernelVersion 字段 → 读出来是空串（视为「版本未知」）。
+func TestReadLegacyManifestWithoutKernelVersion(t *testing.T) {
+	f := newFakeCF()
+	f.kvSeed["CFP_DEPLOY_MANIFEST"] = `{
+		"v": 1,
+		"controlProject": "mycontrol",
+		"dataProject": "mydata",
+		"build": "old-build",
+		"at": "2026-10-20T00:00:00.000Z",
+		"credentials": {}
+	}`
+
+	d, _ := newTestDeployer(t, f, func(o *Options) {
+		o.ControlProject = "mycontrol"
+		o.DataProject = "mydata"
+	})
+
+	m, err := d.readManifest(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m == nil {
+		t.Fatal("应读到清单")
+	}
+	if m.KernelVersion != "" {
+		t.Errorf("旧清单的 kernelVersion 应为空串（版本未知），实际 %q", m.KernelVersion)
+	}
+	// build 指纹照旧能读到
+	if m.Build != "old-build" {
+		t.Errorf("build 应为 old-build，实际 %q", m.Build)
+	}
+}
+
 // KV 归属校验：清单属于别的实例时要拒绝部署。
 func TestOwnershipConflictRejected(t *testing.T) {
 	f := newFakeCF()

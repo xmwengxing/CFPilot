@@ -99,32 +99,52 @@ jobs:
 
       - name: 生成发布说明
         id: notes
-        # 优先用 tag 注释；为空则回退到自动变更列表
+        # 说明来源优先级：
+        #   1. 仓库外的 .release-notes/<tag>.md（本地写好，git add -f 提交时带上）
+        #   2. tag 注释正文
+        #   3. 自动变更列表
+        #
+        # ⚠️ 为什么不用 tag 注释做主来源：git 的 tag 注释格式规定
+        #    「第一段是标题、空行后才是正文」，Markdown 的 ## 标题会被
+        #    当成段落分隔丢掉。所以正式发布说明用文件更可靠。
         run: |
           set -e
-          TAG="desktop-v${{ steps.ver.outputs.version }}"
-          # tag 注释正文（去掉 tag 名那一行）
-          NOTES=$(git tag -l --format='%(contents)' "$TAG" || true)
-          # 去掉首行的 tag 名称
-          NOTES=$(printf '%s\n' "$NOTES" | tail -n +2 | sed '/^$/d' | head -c 60000 || true)
+          VERSION="${{ steps.ver.outputs.version }}"
+          TAG="desktop-v${VERSION}"
+          BODY=""
 
-          if [ -z "$(printf '%s' "$NOTES" | tr -d '[:space:]')" ]; then
-            echo "tag 无注释，回退到自动变更列表"
-            # 只跟上一个 desktop-* tag 比较（v* 与 desktop-* 指向同一提交，比较结果为空）
+          # 1. 专用说明文件（不入库，用 git add -f 单独带上）
+          for f in ".release-notes/${VERSION}.md" ".release-notes/${TAG}.md"; do
+            if [ -f "$f" ]; then
+              echo "使用说明文件：$f"
+              BODY=$(cat "$f")
+              break
+            fi
+          done
+
+          # 2. tag 注释
+          if [ -z "$BODY" ]; then
+            BODY=$(git tag -l --format='%(contents:body)' "$TAG" 2>/dev/null || true)
+            [ -n "$BODY" ] && echo "使用 tag 注释"
+          fi
+
+          # 3. 自动变更列表
+          if [ -z "$(printf '%s' "$BODY" | tr -d '[:space:]')" ]; then
+            echo "无说明，回退到自动变更列表"
             PREV=$(git tag -l 'desktop-v*' --sort=-v:refname | grep -v "^${TAG}$" | head -1 || true)
             if [ -n "$PREV" ]; then
-              NOTES=$(git log --pretty=format:'- %s' "$PREV..HEAD" | head -50)
+              BODY=$(git log --pretty=format:'- %s' "$PREV..HEAD" | head -50)
             else
-              NOTES=$(git log --pretty=format:'- %s' -20)
+              BODY=$(git log --pretty=format:'- %s' -20)
             fi
           fi
 
           # 追加安装说明
           {
-            printf '%s\n\n' "$NOTES"
+            printf '%s\n\n' "$BODY"
             printf -- '---\n\n'
-            printf '**下载后直接运行**：Windows 双击 .exe；Linux 先 `chmod +x`。\n'
-            printf 'CLI 工具：`npm i -g cfpilot` 然后运行 `cfpilot`。\n'
+            printf '**下载后直接运行**：Windows 双击 `.exe`；Linux 先 `chmod +x`。\n\n'
+            printf 'CLI 工具：`npm i -g cfpilot`，然后运行 `cfpilot` 进入中文菜单。\n'
           } > release_body.md
 
           {

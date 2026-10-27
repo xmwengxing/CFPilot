@@ -87,6 +87,10 @@ export async function ask(question: string, options: AskOptions = {}): Promise<s
         finish('')
         return
       }
+      if (key?.ctrl && key.name === 'd') {
+        finish('')
+        return
+      }
       if (str && !key?.ctrl && str >= ' ') {
         buf += str
         if (!password) stdout.write(str)
@@ -165,7 +169,7 @@ export async function select<T>(
     }
   }
 
-  stdout.write(`${c.cyan('?')} ${question} ${c.gray('(↑↓ 选择, Enter 确认)')}\n`)
+  stdout.write(`${c.cyan('?')} ${question} ${c.gray('(↑↓ 选择, Enter 确认, q 返回)')}\n`)
   hideCursor()
   render(true)
 
@@ -209,7 +213,8 @@ export async function select<T>(
         if (picked && !picked.disabled) finish(picked.value)
         return
       }
-      if (key?.name === 'escape' && options.allowCancel !== false) {
+      // Esc 或 q 返回（Esc 在部分终端需转义序列超时才触发，q 更可靠）
+      if ((key?.name === 'escape' || str === 'q') && options.allowCancel !== false) {
         finish(null)
         return
       }

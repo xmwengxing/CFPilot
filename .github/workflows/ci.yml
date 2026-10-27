@@ -39,7 +39,7 @@ jobs:
       - name: 校验内置内核资产与最新构建一致
         run: |
           npm run build -w @cfpilot/worker-core
-          npm run build -w cfpilot-deploy
+          npm run build -w cfpilot
 
           if git diff --exit-code packages/deploy-wizard/assets/cfpilot-worker.js; then
             echo "内置内核资产与最新构建一致 ✅"
@@ -72,7 +72,7 @@ jobs:
           echo "::error::内置内核资产与源码不一致（排除版本串后仍有差异）"
           diff -u /tmp/committed.norm.js /tmp/fresh.norm.js | head -60
           echo ""
-          echo "修复：本地执行 npm run build -w @cfpilot/worker-core && npm run build -w cfpilot-deploy 后提交"
+          echo "修复：本地执行 npm run build -w @cfpilot/worker-core && npm run build -w cfpilot 后提交"
       - name: 上传内核产物
         uses: actions/upload-artifact@v4
         with:

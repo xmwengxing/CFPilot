@@ -16,7 +16,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "build": "node scripts/build.mjs",
+    "build": "node scripts/sync-asset.mjs && node scripts/build.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "prepublishOnly": "node ../../scripts/sync-version.mjs packages/cli && npm run build"
   },

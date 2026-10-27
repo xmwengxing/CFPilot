@@ -181,6 +181,8 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
   const top = flagNumber(args, 'top', 15)
   let token = flagString(args, 'token')
   const noCallback = flagBool(args, 'no-callback')
+  // --ask-callback：扫描结束后交互询问是否回填（菜单模式用）
+  const askCallback = flagBool(args, 'ask-callback')
   const wsPath = normalizeWsPath(flagString(args, 'path'), '/__edge_probe')
   const probePath = normalizeWsPath(flagString(args, 'probe-path'), '/__edge_probe')
   const noSpeed = flagBool(args, 'no-speed')
@@ -361,7 +363,9 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
     printCopyable(summary.entries)
   }
 
+  // ---- 回填 ----
   if (callback && token) {
+    // 已明确给了 token：直接回填
     const result = await postResults(callback, token, formatEntries(summary.entries))
     if (result.ok) {
       process.stdout.write(`\n✓ 已回填 ${summary.entries.length} 条到面板\n`)
@@ -369,8 +373,85 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
       process.stderr.write(`\n✗ 回填失败：${result.error}\n`)
       process.exitCode = 1
     }
-  } else if (!quiet) {
+  } else if (askCallback && !quiet && summary.entries.length > 0) {
+    // 交互询问是否回填
+    await promptCallback(summary.entries, host, panelHost, panelPassword)
+  } else if (!quiet && !asJson) {
     process.stdout.write('\n（未提供 --token，跳过回填）\n')
   }
 }
 
+/**
+ * 扫描结束后询问是否回填，选 Y 则自动取令牌并回填。
+ *
+ * 令牌在**扫描结束后**才申请，10 分钟有效，不会因扫描耗时而过期。
+ */
+async function promptCallback(
+  entries: ScanEntry[],
+  dataHost: string,
+  panelHost: string,
+  panelPassword: string
+): Promise<void> {
+  const { createInterface } = await import('node:readline/promises')
+  const { stdin, stdout } = await import('node:process')
+
+  process.stdout.write('\n' + '─'.repeat(50) + '\n')
+
+  if (!panelHost) {
+    process.stdout.write('未配置控制面域名，无法回填。\n')
+    process.stdout.write('→ 可手动复制上面的 IP 列表，粘贴到面板「手动优选 IP」\n')
+    return
+  }
+
+  const rl = createInterface({ input: stdin, output: stdout })
+  let answer = ''
+  try {
+    answer = (await rl.question(`是否回填这 ${entries.length} 条到面板？(y/N): `))
+      .trim()
+      .toLowerCase()
+  } finally {
+    rl.close()
+  }
+
+  if (answer !== 'y' && answer !== 'yes') {
+    process.stdout.write('\n已跳过回填。\n')
+    process.stdout.write('→ 上面的 IP 列表可直接复制，粘贴到面板「手动优选 IP」框\n')
+    return
+  }
+
+  // 需要密码才能申请令牌
+  let password = panelPassword
+  if (!password) {
+    const rl2 = createInterface({ input: stdin, output: stdout })
+    try {
+      password = (await rl2.question('面板密码（用于申请临时令牌）: ')).trim()
+    } finally {
+      rl2.close()
+    }
+  }
+  if (!password) {
+    process.stdout.write('\n未提供面板密码，已跳过回填。\n')
+    process.stdout.write('→ 可手动复制上面的 IP 列表粘贴到面板\n')
+    return
+  }
+
+  process.stdout.write('\n正在申请临时令牌…\n')
+  const tk = await fetchScannerToken(panelHost, password)
+  if (!tk.ok || !tk.token) {
+    process.stdout.write(`✗ 获取令牌失败：${tk.error ?? '未知错误'}\n`)
+    process.stdout.write('→ 可手动复制上面的 IP 列表粘贴到面板\n')
+    return
+  }
+  process.stdout.write('✓ 已获取临时令牌（10 分钟有效）\n')
+
+  const url = `https://${panelHost.replace(/^https?:\/\//, '').replace(/\/$/, '')}/api/v1/preferred-ips`
+  process.stdout.write(`正在回填到 ${url} …\n`)
+  const result = await postResults(url, tk.token, formatEntries(entries))
+  if (result.ok) {
+    process.stdout.write(`\n✓ 已回填 ${entries.length} 条到面板「手动优选 IP」\n`)
+    process.stdout.write('→ 打开面板「节点来源 → 手动优选 IP」点「查看」即可看到\n')
+  } else {
+    process.stdout.write(`\n✗ 回填失败：${result.error}\n`)
+    process.stdout.write('→ 可手动复制上面的 IP 列表粘贴到面板\n')
+  }
+}

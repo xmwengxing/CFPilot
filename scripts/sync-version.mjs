@@ -34,11 +34,14 @@ const writeJson = (file, obj) => writeFileSync(file, `${JSON.stringify(obj, null
 const MARKER = '// 本文件由 scripts/sync-version.mjs'
 
 /**
- * 允许生成 src/version.ts 的包（相对仓库根的目录）。
- * 只有这两个包的 version.ts 是纯版本常量；新增 npm 包时把目录加进来。
- * worker-core / gui 不在此列：前者是构建注入文件，后者无此文件。
+ * 允许生成的版本文件（包目录 → 文件相对路径）。
+ *
+ * 只有纯版本常量文件才在此列；新增 npm 包时把路径加进来。
+ * worker-core / ui 不在此列：前者是构建注入文件，后者无版本文件。
  */
-const GENERATED_VERSION_TS = new Set(['packages/scanner-cli', 'packages/deploy-wizard'])
+const GENERATED_VERSION_TS = new Map([
+  ['packages/cli', 'src/shared/version.ts'],
+])
 
 // 唯一版本源：根 package.json
 const rootPkg = readJson(resolve(repoRoot, 'package.json'))
@@ -72,9 +75,10 @@ for (const pkgRoot of targets) {
     console.log(`[sync-version] ${pkg.name} package.json → v${unifiedVersion}`)
   }
 
-  // ② src/version.ts：仅白名单包生成；其余包有手写文件时原样保留
-  if (!GENERATED_VERSION_TS.has(rel)) continue
-  const versionFile = resolve(pkgRoot, 'src/version.ts')
+  // ② 版本文件：仅白名单包生成；其余包有手写文件时原样保留
+  const versionRel = GENERATED_VERSION_TS.get(rel)
+  if (!versionRel) continue
+  const versionFile = resolve(pkgRoot, versionRel)
   const content = `${MARKER} 从根 package.json 生成，请勿手改
 export const VERSION = '${unifiedVersion}'
 export const NAME = '${pkg.name}'

@@ -21,8 +21,7 @@ const rootVersion = JSON.parse(readFileSync('package.json', 'utf8')).version
 console.log(`根版本：${rootVersion}`)
 
 const PUBLISHED = [
-  { pkgDir: 'packages/scanner-cli', name: 'cfpilot-scanner', versionFile: 'src/version.ts' },
-  { pkgDir: 'packages/deploy-wizard', name: 'cfpilot-deploy', versionFile: 'src/version.ts' },
+  { pkgDir: 'packages/cli', name: 'cfpilot', versionFile: 'src/shared/version.ts' },
 ]
 
 let bad = 0

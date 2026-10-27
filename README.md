@@ -40,8 +40,8 @@
 ### 1. 部署
 
 ```bash
-npx -y cfpilot-deploy@latest pages-split # Pages 双项目（推荐）
-npx -y cfpilot-deploy@latest init        # Worker 单项目（实验阶段，不可用）
+npx -y cfpilot@latest deploy # Pages 双项目（推荐）
+
 ```
 
 `init` 会依次引导你完成：填 API Token → 选账号 → 自动建 KV → 上传内核 → 绑定域名。
@@ -123,7 +123,7 @@ Cloudflare 控制台 → **存储和数据库 → KV** → 创建命名空间，
 ### 2. 本地优选
 
 ```bash
-npx -y cfpilot-scanner@latest scan \
+npx -y cfpilot@latest scan \
   --host "你的数据面域名" \
   --path "/部署时生成的WS路径" \
   --sample 6556 --top 10
@@ -231,7 +231,7 @@ Electron 版体积是 Go 版的 9 倍，功能完全一致。
 不想逐项勾就用 `Edit Cloudflare Workers` 预设模板。验证权限：
 
 ```bash
-npx -y cfpilot-deploy@latest token --check --zone example.com
+npx -y cfpilot@latest token --check --zone example.com
 ```
 
 ### 一个 KV 只能装一个实例
@@ -353,8 +353,7 @@ CFPilot/
 ├── AGENTS.md              # 开发规范（本地文件，不入库）
 └── packages/
     ├── worker-core/       # 边缘内核 + 中文面板（Pages 产物）
-    ├── scanner-cli/       # cfpilot-scanner —— 本地真连接优选器（npm 包）
-    ├── deploy-wizard/     # cfpilot-deploy —— 全中文部署向导（npm 包）
+    ├── cli/               cfpilot —— 部署 + 优选（npm 包，含交互菜单）
     ├── ui/                # 界面源码（单一来源，Go 版复用）
     └── desktop/           # Go 桌面版（单二进制 + 托盘）
 ```
@@ -413,7 +412,7 @@ CFPilot/
 | `--speed-mode`         | `auto`   | `probe`（走目标探针端点，最忠实）/ `url`（公开测速地址，任何项目可用）/ `auto` |
 | `--cidr` / `--ip-file` | —        | 自定义网段 / 本地 IP 列表                                   |
 
-完整参数见 `npx -y cfpilot-scanner@latest scan --help`。
+完整参数见 `npx -y cfpilot@latest scan --help`。
 
 ***
 

@@ -64,8 +64,11 @@ jobs:
       # `npm stage publish` 是这个工作流的核心（令牌只支持暂存发布），
       # 所以必须先升级 npm。
       - name: 升级 npm（stage 命令需要 11.6+）
+        # ⚠️ 不要用 npm@latest —— 现在是 12.x，要求 Node ^22.22 || ^24.15 || >=26，
+        # 在本 job 的 Node 20 上会 EBADENGINE 直接失败。
+        # npm 11 支持 stage 且兼容 Node 20。
         run: |
-          npm install -g npm@latest
+          npm install -g npm@11
           npm --version
           npm stage --help > /dev/null && echo "npm stage 可用" 
 

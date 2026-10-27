@@ -110,6 +110,9 @@ export function parseTrojanBuffer(
   expectedPassword: string
 ): TrojanBufferResult | null {
   if (bytes.byteLength < 58) return null
+  // ⚠️ 空口令一律拒绝（fail-closed）：sha224('') 是公开可算的常量，
+  // 不拦的话未配置口令的部署等于**开放代理**（谁都能把流量送出去）。
+  if (!expectedPassword) return null
   const expectedHash = trojanPasswordHash(expectedPassword)
   const provided = new TextDecoder().decode(bytes.subarray(0, 56)).trim().toLowerCase()
   if (provided !== expectedHash) return null

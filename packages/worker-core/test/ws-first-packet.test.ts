@@ -219,3 +219,47 @@ describe('拨号期间的数据帧暂存（自研 WS 入站）', () => {
     expect(text).toBe('AFTER')
   })
 })
+
+describe('0-RTT 早期数据（Sec-WebSocket-Protocol，Xray ed=）', () => {
+  it('子协议头携带的首包直接作为种子触发拨号，不等首帧', async () => {
+    const ctx = setup()
+    const early = new Uint8Array([
+      ...buildVlessHeader('example.com', 80),
+      ...new TextEncoder().encode('GET / HTTP/1.1\r\nHost: example.com\r\n\r\n'),
+    ])
+    const req = new Request('https://dp.example.com/t', {
+      headers: { upgrade: 'websocket', 'sec-websocket-protocol': Buffer.from(early).toString('base64url') },
+    })
+    await handleWebSocket(req, 'vless', config, [])
+    await new Promise((r) => setTimeout(r, 5))
+
+    const dial = collectingDial()
+    ctx.releaseDial(dial.result)
+    await new Promise((r) => setTimeout(r, 10))
+
+    const text = new TextDecoder().decode(
+      Buffer.concat(dial.written().map((c) => Buffer.from(c)))
+    )
+    expect(text).toContain('GET / HTTP/1.1')
+    expect(text).toContain('Host: example.com')
+  })
+
+  it('非 early-data 子协议头（非法 Base64 / 过短）被忽略，原首帧行为不回归', async () => {
+    const ctx = setup()
+    dialMock.mockClear() // 只看本次用例的调用
+    const req = new Request('https://dp.example.com/t', {
+      headers: { upgrade: 'websocket', 'sec-websocket-protocol': 'graphql-ws' },
+    })
+    await handleWebSocket(req, 'vless', config, [])
+    // 种子被忽略：仍靠首帧触发 establish
+    expect(dialMock).not.toHaveBeenCalled()
+    ctx.server.emit('message', { data: buildVlessHeader('example.com', 80).buffer as ArrayBuffer })
+    await new Promise((r) => setTimeout(r, 5))
+
+    const dial = collectingDial()
+    ctx.releaseDial(dial.result)
+    await new Promise((r) => setTimeout(r, 10))
+    // 只有协议头、无负载 → 不产生写入
+    expect(dial.written()).toHaveLength(0)
+  })
+})

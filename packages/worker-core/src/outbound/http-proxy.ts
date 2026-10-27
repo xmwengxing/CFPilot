@@ -10,6 +10,15 @@ import { ByteStream } from '../protocols/stream'
 
 const CRLF_CRLF = [0x0d, 0x0a, 0x0d, 0x0a]
 
+/** 在字节序列里定位响应头终止符 CRLFCRLF（可跨块拼接） */
+function indexOfHeaderTerminator(bytes: Uint8Array): number {
+  const n = bytes.byteLength
+  for (let i = 0; i + 3 < n; i++) {
+    if (CRLF_CRLF.every((b, k) => bytes[i + k] === b)) return i
+  }
+  return -1
+}
+
 /** 代理握手超时（ms）：代理连上但不回应时的兜底 */
 export const HANDSHAKE_TIMEOUT_MS = 6000
 
@@ -48,42 +57,47 @@ export async function httpConnect(
     ].join('\r\n')
     await writer.write(new TextEncoder().encode(request))
 
-    // 逐字节读取响应头，直到出现 CRLFCRLF
+    // **按块**读取响应头，直到出现 CRLFCRLF —— 不要逐字节读。
     //
     // ⚠️ **必须带超时**：代理若连上了但不回应 CONNECT（真机实测：
-    // 把 SOCKS5 服务器当 HTTP 代理用），没有超时的逐字节读会**永远挂起** ——
+    // 把 SOCKS5 服务器当 HTTP 代理用），没有超时的读会**永远挂起** ——
     // 表现为客户端拿到协议响应头后一直收不到数据、也不报错（静默挂起 60s+）。
     // 必须超时后抛错，让上层按「代理握手失败」分级上报。
-    const header: number[] = []
+    //
+    // 早期实现逐字节 `readExactly(1)` 且**每字节**建一个 `Promise.race` + 定时器：
+    // 解析一个百余字节的响应头要创建上百个 Promise/Timer，白烧 CPU
+    // （免费版单请求仅 10ms 预算，性能方案 三.1 定位）。
+    // 现改为「按块 fill + peek 整体扫描 + skip 精确消费」，典型 1~2 次读取；
+    // 终止符之后同块到达的隧道数据留在 ByteStream 缓冲，由 `release()` 带出。
     const deadline = Date.now() + HANDSHAKE_TIMEOUT_MS
-    for (let i = 0; i < 8192; i++) {
-      if (Date.now() > deadline) {
+    let headText = ''
+    for (;;) {
+      const view = stream.peek()
+      const idx = indexOfHeaderTerminator(view)
+      if (idx >= 0) {
+        headText = new TextDecoder().decode(view.subarray(0, idx))
+        stream.skip(idx + 4)
+        break
+      }
+      if (view.byteLength > 8192) throw new Error('HTTP 代理响应头超过 8192 字节')
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) {
         throw new Error(`HTTP 代理握手超时（${HANDSHAKE_TIMEOUT_MS}ms 无响应）`)
       }
-      const byte = await Promise.race([
-        stream.readExactly(1),
-        new Promise<null>((r) => setTimeout(() => r(null), Math.max(1, deadline - Date.now()))),
+      const filled = await Promise.race([
+        stream.fill(),
+        new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), remaining)),
       ])
-      // null = 本次读取超时；再给一个短窗口确认不是流刚好结束
-      if (!byte) {
-        const tail = await Promise.race([
-          stream.readExactly(1),
-          new Promise<null>((r) => setTimeout(() => r(null), 200)),
-        ])
-        if (!tail) {
-          throw new Error(`HTTP 代理握手超时（${HANDSHAKE_TIMEOUT_MS}ms 无响应）`)
-        }
-        header.push(tail[0]!)
-        continue
+      if (filled === 'timeout') {
+        throw new Error(`HTTP 代理握手超时（${HANDSHAKE_TIMEOUT_MS}ms 无响应）`)
       }
-      header.push(byte[0]!)
-      const n = header.length
-      if (n >= 4 && header[n - 4] === CRLF_CRLF[0] && header[n - 3] === CRLF_CRLF[1] && header[n - 2] === CRLF_CRLF[2] && header[n - 1] === CRLF_CRLF[3]) {
-        break
+      if (filled === null) {
+        // 流结束且未见终止符（终止符扫描已在本轮开头做过）
+        throw new Error('HTTP 代理响应不完整（连接被提前关闭）')
       }
     }
 
-    const text = new TextDecoder().decode(new Uint8Array(header))
+    const text = headText
     const statusLine = text.split('\r\n')[0] ?? ''
     const match = /^HTTP\/1\.[01]\s+(\d{3})/.exec(statusLine)
     if (!match) throw new Error('HTTP 代理响应非法')

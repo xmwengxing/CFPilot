@@ -148,3 +148,39 @@ func CountryColosOf(country string) []string {
 func CountryNameOf(country string) string {
 	return countryNames[strings.ToUpper(strings.TrimSpace(country))]
 }
+
+// coloNames 机房三字码 → 中文名。
+//
+// 界面地区下拉用这个（比「LAX（美国）」可读）。
+// 只覆盖常见机房，未列出的按国家名兜底。
+var coloNames = map[string]string{
+	"HKG": "香港", "TPE": "台北", "KHH": "高雄",
+	"NRT": "东京", "KIX": "大阪", "CTS": "名古屋", "FUK": "福冈",
+	"ICN": "首尔", "PUS": "釜山",
+	"SIN": "新加坡", "KUL": "吉隆坡", "BKK": "曼谷",
+	"SGN": "胡志明", "HAN": "河内", "CGK": "雅加达", "DPS": "巴厘",
+	"MNL": "马尼拉", "BOM": "孟买", "MAA": "钦奈", "DEL": "德里",
+	"SYD": "悉尼", "MEL": "墨尔本", "BNE": "布里斯班", "PER": "珀斯",
+	"AKL": "奥克兰",
+	"LAX": "洛杉矶", "SJC": "圣何塞", "SEA": "西雅图", "ORD": "芝加哥",
+	"DFW": "达拉斯", "IAD": "华盛顿", "EWR": "纽瓦克", "ATL": "亚特兰大",
+	"MIA": "迈阿密", "DEN": "丹佛", "PHX": "凤凰城", "BOS": "波士顿",
+	"YYZ": "多伦多", "YVR": "温哥华", "YYC": "卡尔加里",
+	"LHR": "伦敦", "MAN": "曼彻斯特",
+	"AMS": "阿姆斯特丹", "FRA": "法兰克福", "MUC": "慕尼黑", "BER": "柏林",
+	"CDG": "巴黎", "MRS": "马赛", "MAD": "马德里", "BCN": "巴塞罗那",
+	"MXP": "米兰", "FCO": "罗马", "ARN": "斯德哥尔摩", "ZRH": "苏黎世",
+	"VIE": "维也纳", "WAW": "华沙", "DME": "莫斯科", "SVO": "莫斯科",
+	"IST": "伊斯坦布尔", "DXB": "迪拜", "TLV": "特拉维夫",
+	"JNB": "约翰内斯堡", "GRU": "圣保罗", "GIG": "里约热内卢",
+	"EZE": "布宜诺斯艾利斯", "SCL": "圣地亚哥", "MEX": "墨西哥城",
+}
+
+// ColoNameOf 返回机房中文名；未知则回落到国家名。
+func ColoNameOf(colo string) string {
+	code := strings.ToUpper(strings.TrimSpace(colo))
+	if n, ok := coloNames[code]; ok {
+		return n
+	}
+	return CountryNameOf(CountryOfColo(code))
+}

@@ -358,7 +358,7 @@ export async function assertKvOwnership(
     throw new Error(
       `该 KV 命名空间${info.detail}。\n` +
         '  CFPilot 的数据面已完全自研，不再与其他项目共用同一命名空间。\n' +
-        '  → 请为 CFPilot 新建一个独立的 KV（GUI：凭据页「新建 KV」；CLI：--new-kv）。\n' +
+        '  → 请为 CFPilot 新建一个独立的 KV（GUI：重新部署时会自动建；CLI：--new-kv）。\n' +
         '  → 此判定不可用「强制」绕过。'
     )
   }
@@ -372,10 +372,10 @@ export async function assertKvOwnership(
     info.verdict === 'occupied'
       ? `该 KV 命名空间已被另一个 CFPilot 实例占用：${info.detail}。\n` +
         '  一个 KV 命名空间只能承载一个 CFPilot 部署实例（内核的 KV 键全局平铺，无实例前缀）。\n' +
-        '  → 请改用其他 KV 命名空间，或新建一个（GUI：凭据页「新建 KV」；CLI：--new-kv）。'
+        '  → 请改用其他 KV 命名空间（GUI：全新部署会自动建；CLI：--new-kv）。'
       : `该 KV 命名空间${info.detail}。\n` +
         '  → 继续部署会覆盖其中的既有配置。\n' +
-        '  → 如需本次部署独占，请新建独立 KV（GUI：凭据页「新建 KV」；CLI：--new-kv）。'
+        '  → 如需本次部署独占，请用独立 KV（GUI：全新部署会自动建；CLI：--new-kv）。'
 
   if (!options.force) {
     throw new Error(message)

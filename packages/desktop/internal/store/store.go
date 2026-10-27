@@ -60,10 +60,32 @@ type Profile struct {
 	AccountName string `json:"accountName"`
 	// KVNamespaceID 是 KV 命名空间 ID
 	KVNamespaceID string `json:"kvNamespaceId"`
-	// PanelPassword 是面板密码（敏感）
+	// PanelPassword 是**面板密码**（敏感）。
+	//
+	// ## 语义（2026-10-27 用户明确要求）
+	//
+	// 这个字段只用于**修改已部署面板的登录密码**，
+	// **绝不参与部署时的密码设置**。
+	//
+	// 两个用途必须彻底分开的原因：
+	//   早期两个输入框都写这个字段 ——
+	//     凭据页「修改密码」→ saveCredentials({panelPassword})
+	//     部署时            → opt.PanelPassword = profile.PanelPassword
+	//   结果：在凭据页改了密码，下次部署的密码也跟着变，
+	//   而云端环境变量是加密的，用户根本不知道自己改了部署密码。
+	//
+	// 现在：
+	//   - 部署密码只来自**部署页**输入框，或随机生成 / 清单沿用
+	//   - 这里的值只用于「登录已部署的面板去改密码」
 	PanelPassword string `json:"panelPassword"`
-	CreatedAt     string `json:"createdAt"`
-	UpdatedAt     string `json:"updatedAt"`
+
+	// DeployPanelPassword 是**部署时**要用的面板密码（与上面严格分开）。
+	//
+	// 只在用户于部署页显式填写时才有值。
+	// 为空表示「随机生成」（首次部署）或「沿用清单里的原密码」（更新部署）。
+	DeployPanelPassword string `json:"deployPanelPassword"`
+	CreatedAt           string `json:"createdAt"`
+	UpdatedAt           string `json:"updatedAt"`
 }
 
 // ProfileView 是给界面看的视图（**不含 Token 明文**）。
@@ -301,6 +323,7 @@ func (s *Store) Create(name string, init *Profile) (*Profile, error) {
 		p.AccountName = strings.TrimSpace(init.AccountName)
 		p.KVNamespaceID = strings.TrimSpace(init.KVNamespaceID)
 		p.PanelPassword = init.PanelPassword
+		p.DeployPanelPassword = init.DeployPanelPassword
 	}
 
 	f.Profiles = append(f.Profiles, p)
@@ -319,6 +342,8 @@ type Patch struct {
 	AccountName   *string
 	KVNamespaceID *string
 	PanelPassword *string
+	// DeployPanelPassword 是部署时用的面板密码（与 PanelPassword 严格分开）
+	DeployPanelPassword *string
 }
 
 // Update 更新指定 profile。id 不存在时返回错误。
@@ -352,6 +377,9 @@ func (s *Store) Update(id string, patch Patch) (*Profile, error) {
 	}
 	if patch.PanelPassword != nil {
 		t.PanelPassword = *patch.PanelPassword
+	}
+	if patch.DeployPanelPassword != nil {
+		t.DeployPanelPassword = *patch.DeployPanelPassword
 	}
 	t.UpdatedAt = nowISO()
 
@@ -457,6 +485,9 @@ func (s *Store) SaveActive(patch Patch) (*Profile, error) {
 	}
 	if patch.PanelPassword != nil {
 		t.PanelPassword = *patch.PanelPassword
+	}
+	if patch.DeployPanelPassword != nil {
+		t.DeployPanelPassword = *patch.DeployPanelPassword
 	}
 	if patch.Name != nil {
 		if v := strings.TrimSpace(*patch.Name); v != "" {

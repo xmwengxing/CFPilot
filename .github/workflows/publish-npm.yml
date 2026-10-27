@@ -1,0 +1,104 @@
+name: Publish npm
+
+# 打 tag 时自动发布两个公开 npm 包。
+#
+# ## 为什么用 automation token 而不是 OTP
+#
+# 你提到每次 `npm publish` 都要输 2FA 验证码，很麻烦。
+# CI 里没法交互输入 OTP，所以需要：
+#
+#   1. 到 npm 网站创建一个 **Automation** 类型的 Access Token
+#      （Automation token 可以绕过 2FA，Classic 的 "Publish" 类型不行）
+#   2. 把它存进 GitHub 仓库 Secrets，名字 `NPM_TOKEN`
+#
+# 配置一次，之后打 tag 就全自动了。
+#
+# ## 触发条件
+#
+#   - 打 `v*` tag（如 v0.6.4）→ 发布 npm
+#   - 也支持手动触发（workflow_dispatch），方便补发
+#
+# ## 与 Release 工作流的关系
+#
+#   release-desktop.yml / release-gui.yml 负责编译产物 + 建 GitHub Release
+#   本工作流只负责 npm 包，两者互不干扰，都由同一个 tag 触发
+#
+# ## 幂等性
+#
+# npm 不允许覆盖已发布版本。所以本工作流会**先检查该版本是否已存在**，
+# 已存在就跳过，不报错 —— 这样重复跑不会失败。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只检查不发布（dry run）'
+        required: false
+        default: 'false'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 校验 tag 与版本号一致
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          echo "tag 版本：$TAG_VERSION"
+          echo "package.json 版本：$PKG_VERSION"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::tag 与根 package.json 版本不一致（单一版本源政策）"
+            exit 1
+          fi
+
+      - name: 构建
+        run: npm run build
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 单元测试
+        run: npm test
+
+      - name: 校验内核资产与构建一致
+        run: |
+          npm run build -w @cfpilot/worker-core
+          npm run build -w cfpilot-deploy
+          if ! git diff --exit-code packages/deploy-wizard/assets/cfpilot-worker.js; then
+            echo "::error::内置内核资产与最新构建不一致"
+            git diff --stat packages/deploy-wizard/assets/cfpilot-worker.js
+            exit 1
+          fi
+
+      - name: 发布 cfpilot-scanner
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          node scripts/publish-npm.mjs cfpilot-scanner
+
+      - name: 发布 cfpilot-deploy
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          node scripts/publish-npm.mjs cfpilot-deploy
+
+      - name: 验证发布结果
+        # 发布后等一下让 registry 生效，再查一次
+        run: |
+          sleep 15
+          node scripts/verify-npm-publish.mjs

@@ -7,7 +7,7 @@
 //
 // ## 界面资源从哪来
 //
-// 「同一份界面源码」的落地方式：本脚本把 packages/gui 的渲染层产物
+// 「同一份界面源码」的落地方式：本脚本把 packages/ui 的界面产物
 // 拷进 packages/desktop/internal/server/assets/，再 go:embed 进去。
 // 这样两个版本永远渲染同一份 HTML/JS，不存在「Go 版界面落后」的问题。
 //
@@ -28,7 +28,12 @@ import { fileURLToPath } from 'node:url'
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(here, '..')
 const desktopDir = join(repoRoot, 'packages', 'desktop')
-const guiDist = join(repoRoot, 'packages', 'gui', 'dist', 'renderer')
+// 界面产物来源（2026-10-27 变更）
+//
+// 早期是 packages/gui/dist/renderer —— 界面源码长在 Electron 外壳里。
+// 0.6.4 起不再发布 Electron 版，外壳移出仓库，界面抽成独立的 @cfpilot/ui。
+// 现在从 packages/ui/dist 取，语义清晰，也不再依赖任何外壳。
+const uiDist = join(repoRoot, 'packages', 'ui', 'dist')
 const assetsDir = join(desktopDir, 'internal', 'server', 'assets')
 const webuiDir = join(desktopDir, 'webui')
 const outDir = join(desktopDir, 'dist')
@@ -37,15 +42,15 @@ const version = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'))
 console.log(`[desktop] 构建 CFPilot Desktop v${version}`)
 
 // ---- 1. 同步界面资源 ----
-if (!existsSync(join(guiDist, 'index.html'))) {
-  console.error('[desktop] 未找到 packages/gui/dist/renderer/index.html')
-  console.error('[desktop] 请先执行：npm run build -w @cfpilot/gui')
+if (!existsSync(join(uiDist, 'index.html'))) {
+  console.error('[desktop] 未找到 packages/ui/dist/index.html')
+  console.error('[desktop] 请先执行：npm run build -w @cfpilot/ui')
   process.exit(1)
 }
 mkdirSync(assetsDir, { recursive: true })
 
 // index.html：插入 adapter.js 的 script 标签（在 renderer.js 之前）
-const htmlRaw = readFileSync(join(guiDist, 'index.html'), 'utf8')
+const htmlRaw = readFileSync(join(uiDist, 'index.html'), 'utf8')
 const rendererTag = '<script src="./renderer.js"></script>'
 if (!htmlRaw.includes(rendererTag)) {
   console.error('[desktop] index.html 里找不到 renderer.js 的 script 标签，无法插入 adapter')
@@ -63,7 +68,7 @@ console.log(
 )
 
 // renderer.js：直接拷贝
-copyFileSync(join(guiDist, 'renderer.js'), join(assetsDir, 'renderer.js'))
+copyFileSync(join(uiDist, 'renderer.js'), join(assetsDir, 'renderer.js'))
 console.log(
   `[desktop] 界面资源 renderer.js → internal/server/assets/ (${(statSync(join(assetsDir, 'renderer.js')).size / 1024).toFixed(1)} KB)`
 )

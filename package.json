@@ -1,6 +1,6 @@
 {
   "name": "cfpilot",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "private": true,
   "type": "module",
   "description": "CFPilot — Cloudflare Workers 代理微内核 + 真连接优选面板 + 本地优选器 + 中文部署向导",
@@ -24,7 +24,7 @@
     "packages/worker-core",
     "packages/scanner-cli",
     "packages/deploy-wizard",
-    "packages/gui"
+    "packages/ui"
   ],
   "engines": {
     "node": ">=20.10.0"
@@ -46,7 +46,9 @@
     "version:sync": "node scripts/sync-version.mjs",
     "version:bump": "node scripts/bump-version.mjs",
     "clean": "node scripts/clean.mjs",
-    "check:build-version": "node scripts/check-build-version.mjs"
+    "check:build-version": "node scripts/check-build-version.mjs",
+    "publish:npm": "node scripts/publish-npm.mjs cfpilot-scanner && node scripts/publish-npm.mjs cfpilot-deploy",
+    "verify:npm": "node scripts/verify-npm-publish.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261021.1",

@@ -39,12 +39,16 @@ ${NAME} v${VERSION}
 CFPilot 全中文部署向导 —— 自动创建 KV、部署 Worker 内核、绑定自定义域名。
 
 用法:
-  ${NAME} init [选项]          执行 Worker 部署（单项目）
+  ${NAME} [选项]              默认 = pages-split（Pages 双项目，唯一受支持形态）
   ${NAME} pages-split [选项]   Pages 双项目部署（控制面 + 数据面，推荐）
   ${NAME} token [选项]        仅校验 API Token
   ${NAME} token --check       逐项探测 Token 权限并输出修复建议
   ${NAME} --help              显示帮助
   ${NAME} --version           显示版本
+
+  ⚠️ 已归档：${NAME} workers（Workers 单脚本形态）
+     2026-10-24 停用 —— 数据面在 Workers 上 522 无解，
+     且实验账号在少量部署后被平台封禁。仅保留供历史排查。
 
 选项:
   --token <token>        Cloudflare API Token（也可用环境变量 CLOUDFLARE_API_TOKEN）
@@ -455,6 +459,31 @@ async function main(): Promise<void> {
     await runPagesSplit(args)
     return
   }
+
+  // ⚠️ 默认命令改为 pages-split（2026-10-27）
+  //
+  // 架构铁律：部署形态唯一 = Pages 双项目。
+  // 旧的 `deploy()`（Workers 单脚本）已于 2026-10-24 全线归档：
+  //   - 数据面在 Workers 上 522 无解
+  //   - 实验用干净账号在少量部署后被 Cloudflare 封禁
+  //
+  // 但早期这里「不指定命令就走 deploy()」，等于默认推荐了已废弃形态 ——
+  // 违反铁律，而且用户按最自然的用法就会踩到。
+  //
+  // 现在：
+  //   - 不指定命令 → 走 pages-split（正确形态）
+  //   - 显式 `workers` 命令 → 才走旧向导，并打印醒目警告
+  if (command !== 'workers') {
+    await runPagesSplit(args)
+    return
+  }
+
+  process.stderr.write(
+    '\n⚠️  你正在使用已归档的 Workers 单脚本部署形态。\n' +
+      '   该形态已于 2026-10-24 停用：数据面在 Workers 上 522 无解，\n' +
+      '   且实验账号在少量部署后被平台封禁。\n' +
+      '   → 请改用 `cfpilot-deploy pages-split`（Pages 双项目，唯一受支持形态）。\n\n'
+  )
 
   const result = await deploy({
     token: flagString(args, 'token') || undefined,

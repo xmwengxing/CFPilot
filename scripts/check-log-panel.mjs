@@ -18,8 +18,8 @@
 // 本脚本锁住这些关键特征，防止有人改回内联像素方案。
 import { readFileSync } from 'node:fs'
 
-const html = readFileSync('packages/gui/dist/renderer/index.html', 'utf8')
-const js = readFileSync('packages/gui/dist/renderer/renderer.js', 'utf8')
+const html = readFileSync('packages/ui/dist/index.html', 'utf8')
+const js = readFileSync('packages/ui/dist/renderer.js', 'utf8')
 
 const checks = [
   // ---- CSS：比例方案 ----

@@ -1,49 +1,22 @@
 /**
- * 跨包动态导入的类型垫片。
+ * 界面层类型声明（@cfpilot/ui 专用）
  *
- * bridge.ts 在运行时按多个候选路径动态 import deploy-wizard 的源码
- * （开发时走 TS 源码，打包后走 dist）。tsc 无法解析这些猜测路径，
- * 这里用模块声明让类型检查通过，运行时由 esbuild 打包成真实 import。
+ * ## 这个文件为什么在 ui 包里
+ *
+ * 2026-10-27 界面源码从 packages/gui/src/renderer 抽到 packages/ui，
+ * 连同它的类型声明一起搬过来 —— 界面只依赖 `window.cfpilot` 这个契约，
+ * 不依赖任何 Electron 或 Node 类型。
+ *
+ * ## 与外壳的分工
+ *
+ *   本文件声明的 `window.cfpilot` 是**契约**，
+ *   由各外壳实现：
+ *     - Go 版：packages/desktop/webui/adapter.js（HTTP fetch + SSE）
+ *     - Electron 版（本地实验）：packages/gui/src/preload/preload.ts（IPC）
+ *
+ *   ⚠️ 改动这个契约必须同步两个外壳，否则界面运行时会读 undefined。
+ *   `scripts/check-adapter-contract.mjs` 会校验 Go 版适配层是否符合本契约。
  */
-declare module '../../deploy-wizard/src/pages-deploy' {
-  export function deployPagesSplit(options: {
-    token: string
-    accountId: string
-    kvNamespaceId: string
-    controlProject: string
-    dataProject: string
-    panelPath: string
-    panelPassword: string
-    uuid: string
-    trojanPassword: string
-    wsPath: string
-    enableTrojan: boolean
-    enableXhttp: boolean
-    mode?: 'auto' | 'fresh' | 'update'
-    keepCredentials?: boolean
-    skipSameVersion?: boolean
-    localBuild?: string
-    bundles?: { control?: string; data?: string }
-    wait?: { timeoutMs: number; intervalMs: number }
-    log?: (m: string) => void
-  }): Promise<{
-    control: { name: string; subdomain: string; deploymentId?: string }
-    data: { name: string; subdomain: string; deploymentId?: string }
-    panelPath?: string
-    uuid?: string
-    wsPath?: string
-    /** 实际生效的控制面面板密码（首次部署时随机生成） */
-    panelPassword?: string
-    warnings: string[]
-  }>
-}
-
-declare module '../../deploy-wizard/src/cf-api' {
-  export class CloudflareClient {
-    constructor(options: { token: string; apiBase?: string })
-    getKvValue(accountId: string, namespaceId: string, key: string): Promise<string | null>
-  }
-}
 
 /** 渲染层的 window.cfpilot（由 preload 通过 contextBridge 注入） */
 interface CFPilotLogEntry {
@@ -142,6 +115,13 @@ interface Window {
         dataProject: string
         panelPath: string
         wsPath: string
+        /**
+         * 本次部署要设置的面板密码（可选）。
+         *
+         * 留空 = 首次随机生成 / 更新沿用原密码。
+         * ⚠️ 与账户里的 panelPassword（改已部署面板密码用）严格分开。
+         */
+        panelPassword?: string
       },
       kvNamespaceId?: string    ): Promise<{
       ok: boolean

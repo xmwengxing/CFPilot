@@ -137,6 +137,40 @@
     $('cfToken').value = ''
     $('panelPassword').value = ''
     if (state.accountId) currentAccountId = state.accountId
+
+    // 自动刷新 KV 列表（2026-10-27 用户要求减少点击）
+    //
+    // 早期需要手动点「刷新 KV 列表」。但用户已经在账户页了，
+    // 系统也知道账号 ID，没理由还让用户点一次。
+    // 这里只在「本地缓存为空」时触发，避免每次刷新都打 API。
+    if (kvOptions.length === 0 && currentAccountId) {
+      try {
+        const opts = await window.cfpilot.listKvOptions(currentAccountId)
+        kvOptions = opts.options
+        renderKvOptions(state.kvNamespaceId || undefined)
+        log(`共 ${kvOptions.length} 个命名空间`, 'ok')
+      } catch {
+        /* 拉取失败不阻断，用户仍可手动点「刷新 KV 列表」 */
+      }
+    }
+
+    // 自动选中当前账户保存的 KV（2026-10-27 用户要求）
+    //
+    // 多账户场景下，每个账户通常对应一个 KV（一个 KV = 一个实例）。
+    // 切来切去时如果不同步 KV 下拉框，用户很容易在 A 账户下
+    // 看到 B 账户的 KV 列表并选错，导致部署到别的实例上。
+    //
+    // 这里只在「下拉框里确实有这个选项」时才选中，
+    // 避免把不存在的 id 写进去（那会让 select.value 变成空串）。
+    const wantKv = (state.kvNamespaceId ?? '').trim()
+    if (wantKv) {
+      const sel = $sel('kvSelect')
+      const exists = Array.from(sel.options).some((o) => o.value === wantKv)
+      if (exists && sel.value !== wantKv) {
+        sel.value = wantKv
+        updateKvHint()
+      }
+    }
   }
 
   /** 把 KV 选项渲染进下拉框 */
@@ -365,6 +399,8 @@
 
       // 切到已有账户时**自动检测账号**（用户要求 2026-10-26）
       if (target.hasToken) {
+        // detectAccountAndGuide 内部会 loadKvOptions，
+        // 之后 refreshCredState 已经把该账户的 KV 选中了
         await detectAccountAndGuide()
       } else {
         $text('detHint').textContent = '该账户还没填 Token，请粘贴后点「修改并保存」。'
@@ -552,18 +588,6 @@
       await loadKvOptions()
     })
 
-    document.getElementById('btnKvNew')!.addEventListener('click', async () => {
-      if (!currentAccountId) { log('请先点「检测账号」', 'warn'); return }
-      const created = await window.cfpilot.createKvNamespace(currentAccountId)
-      if (!created) return
-      log(`已创建 KV：${created.title}`, 'ok')
-      await loadKvOptions()
-      const select = $sel('kvSelect')
-      select.value = created.id
-      updateKvHint()
-      log('已为新实例选中新建的 KV，可直接部署', 'ok')
-    })
-
     document.getElementById('btnKvManual')!.addEventListener('click', async () => {
       const id = $('kvManual').value.trim()
       if (!id) { log('请先填写 KV 命名空间 ID', 'warn'); return }
@@ -579,7 +603,21 @@
       log('已保存本次选择的 KV', 'ok')
     })
 
-    $('kvSelect').addEventListener('change', () => { updateKvHint() })
+    // KV 下拉框改变时**自动保存**（2026-10-27 用户要求「不要增加操作步骤」）
+    //
+    // 早期需要额外点「保存此选择」按钮，属于多余步骤：
+    // 用户既然在这个下拉框里选了，意图已经明确。
+    // 现在选完立刻落盘，那个按钮可以不用点（保留是为了兼容旧习惯）。
+    $('kvSelect').addEventListener('change', async () => {
+      updateKvHint()
+      const id = $sel('kvSelect').value
+      if (!id) return
+      try {
+        await window.cfpilot.saveCredentials({ kvNamespaceId: id })
+      } catch {
+        /* 保存失败不打断主流程，下次部署仍会用下拉框当前值 */
+      }
+    })
 
     document.querySelectorAll('a[data-url]').forEach((a) => {
       a.addEventListener('click', (e) => {
@@ -610,11 +648,9 @@
       'btnScan',
       'btnDetect',
       'btnKvRefresh',
-      'btnKvNew',
       'btnKvSave',
       'btnKvManual',
-      'btnAutoHost',
-      'btnAutoPath',
+      'btnAutoDetect',
     ]) {
       const el = document.getElementById(id) as HTMLButtonElement | null
       if (el) el.disabled = busy
@@ -642,29 +678,58 @@
      *   - 赋值发生在 bindDeploy 执行过程中，早于任何用户点击
      */
     document.getElementById('btnDeploy')!.addEventListener('click', async () => {
-      // 用下拉框当前选中的 KV；没有选中则回落到本机保存的值
+      // 用下拉框当前选中的 KV；没有选中则自动新建（2026-10-27 用户要求）
+      //
+      // ## 为什么自动建而不是让用户先去建
+      //
+      // 全新部署本来就必须有一个 KV（内核的配置键全局平铺在里面）。
+      // 早期让用户先到「Cloudflare 凭据」页点「新建 KV」，
+      // 属于多此一举 —— 部署这一步已经知道需要 KV 了，直接建就好。
+      //
+      // 而且那个按钮很容易误触，每点一次就在账号下多一个命名空间，
+      // 白白消耗免费额度。所以按钮也一并移除了。
       const select = $sel('kvSelect')
-      const kvId = select.value
+      let kvId = select.value
       if (!kvId) {
-        log('请先在「Cloudflare 凭据」页选择 KV 命名空间（可点「新建 KV」）', 'warn')
-        const st = document.getElementById('deployStatus')
-        if (st) {
-          st.innerHTML =
-            '<span class="badge warn">需要先完成设置</span><br>' +
-            '<b>还没选择 KV 命名空间</b><br>' +
-            '<span style="color:var(--muted)">👉 去「Cloudflare 凭据」页点「刷新 KV 列表」并选择</span>'
+        log('还没有 KV 命名空间，正在自动创建…')
+        if (!currentAccountId) {
+          log('请先点「检测账号」再部署（自动建 KV 需要账号 ID）', 'warn')
+          return
         }
-        return
+        try {
+          const created = await window.cfpilot.createKvNamespace(currentAccountId)
+          if (!created || !created.id) {
+            log('自动创建 KV 失败，请到「Cloudflare 凭据」页手动刷新 KV 列表', 'err')
+            return
+          }
+          kvId = created.id
+          log(`已自动创建 KV：${created.title}`, 'ok')
+          // 刷新下拉框并选中它，让用户看到用的是哪个
+          await loadKvOptions()
+          $sel('kvSelect').value = created.id
+          // 顺手保存到账户，下次部署直接复用
+          await window.cfpilot.saveCredentials({ kvNamespaceId: created.id })
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          log('自动创建 KV 失败：' + msg, 'err')
+          return
+        }
       }
       setBusy(true)
       log('── 开始部署 ──')
 
-      // 部署页填了面板密码就先写入当前账户（部署读的是账户里的值）。
-      // 留空表示「沿用原密码/随机生成」，不要覆盖已有值。
-      const deployPw = $('deployPanelPassword').value
-      if (deployPw.trim()) {
-        await window.cfpilot.saveCredentials({ panelPassword: deployPw })
-        log('已使用本次填写的面板密码')
+      // 部署页的面板密码**直接随部署请求传下去**，不写进账户
+      // （2026-10-27 用户明确要求两个用途分开）。
+      //
+      // 历史问题：早期这里调 saveCredentials({panelPassword}) 把部署密码
+      // 写进了账户的「修改已部署面板密码」字段，导致：
+      //   - 在凭据页改了密码，下次部署的密码也跟着变
+      //   - 云端环境变量加密，用户完全不知道自己的部署密码被改了
+      //
+      // 现在：部署密码只存在于本次请求里，留空就是随机 / 沿用清单。
+      const deployPw = $('deployPanelPassword').value.trim()
+      if (deployPw) {
+        log('已使用本次填写的新面板密码')
       }
 
       try {
@@ -678,6 +743,8 @@
             dataProject: $('dataProject').value.trim(),
             panelPath: $('panelPath').value.trim(),
             wsPath: $('wsPath').value.trim(),
+            // 本次部署要设的面板密码（留空 = 随机 / 沿用清单）
+            panelPassword: deployPw,
           },
           kvId
         )
@@ -769,7 +836,23 @@
         set('credUuid', r.uuid ?? '')
         set('credWsPath', r.wsPath ?? '')
         box.hidden = false
-        log('已读取面板凭据（来自本机部署清单）', 'ok')
+
+        // 自动复制到剪贴板（2026-10-27 用户要求减少点击）
+        //
+        // 用户点「查看面板凭据」几乎总是为了拿去登录面板，
+        // 再点一次「复制全部」属于多余步骤。
+        const text = [
+          '面板地址：' + (r.panelUrl ?? ''),
+          '面板密码：' + (r.panelPassword ?? ''),
+          'UUID：' + (r.uuid ?? ''),
+          'WS 路径：' + (r.wsPath ?? ''),
+        ].join('\n')
+        try {
+          await navigator.clipboard.writeText(text)
+          log('已读取面板凭据并复制到剪贴板', 'ok')
+        } catch {
+          log('已读取面板凭据（剪贴板不可用，请手动复制）', 'ok')
+        }
       } catch (err) {
         log('读取面板凭据失败：' + (err instanceof Error ? err.message : String(err)), 'err')
       }
@@ -1013,45 +1096,53 @@
       }
     })
 
-    // 自动识别域名：有自定义域名优先填它，没有则填 pages.dev
-    document.getElementById('btnAutoHost')!.addEventListener('click', async () => {
-      log('自动识别数据面域名…')
-      try {
-        const result = await window.cfpilot.detectScanHost()
-        if (result.ok && result.host) {
-          $('optHost').value = result.host
-          if (result.source === 'custom') {
-            log(`已填入自定义域名：${result.host}`, 'ok')
-          } else {
-            log(`已填入 pages.dev 域名：${result.host}`, 'warn')
-            log('该实例没有绑定自定义域名。建议绑定后再优选——', 'warn')
-            log('pages.dev 生产链接在部分网络环境会被阻断，测出来的结果不可信。', 'warn')
-          }
-        } else {
-          log('自动识别失败：' + (result.error ?? '未知错误'), 'err')
-        }
-      } catch (err) {
-        log('自动识别异常：' + (err instanceof Error ? err.message : String(err)), 'err')
-      }
-    })
+    /**
+     * 自动识别：一次填好域名 + WS 路径（2026-10-27 用户要求减少点击）。
+     *
+     * 早期是两个按钮（「自动识别域名」+「自动识别 WS 路径」），
+     * 但它们读的是同一份部署清单，用户总是要连点两次 —— 属于多余步骤。
+     *
+     * 现在一次点击同时调两个接口，任一失败不影响另一个。
+     */
+    document.getElementById('btnAutoDetect')!.addEventListener('click', async () => {
+      const btn = document.getElementById('btnAutoDetect') as HTMLButtonElement | null
+      if (btn) btn.disabled = true
+      log('自动识别域名与 WS 路径…')
 
-    // 自动识别 WS 路径：从 KV 的 CONFIG 读（最权威），回落数据面环境变量
-    document.getElementById('btnAutoPath')!.addEventListener('click', async () => {
-      log('自动识别 WS 路径…')
       try {
-        const result = await window.cfpilot.detectScanPath()
-        if (result.ok && result.path) {
-          $('optPath').value = result.path
-          if (result.source === 'kv') {
-            log(`已填入 WS 路径：${result.path}`, 'ok')
+        // ---- 域名 ----
+        try {
+          const host = await window.cfpilot.detectScanHost()
+          if (host.ok && host.host) {
+            $('optHost').value = host.host
+            if (host.source === 'custom') {
+              log(`已填入自定义域名：${host.host}`, 'ok')
+            } else {
+              log(`已填入 pages.dev 域名：${host.host}`, 'warn')
+              log('该实例没有绑定自定义域名。建议绑定后再优选——', 'warn')
+              log('pages.dev 生产链接在部分网络环境会被阻断，测出来的结果不可信。', 'warn')
+            }
           } else {
-            log(`已从数据面环境变量填入 WS 路径：${result.path}`, 'ok')
+            log('识别域名失败：' + (host.error ?? '未知错误'), 'err')
           }
-        } else {
-          log('自动识别失败：' + (result.error ?? '未知错误'), 'err')
+        } catch (err) {
+          log('识别域名异常：' + (err instanceof Error ? err.message : String(err)), 'err')
         }
-      } catch (err) {
-        log('自动识别异常：' + (err instanceof Error ? err.message : String(err)), 'err')
+
+        // ---- WS 路径 ----
+        try {
+          const path = await window.cfpilot.detectScanPath()
+          if (path.ok && path.path) {
+            $('optPath').value = path.path
+            log(`已填入 WS 路径：${path.path}`, 'ok')
+          } else {
+            log('识别 WS 路径失败：' + (path.error ?? '未知错误'), 'err')
+          }
+        } catch (err) {
+          log('识别 WS 路径异常：' + (err instanceof Error ? err.message : String(err)), 'err')
+        }
+      } finally {
+        if (btn) btn.disabled = false
       }
     })
 

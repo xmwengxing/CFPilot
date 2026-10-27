@@ -92,11 +92,11 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
-      - name: 构建 GUI
-        run: npm run build -w @cfpilot/gui
+      - name: 构建界面（@cfpilot/ui）
+        run: npm run build -w @cfpilot/ui
 
       - name: 上传 GUI 产物
         uses: actions/upload-artifact@v4
         with:
-          name: cfpilot-gui-dist
-          path: packages/gui/dist
+          name: cfpilot-ui-dist
+          path: packages/ui/dist

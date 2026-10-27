@@ -81,6 +81,19 @@ jobs:
       - name: 交叉编译三平台产物
         run: node scripts/build-desktop.mjs
 
+      - name: 准备内核资产（供远程获取）
+        # ⚠️ 部署用的内核代码必须能**独立于应用版本**更新：
+        # 用户没升级 CLI / 桌面版时，仍应能部署到最新的内核。
+        # 所以把 control.js / dataplane.js 作为 Release 资产发布，
+        # 应用在部署前从 Release 拉取最新版本（见 internal/kernel/remote.go）。
+        run: |
+          mkdir -p packages/desktop/kernel-assets
+          cp packages/worker-core/dist/control.js   packages/desktop/kernel-assets/cfpilot-kernel-control.js
+          cp packages/worker-core/dist/dataplane.js packages/desktop/kernel-assets/cfpilot-kernel-dataplane.js
+          # 同时发布手动部署用的 zip（Pages 上传格式）
+          node scripts/make-pages-zip.mjs
+          ls -la packages/desktop/kernel-assets/
+
       - name: 实跑 Linux 产物（冒烟测试）
         # 交叉编译出的二进制只保证「能生成」，不保证「能运行」。
         # 这里真的执行一次 --version 和 --check，避免发出跑不起来的包。
@@ -169,7 +182,11 @@ jobs:
           #   - 正文来自 tag 注释（见下方「生成发布说明」步骤）
           tag_name: v${{ steps.ver.outputs.version }}
           name: CFPilot v${{ steps.ver.outputs.version }}
-          files: packages/desktop/dist/*
+          files: |
+            packages/desktop/dist/*
+            packages/desktop/kernel-assets/*
+            CFPilot-control.zip
+            CFPilot-dataplane.zip
           # 正文来自 tag 注释（2026-10-27 起 RELEASE_NOTES.md 不入库）
           #
           # 发布说明怎么写：

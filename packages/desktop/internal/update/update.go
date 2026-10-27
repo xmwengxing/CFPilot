@@ -186,8 +186,16 @@ func fetchReleases(ctx context.Context) ([]Release, error) {
 
 	out := make([]Release, 0, len(raw))
 	for _, r := range raw {
-		// 只认 desktop-v* 与 gui-v*（后者是过渡期兼容）
-		if !strings.HasPrefix(r.Tag, "desktop-v") && !strings.HasPrefix(r.Tag, "gui-v") {
+		// 只认 v* / desktop-v* / gui-v*
+		//
+		// ⚠️ **`v*` 是当前的正式 tag**（2026-10-27 起 release-desktop.yml 用
+		// `tag_name: v<版本>`，与 npm 发布共用同一个 tag）。
+		// 早期这里只认 `desktop-v*` / `gui-v*`，于是**一个发行版都找不到** ——
+		// 界面的「检查更新」按钮永远显示「检查失败」。
+		//
+		// `desktop-v*` 是触发工作流的 git tag（不产生 Release），
+		// `gui-v*` 是 Electron 时代的过渡 tag，都保留兼容。
+		if !isReleaseTag(r.Tag) {
 			continue
 		}
 		if r.Draft || r.Prerelease {
@@ -201,7 +209,7 @@ func fetchReleases(ctx context.Context) ([]Release, error) {
 
 		out = append(out, Release{
 			Tag:     r.Tag,
-			Version: strings.TrimPrefix(strings.TrimPrefix(r.Tag, "desktop-v"), "gui-v"),
+			Version: releaseVersion(r.Tag),
 			URL:     asset.URL,
 			Notes:   r.Body,
 			Assets:  r.Assets,
@@ -396,3 +404,37 @@ func DefaultDownloadPath(version string) string {
 	}
 	return filepath.Join(dir, name)
 }
+
+/**
+ * isReleaseTag 判断 tag 是否是有效的发行版 tag。
+ *
+ * 接受的���缀（去掉前缀后须是合法 semver）：
+ *   v         —— 当前正式（release-desktop.yml 的 tag_name）
+ *   desktop-v —— Go 版工作流触发用
+ *   gui-v     —— Electron 时代过渡
+ */
+func isReleaseTag(tag string) bool {
+	return releaseVersion(tag) != ""
+}
+
+/**
+ * releaseVersion 从 tag 里提取版本号（不含前缀）。
+ *
+ * 不是合法 semver 时返回空串。
+ */
+func releaseVersion(tag string) string {
+	t := strings.TrimSpace(tag)
+	for _, prefix := range []string{"desktop-v", "gui-v", "v"} {
+		if strings.HasPrefix(t, prefix) {
+			v := strings.TrimPrefix(t, prefix)
+			if semverRe.MatchString(v) {
+				return v
+			}
+			return ""
+		}
+	}
+	return ""
+}
+
+// semverRe 匹配 x.y.z 形式的版本号。
+var semverRe = regexp.MustCompile(`^\d+\.\d+\.\d+`)

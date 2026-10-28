@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/config"
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/safe"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/store"
 )
 
@@ -334,6 +335,21 @@ func (s *Server) withCommonHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		// 本地服务不缓存：避免浏览器拿旧界面
 		w.Header().Set("Cache-Control", "no-store")
+
+		// ⚠️ **panic 兜底**：Go 里 handler panic 会让整个进程退出
+		// （net/http 的 recover 只保护连接，不保护进程）。
+		// 一次请求里的 nil 解引用就会把「托盘 + 服务 + 正在跑的扫描」全部带走，
+		// 而托盘模式下 panic 信息写在 stderr（用户看不见）→ 表现为「服务莫名消失」。
+		//
+		// 这里接住 → 记日志（含堆栈）→ 返回 500，连接与进程都保住。
+		defer func() {
+			if r := safe.Recover("处理 HTTP 请求 " + r.Method + " " + r.URL.Path); r != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{
+					"error": "服务内部错误，详情已记入日志",
+				})
+			}
+		}()
+
 		next.ServeHTTP(w, r)
 	})
 }

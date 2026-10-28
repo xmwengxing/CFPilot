@@ -1,6 +1,6 @@
 {
   "name": "cfpilot",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "private": true,
   "type": "module",
   "description": "CFPilot — Cloudflare Workers 代理微内核 + 真连接优选面板 + 本地优选器 + 中文部署向导",
@@ -37,7 +37,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "dev": "npm run dev -w @cfpilot/worker-core",
-    "verify": "npm run build && npm run typecheck && npm run test && node scripts/check-geosite.mjs && node scripts/check-log-panel.mjs && node scripts/check-adapter-contract.mjs && node scripts/check-adapter-shape.mjs && node scripts/check-ui-integration.mjs && node scripts/check-build-version.mjs",
+    "verify": "npm run build && npm run typecheck && npm run test && node scripts/check-geosite.mjs && node scripts/check-log-panel.mjs && node scripts/check-adapter-contract.mjs && node scripts/check-adapter-shape.mjs && node scripts/check-adapter-session.mjs && node scripts/check-ui-integration.mjs && node scripts/check-build-version.mjs",
     "check:log-panel": "node scripts/check-log-panel.mjs",
     "check:adapter": "node scripts/check-adapter-contract.mjs",
     "check:adapter-shape": "node scripts/check-adapter-shape.mjs",

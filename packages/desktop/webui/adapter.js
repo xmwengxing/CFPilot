@@ -68,9 +68,28 @@
     var bootToken = params.get('t') || ''
 
     if (!bootToken) {
-      // 没有令牌：可能是刷新后 URL 被清理，或用户直接访问根路径。
-      // 不在这里报错（Cookie 可能仍然有效），交给后续 API 判断。
-      return Promise.resolve(false)
+      // 没有令牌：可能是**刷新后 URL 被清理**（令牌用过即从地址栏抹掉），
+      // 或用户直接访问根路径。
+      //
+      // ⚠️ **Cookie 可能仍然有效** —— 不能就此判定「会话未建立」。
+      //
+      // 之前这里直接 `return Promise.resolve(false)`，
+      // 于是刷新页面后 `ensureStream()` 认为会话没了 → **SSE 永远不建立**
+      // → 实时日志（优选进度、部署日志）全部收不到。
+      // 表现：点「开始优选」后运行日志窗口一片空白。
+      //
+      // 所以这里**探一次**：拿现有的会话 Cookie 问一个受保护的接口，
+      // 通了就算会话还在（后面的 SSE 就能带上 Cookie 建立）。
+      return fetch('/api/service/status', {
+        method: 'GET',
+        credentials: 'same-origin',
+      })
+        .then(function (res) {
+          return res.ok
+        })
+        .catch(function () {
+          return false
+        })
     }
 
     return fetch('/__session?t=' + encodeURIComponent(bootToken), {
@@ -129,7 +148,20 @@
     }
     if (body !== undefined) opts.body = JSON.stringify(body)
 
-    const res = await fetch(path, opts)
+    // ⚠️ **网络层失败要给出可诊断的提示**。
+    //
+    // `fetch` 抛出的 TypeError 消息固定是 "Failed to fetch" ——
+    // 用户看到「读取日志失败：Failed to fetch」完全不知道发生了什么。
+    // 最常见的原因就是**本地服务已经退出**（崩溃 / 被托盘菜单关掉）。
+    let res
+    try {
+      res = await fetch(path, opts)
+    } catch (err) {
+      throw new Error(
+        '无法连接本地服务（可能已退出，请从托盘菜单重新打开 CFPilot）：' +
+          (err && err.message ? err.message : String(err))
+      )
+    }
     let data = null
     const text = await res.text()
     if (text) {
@@ -249,7 +281,7 @@
     sessionReady.then(function (ok) {
       if (es) return
       if (!ok) {
-        console.error('[cfpilot] 会话未建立，实时日志不可用（刷新页面可重试）')
+        console.error('[cfpilot] 会话已失效，实时日志不可用（请从托盘菜单重新打开界面）')
         return
       }
       openStream()

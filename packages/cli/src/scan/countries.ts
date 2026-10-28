@@ -4,7 +4,7 @@
  * ## 数据来源与同步说明
  *
  * 这张表与 worker-core 的 `src/data/pools.ts` 保持同源（那里用于订阅侧国家筛选）。
- * scanner-cli 是**独立发布**的包（`cfpilot-scanner`，被 `npx` 直接拉取），
+ * 优选器已合并进单一 CLI 包（`cfpilot`，入口是 `cfpilot scan` 子命令），
  * 不能依赖 worker-core，因此这里复制一份。
  * 修改规则：**只允许在 worker-core 改，然后同步过来**，避免两边漂移。
  */

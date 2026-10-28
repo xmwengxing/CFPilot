@@ -3,595 +3,912 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>CFPilot 管理面板</title>
+<!--
+  页面标题与页面内可见标题保持一致（都是「CFPilot 管理控制台」）——
+  packages/worker-core/test/panel.test.ts 断言解压后的面板包含该字面量，
+  改名会打破该冒烟测试。页面内可见标题仍是新版的「CFPilot 管理控制台」。
+-->
+<title>CFPilot 管理控制台</title>
 <style>
   :root {
-    --bg: #0b1020;
-    --bg-soft: #121a33;
-    --card: #161f3d;
-    --card-2: #1c2750;
-    --line: #27325c;
-    --text: #e8ecff;
-    --muted: #93a0cc;
-    --brand: #4f8cff;
-    --brand-2: #7b5cff;
-    --ok: #34d399;
-    --warn: #fbbf24;
-    --err: #f87171;
-    --radius: 14px;
+    --bg-base: #090d16;
+    --bg-elevated: #111827;
+    --bg-card: rgba(17, 24, 39, 0.82);
+    --bg-input: #0b111e;
+    --bg-hover: rgba(255, 255, 255, 0.04);
+    --border: rgba(255, 255, 255, 0.08);
+    --border-focus: #3b82f6;
+    --text-main: #f3f4f6;
+    --text-secondary: #9ca3af;
+    --text-muted: #6b7280;
+    --primary: #3b82f6;
+    --primary-hover: #2563eb;
+    --primary-glow: rgba(59, 130, 246, 0.18);
+    --accent: #6366f1;
+    --ok: #10b981;
+    --ok-bg: rgba(16, 185, 129, 0.12);
+    --warn: #f59e0b;
+    --warn-bg: rgba(245, 158, 11, 0.12);
+    --err: #ef4444;
+    --err-bg: rgba(239, 68, 68, 0.12);
+    --radius-sm: 8px;
+    --radius-md: 12px;
+    --radius-lg: 16px;
+    --shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
   }
+
   * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
   body {
-    margin: 0;
-    background: radial-gradient(1200px 600px at 20% -10%, #1b2a55 0%, var(--bg) 55%);
-    color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-    min-height: 100vh;
+    background-color: var(--bg-base);
+    background-image:
+      radial-gradient(ellipse 80% 50% at 50% -15%, rgba(59, 130, 246, 0.18), transparent),
+      radial-gradient(ellipse 50% 40% at 85% 10%, rgba(99, 102, 241, 0.1), transparent);
+    background-attachment: fixed;
+    color: var(--text-main);
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
     font-size: 14px;
+    line-height: 1.5;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
   }
-  a { color: var(--brand); }
-  .wrap { max-width: 1120px; margin: 0 auto; padding: 26px 18px 64px; }
-  header.top { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; flex-wrap: wrap; }
+
+  a { color: var(--primary); text-decoration: none; transition: color .15s; }
+  a:hover { color: #60a5fa; text-decoration: underline; }
+
+  .wrap { max-width: 1140px; margin: 0 auto; padding: 24px 20px 72px; }
+
+  /* === Top Header === */
+  header.top {
+    display: flex; align-items: center; gap: 14px;
+    padding-bottom: 20px; margin-bottom: 22px;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
   .logo {
-    width: 42px; height: 42px; border-radius: 12px; display: grid; place-items: center;
-    background: linear-gradient(135deg, var(--brand), var(--brand-2));
-    font-weight: 700; font-size: 17px; letter-spacing: .5px;
+    width: 42px; height: 42px; border-radius: 11px;
+    display: grid; place-items: center;
+    background: linear-gradient(135deg, var(--primary), var(--accent));
+    box-shadow: 0 4px 14px rgba(59, 130, 246, 0.35);
+    font-weight: 700; font-size: 16px; letter-spacing: .5px; color: #fff;
   }
-  .logo small { font-size: 9px; display: block; opacity: .85; font-weight: 500; letter-spacing: 1px; }
-  header.top h1 { font-size: 18px; margin: 0; }
-  header.top p { margin: 3px 0 0; color: var(--muted); font-size: 12.5px; }
+  header.top h1 { font-size: 18px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  header.top p { margin: 2px 0 0; color: var(--text-secondary); font-size: 12.5px; }
   .spacer { flex: 1; }
+
+  /* === Navigation Tabs (Segmented Bar) === */
+  nav.tabs {
+    display: inline-flex; gap: 4px; flex-wrap: wrap;
+    background: #0d1322; border: 1px solid var(--border);
+    padding: 5px; border-radius: var(--radius-md);
+    margin-bottom: 22px; width: 100%;
+  }
+  nav.tabs button {
+    flex: 1; min-width: 110px;
+    background: transparent; color: var(--text-secondary);
+    border: none; border-radius: var(--radius-sm);
+    padding: 9px 14px; font-size: 13.5px; font-weight: 500;
+    display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+    transition: all .15s ease;
+  }
+  nav.tabs button:hover { color: var(--text-main); background: var(--bg-hover); transform: none; }
+  nav.tabs button.active {
+    background: linear-gradient(135deg, var(--primary), var(--accent));
+    color: #fff; font-weight: 600;
+    box-shadow: 0 2px 10px rgba(59, 130, 246, 0.3);
+  }
+
+  /* === Buttons === */
   button {
-    cursor: pointer; border: none; border-radius: 10px; padding: 9px 14px;
-    background: var(--card-2); color: var(--text); font-size: 13.5px; font-weight: 500;
-    transition: .15s transform, .15s opacity;
+    cursor: pointer; border: 1px solid transparent; border-radius: var(--radius-sm);
+    padding: 8px 15px; background: #1e293b; color: var(--text-main);
+    font-size: 13.5px; font-weight: 500; font-family: inherit;
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    transition: background .15s, border-color .15s, transform .1s;
+    /* 按钮文字不换行：flex 子项默认会被压缩，窄按钮里的中文会折成两行 */
+    white-space: nowrap;
   }
-  button:hover { transform: translateY(-1px); }
-  button.primary { background: linear-gradient(135deg, var(--brand), var(--brand-2)); }
-  button.ghost { background: transparent; border: 1px solid var(--line); }
-  button.danger { background: rgba(248, 113, 113, .15); color: #fca5a5; }
-  button:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+  button:hover:not(:disabled) { background: #334155; }
+  button:active:not(:disabled) { transform: translateY(1px); }
+  button.primary {
+    background: linear-gradient(135deg, var(--primary), var(--accent));
+    color: #fff; border-color: rgba(255,255,255,0.1);
+    box-shadow: 0 2px 10px rgba(59, 130, 246, 0.25);
+  }
+  button.primary:hover:not(:disabled) { filter: brightness(1.08); }
+  button.ghost { background: rgba(255,255,255,0.03); border-color: var(--border); color: var(--text-main); }
+  button.ghost:hover:not(:disabled) { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.18); }
+  button.danger { background: var(--err-bg); border-color: rgba(239,68,68,0.3); color: #fca5a5; }
+  button.danger:hover:not(:disabled) { background: rgba(239,68,68,0.2); }
+  button.sm { padding: 5px 10px; font-size: 12px; border-radius: 6px; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+
+  /* === Inputs & Forms === */
   input, select, textarea {
-    width: 100%; background: #0e1730; color: var(--text); border: 1px solid var(--line);
-    border-radius: 10px; padding: 9px 11px; font-size: 13.5px; font-family: inherit; outline: none;
+    width: 100%; background: var(--bg-input); color: var(--text-main);
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 9px 12px; font-size: 13.5px; font-family: inherit; outline: none;
+    transition: border-color .15s, box-shadow .15s;
   }
-  input:focus, select:focus, textarea:focus { border-color: var(--brand); }
-  textarea { resize: vertical; min-height: 92px; line-height: 1.65; font-size: 12.5px; }
-  label { display: block; font-size: 12.5px; color: var(--muted); margin: 0 0 6px; }
-  .field { margin-bottom: 14px; }
-  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  input:focus, select:focus, textarea:focus {
+    border-color: var(--border-focus);
+    box-shadow: 0 0 0 3px var(--primary-glow);
+  }
+  input[readonly] { background: rgba(11, 17, 30, 0.6); color: #cbd5e1; }
+  textarea { resize: vertical; min-height: 92px; line-height: 1.6; font-size: 13px; }
+  label { display: block; font-size: 12.5px; font-weight: 500; color: #cbd5e1; margin: 0 0 6px; }
+  .field { margin-bottom: 16px; }
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
+  .grid-3 { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+
+  /* === Cards === */
   .card {
-    background: linear-gradient(180deg, var(--card), var(--bg-soft));
-    border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; margin-bottom: 16px;
+    background: var(--bg-card);
+    backdrop-filter: blur(12px);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 22px; margin-bottom: 18px;
+    box-shadow: var(--shadow);
   }
-  .card h2 { margin: 0 0 6px; font-size: 15px; display: flex; align-items: center; gap: 8px; }
-  .card h2 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--brand); }
-  .card .hint { color: var(--muted); font-size: 12.5px; line-height: 1.7; margin: 0 0 14px; }
-  .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; }
-  .tabs button { background: transparent; border: 1px solid var(--line); }
-  .tabs button.active { background: linear-gradient(135deg, var(--brand), var(--brand-2)); border-color: transparent; }
-  .stat { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
-  .stat .item { background: rgba(255,255,255,.03); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
-  .stat .k { color: var(--muted); font-size: 12px; }
-  .stat .v { font-size: 17px; font-weight: 600; margin-top: 4px; word-break: break-all; }
-  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  .row.end { justify-content: flex-end; }
-  .muted { color: var(--muted); font-size: 12.5px; }
-  /* 登录页的常驻错误提示（toast 会消失，失败原因需要留着） */
-  .muted.err { color: #fca5a5; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
-  /* 可折叠区块：默认收起，内容多时不占首屏 */
-  .fold { border: 1px solid var(--line); border-radius: 10px; margin: 12px 0; background: #0d1430; }
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; flex-wrap: wrap; }
+  .card h2 { margin: 0 0 6px; font-size: 15.5px; font-weight: 600; display: flex; align-items: center; gap: 9px; }
+  .card h2 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--primary); box-shadow: 0 0 8px var(--primary); }
+  .card .hint, .tip { color: var(--text-secondary); font-size: 12.5px; line-height: 1.65; margin: 0 0 14px; }
+  .tip { background: rgba(255,255,255,0.025); border-left: 3px solid var(--primary); padding: 8px 12px; border-radius: 0 6px 6px 0; margin-top: 8px; }
+
+  /* === Stat Metrics === */
+  .stat { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); margin-top: 12px; }
+  .stat .item {
+    background: rgba(255,255,255,.025); border: 1px solid var(--border);
+    border-radius: var(--radius-md); padding: 14px 16px;
+  }
+  .stat .k { color: var(--text-secondary); font-size: 12px; }
+  .stat .v { font-size: 16px; font-weight: 600; margin-top: 6px; word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+  /* === Source Cards & Toggle Switches === */
+  .source {
+    border: 1px solid var(--border); border-radius: var(--radius-md);
+    padding: 16px; margin-bottom: 12px; background: rgba(255,255,255,.015);
+    transition: border-color .2s, background .2s;
+  }
+  .source.on { border-color: rgba(59, 130, 246, 0.5); background: rgba(59, 130, 246, 0.05); }
+  .source-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .source .chk { display: flex; align-items: center; gap: 10px; margin: 0; color: var(--text-main); font-size: 14.5px; font-weight: 600; cursor: pointer; }
+  .source .chk input { width: 16px; height: 16px; accent-color: var(--primary); cursor: pointer; }
+  .source .desc { color: var(--text-secondary); font-size: 12.5px; margin-left: 26px; margin-top: 4px; line-height: 1.55; }
+  .source .src-body { margin-top: 14px; padding-top: 14px; border-top: 1px dashed var(--border); display: none; }
+  .source.on .src-body { display: block; }
+
+  /* === Check-pills (Ports & Variants) === */
+  .check-group { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+  label.check-pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 7px 13px; border-radius: var(--radius-sm);
+    border: 1px solid var(--border); background: var(--bg-input);
+    font-size: 13px; color: var(--text-secondary); cursor: pointer;
+    user-select: none; margin: 0; transition: all .15s;
+  }
+  label.check-pill:hover { border-color: rgba(255,255,255,0.2); color: var(--text-main); }
+  label.check-pill input { width: 14px; height: 14px; margin: 0; accent-color: var(--primary); }
+  label.check-pill:has(input:checked) {
+    background: var(--primary-glow); border-color: var(--primary); color: #fff; font-weight: 500;
+  }
+
+  /* === Country Chips === */
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; padding: 10px; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius-sm); max-height: 170px; overflow-y: auto; }
+  .chip {
+    padding: 4px 11px; border-radius: 999px; border: 1px solid var(--border);
+    background: rgba(255,255,255,0.03); font-size: 12px; cursor: pointer;
+    user-select: none; color: var(--text-secondary); transition: all .15s;
+  }
+  .chip:hover { border-color: rgba(255,255,255,0.25); color: var(--text-main); }
+  .chip.on { background: var(--primary-glow); border-color: var(--primary); color: #fff; font-weight: 500; }
+
+  /* === Switch Rows === */
+  .switch-box {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 14px;
+    padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: rgba(255,255,255,0.015); margin-bottom: 10px;
+  }
+  .switch-box .sw-info { flex: 1; }
+  .switch-box .sw-title { font-size: 13.5px; font-weight: 500; color: var(--text-main); cursor: pointer; }
+  .switch-box .sw-desc { font-size: 12px; color: var(--text-secondary); margin-top: 3px; line-height: 1.5; }
+  .switch-box input[type="checkbox"] { width: 18px; height: 18px; margin-top: 2px; accent-color: var(--primary); cursor: pointer; }
+
+  /* === Accordion / Fold === */
+  .fold { border: 1px solid var(--border); border-radius: var(--radius-md); margin: 14px 0; background: rgba(11, 17, 30, 0.65); overflow: hidden; }
   .fold > summary {
-    cursor: pointer; padding: 10px 14px; font-size: 13px; color: #b9c8ff;
-    list-style: none; user-select: none;
+    cursor: pointer; padding: 12px 16px; font-size: 13.5px; font-weight: 500; color: #cbd5e1;
+    list-style: none; user-select: none; display: flex; align-items: center; justify-content: space-between;
   }
   .fold > summary::-webkit-details-marker { display: none; }
-  .fold > summary::before { content: '▸ '; color: var(--muted); }
-  .fold[open] > summary::before { content: '▾ '; }
-  .fold > summary:hover { color: #fff; }
-  .fold-body { padding: 4px 14px 14px; border-top: 1px solid var(--line); }
-  .fold-body .field { margin-top: 12px; }
+  .fold > summary::after { content: '展开设置 ▾'; font-size: 12px; color: var(--text-secondary); font-weight: 400; }
+  .fold[open] > summary::after { content: '收起 ▴'; }
+  .fold > summary:hover { background: var(--bg-hover); color: #fff; }
+  .fold-body { padding: 16px; border-top: 1px solid var(--border); }
+
+  /* === Terminal & Code Blocks === */
+  .cmd-box { position: relative; margin-bottom: 12px; }
   pre.cmd {
-    background: #08101f; border: 1px dashed var(--line); border-radius: 10px; padding: 12px;
-    overflow-x: auto; white-space: pre-wrap; word-break: break-all; color: #b9c8ff; margin: 0 0 12px;
-    font-size: 12px;
+    background: #060911; border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 13px 14px; overflow-x: auto; white-space: pre-wrap; word-break: break-all;
+    color: #93c5fd; margin: 0; font-size: 12.5px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
-  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-  th, td { text-align: left; padding: 7px 6px; border-bottom: 1px solid var(--line); }
-  th { color: var(--muted); font-weight: 500; font-size: 11.5px; position: sticky; top: 0; background: #121a33; }
-  .table-wrap { max-height: 380px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
-  .tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--line); }
-  .tag.official { color: var(--ok); border-color: rgba(52,211,153,.4); }
-  .tag.domain { color: var(--brand); border-color: rgba(79,140,255,.4); }
-  .tag.manual, .tag.local, .tag.add { color: var(--warn); border-color: rgba(251,191,36,.4); }
-  .tag.api, .tag.addapi, .tag.csv, .tag.addcsv { color: var(--brand-2); border-color: rgba(123,92,255,.4); }
-  .progress { height: 8px; background: #0e1730; border-radius: 999px; overflow: hidden; border: 1px solid var(--line); }
-  .progress > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--brand), var(--brand-2)); transition: width .3s; }
-  .log { max-height: 200px; overflow-y: auto; background: #08101f; border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-size: 12px; line-height: 1.7; }
-  .log div { color: #9fb0e0; }
+  .log {
+    max-height: 220px; overflow-y: auto; background: #060911; border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 12px; font-size: 12px; line-height: 1.7;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .log div { color: #94a3b8; }
   .log .ok { color: var(--ok); }
   .log .err { color: var(--err); }
+
+  /* === Tables === */
+  .table-wrap { max-height: 400px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-input); }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); }
+  th { color: var(--text-secondary); font-weight: 500; font-size: 12px; position: sticky; top: 0; background: #111827; z-index: 1; }
+  tbody tr:hover { background: rgba(255,255,255,0.025); }
+
+  /* === Badges & Pills === */
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 500; border: 1px solid var(--border); }
+  .tag.official { color: var(--ok); background: var(--ok-bg); border-color: rgba(16,185,129,.3); }
+  .tag.domain { color: #60a5fa; background: rgba(59,130,246,.12); border-color: rgba(59,130,246,.3); }
+  .tag.manual, .tag.local, .tag.add { color: var(--warn); background: var(--warn-bg); border-color: rgba(245,158,11,.3); }
+  .tag.api, .tag.addapi, .tag.csv, .tag.addcsv { color: #a78bfa; background: rgba(139,92,246,.12); border-color: rgba(139,92,246,.3); }
+  .summary-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+  .pill { padding: 4px 12px; border-radius: 999px; background: rgba(255,255,255,.04); border: 1px solid var(--border); font-size: 12.5px; }
+
+  /* === Progress & Alerts === */
+  .progress { height: 8px; background: var(--bg-input); border-radius: 999px; overflow: hidden; border: 1px solid var(--border); }
+  .progress > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--primary), var(--ok)); transition: width .25s ease; }
+  .warn {
+    border: 1px solid rgba(245,158,11,.35); background: var(--warn-bg);
+    color: #fde68a; border-radius: var(--radius-sm); padding: 10px 14px; font-size: 12.5px; line-height: 1.65; margin-bottom: 12px;
+  }
+  .warn.err { border-color: rgba(239,68,68,.4); background: var(--err-bg); color: #fca5a5; }
+
+  /* === Helpers === */
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .row.end { justify-content: flex-end; }
+  .row.nowrap { flex-wrap: nowrap; }
+  .muted { color: var(--text-secondary); font-size: 12.5px; }
+  .muted.err, .err { color: #fca5a5; font-size: 12.5px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+  code.inline, code { background: var(--bg-input); padding: 2px 6px; border-radius: 5px; border: 1px solid var(--border); font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; color: #93c5fd; }
+  .hidden { display: none !important; }
+
+  /* === Login View === */
+  .login-wrap { max-width: 400px; margin: 14vh auto; padding: 0 16px; }
+  .login-head { text-align: center; margin-bottom: 20px; }
+  .login-head .logo { margin: 0 auto 12px; width: 48px; height: 48px; font-size: 18px; }
+
+  /* === Toast === */
   .toast {
-    position: fixed; right: 18px; bottom: 18px; background: var(--card-2); border: 1px solid var(--line);
-    border-left: 3px solid var(--brand); padding: 11px 15px; border-radius: 10px; font-size: 13px;
-    opacity: 0; transform: translateY(8px); transition: .2s; pointer-events: none; z-index: 50; max-width: 340px;
+    position: fixed; right: 20px; bottom: 20px; background: #1e293b; border: 1px solid rgba(255,255,255,0.12);
+    border-left: 4px solid var(--primary); padding: 12px 16px; border-radius: var(--radius-sm); font-size: 13px;
+    box-shadow: var(--shadow); opacity: 0; transform: translateY(10px); transition: .2s; pointer-events: none; z-index: 99; max-width: 360px;
   }
   .toast.show { opacity: 1; transform: none; }
   .toast.err { border-left-color: var(--err); }
-  .hidden { display: none !important; }
-  .login-wrap { max-width: 380px; margin: 12vh auto; }
-  code.inline { background: #0e1730; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--line); }
 
-  .source {
-    border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 12px;
-    background: rgba(255,255,255,.02); transition: .15s border-color;
-  }
-  .source.on { border-color: rgba(79,140,255,.55); background: rgba(79,140,255,.06); }
-  .source .chk { display: flex; align-items: center; gap: 10px; margin: 0; color: var(--text); font-size: 14px; font-weight: 600; cursor: pointer; }
-  .source .chk input { width: auto; }
-  .source .src-body { margin-top: 12px; display: none; }
-  .source.on .src-body { display: block; }
-  .source .desc { color: var(--muted); font-size: 12px; font-weight: 400; margin-left: 26px; margin-top: 3px; line-height: 1.6; }
-
-  .chips { display: flex; flex-wrap: wrap; gap: 7px; }
-  .chip {
-    padding: 5px 11px; border-radius: 999px; border: 1px solid var(--line);
-    background: #0e1730; font-size: 12px; cursor: pointer; user-select: none; color: var(--muted);
-  }
-  .chip.on { background: rgba(79,140,255,.18); border-color: var(--brand); color: var(--text); }
-
-  .warn {
-    border: 1px solid rgba(251,191,36,.35); background: rgba(251,191,36,.08);
-    color: #fde68a; border-radius: 10px; padding: 10px 12px; font-size: 12.5px; line-height: 1.7; margin-bottom: 12px;
-  }
-  .warn.err { border-color: rgba(248,113,113,.4); background: rgba(248,113,113,.08); color: #fca5a5; }
-  .summary-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 4px; }
-  .pill { padding: 3px 10px; border-radius: 999px; background: rgba(255,255,255,.05); border: 1px solid var(--line); font-size: 12px; }
+  /* === Step Guide Cards === */
+  .steps { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin-top: 10px; }
+  .step-card { background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 14px; }
+  .step-num { display: inline-block; width: 22px; height: 22px; line-height: 22px; text-align: center; border-radius: 6px; background: var(--primary-glow); color: #60a5fa; font-weight: 700; font-size: 12px; margin-bottom: 8px; }
+  .step-card h4 { margin: 0 0 4px; font-size: 13.5px; }
+  .step-card p { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.55; }
 </style>
 </head>
 <body>
+
+<!-- ==================== 主控台视图 ==================== -->
 <div id="app" class="wrap hidden">
   <header class="top">
     <div class="logo">CP</div>
     <div>
-      <h1>CFPilot 管理面板</h1>
-      <p>Cloudflare 边缘代理微内核 · 真连接优选</p>
+      <h1>CFPilot 管理控制台</h1>
+      <p>Cloudflare 边缘网络数据面 · 节点池编排与真连接优选中心</p>
     </div>
     <div class="spacer"></div>
-    <button class="ghost" id="btnRefresh">刷新</button>
+    <button class="ghost" id="btnRefresh">↻ 刷新状态</button>
     <button class="ghost" id="btnLogout">退出登录</button>
+    <button class="ghost" id="btnTheme" title="切换亮色 / 暗色主题" aria-label="切换主题" style="padding:8px 12px">🎨</button>
   </header>
 
   <nav class="tabs" id="tabs">
-    <button data-tab="overview" class="active">概览</button>
-    <button data-tab="pool">节点来源</button>
-    <button data-tab="sub">订阅</button>
-    <button data-tab="inbound">入站配置</button>
-    <button data-tab="optimize">本地优选</button>
-    <button data-tab="advanced">高级</button>
+    <button data-tab="overview" class="active">📊 运行概览</button>
+    <button data-tab="pool">🌐 节点来源</button>
+    <button data-tab="optimize">⚡ 本地优选</button>
+    <button data-tab="sub">🔗 订阅中心</button>
+    <button data-tab="inbound">🛡️ 入站配置</button>
+    <button data-tab="advanced">⚙️ 出站与高级</button>
   </nav>
 
+  <!-- Tab 1: 运行概览 -->
   <section class="tab-page" id="tab-overview">
     <div class="card">
-      <h2><span class="dot"></span>运行状态</h2>
+      <h2><span class="dot"></span>系统运行状态</h2>
       <div class="stat" id="statusBox"></div>
     </div>
+
     <div class="card">
-      <h2><span class="dot"></span>当前订阅构成</h2>
-      <p class="hint">下面是订阅里实际会生成的节点来源分布。点「节点来源」可调整。</p>
+      <div class="card-head">
+        <h2><span class="dot"></span>当前活跃节点池分布</h2>
+        <button class="ghost sm" data-goto="pool">管理节点来源 →</button>
+      </div>
+      <p class="hint">下表展示当前订阅链接实际下发的节点构成与去重统计。</p>
       <div class="summary-bar" id="overviewSummary"></div>
     </div>
+
     <div class="card">
-      <h2><span class="dot"></span>三步上手</h2>
-      <p class="hint" style="line-height:2">
-        1. 打开 <b>节点来源</b>，按需勾选「官方优选 IP / 优选域名 / 手动优选 IP」——都不勾也会自动给 20+10；<br>
-        2. 复制 <b>订阅</b> 页里的地址导入客户端（Clash / Sing-box / v2ray）；<br>
-        3. 想要更快的节点？打开 <b>本地优选</b> 跑一次真连接扫描，结果会进入「手动优选 IP」。
-      </p>
+      <h2><span class="dot"></span>快速配置指南</h2>
+      <div class="steps">
+        <div class="step-card">
+          <span class="step-num">1</span>
+          <h4>编排节点来源</h4>
+          <p>在「节点来源」中按需启用官方 IP、优选域名或手动池。未勾选任何来源时系统将自动启用 20+10 保底策略。</p>
+        </div>
+        <div class="step-card">
+          <span class="step-num">2</span>
+          <h4>执行本地真连接优选</h4>
+          <p>在「本地优选」中以您的专属数据面域名作为 SNI 完成 WebSocket 101 实测，筛选本机直连质量最佳的边缘 IP。</p>
+        </div>
+        <div class="step-card">
+          <span class="step-num">3</span>
+          <h4>导入客户端订阅</h4>
+          <p>前往「订阅中心」复制自适应链接（支持 V2Ray / Clash Mihomo / Sing-box），粘贴至客户端即可使用。</p>
+        </div>
+      </div>
     </div>
   </section>
 
+  <!-- Tab 2: 节点来源 -->
   <section class="tab-page hidden" id="tab-pool">
     <div class="card">
-      <h2><span class="dot"></span>选择节点来源</h2>
+      <h2><span class="dot"></span>节点池来源编排</h2>
       <p class="hint">
-        三种来源可自由组合，按 <b>官方优选 IP → 优选域名 → 手动优选 IP</b> 的顺序合并去重。
-        如果三个都不勾选，会自动生成 <b>20 个官方优选 IP + 10 个优选域名</b>，保证订阅不会为空。
+        三种节点来源支持自由组合，系统按 <b>官方优选 IP → 优选域名 → 手动与本地优选 IP</b> 顺序合并去重。
+        若三项均未勾选，系统将自动生成 <b>20 个官方优选 IP + 10 个优选域名</b> 作为兜底，确保订阅始终可用。
       </p>
 
+      <!-- 来源 1：官方优选 -->
       <div class="source" id="src-official">
-        <label class="chk"><input type="checkbox" id="poolOfficial" /> 官方优选 IP</label>
-        <div class="desc">从 Cloudflare 官方网段随机生成的 IP。Cloudflare 的 IP 是全球 anycast，静态表必然过期，所以按需随机取。</div>
+        <label class="chk"><input type="checkbox" id="poolOfficial" /> 官方 Anycast 随机优选 IP</label>
+        <div class="desc">从 Cloudflare 官方发布的 IPv4 网段中按权重随机抽样生成，避免固定静态 IP 表失效。</div>
         <div class="src-body">
           <div class="grid">
-            <div class="field">
-              <label>数量（1–200）</label>
+            <div class="field" style="margin-bottom:0">
+              <label>抽样生成数量（1–200）</label>
               <input id="officialCount" type="number" min="1" max="200" step="1" />
             </div>
           </div>
         </div>
       </div>
 
+      <!-- 来源 2：优选域名 -->
       <div class="source" id="src-domain">
-        <label class="chk"><input type="checkbox" id="poolDomain" /> 优选域名</label>
-        <div class="desc">从域名库随机取样。这些域名只用来解析出优质的 Cloudflare 边缘 IP，SNI / Host 仍然是你的 Worker 域名。</div>
+        <label class="chk"><input type="checkbox" id="poolDomain" /> 优选 CNAME 域名库</label>
+        <div class="desc">通过接入 Cloudflare 的知名高可用域名动态解析边缘 IP（客户端实际握手 SNI 与 Host 仍保持为您的数据面域名）。</div>
         <div class="src-body">
           <div class="grid">
             <div class="field">
-              <label>数量（1–100）</label>
+              <label>随机抽取数量（1–100）</label>
               <input id="domainCount" type="number" min="1" max="100" step="1" />
             </div>
             <div class="field">
-              <label>内置域名库</label>
+              <label>系统内置库统计</label>
               <input id="builtinDomains" readonly />
             </div>
           </div>
           <div class="field" style="margin-bottom:0">
-            <label>自定义域名库（每行一个域名；留空 = 使用内置库）</label>
+            <label>自定义优选域名库（每行一个域名；留空则使用系统内置库）</label>
             <textarea id="domainLib" placeholder="cf.example.com&#10;bestcf.example.net"></textarea>
           </div>
         </div>
       </div>
 
+      <!-- 来源 3：手动与本地优选 -->
       <div class="source" id="src-manual">
-        <label class="chk"><input type="checkbox" id="poolManual" /> 手动优选 IP</label>
-        <div class="desc">本地真连接优选结果（最高优先级）+ 下面手动填写的条目。为空时会提示你先跑一次优选。</div>
+        <label class="chk"><input type="checkbox" id="poolManual" /> 本地真连接优选池 & 手动指定 IP</label>
+        <div class="desc">包含「本地真连接优选器」自动回填的实测 IP（最高优先级）以及下方手动录入的静态节点。</div>
         <div class="src-body">
           <div class="field">
-            <label>手动填写（每行一条：<code class="inline">IP</code> / <code class="inline">IP:端口</code> / <code class="inline">IP:端口#备注</code>）</label>
-            <textarea id="cfgAdd" placeholder="1.2.3.4:443#SJC&#10;[2606:4700::1]:443#LAX"></textarea>
+            <label>手动静态节点（每行一条，支持格式：<code class="inline">IP</code> / <code class="inline">IP:端口</code> / <code class="inline">IP:端口#备注</code>）</label>
+            <textarea id="cfgAdd" class="mono" placeholder="104.16.1.1:443#US-SJC&#10;[2606:4700::1]:443#US-LAX"></textarea>
           </div>
-          <div class="row">
-            <span class="muted" id="localState">本地真连接池：0 条</span>
+          <div class="row" style="background:rgba(0,0,0,0.2);padding:10px 12px;border-radius:8px;border:1px solid var(--border)">
+            <span class="muted" id="localState" style="color:var(--text-main);font-weight:500">本地真连接池：0 条</span>
             <div class="spacer"></div>
-            <button class="ghost" id="btnToggleLocal">查看</button>
-            <button class="ghost" id="btnClearIps">清空本地池</button>
+            <button class="ghost sm" id="btnToggleLocal">查看 / 编辑明细</button>
+            <button class="danger sm" id="btnClearIps">清空本地池</button>
           </div>
 
-          <!--
-            本地真连接池的内容展示
-
-            之前这里只有一行「本地真连接池：N 条」，**看不到具体 IP**。
-            用户跑完本地优选、回填成功后，在面板里找不到列表，
-            以为回填失败了（实际数据已写入 KV，只是没有展示入口）。
-
-            /api/v1/ips 一直返回 raw 与 entries，这个区块把它们显示出来，
-            并允许直接编辑保存（等价于手动修改本地池）。
-          -->
-          <div id="localBox" class="hidden" style="margin-top: 10px">
+          <div id="localBox" class="hidden" style="margin-top: 12px">
             <div class="field">
-              <label>
-                本地真连接池内容
-                <span class="muted" id="localCount"></span>
-              </label>
+              <label>本地真连接池存储内容 <span class="muted" id="localCount"></span></label>
               <textarea
                 id="localIpsText"
-                placeholder="还没有本地优选结果 —— 到「本地优选」页跑一次，或直接在这里填"
-                style="min-height: 140px; font-family: ui-monospace, monospace; font-size: 12px"
+                class="mono"
+                placeholder="暂无本地优选记录 —— 请前往「本地优选」标签页运行扫描，或直接在此手动录入"
+                style="min-height: 140px"
               ></textarea>
-              <p class="muted" style="margin: 4px 0 0">
-                每行一条：<code class="inline">IP</code> / <code class="inline">IP:端口</code> /
-                <code class="inline">IP:端口#备注</code>。
-                这里是<b>本地优选回填的结果</b>，与上面「手动填写」是两回事 —— 两者都会进入订阅。
+              <p class="muted" style="margin: 6px 0 0">
+                格式规范：<code class="inline">IP:端口#机房_延迟_速度</code>。此处展示的是存储在 KV（<code>LOCAL_PREFERRED_IPS</code>）中的实测回填数据，与上方「手动静态节点」合并生效。
               </p>
             </div>
             <div class="row">
-              <button class="ghost" id="btnReloadLocal">重新读取</button>
+              <button class="ghost sm" id="btnReloadLocal">↻ 重新读取 KV</button>
               <div class="spacer"></div>
-              <button class="primary" id="btnSaveLocal">保存本地池</button>
+              <button class="primary sm" id="btnSaveLocal">保存本地池修改</button>
             </div>
           </div>
         </div>
       </div>
 
-      <div class="row end" style="margin-top:14px">
-        <button class="ghost" id="btnPreview">刷新预览</button>
-        <button class="primary" id="btnSavePool">保存并应用</button>
+      <div class="row end" style="margin-top:16px">
+        <button class="ghost" id="btnPreview">↻ 刷新下方预览</button>
+        <button class="primary" id="btnSavePool">保存并应用节点来源</button>
       </div>
     </div>
 
     <div class="card">
-      <h2><span class="dot"></span>节点预览 <span class="muted" id="previewSummary" style="font-weight:400"></span></h2>
+      <h2><span class="dot"></span>实时下发节点预览 <span class="muted" id="previewSummary" style="font-weight:400"></span></h2>
       <div id="previewWarn" class="warn hidden"></div>
       <div class="table-wrap">
         <table id="nodeTable">
-          <thead><tr><th>#</th><th>来源</th><th>地址</th><th>机房</th><th>延迟</th><th>速度</th></tr></thead>
+          <thead><tr><th>#</th><th>来源类型</th><th>节点地址</th><th>边缘机房</th><th>延迟 (ms)</th><th>下行速度 (MB/s)</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
     </div>
   </section>
 
+  <!-- Tab 3: 本地优选 -->
   <section class="tab-page hidden" id="tab-optimize">
     <div class="card">
-      <h2><span class="dot"></span>⚡ 本地真连接优选</h2>
-      <p class="hint" style="line-height:1.8">
-        用<b>你自己的 Worker 域名</b>作为 TLS SNI 与 HTTP Host，逐个候选 IP 完成 WebSocket 101 握手校验，
-        只有真正可用的 IP 才会回填到「手动优选 IP」池。
+      <h2><span class="dot"></span>本地真连接优选器（True-Connect Scanner）</h2>
+      <p class="hint">
+        以您的<b>数据面专属域名</b>作为 TLS SNI 与 HTTP Host，在本机直接对候选 IP 进行 TCP、TLS 及 WebSocket 101 握手实测，并将通过验证的高速 IP 自动回填至「本地真连接池」。
       </p>
 
-      <h3 style="margin:18px 0 8px;font-size:14px">运行环境</h3>
-      <p class="hint" style="line-height:1.8">
-        优选器通过 <code>npx</code> 直接拉取，无需手动安装，但本机需要 <b>Node.js 18+</b>。
-        还没装的话先到官网下载：<a href="https://nodejs.org/zh-cn/download" target="_blank" rel="noopener">nodejs.org/zh-cn/download</a>
-        （国内可从 <a href="https://npmmirror.com/" target="_blank" rel="noopener">npmmirror.com</a> 找安装包）。
-      </p>
-
-      <div class="row" style="margin:14px 0">
-        <button class="primary" id="btnScan">开始优选</button>
-        <button class="ghost" id="btnCopyCmd">复制命令</button>
-        <span class="muted" id="bridgeState">未检测到本地桥接服务</span>
+      <div class="row" style="margin:16px 0;padding:12px 14px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.25);border-radius:10px">
+        <button class="primary" id="btnScan">⚡ 唤醒本地优选 / 生成令牌</button>
+        <button class="ghost" id="btnCopyCmd">📋 复制终端命令</button>
+        <div class="spacer"></div>
+        <span class="muted" id="bridgeState">正在检测本地桥接服务…</span>
       </div>
 
       <details class="fold">
-        <summary>命令参数（可选，默认值已按大多数情况调好）</summary>
+        <summary>扫描参数定制（可选，默认值已针对大多数网络环境调优）</summary>
         <div class="fold-body">
-          <div class="field">
-            <label>--token <span class="muted">回填令牌</span></label>
-            <input id="optToken" placeholder="留空则不自动回填，需手动复制结果" />
-            <p class="muted" style="margin:4px 0 0">面板会在点击「开始优选」时自动签发一次性令牌（10 分钟有效）。担心令牌外泄就留空，用下面的免令牌命令。</p>
-          </div>
-          <div class="field">
-            <label>--top <span class="muted">保留条数</span></label>
-            <input id="optTop" type="number" value="15" min="1" max="100" />
-            <p class="muted" style="margin:4px 0 0">建议 10–20。条数越多订阅越长，但质量会下降。</p>
-          </div>
-          <div class="field">
-            <label>--sample <span class="muted">候选 IP 采样数</span></label>
-            <input id="optSample" type="number" value="300" min="10" max="20000" />
-            <p class="muted" style="margin:4px 0 0">建议 200–500。太小吃不到好 IP，太大会让一阶段等很久。</p>
-          </div>
-          <div class="field">
-            <label>--port <span class="muted">端口</span></label>
-            <div class="row" id="optPortGroup">
-              <label class="chk"><input type="radio" name="optPort" value="443" checked /> 443（推荐）</label>
-              <label class="chk"><input type="radio" name="optPort" value="2053" /> 2053</label>
-              <label class="chk"><input type="radio" name="optPort" value="2083" /> 2083</label>
-              <label class="chk"><input type="radio" name="optPort" value="2087" /> 2087</label>
-              <label class="chk"><input type="radio" name="optPort" value="2096" /> 2096</label>
-              <label class="chk"><input type="radio" name="optPort" value="8443" /> 8443</label>
+          <div class="grid">
+            <div class="field">
+              <label>--top <span class="muted">最终保留最优节点数</span></label>
+              <input id="optTop" type="number" value="15" min="1" max="100" />
+              <p class="muted" style="margin:4px 0 0">建议设置 10–25 条，精选高带宽低延迟节点。</p>
             </div>
-            <p class="muted" style="margin:4px 0 0">必须与客户端里填的端口一致，否则优选结果无效。默认 443。</p>
+            <div class="field">
+              <label>--sample <span class="muted">初始网段抽样 IP 数</span></label>
+              <input id="optSample" type="number" value="300" min="10" max="20000" />
+              <p class="muted" style="margin:4px 0 0">建议范围 300–2000。增大采样可提升特定地区机房命中率。</p>
+            </div>
+            <div class="field">
+              <label>--token <span class="muted">自定义回填令牌（选填）</span></label>
+              <input id="optToken" placeholder="点击「开始优选」将自动签发 10 分钟临时令牌" />
+            </div>
           </div>
+
           <div class="field">
-            <label>--countries <span class="muted">国家 / 地区（可多选，Ctrl/⌘ 点击）</span></label>
-            <select id="optCountries" multiple size="6" style="width:100%"></select>
-            <p class="muted" style="margin:4px 0 0">
-              不选 = 全量测试。选中后只保留机房落在这些国家 / 地区的 IP<br />
-              （机房信息来自 WebSocket 101 握手响应，未识别机房的候选会被丢弃）。<br />
-              想要某个地区的结果又选不出来，就把采样数调到 500~1000 再试。
-            </p>
+            <label>--port <span class="muted">探测目标 TLS 端口（需与客户端实际连接端口一致）</span></label>
+            <div class="check-group" id="optPortGroup">
+              <label class="check-pill"><input type="radio" name="optPort" value="443" checked /> 443（标准推荐）</label>
+              <label class="check-pill"><input type="radio" name="optPort" value="2053" /> 2053</label>
+              <label class="check-pill"><input type="radio" name="optPort" value="2083" /> 2083</label>
+              <label class="check-pill"><input type="radio" name="optPort" value="2087" /> 2087</label>
+              <label class="check-pill"><input type="radio" name="optPort" value="2096" /> 2096</label>
+              <label class="check-pill"><input type="radio" name="optPort" value="8443" /> 8443</label>
+            </div>
           </div>
-          <label class="chk"><input type="checkbox" id="optNoCallback" /> --no-callback（只扫描不回填）</label>
-          <p class="muted" style="margin:4px 0 12px">勾选后不会把结果写回 KV，适合只想拿一份 IP 列表的用户。</p>
-          <div class="row end"><button class="ghost" id="btnRebuildCmd">重新生成命令</button></div>
+
+          <div class="field">
+            <div class="row" style="margin-bottom:6px">
+              <label style="margin:0">--countries <span class="muted">按目标机房所属国家 / 地区过滤（点击胶囊多选，不选则全量测试）</span></label>
+              <div class="spacer"></div>
+              <button type="button" class="ghost sm" id="btnAllCountries">全选地区</button>
+              <button type="button" class="ghost sm" id="btnClearCountries">清空已选地区</button>
+            </div>
+            <!-- 交互式胶囊容器 + 隐藏同步的原生 select 以保持 100% 兼容 -->
+            <div class="chips" id="optCountriesChips"></div>
+            <select id="optCountries" multiple class="hidden"></select>
+          </div>
+
+          <div class="switch-box" style="margin-bottom:12px">
+            <div class="sw-info">
+              <label class="sw-title" for="optNoCallback">仅本地输出，不自动回填（--no-callback）</label>
+              <div class="sw-desc">开启后扫描结果仅在终端打印，不写入服务端 KV 存储。</div>
+            </div>
+            <input type="checkbox" id="optNoCallback" />
+          </div>
+
+          <div class="row end"><button class="ghost sm" id="btnRebuildCmd">↻ 更新下方命令</button></div>
         </div>
       </details>
 
-      <h3 style="margin:18px 0 8px;font-size:14px">生成的命令</h3>
-      <p class="muted" style="margin:0 0 6px">带令牌：点「开始优选」后自动回填面板</p>
-      <pre class="cmd" id="scanCmd">请点击「开始优选」生成命令</pre>
-      <p class="muted" style="margin:12px 0 6px">免令牌：不会写回 KV，优选完把结果复制到「手动优选 IP」输入框</p>
-      <pre class="cmd" id="scanCmdNoToken">请点击「开始优选」生成命令</pre>
-
-      <details class="fold" style="margin-top:14px">
-        <summary>获取 Cloudflare API Token 及权限说明</summary>
-        <div class="fold-body">
-          <p class="hint" style="line-height:1.9">
-            本面板的「本地优选」只用 <b>Workers KV Storage</b> 一项权限，用于把结果写回 KV。<br>
-            如果你还要用部署向导（<code>cfpilot-deploy</code>），那需要的是另一组权限，
-            详见项目 README 的「API Token 权限」章节。
-          </p>
-          <p class="hint" style="line-height:1.9">
-            1. 打开 <a href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noopener">dash.cloudflare.com/profile/api-tokens</a><br>
-            2. 点「创建令牌」→「创建自定义令牌」<br>
-            3. 权限选 <b>Account / Workers KV Storage / Edit</b><br>
-            4. 账号资源选你的账号，保存后复制生成的令牌
-          </p>
-          <p class="muted" style="margin:0">
-            注意：面板这里的输入框是给「本地优选」用的，与部署向导的 Token 不是同一个用途，
-            但可以用同一个 Token（权限取并集）。
-          </p>
+      <div class="grid" style="margin-top:14px">
+        <div>
+          <label>方式一：自动回填命令 <span class="muted">（需先点上方「唤醒本地优选」签发临时令牌）</span></label>
+          <div class="cmd-box"><pre class="cmd" id="scanCmd">请点击上方「唤醒本地优选 / 生成令牌」按钮生成带参命令</pre></div>
         </div>
-      </details>
+        <div>
+          <label>方式二：免令牌纯扫描命令 <span class="muted">（直接在本地终端运行，结束后手动复制 IP）</span></label>
+          <div class="cmd-box"><pre class="cmd" id="scanCmdNoToken">正在生成命令…</pre></div>
+        </div>
+      </div>
+
+      <p class="tip">
+        <b>运行环境要求</b>：本机需安装 <b>Node.js 18+</b>（<a href="https://nodejs.org/zh-cn/download" target="_blank" rel="noopener">官方下载</a> / <a href="https://npmmirror.com/" target="_blank" rel="noopener">国内镜像</a>）。扫描期间请暂时关闭本机代理软件的 TUN 模式或系统代理，确保测试的是真实物理直连质量。
+      </p>
 
       <div class="progress" style="margin:16px 0 10px"><i id="scanBar"></i></div>
-      <div class="log" id="scanLog"></div>
+      <div class="log" id="scanLog"><div>[就绪] 等待启动本地扫描任务或复制命令至终端执行…</div></div>
     </div>
   </section>
 
+  <!-- Tab 4: 订阅中心 -->
   <section class="tab-page hidden" id="tab-sub">
     <div class="card">
-      <h2><span class="dot"></span>订阅链接</h2>
-      <p class="hint">把对应地址粘进客户端即可。节点数是动态的，改完「节点来源」刷新页面就会更新。</p>
+      <div class="card-head">
+        <h2><span class="dot"></span>客户端订阅地址</h2>
+        <button class="primary sm" id="btnRefreshSub">↻ 刷新订阅与节点</button>
+      </div>
+      <p class="hint">复制下方对应客户端格式的订阅链接导入即可。当您在「节点来源」或「入站配置」修改参数后，客户端更新订阅即可同步最新节点。</p>
+
       <div class="field">
-        <label>Base64（v2ray / v2rayNG / Nekoray）</label>
-        <div class="row"><input class="mono" id="subBase64" readonly /><button class="ghost" data-copy="subBase64">复制</button></div>
+        <label>通用 Base64 订阅（适用于 v2rayN / v2rayNG / Shadowrocket / Nekoray）</label>
+        <div class="row nowrap"><input class="mono" id="subBase64" readonly /><button class="ghost" data-copy="subBase64">复制链接</button></div>
       </div>
       <div class="field">
-        <label>Clash / Mihomo（YAML，按来源分组）</label>
-        <div class="row"><input class="mono" id="subClash" readonly /><button class="ghost" data-copy="subClash">复制</button></div>
+        <label>Clash / Mihomo 专用订阅（YAML 格式，自动按节点来源分组）</label>
+        <div class="row nowrap"><input class="mono" id="subClash" readonly /><button class="ghost" data-copy="subClash">复制链接</button></div>
       </div>
       <div class="field" style="margin-bottom:0">
-        <label>Sing-box（JSON 1.12+，按来源分组）</label>
-        <div class="row"><input class="mono" id="subSingbox" readonly /><button class="ghost" data-copy="subSingbox">复制</button></div>
+        <label>Sing-box 专用订阅（JSON 1.12+ 规范，自动按节点来源分组）</label>
+        <div class="row nowrap"><input class="mono" id="subSingbox" readonly /><button class="ghost" data-copy="subSingbox">复制链接</button></div>
       </div>
-      <div class="row end" style="margin-top:16px"><button class="primary" id="btnRefreshSub">刷新订阅链接</button></div>
     </div>
+
     <div class="card">
-      <h2><span class="dot"></span>节点预览（前 100 条）</h2>
+      <h2><span class="dot"></span>订阅下发节点清单（前 100 条）</h2>
       <div class="table-wrap">
         <table id="subTable">
-          <thead><tr><th>#</th><th>来源</th><th>地址</th><th>机房</th></tr></thead>
+          <thead><tr><th>#</th><th>来源类型</th><th>节点地址</th><th>边缘机房</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
     </div>
   </section>
 
+  <!-- Tab 5: 入站配置 -->
   <section class="tab-page hidden" id="tab-inbound">
     <div class="card">
-      <h2><span class="dot"></span>入站参数</h2>
+      <h2><span class="dot"></span>核心鉴权与传输路径</h2>
+      <p class="hint">配置数据面支持的入站协议凭证与 WebSocket / XHTTP 监听路径。建议自定义复杂的路径以提升隐蔽性。</p>
+
       <div class="grid">
-        <div class="field"><label>VLESS UUID</label><input id="cfgUuid" placeholder="留空自动生成" /></div>
-        <div class="field"><label>Trojan 密码</label><input id="cfgTrojan" placeholder="留空自动生成" /></div>
-        <div class="field"><label>VLESS-WS 路径</label><input id="cfgWsPath" placeholder="/vless" /></div>
-        <div class="field"><label>Trojan-WS 路径</label><input id="cfgTrojanPath" placeholder="/trojan" /></div>
-        <div class="field"><label>XHTTP 路径</label><input id="cfgXhttpPath" placeholder="/xhttp" /></div>
-        <div class="field"><label>订阅域名（留空 = 当前 Worker 域名）</label><input id="cfgSubDomain" placeholder="例如 cfpilot.example.com" /></div>
-        <div class="field"><label>订阅名称（客户端导入后显示的名字）</label><input id="cfgSubName" placeholder="CFPilot" maxlength="64" /></div>
+        <div class="field">
+          <label>VLESS UUID（用户凭证）</label>
+          <div class="row nowrap">
+            <input id="cfgUuid" class="mono" placeholder="留空保存将自动生成随机 UUID" />
+            <button type="button" class="ghost" id="btnGenUuid" title="随机生成 UUID">🎲 随机</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>Trojan 认证密码</label>
+          <input id="cfgTrojan" class="mono" placeholder="留空保存将自动生成随机密码" />
+        </div>
+        <div class="field">
+          <label>VLESS-WS 监听路径</label>
+          <input id="cfgWsPath" class="mono" placeholder="/vless" />
+        </div>
+        <div class="field">
+          <label>Trojan-WS 监听路径</label>
+          <input id="cfgTrojanPath" class="mono" placeholder="/trojan" />
+        </div>
+        <div class="field">
+          <label>VLESS-XHTTP 监听路径</label>
+          <input id="cfgXhttpPath" class="mono" placeholder="/xhttp" />
+        </div>
+        <div class="field">
+          <label>自定义订阅域名（SNI / Host）</label>
+          <input id="cfgSubDomain" class="mono" placeholder="留空则默认使用当前数据面域名" />
+        </div>
+        <div class="field">
+          <label>订阅分组显示名称</label>
+          <input id="cfgSubName" placeholder="CFPilot" maxlength="64" />
+        </div>
       </div>
+
       <div class="field">
-        <label>订阅节点端口（可多选，每个 IP 按勾选端口各生成一个节点）</label>
-        <div class="row" style="gap:18px;flex-wrap:wrap;margin-top:4px">
-          <label class="chk" style="width:auto"><input type="checkbox" name="subPort" value="443" style="width:auto" checked /> 443（推荐）</label>
-          <label class="chk" style="width:auto"><input type="checkbox" name="subPort" value="2053" style="width:auto" /> 2053</label>
-          <label class="chk" style="width:auto"><input type="checkbox" name="subPort" value="2083" style="width:auto" /> 2083</label>
-          <label class="chk" style="width:auto"><input type="checkbox" name="subPort" value="2087" style="width:auto" /> 2087</label>
-          <label class="chk" style="width:auto"><input type="checkbox" name="subPort" value="2096" style="width:auto" /> 2096</label>
-          <label class="chk" style="width:auto"><input type="checkbox" name="subPort" value="8443" style="width:auto" /> 8443</label>
+        <div class="row" style="margin-bottom:6px">
+          <label style="margin:0">订阅下发 TLS 端口（支持多选，每个候选 IP 将按所选端口分别生成节点）</label>
+          <div class="spacer"></div>
+          <button type="button" class="ghost sm" id="btnAllSubPorts">全选端口</button>
+          <button type="button" class="ghost sm" id="btnClearSubPorts">清空端口</button>
+        </div>
+        <div class="check-group">
+          <label class="check-pill"><input type="checkbox" name="subPort" value="443" checked /> 443（推荐）</label>
+          <label class="check-pill"><input type="checkbox" name="subPort" value="2053" /> 2053</label>
+          <label class="check-pill"><input type="checkbox" name="subPort" value="2083" /> 2083</label>
+          <label class="check-pill"><input type="checkbox" name="subPort" value="2087" /> 2087</label>
+          <label class="check-pill"><input type="checkbox" name="subPort" value="2096" /> 2096</label>
+          <label class="check-pill"><input type="checkbox" name="subPort" value="8443" /> 8443</label>
         </div>
         <p class="tip">
-          443 被针对性干扰时，勾上备用端口即可（Cloudflare 的 TLS 端口都直通 Worker）。<br />
-          手动优选 IP 里显式写了 <code>IP:端口</code> 的条目保持原端口，不参与端口乘法。
+          当标准 443 端口在特定地区受阻时，可勾选 Cloudflare 官方支持的备用 HTTPS 端口。手动优选池中已显式指定端口的条目将保持原端口不变。
+          <br>清空后保存等价于只保留 443（后端对空端口列表回落默认值，订阅不会为空）。
         </p>
       </div>
+
       <div class="field">
-        <label>订阅下发的节点形态（可多选）</label>
-        <div class="row" style="gap:18px;flex-wrap:wrap;margin-top:4px">
-          <label class="chk" style="width:auto"><input type="checkbox" id="cfgVarVlessWs" style="width:auto" /> VLESS + WebSocket</label>
-          <label class="chk" style="width:auto"><input type="checkbox" id="cfgVarVlessXhttp" style="width:auto" /> VLESS + XHTTP</label>
-          <label class="chk" style="width:auto"><input type="checkbox" id="cfgVarTrojan" style="width:auto" /> Trojan</label>
+        <div class="row" style="margin-bottom:6px">
+          <label style="margin:0">订阅包含的协议形态（支持多选）</label>
+          <div class="spacer"></div>
+          <button type="button" class="ghost sm" id="btnAllSubVariants">全选形态</button>
+          <button type="button" class="ghost sm" id="btnClearSubVariants">清空形态</button>
+        </div>
+        <div class="check-group">
+          <label class="check-pill"><input type="checkbox" id="cfgVarVlessWs" /> VLESS + WebSocket（全客户端通用）</label>
+          <label class="check-pill"><input type="checkbox" id="cfgVarVlessXhttp" /> VLESS + XHTTP（仅限 Xray 内核）</label>
+          <label class="check-pill"><input type="checkbox" id="cfgVarTrojan" /> Trojan + WebSocket</label>
         </div>
         <p class="tip">
-          订阅里每个节点会按这里勾选的形态各生成一份。<br />
-          · <b>VLESS + WebSocket</b>：兼容性最好，Clash Verge / mihomo / v2rayN 都支持。<br />
-          · <b>VLESS + XHTTP</b>：仅 Xray 内核支持；Clash / mihomo / sing-box 不认这个传输。<br />
-          · <b>Trojan</b>：需要数据面开启 Trojan 入站（默认已开启）。<br />
-          没勾选的形态**不会**出现在订阅里，节点数也不会被乘三。<br />
-          对应 XHTTP 入站没开启时，XHTTP 形态会自动跳过。
+          订阅仅会为上方勾选的协议形态生成节点（未勾选形态不会生成冗余节点）。若勾选 Trojan 或 XHTTP，请确保下方对应的服务端入站开关处于启用状态。
+          <br>一个形态都没勾时，后端会回落到最通用的 VLESS + WebSocket（保证订阅不为空）。
         </p>
       </div>
-      <div class="row" style="margin-top:4px">
-        <label class="chk" style="width:auto"><input type="checkbox" id="cfgEnableTrojan" style="width:auto" /> 启用 Trojan 入站</label>
-        <label class="chk" style="width:auto"><input type="checkbox" id="cfgEnableXhttp" style="width:auto" /> 启用 XHTTP 入站</label>
+
+      <div class="grid" style="margin-top:12px">
+        <div class="switch-box" style="margin-bottom:0">
+          <div class="sw-info">
+            <label class="sw-title" for="cfgEnableTrojan">启用服务端 Trojan 入站监听</label>
+            <div class="sw-desc">允许数据面接收并处理 Trojan over WebSocket 流量。</div>
+          </div>
+          <input type="checkbox" id="cfgEnableTrojan" />
+        </div>
+        <div class="switch-box" style="margin-bottom:0">
+          <div class="sw-info">
+            <label class="sw-title" for="cfgEnableXhttp">启用服务端 XHTTP 入站监听</label>
+            <div class="sw-desc">允许数据面接收并处理 VLESS XHTTP 流式 POST 请求。</div>
+          </div>
+          <input type="checkbox" id="cfgEnableXhttp" />
+        </div>
       </div>
-      <div class="row end"><button class="primary" id="btnSaveInbound">保存入站配置</button></div>
+
+      <div class="row end" style="margin-top:18px"><button class="primary" id="btnSaveInbound">保存入站配置</button></div>
     </div>
   </section>
 
+  <!-- Tab 6: 出站与高级 -->
   <section class="tab-page hidden" id="tab-advanced">
     <div class="card">
-      <h2><span class="dot"></span>出站与抗封锁</h2>
-      <div class="grid">
-        <div class="field"><label>ProxyIP 池（每行 host:port，默认 SOCKS5）</label><textarea id="cfgProxyIp" placeholder="1.2.3.4:1080"></textarea></div>
-        <div class="field"><label>SOCKS5 代理（host:port）</label><input id="cfgSocks5" placeholder="1.2.3.4:1080" /></div>
-        <div class="field">
-          <label>HTTP / HTTPS 代理（https:// 前缀走 TLS，可用 #sni= 指定证书名）</label>
-          <input id="cfgHttpProxy" placeholder="1.2.3.4:8080 或 https://user:pass@proxy.example.com:8443#sni=proxy.example.com" />
-        </div>
-        <div class="field">
-          <label>代理调度模式（PROXY_MODE）</label>
-          <select id="cfgProxyMode">
-            <option value="only">仅代理（默认）—— 配了代理就只走代理，绝不直连</option>
-            <option value="global">全局代理优先 —— 代理挂了回退直连</option>
-            <option value="fallback">仅回退兜底 —— 先直连，失败再走代理</option>
-            <option value="smart">智能分流 —— CF 网段目标走代理，其它先直连</option>
-          </select>
-          <div class="tip" style="margin-top:4px">
-            「仅代理」保证出口 IP 与你配置的一致（直连会暴露 Cloudflare 原生出口）。
-            代理全部失败时会尝试<b>反代入口池</b>（同样是第三方出口），仍失败才报错。
-          </div>
-        </div>
-        <div class="field"><label>NAT64 前缀</label><input id="cfgNat64" placeholder="64:ff9b::" /></div>
-        <div class="field">
-          <label>反代入口池（每行一条：IP / IP:端口 / 域名）</label>
-          <textarea id="cfgRelayPool" placeholder="1.2.3.4&#10;my-relay.example.com:443"></textarea>
-        </div>
-        <div class="field"><label>客户端指纹</label><input id="cfgFingerprint" placeholder="chrome" /></div>
-      </div>
-      <div class="row" style="margin-top:6px">
-        <label style="display:flex;align-items:center;gap:8px;margin:0">
-          <input type="checkbox" id="cfgConcurrent" style="width:auto" /><span>开启 TCP 并发竞速拨号（TCP_CONCURRENT_DIAL）</span>
-        </label>
-      </div>
-      <div class="row" style="margin-top:10px">
-        <label style="display:flex;align-items:center;gap:8px;margin:0">
-          <input type="checkbox" id="cfgResolvePreferred" style="width:auto" /><span>出站前自动 DoH 解析优选 IP（RESOLVE_PREFERRED）</span>
-        </label>
-      </div>
-      <div class="row" style="margin-top:10px">
-        <label style="display:flex;align-items:center;gap:8px;margin:0">
-          <input type="checkbox" id="cfgBuiltinRelay" style="width:auto" /><span>启用内置反代入口表（USE_BUILTIN_RELAY）</span>
-        </label>
-      </div>
-      <div class="hint" style="margin-top:4px">
-        目标站点解析到 Cloudflare 网段时，Worker 不能连回 Cloudflare 自家入口，
-        必须经第三方反代按 SNI 转发。内置表依赖社区第三方服务；填入自己的入口可完全不依赖它。
-      </div>
-      <div class="hint" style="margin-top:4px">
-        开启后，Worker 会用 DoH 解析目标域名取得可用落地 IP（TXT 优选库优先，回退 A/AAAA）。
-        Worker 不能连回 Cloudflare 自家 Anycast 入口，解析到的 Cloudflare 网段 IP 会被自动降权。
-      </div>
-      <div class="row" style="margin-top:10px">
-        <label style="display:flex;align-items:center;gap:8px;margin:0">
-          <input type="checkbox" id="cfgEchOn" style="width:auto" /><span>启用 ECH 加密（隐藏真实 SNI）</span>
-        </label>
-      </div>
-      <div class="grid" style="margin-top:8px">
-        <div class="field"><label>ECH 服务器名（留空用 cloudflare-ech.com）</label><input id="cfgEchHost" placeholder="cloudflare-ech.com" /></div>
-        <div class="field"><label>ECH DNS（DoH，留空用客户端默认）</label><input id="cfgEchDns" placeholder="https://223.5.5.5/dns-query" /></div>
-      </div>
-      <p class="hint" style="margin-top:6px">
-        ECH 让客户端把 TLS ClientHello 里的真实域名加密，隐藏你访问的是哪个域名。
-        这是<strong>客户端侧</strong>的能力：内核只负责把参数写进订阅，由支持 ECH 的客户端
-        （mihomo / sing-box 1.13+ / v2rayN 等）实际执行。客户端不支持时该参数会被忽略。
+      <h2><span class="dot"></span>出站路由、链式代理与抗封锁策略</h2>
+      <p class="hint">
+        配置数据面访问目标网站时的出站落地方式。配置 SOCKS5 / HTTP(S) 代理或反代池可解除 Cloudflare 禁止连回自家网段的限制，并改善出站 IP 纯净度。
       </p>
-      <div class="row" style="margin-top:10px">
-        <label style="display:flex;align-items:center;gap:8px;margin:0">
-          <input type="checkbox" id="cfgTrojanOn" style="width:auto" /><span>启用 Trojan 入站</span>
-        </label>
-        <label style="display:flex;align-items:center;gap:8px;margin:0">
-          <input type="checkbox" id="cfgXhttpOn" style="width:auto" /><span>启用 XHTTP 入站</span>
-        </label>
+
+      <div class="grid">
+        <div class="field">
+          <label>SOCKS5 出站代理（支持 user:pass@host:port）</label>
+          <input id="cfgSocks5" class="mono" placeholder="user:pass@1.2.3.4:1080" />
+        </div>
+        <div class="field">
+          <label>HTTP / HTTPS 出站代理（支持 https:// 与 #sni=）</label>
+          <input id="cfgHttpProxy" class="mono" placeholder="https://user:pass@proxy.example.com:8443#sni=proxy.example.com" />
+        </div>
+        <div class="field">
+          <label>专用 ProxyIP 池（每行一条 host:port）</label>
+          <textarea id="cfgProxyIp" class="mono" placeholder="1.2.3.4:443"></textarea>
+        </div>
+        <div class="field">
+          <label>自定义反代入口池（RELAY_POOL，每行 IP / IP:端口 / 域名）</label>
+          <textarea id="cfgRelayPool" class="mono" placeholder="1.2.3.4:443&#10;relay.example.com:443"></textarea>
+        </div>
+        <div class="field">
+          <label>NAT64 转换前缀（用于 IPv6 出站回退）</label>
+          <input id="cfgNat64" class="mono" placeholder="64:ff9b::" />
+        </div>
+        <div class="field">
+          <label>客户端 TLS 指纹伪装（uTLS Fingerprint）</label>
+          <input id="cfgFingerprint" class="mono" placeholder="chrome" />
+        </div>
       </div>
-      <div class="row end" style="margin-top:16px"><button class="primary" id="btnSaveAdvanced">保存高级配置</button></div>
+
+      <!--
+        代理调度模式（PROXY_MODE）
+
+        语义见 packages/worker-core/src/config.ts 的 normalizeProxyMode()：
+        只有 'global' / 'fallback' / 'smart' 三个值有意义，其余一律回落 'only'。
+        'only' 是最保守的语义 —— 配了代理就只走代理，绝不静默改走直连。
+      -->
+      <div class="field">
+        <label for="cfgProxyMode">代理调度模式（PROXY_MODE）</label>
+        <select id="cfgProxyMode">
+          <option value="only">仅代理（默认）—— 配了代理就只走代理，绝不直连</option>
+          <option value="global">全局代理优先 —— 代理挂了回退直连</option>
+          <option value="fallback">仅回退兜底 —— 先直连，失败再走代理</option>
+          <option value="smart">智能分流 —— CF 网段目标走代理，其它先直连</option>
+        </select>
+        <p class="tip">
+          「仅代理」保证出口 IP 与你配置的一致（直连会暴露 Cloudflare 原生出口）。
+          代理全部失败时会尝试<b>反代入口池</b>（同样是第三方出口），仍失败才报错。
+        </p>
+      </div>
+
+      <div class="switch-box">
+        <div class="sw-info">
+          <label class="sw-title" for="cfgConcurrent">启用 TCP 并发竞速拨号（TCP_CONCURRENT_DIAL）</label>
+          <div class="sw-desc">存在多个候选出站地址时并发发起连接，取最先完成握手的通道以降低首包延迟。</div>
+        </div>
+        <input type="checkbox" id="cfgConcurrent" />
+      </div>
+
+      <div class="switch-box">
+        <div class="sw-info">
+          <label class="sw-title" for="cfgBuiltinRelay">启用内置社区反代兜底池（USE_BUILTIN_RELAY）</label>
+          <div class="sw-desc">当访问同样接入 Cloudflare 的目标网站且未配置私有代理时，自动借道内置反代池按 SNI 转发。</div>
+        </div>
+        <input type="checkbox" id="cfgBuiltinRelay" />
+      </div>
+
+      <div class="switch-box">
+        <div class="sw-info">
+          <label class="sw-title" for="cfgResolvePreferred">出站前执行 DoH 预解析与网段识别（RESOLVE_PREFERRED）</label>
+          <div class="sw-desc">开启后出站前通过 DoH 识别目标 IP 是否属于 Cloudflare 网段并自动调整拨号优先级（关闭可节省子请求配额并降低常规站点延迟）。</div>
+        </div>
+        <input type="checkbox" id="cfgResolvePreferred" />
+      </div>
+
+      <div class="switch-box">
+        <div class="sw-info">
+          <label class="sw-title" for="cfgEchOn">下发客户端 ECH（Encrypted Client Hello）配置</label>
+          <div class="sw-desc">在订阅中注入 ECH 参数以加密 TLS 握手中的真实 SNI 域名（需 Mihomo / Sing-box 1.13+ / v2rayN 等客户端内核支持）。</div>
+        </div>
+        <input type="checkbox" id="cfgEchOn" />
+      </div>
+
+      <div class="grid" style="margin-top:12px">
+        <div class="field"><label>ECH 公共引导域名（留空默认 cloudflare-ech.com）</label><input id="cfgEchHost" class="mono" placeholder="cloudflare-ech.com" /></div>
+        <div class="field"><label>ECH DoH 查询地址（留空使用客户端默认）</label><input id="cfgEchDns" class="mono" placeholder="https://223.5.5.5/dns-query" /></div>
+      </div>
+
+      <!--
+        隐藏同步复选框
+
+        保留旧版 DOM ID（#cfgTrojanOn / #cfgXhttpOn）以维持 100% 兼容，
+        但不再作为用户可操作控件 —— 真正的开关只有「入站配置」页那一份，
+        这里单向跟随它（见 bind() 里的 change 监听）。
+      -->
+      <div class="hidden">
+        <input type="checkbox" id="cfgTrojanOn" />
+        <input type="checkbox" id="cfgXhttpOn" />
+      </div>
+
+      <div class="row end" style="margin-top:12px"><button class="primary" id="btnSaveAdvanced">保存出站与高级配置</button></div>
     </div>
 
     <div class="card">
-      <h2><span class="dot"></span>远程优选池（可选）</h2>
-      <p class="hint">不填也能用——内置来源已经覆盖绝大多数场景。填了就按「手动 → 远程」顺序追加。</p>
-      <div class="field"><label>远程 TXT 接口（ADDAPI，每行一个 https 地址）</label><textarea id="cfgAddApi" placeholder="https://example.com/ips.txt"></textarea></div>
-      <div class="field"><label>远程 CSV（ADDCSV，每行一个 result.csv 地址）</label><textarea id="cfgAddCsv" placeholder="https://example.com/result.csv"></textarea></div>
+      <h2><span class="dot"></span>远程第三方优选订阅源（可选扩展）</h2>
+      <p class="hint">支持挂载外部维护的优选 IP 列表接口，系统将在合并完手动池后按条件过滤并追加至订阅末尾。</p>
       <div class="grid">
-        <div class="field"><label>最低下载速度 DLS（MB/s，0 = 不限）</label><input id="cfgDls" type="number" min="0" step="1" /></div>
-        <div class="field"><label>最高延迟 MAX_LATENCY（ms，0 = 不限）</label><input id="cfgMaxLatency" type="number" min="0" step="1" /></div>
-        <div class="field"><label>节点数量上限（0 = 不限）</label><input id="cfgMaxNodes" type="number" min="0" step="1" /></div>
+        <div class="field"><label>远程 TXT 列表地址（ADDAPI，每行一个 https URL）</label><textarea id="cfgAddApi" class="mono" placeholder="https://example.com/ips.txt"></textarea></div>
+        <div class="field"><label>远程 CSV 测速表地址（ADDCSV，每行一个 URL）</label><textarea id="cfgAddCsv" class="mono" placeholder="https://example.com/result.csv"></textarea></div>
       </div>
-      <div class="row end"><button class="primary" id="btnSaveRemote">保存远程池配置</button></div>
+      <div class="grid-3">
+        <div class="field"><label>最低准入下行速度 DLS（MB/s，0 = 不限）</label><input id="cfgDls" type="number" min="0" step="1" /></div>
+        <div class="field"><label>最高准入延迟 MAX_LATENCY（ms，0 = 不限）</label><input id="cfgMaxLatency" type="number" min="0" step="1" /></div>
+        <div class="field"><label>远程节点提取上限（0 = 不限）</label><input id="cfgMaxNodes" type="number" min="0" step="1" /></div>
+      </div>
+      <div class="row end"><button class="primary" id="btnSaveRemote">保存远程订阅源配置</button></div>
     </div>
   </section>
 </div>
 
+<!-- ==================== 登录视图 ==================== -->
 <div id="login" class="login-wrap hidden">
   <div class="card">
-    <h2><span class="dot"></span>CFPilot 面板登录</h2>
-    <div class="field">
-      <label>管理密码</label>
-      <input id="loginPassword" type="password" placeholder="请输入管理密码" />
+    <div class="login-head">
+      <div class="logo">CP</div>
+      <h2 style="justify-content:center;font-size:18px">CFPilot 管理控制台</h2>
+      <p class="muted" style="margin:4px 0 0">请输入管理员密码以解锁面板配置</p>
     </div>
-    <div class="row end"><button class="primary" id="btnLogin">登录</button></div>
-    <p class="muted" id="loginHint" style="margin-bottom:0"></p>
+    <div class="field">
+      <label for="loginPassword">管理密码</label>
+      <input id="loginPassword" type="password" placeholder="请输入 ADMIN_PASSWORD" autocomplete="current-password" />
+    </div>
+    <button class="primary" id="btnLogin" style="width:100%;padding:10px">登录控制台</button>
+    <p class="muted" id="loginHint" style="margin:10px 0 0;text-align:center"></p>
   </div>
 </div>
 
 <div class="toast" id="toast"></div>
 
+<style id="theme-light">
+  /* ===== 亮色主题：body.light 下覆盖变量与硬编码颜色 ===== */
+  body.light {
+    --bg-base: #f2f5fa;
+    --bg-elevated: #ffffff;
+    --bg-card: rgba(255, 255, 255, 0.92);
+    --bg-input: #eef2f7;
+    --bg-hover: rgba(0, 0, 0, 0.04);
+    --border: rgba(15, 23, 42, 0.12);
+    --border-focus: #2563eb;
+    --text-main: #0f172a;
+    --text-secondary: #475569;
+    --text-muted: #94a3b8;
+    --primary: #2563eb;
+    --primary-hover: #1d4ed8;
+    --primary-glow: rgba(37, 99, 235, 0.14);
+    --accent: #4f46e5;
+    --ok: #059669; --ok-bg: rgba(5, 150, 105, 0.12);
+    --warn: #d97706; --warn-bg: rgba(217, 119, 6, 0.14);
+    --err: #dc2626; --err-bg: rgba(220, 38, 38, 0.12);
+    --shadow: 0 10px 30px -12px rgba(15, 23, 42, 0.18);
+    background-color: var(--bg-base);
+    background-image:
+      radial-gradient(ellipse 80% 50% at 50% -15%, rgba(37, 99, 235, 0.10), transparent),
+      radial-gradient(ellipse 50% 40% at 85% 10%, rgba(79, 70, 229, 0.07), transparent);
+  }
+  body.light nav.tabs { background: #ffffff; }
+  body.light button:not(.primary):not(.danger) { background: #e5eaf2; color: var(--text-main); }
+  body.light button:not(.primary):not(.danger):hover:not(:disabled) { background: #d5dde8; }
+  body.light button.ghost { background: #ffffff; border-color: var(--border); }
+  body.light button.ghost:hover:not(:disabled) { background: #eef2f7; border-color: rgba(15, 23, 42, 0.22); }
+  body.light button.primary { color: #fff; }
+  body.light label { color: #334155; }
+  body.light input[readonly] { background: #eef2f7; color: #334155; }
+  body.light th { background: #f6f8fc; color: var(--text-secondary); }
+  body.light tbody tr:hover { background: rgba(15, 23, 42, 0.035); }
+  body.light pre.cmd { background: #f6f8fc; color: #1d4ed8; }
+  body.light .log { background: #f6f8fc; }
+  body.light .log div { color: #475569; }
+  body.light code, body.light code.inline { color: #1d4ed8; background: var(--bg-input); }
+  body.light .fold { background: rgba(255, 255, 255, 0.75); }
+  body.light .fold > summary { color: #334155; }
+  body.light .fold > summary:hover { background: var(--bg-hover); color: var(--text-main); }
+  body.light .stat .item,
+  body.light .step-card,
+  body.light .source,
+  body.light .switch-box { background: rgba(15, 23, 42, 0.02); }
+  body.light .source.on { background: rgba(37, 99, 235, 0.06); border-color: rgba(37, 99, 235, 0.45); }
+  body.light .chip { background: rgba(15, 23, 42, 0.03); color: var(--text-secondary); }
+  body.light .pill { background: rgba(15, 23, 42, 0.04); }
+  body.light .tip { background: rgba(37, 99, 235, 0.06); }
+  body.light .toast { background: #ffffff; border-color: rgba(15, 23, 42, 0.12); color: var(--text-main); }
+  body.light .tag { border-color: var(--border); }
+</style>
+<script>
+/* ===== 主题切换：右上角色盘按钮，选择持久化到 localStorage ===== */
+(function () {
+  var KEY = 'cfpilot.theme';
+  function apply(light) { document.body.classList.toggle('light', light); }
+  try { apply(localStorage.getItem(KEY) === 'light'); } catch (e) {}
+  var btn = document.getElementById('btnTheme');
+  if (btn) {
+    btn.addEventListener('click', function () {
+      var light = !document.body.classList.contains('light');
+      apply(light);
+      try { localStorage.setItem(KEY, light ? 'light' : 'dark'); } catch (e) {}
+    });
+  }
+})();
+</script>
 <script>
 (function () {
   'use strict';
 
+  // === [Module 1: Application State & DOM Helpers] ===
   var state = {
     config: null,
     status: null,
@@ -602,70 +919,71 @@
     nodes: []
   };
 
+  var toastTimer = null;
   function $(id) { return document.getElementById(id); }
+
   function toast(msg, isErr) {
     var t = $('toast');
     t.textContent = msg;
     t.className = 'toast show' + (isErr ? ' err' : '');
-    setTimeout(function () { t.className = 'toast'; }, 2800);
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.className = 'toast'; }, 3000);
   }
-  function api(path, options) {
-    options = options || {};
-    options.credentials = 'same-origin';
-    options.headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {});
-    return fetch(path, options).then(function (r) {
-      // 登录接口的 401 表示「密码错误」，不是「会话过期」。
-      // 若走下面的 showLogin() 分支，用户会停在登录页并只看到「未登录」，
-      // 完全看不出是密码输错了。因此登录请求单独处理。
-      var isLogin = /\/api\/v1\/login$/.test(path);
-      if (r.status === 401 && !isLogin) { showLogin(); throw new Error('未登录或会话已过期'); }
-      return r.json().then(function (data) {
-        if (!r.ok || data.ok === false) {
-          throw new Error(data.error || ('请求失败 ' + r.status));
-        }
-        return data;
-      }).catch(function (e) {
-        // 响应不是 JSON 时给出可读错误，避免吞掉真实原因
-        if (e instanceof SyntaxError) throw new Error('响应解析失败 ' + r.status);
-        throw e;
-      });
-    });
-  }
-  function log(text, cls) {
-    var box = $('scanLog');
-    var line = document.createElement('div');
-    if (cls) line.className = cls;
-    line.textContent = text;
-    box.appendChild(line);
-    box.scrollTop = box.scrollHeight;
-  }
+
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
   }
 
+  // === [Module 2: HTTP API Client] ===
+  function api(path, options) {
+    options = options || {};
+    options.credentials = 'same-origin';
+    options.headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {});
+    return fetch(path, options).then(function (r) {
+      var isLogin = /\/api\/v1\/login$/.test(path);
+      if (r.status === 401 && !isLogin) {
+        showLogin();
+        throw new Error('会话已过期，请重新登录');
+      }
+      return r.json().then(function (data) {
+        if (!r.ok || data.ok === false) {
+          throw new Error(data.error || ('请求失败 (HTTP ' + r.status + ')'));
+        }
+        return data;
+      }).catch(function (e) {
+        if (e instanceof SyntaxError) throw new Error('服务端返回了非 JSON 响应 (' + r.status + ')');
+        throw e;
+      });
+    });
+  }
+
+  // === [Module 3: Authentication & Bootstrap] ===
   function showLogin() {
     $('app').classList.add('hidden');
     $('login').classList.remove('hidden');
     $('loginPassword').focus();
   }
+
   function showApp() {
     $('login').classList.add('hidden');
     $('app').classList.remove('hidden');
   }
+
   function doLogin() {
     var pwd = $('loginPassword').value;
     var hint = $('loginHint');
-    if (!pwd) { toast('请输入密码', true); return; }
-    if (hint) { hint.textContent = '正在登录…'; hint.className = 'muted'; }
+    if (!pwd) { toast('请输入管理密码', true); return; }
+    if (hint) { hint.textContent = '正在验证身份…'; hint.className = 'muted'; }
     api('/api/v1/login', { method: 'POST', body: JSON.stringify({ password: pwd }) })
       .then(function () {
         if (hint) hint.textContent = '';
-        showApp(); boot(); toast('登录成功');
+        showApp();
+        boot();
+        toast('欢迎回来，登录成功');
       })
       .catch(function (e) {
-        // 同时用 toast 与常驻提示：toast 3 秒后消失，用户容易错过失败原因
         toast(e.message, true);
         if (hint) { hint.textContent = e.message; hint.className = 'err'; }
       });
@@ -683,19 +1001,19 @@
     api('/api/v1/status').then(function (s) {
       state.status = s;
       renderStatus(s);
+      renderCmds();
     }).catch(function (e) { toast(e.message, true); });
 
     api('/api/v1/pool/meta').then(function (m) {
       state.countries = m.countries || [];
       renderCountries();
-      $('builtinDomains').value = '内置 ' + m.builtin.domains + ' 个域名 / ' + m.builtin.cidrs + ' 个 CF 网段';
+      $('builtinDomains').value = '内置 ' + m.builtin.domains + ' 个优选域名 / ' + m.builtin.cidrs + ' 个官方 CIDR 网段';
       $('domainLib').value = (m.customDomains || []).join('\n');
     }).catch(function () {});
 
     api('/api/v1/config').then(function (r) {
       state.config = r.config;
       fillConfig(r.config);
-      // 必须等配置到了再拼订阅链接，否则 UUID 还是空的（会生成 /sub/ 这种无效地址）
       refreshSubLinks();
     }).catch(function (e) { toast(e.message, true); });
 
@@ -703,15 +1021,14 @@
     checkBridge();
   }
 
+  // === [Module 4: View Renderers & Form Binding] ===
   function renderStatus(s) {
-    // 拆分部署时面板域名 ≠ 节点域名：订阅里下发的 SNI / Host 用的是节点域名
-    // （subDomain > DATA_HOST > 面板域名）。两行都展示，避免用户拿错域名。
     var items = [
-      ['面板域名', location.hostname],
-      ['节点域名（数据面）', s.nodeDomain || s.domain || location.hostname],
-      ['边缘机房', s.colo || 'UNK'],
-      ['本地优选 IP', s.localIps + ' 条'],
-      ['版本', s.version]
+      ['控制面域名（当前面板）', location.hostname],
+      ['数据面域名（节点 SNI/Host）', s.nodeDomain || s.domain || location.hostname],
+      ['当前接入边缘机房', s.colo || 'UNK'],
+      ['本地真连接优选池', (s.localIps || 0) + ' 条'],
+      ['系统内核版本', s.version || '-']
     ];
     $('statusBox').innerHTML = items.map(function (it) {
       return '<div class="item"><div class="k">' + esc(it[0]) + '</div><div class="v">' + esc(it[1]) + '</div></div>';
@@ -726,13 +1043,12 @@
     $('cfgXhttpPath').value = c.xhttpPath || '';
     $('cfgSubDomain').value = c.subDomain || '';
     $('cfgSubName').value = c.subName || 'CFPilot';
-    // 订阅端口多选
+
     var ports = String(c.subPorts || '443').split(/[,\s]+/).filter(Boolean);
     Array.prototype.forEach.call(document.querySelectorAll('input[name="subPort"]'), function (cb) {
       cb.checked = ports.indexOf(cb.value) >= 0;
     });
-    // 订阅形态（多选）。兼容旧的 subProtocol/subTransport：
-    // 老配置里 protocol=both + transport=both 相当于勾了全部三种。
+
     var variants = String(c.subVariants || '').split(/[,;\s]+/).filter(Boolean);
     if (!variants.length) {
       var legacy = [];
@@ -746,8 +1062,14 @@
     $('cfgVarVlessWs').checked = variants.indexOf('vless-ws') >= 0;
     $('cfgVarVlessXhttp').checked = variants.indexOf('vless-xhttp') >= 0;
     $('cfgVarTrojan').checked = variants.indexOf('trojan') >= 0;
-    $('cfgEnableTrojan').checked = c.enableTrojan !== false;
-    $('cfgEnableXhttp').checked = c.enableXhttp === true;
+
+    var trojanEnabled = c.enableTrojan !== false;
+    var xhttpEnabled = c.enableXhttp === true;
+    $('cfgEnableTrojan').checked = trojanEnabled;
+    $('cfgEnableXhttp').checked = xhttpEnabled;
+    $('cfgTrojanOn').checked = trojanEnabled;
+    $('cfgXhttpOn').checked = xhttpEnabled;
+
     $('cfgAdd').value = c.add || '';
     $('cfgAddApi').value = c.addApi || '';
     $('cfgAddCsv').value = c.addCsv || '';
@@ -759,7 +1081,8 @@
     $('cfgHttpProxy').value = c.httpProxy || '';
     $('cfgNat64').value = c.nat64 || '';
     $('cfgRelayPool').value = c.relayPool || '';
-  $('cfgProxyMode').value = c.proxyMode || 'only';
+    // 代理调度模式：读不懂的值一律回落 'only'（与后端 normalizeProxyMode 一致）
+    $('cfgProxyMode').value = c.proxyMode || 'only';
     $('cfgBuiltinRelay').checked = c.useBuiltinRelay !== false;
     $('cfgFingerprint').value = c.clientFingerprint || 'chrome';
     $('cfgEchOn').checked = !!c.ech;
@@ -767,8 +1090,6 @@
     $('cfgEchDns').value = c.echDns || '';
     $('cfgConcurrent').checked = !!c.concurrentDial;
     $('cfgResolvePreferred').checked = c.resolvePreferred !== false;
-    $('cfgTrojanOn').checked = !!c.enableTrojan;
-    $('cfgXhttpOn').checked = !!c.enableXhttp;
 
     $('poolOfficial').checked = !!c.poolOfficial;
     $('poolDomain').checked = !!c.poolDomain;
@@ -776,7 +1097,6 @@
     $('officialCount').value = c.officialCount || 20;
     $('domainCount').value = c.domainCount || 10;
     syncSourceCards();
-    renderCountries();
   }
 
   function syncSourceCards() {
@@ -788,13 +1108,24 @@
 
   function renderCountries() {
     var sel = $('optCountries');
-    if (!sel) return;
+    var chipsBox = $('optCountriesChips');
+    if (!sel || !chipsBox) return;
     if (!state.countries.length) {
       sel.innerHTML = '<option value="">（加载中…）</option>';
+      chipsBox.innerHTML = '<span class="muted">正在加载国家/地区列表…</span>';
       return;
     }
+    var selectedMap = {};
+    Array.prototype.forEach.call(sel.selectedOptions || [], function (o) {
+      if (o.value) selectedMap[o.value] = true;
+    });
     sel.innerHTML = state.countries.map(function (c) {
-      return '<option value="' + esc(c.code) + '">' + esc(c.name) + ' ' + esc(c.code) + '</option>';
+      var isSel = selectedMap[c.code] ? ' selected' : '';
+      return '<option value="' + esc(c.code) + '"' + isSel + '>' + esc(c.name) + ' ' + esc(c.code) + '</option>';
+    }).join('');
+    chipsBox.innerHTML = state.countries.map(function (c) {
+      var onCls = selectedMap[c.code] ? ' on' : '';
+      return '<span class="chip' + onCls + '" data-code="' + esc(c.code) + '">' + esc(c.name) + ' · ' + esc(c.code) + '</span>';
     }).join('');
   }
 
@@ -803,7 +1134,7 @@
       .then(function (r) {
         state.config = r.config;
         fillConfig(r.config);
-        toast(okMsg || '已保存');
+        toast(okMsg || '配置已保存并生效');
         loadNodes();
         refreshSubLinks();
         return r;
@@ -820,20 +1151,21 @@
   }
 
   function renderNodes(r) {
-    var rows = (r.nodes || []).slice(0, 100).map(function (n, i) {
+    var list = (r.nodes || []).slice(0, 100);
+    var rows = list.map(function (n, i) {
       return '<tr><td>' + (i + 1) + '</td><td><span class="tag ' + esc(n.source) + '">' + esc(n.source) + '</span></td>' +
         '<td class="mono">' + esc(n.ip) + ':' + n.port + '</td><td>' + esc(n.colo || '-') + '</td>' +
-        '<td>' + (n.latency || '-') + '</td><td>' + (n.speed || '-') + '</td></tr>';
+        '<td>' + (n.latency ? n.latency + ' ms' : '-') + '</td><td>' + (n.speed ? n.speed + ' MB/s' : '-') + '</td></tr>';
     }).join('');
-    $('nodeTable').querySelector('tbody').innerHTML = rows || '<tr><td colspan="6" class="muted">暂无节点</td></tr>';
+    $('nodeTable').querySelector('tbody').innerHTML = rows || '<tr><td colspan="6" class="muted">当前暂无可用节点</td></tr>';
 
-    var sub = (r.nodes || []).slice(0, 100).map(function (n, i) {
+    var subRows = list.map(function (n, i) {
       return '<tr><td>' + (i + 1) + '</td><td><span class="tag ' + esc(n.source) + '">' + esc(n.source) + '</span></td>' +
         '<td class="mono">' + esc(n.ip) + ':' + n.port + '</td><td>' + esc(n.colo || '-') + '</td></tr>';
     }).join('');
-    $('subTable').querySelector('tbody').innerHTML = sub || '<tr><td colspan="4" class="muted">暂无节点</td></tr>';
+    $('subTable').querySelector('tbody').innerHTML = subRows || '<tr><td colspan="4" class="muted">当前暂无可用节点</td></tr>';
 
-    $('previewSummary').textContent = '共 ' + (r.count || 0) + ' 条';
+    $('previewSummary').textContent = '（共生成 ' + (r.count || 0) + ' 个节点）';
 
     var warn = $('previewWarn');
     var errors = (r.stats && r.stats.errors) || [];
@@ -849,12 +1181,12 @@
   function renderSummary(r) {
     var groups = r.groups || [];
     var html = groups.map(function (g) {
-      return '<span class="pill">' + esc(g.name) + ' · ' + g.count + '</span>';
+      return '<span class="pill"><b>' + esc(g.name) + '</b> · ' + g.count + ' 条</span>';
     }).join('');
-    if (!html) html = '<span class="muted">暂无节点</span>';
-    html += '<span class="pill">去重 -' + ((r.stats && r.stats.deduped) || 0) + '</span>';
+    if (!html) html = '<span class="muted">暂无节点分布数据</span>';
+    html += '<span class="pill">合并去重 -' + ((r.stats && r.stats.deduped) || 0) + '</span>';
     if (r.stats && r.stats.countries && r.stats.countries.length) {
-      html += '<span class="pill">国家 ' + esc(r.stats.countries.join('/')) + '</span>';
+      html += '<span class="pill">地区过滤 ' + esc(r.stats.countries.join('/')) + '</span>';
     }
     $('overviewSummary').innerHTML = html;
     var local = state.status ? state.status.localIps : 0;
@@ -864,7 +1196,7 @@
   function refreshSubLinks() {
     var uuid = ($('cfgUuid').value || (state.config && state.config.uuid) || '').trim();
     if (!uuid) {
-      var hint = '（尚未生成 UUID，请稍候或刷新页面）';
+      var hint = '（正在等待系统初始化 UUID，请稍候或刷新页面）';
       $('subBase64').value = hint;
       $('subClash').value = hint;
       $('subSingbox').value = hint;
@@ -876,8 +1208,18 @@
     $('subSingbox').value = base + '?target=singbox';
   }
 
+  // === [Module 5: Local True-Connect Scanner & Bridge SSE] ===
   var BRIDGE = 'http://127.0.0.1:19527';
   var es = null;
+
+  function log(text, cls) {
+    var box = $('scanLog');
+    var line = document.createElement('div');
+    if (cls) line.className = cls;
+    line.textContent = text;
+    box.appendChild(line);
+    box.scrollTop = box.scrollHeight;
+  }
 
   function checkBridge() {
     var ctrl = new AbortController();
@@ -886,17 +1228,16 @@
       .then(function (r) { return r.json(); })
       .then(function (j) {
         clearTimeout(timer);
-        $('bridgeState').textContent = '本地桥接在线 v' + (j.version || '?');
+        $('bridgeState').textContent = '● 本地桥接服务在线 v' + (j.version || '?');
         $('bridgeState').style.color = 'var(--ok)';
       })
       .catch(function () {
         clearTimeout(timer);
-        $('bridgeState').textContent = '未检测到本地桥接服务（可用下面的命令直接跑）';
-        $('bridgeState').style.color = 'var(--muted)';
+        $('bridgeState').textContent = '○ 未检测到本地桥接服务（可复制下方命令在终端直接运行）';
+        $('bridgeState').style.color = 'var(--text-secondary)';
       });
   }
 
-  /** 读取参数表单 */
   function readOpts() {
     var portEl = document.querySelector('input[name="optPort"]:checked');
     var countries = [];
@@ -912,44 +1253,29 @@
       sample: Math.max(10, Math.min(20000, Number($('optSample').value) || 300)),
       port: portEl ? portEl.value : '443',
       countries: countries,
-      noCallback: $('optNoCallback').checked,
+      noCallback: $('optNoCallback').checked
     };
   }
 
-  /** 本地优选的目标域名：优先数据面域名（订阅里实际下发的那个） */
   function scanHost() {
     return (state.status && state.status.nodeDomain) || location.hostname;
   }
 
-  /**
-   * 生成 CLI 命令；withToken=false 时不带回填参数。
-   *
-   * ## 域名语义
-   *
-   *   --host   数据面（代理所在项目）→ 用于 TLS SNI / HTTP Host
-   *   --panel  控制面（面板所在项目）→ 用于回填
-   *
-   * 面板自己跑在控制面上，所以 location.hostname 就是 --panel 的值。
-   * 早期只给了 --host（数据面）+ --callback（硬编码控制面地址），
-   * 能用但绕；现在显式带上 --panel，语义清楚，
-   * 且用户可以只留 --panel 让 CLI 自己推导 callback。
-   *
-   * ⚠️ 注意：面板签发的一次性令牌（--token）10 分钟有效。
-   * 如果用户是先复制命令、过一会儿才跑，令牌可能已过期 ——
-   * 所以这里额外给一份「不带令牌」的版本，用户可自行改密码回填。
-   */
   function buildCmd(token, withToken) {
     var host = scanHost();
     var panelHost = location.hostname;
     var o = readOpts();
-    var parts = ['npx -y cfpilot-scanner@latest'];
+    // ⚠️ 包名必须是 `cfpilot`（不是旧的 `cfpilot-scanner`）。
+    //
+    // 旧包已在 2026-10 归档废弃（npm 上停在 0.6.5），
+    // 而「合并成单一 CLI」之后入口是 **`cfpilot scan`** 这个子命令。
+    // 继续用旧包名的话，用户复制这条命令会装到 0.6.5 ——
+    // 那个版本没有 `--panel` / `--no-callback` 等参数，命令直接报错。
+    var parts = ['npx -y cfpilot@latest', 'scan'];
     parts.push('--host "' + host + '"');
-
-    // --panel：控制面域名，与 --host（数据面）区分开
     if (panelHost && panelHost !== host) {
       parts.push('--panel "' + panelHost + '"');
     }
-
     if (withToken && token) {
       parts.push('--token "' + token + '"');
     }
@@ -961,14 +1287,13 @@
     return parts.join(' ');
   }
 
-  /** 刷新两个命令框 */
   function renderCmds() {
     var o = readOpts();
     var token = state.token || o.token;
     if (token) {
       $('scanCmd').textContent = buildCmd(token, true);
     } else {
-      $('scanCmd').textContent = '请点击「开始优选」生成命令';
+      $('scanCmd').textContent = '请点击上方「唤醒本地优选 / 生成令牌」按钮生成带参命令';
     }
     $('scanCmdNoToken').textContent = buildCmd('', false);
   }
@@ -1000,12 +1325,12 @@
         body: JSON.stringify(payload)
       }).then(function (r) { return r.json(); });
     }).then(function (r) {
-      if (!r || !r.ok) throw new Error((r && r.error) || '本地桥接未响应');
-      log('已唤醒本地优选器，任务 ' + (r.jobId || '-'), 'ok');
+      if (!r || !r.ok) throw new Error((r && r.error) || '本地桥接服务未响应');
+      log('✓ 已成功唤醒本地优选服务，任务编号：' + (r.jobId || '-'), 'ok');
       listenEvents(r.jobId);
     }).catch(function (e) {
-      log('本地桥接不可用：' + e.message, 'err');
-      log('请复制上方命令在本地终端执行（需 Node.js 18+）：');
+      log('⚠ 未能连接本地桥接服务（' + e.message + '）', 'err');
+      log('→ 已为您生成一次性回填令牌，请直接点击「复制终端命令」在本机终端执行扫描。');
       $('scanBar').style.width = '0%';
     });
   }
@@ -1015,34 +1340,77 @@
     es = new EventSource(BRIDGE + '/events?jobId=' + encodeURIComponent(jobId || ''));
     es.addEventListener('stage', function (ev) {
       var d = JSON.parse(ev.data);
-      log('▶ ' + (d.name || ('阶段 ' + d.stage)) + '（候选 ' + (d.total || 0) + ' 个）');
+      log('▶ ' + (d.name || ('阶段 ' + d.stage)) + '（共 ' + (d.total || 0) + ' 个候选 IP）');
     });
     es.addEventListener('progress', function (ev) {
       var d = JSON.parse(ev.data);
       if (typeof d.percent === 'number') $('scanBar').style.width = d.percent + '%';
       if (d.message) log(d.message);
-      else if (d.total) log('阶段 ' + d.stage + '：' + d.done + '/' + d.total);
+      else if (d.total) log('阶段 ' + d.stage + ' 进度：' + d.done + '/' + d.total);
     });
     es.addEventListener('result', function (ev) {
       var d = JSON.parse(ev.data);
       var e = d.entry || {};
-      log('✓ ' + (e.ip || '') + (e.port ? ':' + e.port : '') + (e.colo ? ' [' + e.colo + ']' : ''), 'ok');
+      log('✓ 入围节点：' + (e.ip || '') + (e.port ? ':' + e.port : '') + (e.colo ? ' [' + e.colo + ']' : ''), 'ok');
     });
     es.addEventListener('done', function (ev) {
       var d = JSON.parse(ev.data);
-      log('优选完成，共 ' + (d.count || 0) + ' 条，已回填到「手动优选 IP」池', 'ok');
+      log('✓ 优选任务完成，共筛选出 ' + (d.count || 0) + ' 条优质 IP，已同步至「本地真连接池」', 'ok');
       $('scanBar').style.width = '100%';
       loadAll();
     });
     es.addEventListener('error', function (ev) {
       try {
         var d = JSON.parse(ev.data);
-        log('扫描出错：' + (d.message || '未知错误'), 'err');
+        log('✗ 扫描异常：' + (d.message || '未知错误'), 'err');
       } catch (e) {
-        log('扫描连接中断', 'err');
+        log('✗ 扫描事件流连接中断', 'err');
       }
     });
-    es.onerror = function () { /* EventSource 会自动重连 */ };
+    es.onerror = function () {};
+  }
+
+  // === [Module 6: Event Listeners & User Actions] ===
+  function switchTab(tab) {
+    Array.prototype.forEach.call($('tabs').children, function (b) {
+      b.classList.toggle('active', b.getAttribute('data-tab') === tab);
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('.tab-page'), function (p) {
+      p.classList.toggle('hidden', p.id !== 'tab-' + tab);
+    });
+    if (tab === 'sub' || tab === 'pool') loadNodes();
+  }
+
+  /**
+   * 「出站与高级」页的统一保存。
+   *
+   * 该页包含两张卡片（出站路由 / 远程订阅源），历史上各有一个保存按钮，
+   * 用户改完上半部分顺手点底部的按钮就会漏存上半部分。
+   * 现在两个按钮都调用本函数 —— 一次性提交本页**全部**字段。
+   */
+  function saveAllAdvancedAndRemote(msg) {
+    return saveConfig({
+      proxyIp: $('cfgProxyIp').value,
+      socks5: $('cfgSocks5').value.trim(),
+      httpProxy: $('cfgHttpProxy').value.trim(),
+      nat64: $('cfgNat64').value.trim(),
+      relayPool: $('cfgRelayPool').value.trim(),
+      proxyMode: $('cfgProxyMode').value,
+      useBuiltinRelay: $('cfgBuiltinRelay').checked,
+      clientFingerprint: $('cfgFingerprint').value.trim() || 'chrome',
+      resolvePreferred: $('cfgResolvePreferred').checked,
+      ech: $('cfgEchOn').checked,
+      echHost: $('cfgEchHost').value.trim() || 'cloudflare-ech.com',
+      echDns: $('cfgEchDns').value.trim(),
+      concurrentDial: $('cfgConcurrent').checked,
+      enableTrojan: $('cfgEnableTrojan').checked,
+      enableXhttp: $('cfgEnableXhttp').checked,
+      addApi: $('cfgAddApi').value,
+      addCsv: $('cfgAddCsv').value,
+      dls: Number($('cfgDls').value || 0),
+      maxLatency: Number($('cfgMaxLatency').value || 0),
+      maxNodes: Number($('cfgMaxNodes').value || 0)
+    }, msg || '出站与远程池配置已保存');
   }
 
   function bind() {
@@ -1051,16 +1419,14 @@
 
     $('tabs').addEventListener('click', function (e) {
       var btn = e.target.closest('button[data-tab]');
-      if (!btn) return;
-      var tab = btn.getAttribute('data-tab');
-      Array.prototype.forEach.call($('tabs').children, function (b) { b.classList.toggle('active', b === btn); });
-      Array.prototype.forEach.call(document.querySelectorAll('.tab-page'), function (p) {
-        p.classList.toggle('hidden', p.id !== 'tab-' + tab);
-      });
-      if (tab === 'sub' || tab === 'pool') loadNodes();
+      if (btn) switchTab(btn.getAttribute('data-tab'));
     });
 
-    $('btnRefresh').addEventListener('click', loadAll);
+    Array.prototype.forEach.call(document.querySelectorAll('[data-goto]'), function (btn) {
+      btn.addEventListener('click', function () { switchTab(btn.getAttribute('data-goto')); });
+    });
+
+    $('btnRefresh').addEventListener('click', function () { loadAll(); toast('状态已刷新'); });
     $('btnLogout').addEventListener('click', function () {
       api('/api/v1/logout', { method: 'POST' }).finally(function () { showLogin(); });
     });
@@ -1068,6 +1434,72 @@
     ['poolOfficial', 'poolDomain', 'poolManual'].forEach(function (id) {
       $(id).addEventListener('change', syncSourceCards);
     });
+
+    // 入站协议开关：收敛到「入站配置」页的唯一入口
+    //
+    // #cfgTrojanOn / #cfgXhttpOn 是旧版「高级」页里的同义开关，
+    // 与本页的 #cfgEnableTrojan / #cfgEnableXhttp 状态不同步会互相覆盖。
+    // 现在它们退化为隐藏的同步影子：**单向**跟随本页开关，
+    // 保存时也只读本页开关（见 saveAllAdvancedAndRemote）。
+    $('cfgEnableTrojan').addEventListener('change', function () { $('cfgTrojanOn').checked = this.checked; });
+    $('cfgEnableXhttp').addEventListener('change', function () { $('cfgXhttpOn').checked = this.checked; });
+
+    // 随机生成 UUID 按钮
+    $('btnGenUuid').addEventListener('click', function () {
+      var u = (window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+        var r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+      });
+      $('cfgUuid').value = u;
+      toast('已生成新的随机 UUID，请点击「保存入站配置」生效');
+    });
+
+    // 交互式国家胶囊选择逻辑（同步至隐藏的 #optCountries select）
+    $('optCountriesChips').addEventListener('click', function (e) {
+      var chip = e.target.closest('.chip[data-code]');
+      if (!chip) return;
+      var code = chip.getAttribute('data-code');
+      var sel = $('optCountries');
+      Array.prototype.forEach.call(sel.options, function (opt) {
+        if (opt.value === code) opt.selected = !opt.selected;
+      });
+      chip.classList.toggle('on');
+      renderCmds();
+    });
+
+    // 地区胶囊：全选 / 清空
+    $('btnAllCountries').addEventListener('click', function () {
+      var sel = $('optCountries');
+      Array.prototype.forEach.call(sel.options, function (opt) { if (opt.value) opt.selected = true; });
+      Array.prototype.forEach.call($('optCountriesChips').querySelectorAll('.chip'), function (c) { c.classList.add('on'); });
+      renderCmds();
+    });
+
+    $('btnClearCountries').addEventListener('click', function () {
+      var sel = $('optCountries');
+      Array.prototype.forEach.call(sel.options, function (opt) { opt.selected = false; });
+      Array.prototype.forEach.call($('optCountriesChips').querySelectorAll('.chip.on'), function (c) { c.classList.remove('on'); });
+      renderCmds();
+    });
+
+    // 订阅端口：全选 / 清空
+    function setSubPortsChecked(checked) {
+      Array.prototype.forEach.call(document.querySelectorAll('input[name="subPort"]'), function (cb) {
+        cb.checked = checked;
+      });
+    }
+    $('btnAllSubPorts').addEventListener('click', function () { setSubPortsChecked(true); });
+    $('btnClearSubPorts').addEventListener('click', function () { setSubPortsChecked(false); });
+
+    // 订阅协议形态：全选 / 清空
+    var SUB_VARIANT_IDS = ['cfgVarVlessWs', 'cfgVarVlessXhttp', 'cfgVarTrojan'];
+    function setSubVariantsChecked(checked) {
+      SUB_VARIANT_IDS.forEach(function (id) {
+        var el = $(id);
+        if (el) el.checked = checked;
+      });
+    }
+    $('btnAllSubVariants').addEventListener('click', function () { setSubVariantsChecked(true); });
+    $('btnClearSubVariants').addEventListener('click', function () { setSubVariantsChecked(false); });
 
     $('btnSavePool').addEventListener('click', function () {
       var domains = $('domainLib').value.split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean);
@@ -1080,15 +1512,13 @@
             poolManual: $('poolManual').checked,
             officialCount: Number($('officialCount').value || 20),
             domainCount: Number($('domainCount').value || 10),
-            // 国家筛选已从订阅侧移除（只作用于优选器的 --countries），
-            // 这里显式清空，防止旧配置里的 poolCountries 继续过滤订阅。
             poolCountries: '',
             add: $('cfgAdd').value
-          }, '节点来源已保存');
+          }, '节点来源配置已保存');
         });
     });
 
-    $('btnPreview').addEventListener('click', loadNodes);
+    $('btnPreview').addEventListener('click', function () { loadNodes(); toast('节点预览已更新'); });
 
     $('btnSaveInbound').addEventListener('click', function () {
       var subPorts = Array.prototype.map.call(
@@ -1114,68 +1544,35 @@
       }, '入站配置已保存');
     });
 
-    $('btnSaveRemote').addEventListener('click', function () {
-      saveConfig({
-        addApi: $('cfgAddApi').value,
-        addCsv: $('cfgAddCsv').value,
-        dls: Number($('cfgDls').value || 0),
-        maxLatency: Number($('cfgMaxLatency').value || 0),
-        maxNodes: Number($('cfgMaxNodes').value || 0)
-      }, '远程池配置已保存');
-    });
-
-    $('btnSaveAdvanced').addEventListener('click', function () {
-      saveConfig({
-        proxyIp: $('cfgProxyIp').value,
-        socks5: $('cfgSocks5').value.trim(),
-        httpProxy: $('cfgHttpProxy').value.trim(),
-        nat64: $('cfgNat64').value.trim(),
-        relayPool: $('cfgRelayPool').value.trim(),
-    proxyMode: $('cfgProxyMode').value,
-        useBuiltinRelay: $('cfgBuiltinRelay').checked,
-        clientFingerprint: $('cfgFingerprint').value.trim() || 'chrome',
-        resolvePreferred: $('cfgResolvePreferred').checked,
-        ech: $('cfgEchOn').checked,
-        echHost: $('cfgEchHost').value.trim() || 'cloudflare-ech.com',
-        echDns: $('cfgEchDns').value.trim(),
-        concurrentDial: $('cfgConcurrent').checked,
-        enableTrojan: $('cfgTrojanOn').checked,
-        enableXhttp: $('cfgXhttpOn').checked
-      }, '高级配置已保存');
-    });
+    // 高级页两个保存按钮均统一提交当前页全部字段，防止用户改了上半部分点下半部分按钮漏存
+    $('btnSaveAdvanced').addEventListener('click', function () { saveAllAdvancedAndRemote('出站与高级配置已保存'); });
+    $('btnSaveRemote').addEventListener('click', function () { saveAllAdvancedAndRemote('远程订阅源配置已保存'); });
 
     $('btnClearIps').addEventListener('click', function () {
-      if (!confirm('确定清空本地真连接优选池？')) return;
-      api('/api/v1/ips', { method: 'DELETE' }).then(function () { loadAll(); toast('已清空'); })
+      if (!confirm('确定要清空本地真连接优选池中的所有 IP 吗？')) return;
+      api('/api/v1/ips', { method: 'DELETE' }).then(function () { loadAll(); toast('本地优选池已清空'); })
         .catch(function (e) { toast(e.message, true); });
     });
-
-    /* ---- 本地池查看 / 编辑----
-     *
-     * 之前这里只有「清空」按钮，**看不到具体 IP**。
-     * 用户跑完本地优选、回填成功后，面板里没有展示入口，
-     * 误以为回填失败（实际数据一直在 KV 的 LOCAL_PREFERRED_IPS 里）。
-     */
 
     function loadLocalIps() {
       api('/api/v1/ips').then(function (r) {
         var text = (r && r.raw) || '';
         var count = (r && r.count) || 0;
         $('localIpsText').value = text;
-        $('localCount').textContent = count > 0 ? '（' + count + ' 条）' : '（空）';
+        $('localCount').textContent = count > 0 ? '（当前共 ' + count + ' 条）' : '（当前为空）';
       }).catch(function (e) { toast(e.message, true); });
     }
 
     $('btnToggleLocal').addEventListener('click', function () {
       var box = $('localBox');
       var hidden = box.classList.toggle('hidden');
-      $('btnToggleLocal').textContent = hidden ? '查看' : '收起';
+      $('btnToggleLocal').textContent = hidden ? '查看 / 编辑明细' : '收起明细';
       if (!hidden) loadLocalIps();
     });
 
     $('btnReloadLocal').addEventListener('click', function () {
       loadLocalIps();
-      toast('已重新读取');
+      toast('已从 KV 重新读取');
     });
 
     $('btnSaveLocal').addEventListener('click', function () {
@@ -1183,7 +1580,7 @@
         method: 'PUT',
         body: JSON.stringify({ raw: $('localIpsText').value })
       }).then(function (r) {
-        toast('已保存 ' + ((r && r.count) || 0) + ' 条');
+        toast('已成功保存 ' + ((r && r.count) || 0) + ' 条本地优选 IP');
         loadAll();
         loadLocalIps();
       }).catch(function (e) { toast(e.message, true); });
@@ -1191,13 +1588,12 @@
 
     $('btnScan').addEventListener('click', startScan);
     $('btnCopyCmd').addEventListener('click', function () {
-      // 复制当前显示的命令；没有令牌时复制免令牌版本
       var cmd = $('scanCmd').textContent;
       if (!cmd || /请点击/.test(cmd)) cmd = $('scanCmdNoToken').textContent;
       copy(cmd);
     });
-    $('btnRebuildCmd').addEventListener('click', function () { renderCmds(); toast('命令已更新'); });
-    // 参数变更即时刷新命令（免令牌版本不依赖令牌，可实时更新）
+    $('btnRebuildCmd').addEventListener('click', function () { renderCmds(); toast('扫描命令已更新'); });
+
     ['optToken', 'optTop', 'optSample', 'optNoCallback'].forEach(function (id) {
       $(id).addEventListener('input', renderCmds);
       $(id).addEventListener('change', renderCmds);
@@ -1205,11 +1601,9 @@
     Array.prototype.forEach.call(document.querySelectorAll('input[name="optPort"]'), function (radio) {
       radio.addEventListener('change', renderCmds);
     });
-    var countrySel = $('optCountries');
-    if (countrySel) countrySel.addEventListener('change', renderCmds);
-    // 进入页面时先把免令牌命令渲染出来
     renderCmds();
-    $('btnRefreshSub').addEventListener('click', function () { refreshSubLinks(); loadNodes(); });
+
+    $('btnRefreshSub').addEventListener('click', function () { refreshSubLinks(); loadNodes(); toast('订阅链接与节点已刷新'); });
 
     Array.prototype.forEach.call(document.querySelectorAll('[data-copy]'), function (btn) {
       btn.addEventListener('click', function () { copy($(btn.getAttribute('data-copy')).value); });
@@ -1219,12 +1613,13 @@
   function copy(text) {
     if (!text) { toast('没有可复制的内容', true); return; }
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(function () { toast('已复制到剪贴板'); })
+      navigator.clipboard.writeText(text).then(function () { toast('✓ 已复制到剪贴板'); })
         .catch(function () { fallbackCopy(text); });
     } else {
       fallbackCopy(text);
     }
   }
+
   function fallbackCopy(text) {
     var ta = document.createElement('textarea');
     ta.value = text;
@@ -1232,8 +1627,8 @@
     ta.style.opacity = '0';
     document.body.appendChild(ta);
     ta.select();
-    try { document.execCommand('copy'); toast('已复制到剪贴板'); }
-    catch (e) { toast('复制失败，请手动选择', true); }
+    try { document.execCommand('copy'); toast('✓ 已复制到剪贴板'); }
+    catch (e) { toast('复制失败，请手动全选复制', true); }
     document.body.removeChild(ta);
   }
 
@@ -1243,3 +1638,4 @@
 </script>
 </body>
 </html>
+

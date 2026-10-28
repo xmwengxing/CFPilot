@@ -331,6 +331,7 @@
     <div class="card">
       <h2><span class="dot"></span>系统运行状态</h2>
       <div class="stat" id="statusBox"></div>
+      <p class="hint" id="statusMeta" style="margin:12px 0 0"></p>
     </div>
 
     <div class="card">
@@ -688,6 +689,10 @@
         <p class="tip">
           订阅仅会为上方勾选的协议形态生成节点（未勾选形态不会生成冗余节点）。若勾选 Trojan 或 XHTTP，请确保下方对应的服务端入站开关处于启用状态。
           <br>一个形态都没勾时，后端会回落到最通用的 VLESS + WebSocket（保证订阅不为空）。
+          <br>⚠️ <b>XHTTP 实测在 Cloudflare 边缘会被直接拦截</b>：标准 Xray 客户端发的请求头是
+          <code class="inline">Content-Type: application/grpc</code>，Cloudflare 对这个类型直接回 <b>403</b>
+          （请求根本到不了数据面），因此勾选 XHTTP 生成的节点在客户端里基本都是 <b>-1</b>。
+          只有能把 Content-Type 改成 <code class="inline">application/octet-stream</code> 等类型的客户端才可能通。
         </p>
       </div>
 
@@ -1026,12 +1031,17 @@
     }).catch(function () { showLogin(); });
   }
 
-  function loadAll() {
-    api('/api/v1/status').then(function (s) {
+  function loadStatus() {
+    return api('/api/v1/status').then(function (s) {
       state.status = s;
       renderStatus(s);
       renderCmds();
+      return s;
     }).catch(function (e) { toast(e.message, true); });
+  }
+
+  function loadAll() {
+    loadStatus();
 
     api('/api/v1/pool/meta').then(function (m) {
       state.countries = m.countries || [];
@@ -1052,16 +1062,33 @@
 
   // === [Module 4: View Renderers & Form Binding] ===
   function renderStatus(s) {
+    // 版本显示成「0.9.4 · 7e75bc4-29e1702c」：
+    // 前半是人读的语义版本（构建期从 package.json 注入），后半精确到源码内容。
+    // 早期这里显示的是服务端写死的 '0.1.0'，用户以为卡片是摆设（2026-10-28 报障）。
+    var ver = '-';
+    if (s.pkgVersion && s.pkgVersion !== 'dev') {
+      ver = s.pkgVersion + (s.version && s.version !== 'dev' ? ' · ' + s.version : '');
+    } else if (s.version && s.version !== 'dev') {
+      ver = s.version;
+    }
     var items = [
       ['控制面域名（当前面板）', location.hostname],
       ['数据面域名（节点 SNI/Host）', s.nodeDomain || s.domain || location.hostname],
       ['当前接入边缘机房', s.colo || 'UNK'],
       ['本地真连接优选池', (s.localIps || 0) + ' 条'],
-      ['系统内核版本', s.version || '-']
+      ['系统内核版本', ver]
     ];
     $('statusBox').innerHTML = items.map(function (it) {
       return '<div class="item"><div class="k">' + esc(it[0]) + '</div><div class="v">' + esc(it[1]) + '</div></div>';
     }).join('');
+    // 读取时刻：证明这些值是现读的（「边缘机房」随当前网络的就近路由变化，
+    // 长期停在同一页不会自己更新，切回本页才会重新读取）。
+    var meta = $('statusMeta');
+    if (meta) {
+      var t = s.readAt ? new Date(s.readAt) : new Date();
+      meta.textContent = '以上数据读取于 ' + t.toLocaleTimeString()
+        + '（每次切回本页自动刷新；「当前接入边缘机房」跟随你当前网络的就近路由）';
+    }
   }
 
   function fillConfig(c) {
@@ -1092,8 +1119,11 @@
     $('cfgVarVlessXhttp').checked = variants.indexOf('vless-xhttp') >= 0;
     $('cfgVarTrojan').checked = variants.indexOf('trojan') >= 0;
 
+    // 两个开关的默认值都按「未显式关闭即为开启」判断：
+    // 早期 XHTTP 用 `=== true`，而部署默认写的是 false，于是新建实例里这个开关永远是关的，
+    // 用户在面板里勾了也不生效（2026-10-28 报障）。现在部署默认 true，面板可随时关。
     var trojanEnabled = c.enableTrojan !== false;
-    var xhttpEnabled = c.enableXhttp === true;
+    var xhttpEnabled = c.enableXhttp !== false;
     $('cfgEnableTrojan').checked = trojanEnabled;
     $('cfgEnableXhttp').checked = xhttpEnabled;
     $('cfgTrojanOn').checked = trojanEnabled;
@@ -1411,6 +1441,10 @@
     Array.prototype.forEach.call(document.querySelectorAll('.tab-page'), function (p) {
       p.classList.toggle('hidden', p.id !== 'tab-' + tab);
     });
+    // 概览页的「边缘机房 / 优选池 / 内核版本」是**实时**数据：
+    // 每次切回概览都重新读一次，否则停在同一页时会一直看着加载时那一刻的值
+    // （用户曾因此以为这几张卡是硬编码的）。
+    if (tab === 'overview') loadStatus();
     if (tab === 'sub' || tab === 'pool') loadNodes();
   }
 

@@ -58,9 +58,12 @@ describe('数据面 /__version', () => {
     expect(text.toLowerCase()).not.toContain('wspath')
   })
 
-  it('只有 build 与 ts 两个字段', async () => {
+  it('只有 build / version / ts 三个字段（version 是本轮加的语义版本）', async () => {
     const res = versionResponse()
     const data = (await res.json()) as Record<string, unknown>
-    expect(Object.keys(data).sort()).toEqual(['build', 'ts'])
+    expect(Object.keys(data).sort()).toEqual(['build', 'ts', 'version'])
+    // build 精确到源码内容（<git短hash>-<源码哈希>），version 是人读的语义版本
+    expect(typeof data.build).toBe('string')
+    expect(typeof data.version).toBe('string')
   })
 })

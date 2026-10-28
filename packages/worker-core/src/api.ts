@@ -27,6 +27,7 @@ import { collectNodes, parseLocalList } from './sub-engine'
 import { CF_IPV4_CIDRS, COUNTRY_NAMES, PREFERRED_DOMAINS, SUPPORTED_COUNTRIES } from './data/pools'
 import { randomHex } from './util'
 import { CpuBudget } from './budget'
+import { BUILD_VERSION, PKG_VERSION } from './version'
 import { normalizeNodeDomain } from './routes/shared'
 
 export const API_PREFIX = '/api/v1'
@@ -164,6 +165,14 @@ export async function handleApi(
     // 节点域名 = 订阅里实际下发的 SNI / Host：subDomain > DATA_HOST > 面板域名。
     // 拆分部署时它与面板域名不同，面板概览与本地优选命令都必须用它。
     const nodeDomain = normalizeNodeDomain(config.subDomain || env.DATA_HOST || url.hostname)
+    // ⚠️ 这里的版本号**必须是真实的构建版本**。
+    //
+    // 2026-10-28 用户报障：「系统内核版本」这张卡从来没变过，像是硬编码。
+    // 查下来确实写死成 `version: '0.1.0'` —— 面板永远显示 0.1.0。
+    // 现在给两个值：
+    //   version     = BUILD_VERSION（<git短hash>-<源码哈希>，精确到内容）
+    //   pkgVersion  = PKG_VERSION（0.9.4 这类人读版本，构建期从 package.json 注入）
+    // 另带 readAt（读取时刻），面板据此显示「数据是刚读的」。
     return json({
       ok: true,
       panelPath: auth.panelPath,
@@ -173,7 +182,9 @@ export async function handleApi(
       colo: (request as unknown as { cf?: { colo?: string } }).cf?.colo ?? 'UNK',
       localIps: parsed.length,
       generatedPassword: auth.generatedPassword,
-      version: '0.1.0',
+      version: BUILD_VERSION,
+      pkgVersion: PKG_VERSION,
+      readAt: Date.now(),
     })
   }
 

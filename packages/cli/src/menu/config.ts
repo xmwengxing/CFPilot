@@ -5,7 +5,8 @@
 import type { ParsedArgs } from '../shared/args'
 import { c, box, status, rule } from './ui'
 import { ask, confirm, select, pause } from './prompt'
-import { configPath, loadConfig, saveConfig, clearConfig, resolveToken } from './store'
+import { configPath, loadConfig, saveConfig, saveToken, clearConfig, resolveToken } from './store'
+import type { Config } from './store'
 import { CloudflareClient } from '../deploy/cf-api'
 import { listCfPilotNamespaces } from '../deploy/pages-deploy'
 
@@ -25,7 +26,22 @@ async function syncFromCloud(token: string): Promise<boolean> {
   // 清空放在这里（而不是菜单分支）是为了**覆盖所有调用方**：
   // 交互菜单、`syncAccount()`、以及任何直接调用本函数的地方。
   //
-  // 注意 `saveConfig` 会把空串**删除**（不留下空键），语义正好是「清空」。
+  // ⚠️ 只清**实例相关**字段（KV / 域名 / WS 路径 / 面板密码）；
+  // accountId / accountName 由下面的探测结果重新写入。
+  //
+  // ⚠️ **换 Token = 换账号**：只有 token 变了才清。
+  // 同一个 token 的重新同步不清 —— 否则网络抖动一次就把有效配置清成半空。
+  if ((loadConfig().token ?? '').trim() !== token.trim()) {
+    saveConfig({
+      accountId: '',
+      accountName: '',
+      kvNamespaceId: '',
+      panelHost: '',
+      dataHost: '',
+      wsPath: '',
+      panelPassword: '',
+    })
+  }
   saveConfig({
     accountId: '',
     accountName: '',
@@ -33,6 +49,7 @@ async function syncFromCloud(token: string): Promise<boolean> {
     panelHost: '',
     dataHost: '',
     wsPath: '',
+    panelPassword: '',
   })
 
   try {
@@ -53,7 +70,8 @@ async function syncFromCloud(token: string): Promise<boolean> {
       )
       account = accounts.find((a) => a.id === picked) ?? accounts[0]!
     }
-    saveConfig({ accountId: account.id, accountName: account.name })
+    // ⚠️ 账号与实例信息**一起写**（每个分支一次 saveConfig），
+    // 保证配置里「账号 / KV / 域名 / WS 路径」永远来自同一次探测。
     status('ok', `账号：${account.name}`)
 
     // ---- KV 与实例 ----
@@ -64,10 +82,13 @@ async function syncFromCloud(token: string): Promise<boolean> {
       // dataHost / wsPath 全部留在配置里 —— 配着新 Token，
       // 却指着上一个账户的 KV 与域名。
       saveConfig({
+        accountId: account.id,
+        accountName: account.name,
         kvNamespaceId: '',
         panelHost: '',
         dataHost: '',
         wsPath: '',
+        panelPassword: '',
       })
       status('info', '该账号下还没有 KV（首次部署时会自动创建）')
       return true
@@ -94,6 +115,8 @@ async function syncFromCloud(token: string): Promise<boolean> {
       // WS 路径是**每实例**的（写在内核的 CONFIG 里），
       // 不跟着实例走就一定会错。
       saveConfig({
+        accountId: account.id,
+        accountName: account.name,
         kvNamespaceId: chosen.id,
         panelHost: chosen.manifest.controlSubdomain,
         dataHost: chosen.manifest.dataSubdomain,
@@ -107,13 +130,16 @@ async function syncFromCloud(token: string): Promise<boolean> {
 
     // 无实例：只记录 KV 供选择
     //
-    // 同样要清掉上一个账户的实例信息（域名 / WS 路径）。
+    // 同样要清掉上一个账户的实例信息（域名 / WS 路径 / 面板密码）。
     if (namespaces.length === 1) {
       saveConfig({
+        accountId: account.id,
+        accountName: account.name,
         kvNamespaceId: namespaces[0]!.id,
         panelHost: '',
         dataHost: '',
         wsPath: '',
+        panelPassword: '',
       })
       status('info', `KV：${namespaces[0]!.title}（尚无部署）`)
     } else {
@@ -128,13 +154,18 @@ async function syncFromCloud(token: string): Promise<boolean> {
           { label: '不指定（部署时自动创建）', value: '' },
         ]
       )
+      // 「不指定」也要写 —— 否则上一个账户的 KV ID 会残留下来。
+      // select 返回 null 表示用户按 Esc 退出，此时按「不指定」处理。
+      saveConfig({
+        accountId: account.id,
+        accountName: account.name,
+        kvNamespaceId: picked ?? '',
+        panelHost: '',
+        dataHost: '',
+        wsPath: '',
+        panelPassword: '',
+      })
       if (picked) {
-        saveConfig({
-          kvNamespaceId: picked,
-          panelHost: '',
-          dataHost: '',
-          wsPath: '',
-        })
         status('ok', 'KV 已保存')
       }
     }
@@ -203,9 +234,19 @@ export async function menuConfig(): Promise<void> {
           status('warn', '未输入，已取消')
           break
         }
-        // 只存 Token —— 旧账户的字段由 syncFromCloud 在探测前统一清空
-        // （见该函数开头的说明：那里覆盖所有调用方）。
-        saveConfig({ token })
+        // ⚠️ **换 Token 前先清空上一个账户的全部字段**。
+        //
+        // `saveConfig` 是**合并语义**（`{ ...current, ...patch }`），
+        // 没在 patch 里的字段全部保留。于是「贴入新 Token」后配置会变成：
+        //
+        //   { token: tokenB, accountId: A, kvNamespaceId: KVA,
+        //     panelHost: A的域名, dataHost: A的域名, wsPath: A的WS路径 }
+        //
+        // —— **新 Token 配旧账户的 KV 与域名**。
+        // 后续回填会打到上一个账户的面板、改密码会改到上一个账户的实例。
+        //
+        // `saveToken` 在 token 变化时自动清空这些字段（同 token 则保留）。
+        saveToken(token)
         status('ok', 'Token 已保存')
 
         status('info', '正在识别账号与实例…')
@@ -275,14 +316,40 @@ export async function runConfig(args: ParsedArgs): Promise<void> {
     return
   }
 
-  const patch: Record<string, string> = {}
+  const patch: Partial<Config> = {}
+  const explicit: Partial<Config> = {}
   if (typeof flags['token'] === 'string') patch.token = flags['token']
-  if (typeof flags['kv'] === 'string') patch.kvNamespaceId = flags['kv']
-  if (typeof flags['panel'] === 'string') patch.panelHost = flags['panel']
-  if (typeof flags['account'] === 'string') patch.accountId = flags['account']
+  if (typeof flags['kv'] === 'string') {
+    patch.kvNamespaceId = flags['kv']
+    explicit.kvNamespaceId = flags['kv']
+  }
+  if (typeof flags['panel'] === 'string') {
+    patch.panelHost = flags['panel']
+    explicit.panelHost = flags['panel']
+  }
+  if (typeof flags['account'] === 'string') {
+    patch.accountId = flags['account']
+    explicit.accountId = flags['account']
+  }
 
-  saveConfig(patch)
+  // ⚠️ **换 Token = 换账号**：`cfpilot config --token xxx` 也必须清空
+  // 上一个账户的 KV / 域名 / WS 路径，否则配置会变成
+  // 「新 Token + 旧账户的实例信息」→ 回填打到旧面板、改密码改到旧实例。
+  //
+  // 同一条命令里显式给出的 --kv / --panel / --account 保留（用户是故意的）。
+  if (typeof patch.token === 'string') {
+    saveToken(patch.token, explicit)
+  } else {
+    saveConfig(patch)
+  }
   process.stdout.write('已保存：' + Object.keys(patch).join(', ') + '\n')
+
+  // 换了 Token 就顺手同步一次账号与实例（配置里不会残留旧账户的信息）。
+  if (typeof patch.token === 'string') {
+    process.stdout.write('\n')
+    status('info', '正在识别账号与实例…')
+    await syncFromCloud(patch.token)
+  }
 }
 
 /** 供其他菜单复用：用 Token 同步账号与实例。 */

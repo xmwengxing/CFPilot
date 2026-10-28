@@ -65,6 +65,8 @@ export async function handleXhttp(
     proxies,
     nat64: config.nat64,
     concurrent: config.concurrentDial,
+    // 代理调度模式（与 WS 入站路径保持一致）
+    proxyMode: config.proxyMode,
     // ⚠️ 这两项必须与 WS 入站路径保持一致：
     // 少了它们，XHTTP 会**用运行时自己的 DNS 解析**目标域名 ——
     // 而运行时的解析结果可能落在 Cloudflare 网段（Worker 不能连回自家 Anycast），

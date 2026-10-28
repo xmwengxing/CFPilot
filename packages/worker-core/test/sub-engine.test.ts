@@ -42,6 +42,7 @@ const config: UserConfig = {
   proxyIp: '',
   socks5: '',
   httpProxy: '',
+  proxyMode: 'only',
   nat64: '',
   concurrentDial: true,
   resolvePreferred: true,

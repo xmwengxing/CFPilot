@@ -310,8 +310,34 @@ export function buildRouteCandidates(input: RouteInput): RouteCandidate[] {
  * 放进竞速只会拖慢整体并制造噪声，只在正常候选全失败后才试。
  */
 export interface CandidateGroups {
-  /** 代理候选（用户显式配置） */
-  proxy: RouteCandidate[]
+  /**
+   * 落地代理候选（SOCKS5 / HTTP / HTTPS）。
+   *
+   * ## ⚠️ 为什么必须与 ProxyIP 分开
+   *
+   * 两者的**握手成本差一个 RTT**：
+   *
+   *   ProxyIP（kind='direct'）：只要 TCP 连上就算成功 → **1 RTT**
+   *   SOCKS5 / HTTP：还要做认证 + CONNECT → **2~3 RTT**
+   *
+   * 若把两者放进**同一个并发竞速池**，ProxyIP 必然先赢 ——
+   * 于是「配了 SOCKS5 也没用」，而且是**静默**的（出口 IP 与预期不符，无任何报错）。
+   *
+   * 另一个副作用：多个 SOCKS5 并发竞速会让**所有**代理服务器同时向目标站建连
+   * 再被强行断开 —— 白白消耗代理服务器的连接数与配额。
+   *
+   * 所以两类代理**绝不混在一个池子里**：
+   *   - 落地代理 → **顺序故障转移**（一个挂了换下一个，不并发轰炸）
+   *   - ProxyIP   → **并发竞速**（都是 1 RTT，并发无害且更快）
+   */
+  landing: RouteCandidate[]
+  /**
+   * ProxyIP 候选（kind='direct'）。
+   *
+   * 语义是「连到这个地址，但请求的目标仍是原始 hostname:port」——
+   * 本质是**固定的反代入口**（与 `relayPool` 同一类机制）。
+   */
+  proxyIp: RouteCandidate[]
   /** 直连 / 优选候选 */
   direct: RouteCandidate[]
   /** 降权候选（Cloudflare 网段），最后才试 */
@@ -320,8 +346,11 @@ export interface CandidateGroups {
 
 export function groupCandidates(candidates: RouteCandidate[]): CandidateGroups {
   const primary = candidates.filter((c) => !c.deprioritized)
+  const proxies = primary.filter((c) => c.source === 'proxy')
   return {
-    proxy: primary.filter((c) => c.source === 'proxy'),
+    // 落地代理与 ProxyIP **必须分开**（握手成本差一个 RTT，混池会让 ProxyIP 永远赢）
+    landing: proxies.filter((c) => c.via?.kind !== 'direct'),
+    proxyIp: proxies.filter((c) => c.via?.kind === 'direct'),
     direct: primary.filter((c) => c.source !== 'proxy'),
     fallback: candidates.filter((c) => c.deprioritized),
   }

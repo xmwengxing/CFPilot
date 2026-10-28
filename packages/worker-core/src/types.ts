@@ -68,6 +68,21 @@ export interface Env {
 }
 
 /** 用户可配置项（KV CONFIG > 环境变量 > 内置默认值） */
+/**
+ * 代理调度模式。
+ *
+ * 决定「配了代理之后，出站流量按什么顺序尝试各条通道」。
+ *
+ * - `only`（默认）：有代理只走代理；代理全失败 → 试反代池 → 抛错。
+ *   **绝不直连** —— 直连会暴露 Cloudflare 原生出口 IP，
+ *   与用户「配置代理是为了指定出口」的意图相悖。
+ * - `global`：代理优先；全失败 → 回退直连/优选 → 反代池。
+ * - `fallback`：直连/优选优先；失败 → 代理 → 反代池。
+ * - `smart`：目标是 Cloudflare 网段 → 代理优先（直连必然被拒）；
+ *   否则直连优先（省代理连接数），失败再走代理。
+ */
+export type ProxyMode = 'only' | 'global' | 'fallback' | 'smart'
+
 export interface UserConfig {
   /** VLESS UUID */
   uuid: string
@@ -114,6 +129,19 @@ export interface UserConfig {
   socks5: string
   /** HTTP 代理 host:port */
   httpProxy: string
+  /**
+   * 代理调度模式。
+   *
+   * 决定「配了代理之后，出站流量按什么顺序尝试各条通道」。
+   *
+   * - `only`（默认）：有代理只走代理；代理全失败 → 试反代池 → 抛错。
+   *   **绝不直连** —— 直连会暴露 Cloudflare 原生出口 IP。
+   * - `global`：代理优先；全失败 → 回退直连/优选 → 反代池。
+   * - `fallback`：直连/优选优先；失败 → 代理 → 反代池。
+   * - `smart`：目标是 Cloudflare 网段 → 代理优先（直连必然被拒）；
+   *   否则直连优先（省代理连接数），失败再走代理。
+   */
+  proxyMode: ProxyMode
   /** NAT64 前缀 */
   nat64: string
   /** 是否开启并发竞速拨号 */

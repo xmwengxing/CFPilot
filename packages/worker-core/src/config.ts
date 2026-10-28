@@ -1,7 +1,8 @@
 /**
  * 配置加载：KV CONFIG > 环境变量 > 内置默认值
  */
-import type { Env, UserConfig } from './types'
+import type { Env, UserConfig, ProxyMode
+} from './types'
 import { randomUuid } from './util'
 import type { Store } from './store'
 import { KvStore } from './store'
@@ -46,6 +47,7 @@ export const DEFAULT_CONFIG: UserConfig = {
   proxyIp: '',
   socks5: '',
   httpProxy: '',
+  proxyMode: 'only' as ProxyMode,
   nat64: '',
   concurrentDial: true,
   resolvePreferred: true,
@@ -86,6 +88,21 @@ function bool(value: unknown, fallback: boolean): boolean {
   return fallback
 }
 
+/** 合法的代理调度模式 */
+export const PROXY_MODES: ProxyMode[] = ['only', 'global', 'fallback', 'smart']
+
+/**
+ * 归一化代理调度模式。
+ *
+ * 读不懂的值一律回落 `only` —— 那是**最保守**的语义
+ * （有代理只走代理，绝不静默改走直连）。
+ */
+export function normalizeProxyMode(value: string): ProxyMode {
+  const text = value.trim().toLowerCase()
+  if (text === 'global' || text === 'fallback' || text === 'smart') return text
+  return 'only'
+}
+
 function text(value: unknown, fallback: string): string {
   if (value === undefined || value === null) return fallback
   return String(value)
@@ -116,6 +133,7 @@ export function configFromEnv(env: Env): UserConfig {
     proxyIp: text(env.PROXYIP, ''),
     socks5: text(env.SOCKS5, ''),
     httpProxy: text(env.HTTP_PROXY, ''),
+    proxyMode: normalizeProxyMode(text(env.PROXY_MODE, '')),
     nat64: text(env.NAT64, ''),
     concurrentDial: bool(env.TCP_CONCURRENT_DIAL, true),
     resolvePreferred: bool(env.RESOLVE_PREFERRED, DEFAULT_CONFIG.resolvePreferred),

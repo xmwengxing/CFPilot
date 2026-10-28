@@ -491,6 +491,19 @@
           <label>HTTP / HTTPS 代理（https:// 前缀走 TLS，可用 #sni= 指定证书名）</label>
           <input id="cfgHttpProxy" placeholder="1.2.3.4:8080 或 https://user:pass@proxy.example.com:8443#sni=proxy.example.com" />
         </div>
+        <div class="field">
+          <label>代理调度模式（PROXY_MODE）</label>
+          <select id="cfgProxyMode">
+            <option value="only">仅代理（默认）—— 配了代理就只走代理，绝不直连</option>
+            <option value="global">全局代理优先 —— 代理挂了回退直连</option>
+            <option value="fallback">仅回退兜底 —— 先直连，失败再走代理</option>
+            <option value="smart">智能分流 —— CF 网段目标走代理，其它先直连</option>
+          </select>
+          <div class="tip" style="margin-top:4px">
+            「仅代理」保证出口 IP 与你配置的一致（直连会暴露 Cloudflare 原生出口）。
+            代理全部失败时会尝试<b>反代入口池</b>（同样是第三方出口），仍失败才报错。
+          </div>
+        </div>
         <div class="field"><label>NAT64 前缀</label><input id="cfgNat64" placeholder="64:ff9b::" /></div>
         <div class="field">
           <label>反代入口池（每行一条：IP / IP:端口 / 域名）</label>
@@ -746,6 +759,7 @@
     $('cfgHttpProxy').value = c.httpProxy || '';
     $('cfgNat64').value = c.nat64 || '';
     $('cfgRelayPool').value = c.relayPool || '';
+  $('cfgProxyMode').value = c.proxyMode || 'only';
     $('cfgBuiltinRelay').checked = c.useBuiltinRelay !== false;
     $('cfgFingerprint').value = c.clientFingerprint || 'chrome';
     $('cfgEchOn').checked = !!c.ech;
@@ -1117,6 +1131,7 @@
         httpProxy: $('cfgHttpProxy').value.trim(),
         nat64: $('cfgNat64').value.trim(),
         relayPool: $('cfgRelayPool').value.trim(),
+    proxyMode: $('cfgProxyMode').value,
         useBuiltinRelay: $('cfgBuiltinRelay').checked,
         clientFingerprint: $('cfgFingerprint').value.trim() || 'chrome',
         resolvePreferred: $('cfgResolvePreferred').checked,

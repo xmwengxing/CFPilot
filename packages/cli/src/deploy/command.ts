@@ -14,6 +14,7 @@ import {
   type ParsedArgs,
 } from '../shared/args'
 import { CloudflareClient } from './cf-api'
+import { checkKvInAccount, findAccountByKv } from './account-resolve'
 import {
   deployPagesSplit,
   listCfPilotNamespaces,
@@ -82,6 +83,132 @@ export async function listKvInstances(client: CloudflareClient, accountId: strin
 }
 
 
+/**
+ * 解析本次部署要用的账号。
+ *
+ * ## 规则
+ *
+ *   1. 给了 `--account` → 用它；若同时给了 `--kv`，**校验两者同源**。
+ *   2. 只给了 `--kv` → 用 KV **反查**它所属的账号（KV 是账号作用域的）。
+ *      查不到就报错要求显式指定 `--account`。
+ *   3. 两个都没给 → 回落第一个账号（全新部署的常见场景，没有 KV 参与）。
+ *
+ * ## 为什么第 2 条不能盲取 accounts[0]
+ *
+ * 账号取自 A、KV 取自 B 时，部署会在 A 里建出**孤儿 Pages 项目**，
+ * KV 绑定必然失败、配置写不进去 → 半成品实例 + 一堆垃圾。
+ * KV 归属哪个账号只能靠反查（CF 没有「按 KV ID 查账号」的接口）。
+ *
+ * @returns 解析结果；`ok: false` 时 `message` 是给用户看的错误说明。
+ */
+export interface AccountResolution {
+  ok: boolean
+  /** 解析出的账号 ID（ok 为 true 时有值） */
+  accountId: string
+  /** 账号名（仅用于展示） */
+  accountName: string
+  /** 给用户看的说明 */
+  message: string
+  /** 账号是怎么来的 */
+  source: 'flag' | 'kv-lookup' | 'first'
+}
+
+export async function resolveDeployAccount(
+  client: CloudflareClient,
+  options: { accountFlag: string; kvId: string; /** --list-kv 只按账号列实例，与 KV 无关 */
+    ignoreKv?: boolean }
+): Promise<AccountResolution> {
+  const { accountFlag } = options
+  const kvId = options.ignoreKv ? '' : options.kvId
+
+  if (accountFlag) {
+    // ⚠️ **账号与 KV 必须同源**。
+    //
+    // 显式给了 --account 与 --kv，但两者分属不同账号时，
+    // 部署会在 --account 的账号下建出孤儿 Pages 项目、KV 绑定必然失败。
+    // 这里提前拦下来（比部署到一半失败好得多）。
+    if (kvId) {
+      const check = await checkKvInAccount(client, accountFlag, kvId)
+      if (check === 'no') {
+        return {
+          ok: false,
+          accountId: '',
+          accountName: '',
+          source: 'flag',
+          message:
+            `✗ KV ${kvId} 不属于账号 ${accountFlag}\n` +
+            '  → 账号与 KV 必须属于同一个 Cloudflare 账号，否则会建出无法使用的孤儿项目\n',
+        }
+      }
+      if (check === 'unknown') {
+        // 读不到 → 不能确认，但也不该直接拒绝（可能是权限不足）。
+        // 真正的归属校验在部署前的 assertKvOwnership 里还会再做一次。
+        return {
+          ok: true,
+          accountId: accountFlag,
+          accountName: accountFlag,
+          source: 'flag',
+          message: `· 未能确认 KV ${kvId} 是否属于该账号（读取 KV 列表失败），继续\n`,
+        }
+      }
+    }
+    return {
+      ok: true,
+      accountId: accountFlag,
+      accountName: accountFlag,
+      source: 'flag',
+      message: `使用账号：${accountFlag}\n`,
+    }
+  }
+
+  const accounts = await client.listAccounts()
+  if (accounts.length === 0) {
+    return {
+      ok: false,
+      accountId: '',
+      accountName: '',
+      source: 'first',
+      message: '✗ 该 Token 没有可访问的账号\n',
+    }
+  }
+
+  if (kvId) {
+    // 用 KV 反查它属于哪个账号（KV 是账号作用域的，只能逐个账号查）。
+    const { owner, unreadable } = await findAccountByKv(client, accounts, kvId)
+    if (!owner) {
+      const names = accounts.map((a) => a.name).join('、')
+      return {
+        ok: false,
+        accountId: '',
+        accountName: '',
+        source: 'kv-lookup',
+        message:
+          unreadable > 0
+            ? `✗ 无法确定 KV ${kvId} 属于哪个账号（${names}；其中 ${unreadable} 个账号的 KV 列表读取失败）\n` +
+              '  → 请用 --account <账号ID> 与 --kv <KV ID> 一起指定\n'
+            : `✗ KV ${kvId} 不属于该 Token 的任何账号（${names}）\n` +
+              '  → 请用 --account <账号ID> 与 --kv <KV ID> 一起指定\n',
+      }
+    }
+    return {
+      ok: true,
+      accountId: owner.id,
+      accountName: owner.name,
+      source: 'kv-lookup',
+      message: `使用账号：${owner.name}（${owner.id}，由 --kv 反查）\n`,
+    }
+  }
+
+  // 没给 --kv 时才回落第一个账号（全新部署的常见场景）
+  return {
+    ok: true,
+    accountId: accounts[0]!.id,
+    accountName: accounts[0]!.name,
+    source: 'first',
+    message: `使用账号：${accounts[0]!.name}（${accounts[0]!.id}）\n`,
+  }
+}
+
 export async function runDeployCommand(args: ParsedArgs): Promise<void> {
   if (flagBool(args, 'h') || flagBool(args, 'help')) {
     process.stdout.write(DEPLOY_HELP)
@@ -96,57 +223,25 @@ export async function runDeployCommand(args: ParsedArgs): Promise<void> {
   }
 
   const client = new CloudflareClient({ token })
-  const accountId = flagString(args, 'account') || ''
   let kvId = flagString(args, 'kv') || ''
-  let resolvedAccount = accountId
 
-  if (!resolvedAccount) {
-    const accounts = await client.listAccounts()
-    if (accounts.length === 0) {
-      process.stderr.write('✗ 该 Token 没有可访问的账号\n')
-      process.exitCode = 1
-      return
-    }
+  // --list-kv：只列出账号下的实例，不部署（与 KV 无关）
+  const listKv = flagBool(args, 'list-kv')
 
-    // ⚠️ **给了 --kv 时不能盲取 accounts[0]**。
-    //
-    // KV 是**账号作用域**的：accounts[0] 未必是那个 KV 所属的账号
-    // （`/accounts` 的返回顺序不保证与用户预期一致）。
-    // 一旦错配，就是「账号 A + 账号 B 的 KV」——
-    // 真写入会被 CF 拒绝（不会写坏别人），
-    // 但**会在 A 里凭空建出孤儿 Pages 项目**，并留下一堆半成品实例。
-    //
-    // 所以这里用 KV 反查它属于哪个账号。
-    if (kvId) {
-      let found = ''
-      for (const acc of accounts) {
-        const namespaces = await client.listKvNamespaces(acc.id)
-        if (namespaces.some((ns) => ns.id === kvId)) {
-          found = acc.id
-          break
-        }
-      }
-      if (!found) {
-        process.stderr.write(
-          `✗ KV ${kvId} 不属于该 Token 的任何账号（${accounts
-            .map((a) => a.name)
-            .join('、')}）—— 请用 --account 指定正确的账号\n`
-        )
-        process.exitCode = 1
-        return
-      }
-      resolvedAccount = found
-      const acc = accounts.find((a) => a.id === found)!
-      process.stdout.write(`使用账号：${acc.name}（${acc.id}，由 --kv 反查）\n`)
-    } else {
-      // 没给 --kv 时才回落第一个账号（全新部署的常见场景）
-      resolvedAccount = accounts[0]!.id
-      process.stdout.write(`使用账号：${accounts[0]!.name}（${accounts[0]!.id}）\n`)
-    }
+  const resolution = await resolveDeployAccount(client, {
+    accountFlag: flagString(args, 'account') || '',
+    kvId,
+    ignoreKv: listKv,
+  })
+  if (!resolution.ok) {
+    process.stderr.write(resolution.message)
+    process.exitCode = 1
+    return
   }
+  const resolvedAccount = resolution.accountId
+  process.stdout.write(resolution.message)
 
-  // --list-kv：只列出账号下的实例，不部署
-  if (flagBool(args, 'list-kv')) {
+  if (listKv) {
     await listKvInstances(client, resolvedAccount)
     return
   }

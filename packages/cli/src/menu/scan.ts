@@ -8,6 +8,7 @@ import { ask, confirm, multiSelect, select } from './prompt'
 import { loadConfig, saveConfig, resolveToken } from './store'
 import { SUPPORTED_COUNTRIES } from '../scan/countries'
 import { CloudflareClient } from '../deploy/cf-api'
+import { findAccountByKv } from '../deploy/account-resolve'
 import { listCfPilotNamespaces } from '../deploy/pages-deploy'
 
 /** 构造子命令参数对象。 */
@@ -30,7 +31,20 @@ async function fetchInstances(token: string): Promise<Instance[]> {
     const client = new CloudflareClient({ token })
     const cfg = loadConfig()
     const accounts = await client.listAccounts()
-    const accountId = cfg.accountId || accounts[0]?.id
+    if (accounts.length === 0) return []
+
+    // ⚠️ **不要静默用 accounts[0]**：配置里的 KV / 域名可能是另一个账号的，
+    // 拿 accounts[0] 去查会列出完全不相干的实例，并把它们的域名写回配置
+    // → 后续回填打到别的账号的面板。
+    let accountId = cfg.accountId || ''
+    if (!accountId && cfg.kvNamespaceId) {
+      // 配置里的 KV 属于哪个账号，就用哪个账号
+      const { owner } = await findAccountByKv(client, accounts, cfg.kvNamespaceId)
+      if (owner) accountId = owner.id
+    }
+    if (!accountId && accounts.length === 1) {
+      accountId = accounts[0]!.id
+    }
     if (!accountId) return []
 
     const list = await listCfPilotNamespaces(client, accountId)

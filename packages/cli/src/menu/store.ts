@@ -60,6 +60,23 @@ export function loadConfig(): Config {
   }
 }
 
+/**
+ * 与**账号绑定**的字段。
+ *
+ * 这些字段描述的是「某个账号下的某个实例」，一旦换了 Token（= 换了账号）
+ * 就全部失效。若不清空，就会出现「A 的 KV + B 的 Token」这种串号：
+ * 部署落到新账号、回填打到旧账号的面板、改密码改到旧账号的实例。
+ */
+export const ACCOUNT_SCOPED_FIELDS = [
+  'accountId',
+  'accountName',
+  'kvNamespaceId',
+  'panelHost',
+  'dataHost',
+  'wsPath',
+  'panelPassword',
+] as const
+
 export function saveConfig(patch: Partial<Config>): void {
   const current = loadConfig()
   const next = { ...current, ...patch }
@@ -69,6 +86,50 @@ export function saveConfig(patch: Partial<Config>): void {
   }
   mkdirSync(configDir(), { recursive: true })
   writeFileSync(configFile(), JSON.stringify(next, null, 2) + '\n', 'utf8')
+}
+
+/**
+ * 保存 API Token。
+ *
+ * ## 为什么要单独一个函数
+ *
+ * `saveConfig` 是**合并语义**（`{ ...current, ...patch }`），
+ * 没在 patch 里出现的字段全部保留。于是「贴入新 Token」之后配置会变成：
+ *
+ *   { token: tokenB, accountId: A, kvNamespaceId: KVA,
+ *     panelHost: A的域名, dataHost: A的域名, wsPath: A的WS路径 }
+ *
+ * —— **新 Token 配旧账户的 KV 与域名**。
+ * 后续回填会打到上一个账户的面板、改密码会改到上一个账户的实例。
+ *
+ * 所以换 Token 时必须**先清空所有账号相关字段**，再写新 Token。
+ * （`saveConfig` 会把空串键删掉，所以传空串即等于「清空」。）
+ *
+ * @param token 新 Token
+ * @param keep  同一次调用里**显式指定**的字段（不清空），
+ *              例如 `cfpilot config --token X --account Y`
+ */
+export function saveToken(token: string, keep: Partial<Config> = {}): void {
+  const trimmed = token.trim()
+  const current = loadConfig()
+  const changed = (current.token ?? '') !== trimmed
+
+  // 只保留**显式给出**的字段（undefined 视为没给）
+  const explicit: Partial<Config> = {}
+  for (const key of Object.keys(keep) as Array<keyof Config>) {
+    const value = keep[key]
+    if (value !== undefined) explicit[key] = value
+  }
+
+  if (!changed) {
+    // 同一个 Token：账号没变，已有字段仍然有效
+    saveConfig({ token: trimmed, ...explicit })
+    return
+  }
+
+  const clearing: Partial<Config> = {}
+  for (const key of ACCOUNT_SCOPED_FIELDS) clearing[key] = ''
+  saveConfig({ ...clearing, ...explicit, token: trimmed })
 }
 
 export function clearConfig(): void {

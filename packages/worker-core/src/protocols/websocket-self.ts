@@ -485,6 +485,9 @@ export async function handleWebSocket(
         timeoutMs: DIAL_TIMEOUT_MS,
         concurrent: config.concurrentDial,
         nat64: config.nat64 || undefined,
+        // 代理调度模式（only / global / fallback / smart）——
+        // 决定「配了代理之后按什么顺序尝试各条通道」。
+        proxyMode: config.proxyMode,
         // ⚠️ 这里**不要**传 `config.add`（面板回填的优选 IP）。
         //
         // `optimizedIps` 的语义是「**目标站**的落地 IP 候选」——

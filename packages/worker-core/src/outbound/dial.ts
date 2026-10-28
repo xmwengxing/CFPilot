@@ -39,6 +39,7 @@ import {
   type RouteCandidate,
 } from './route'
 import type { ProxyEndpoint } from './proxy-pool'
+import type { ProxyMode } from '../types'
 
 type ConnectFn = (
   address: { hostname: string; port: number },
@@ -105,6 +106,13 @@ export interface DialOptions {
   nat64?: string
   /** 并发竞速拨号 */
   concurrent?: boolean
+  /**
+   * 代理调度模式（见 `types.ts` 的 ProxyMode）。
+   *
+   * 决定「配了代理之后，出站流量按什么顺序尝试各条通道」。
+   * 默认 `only`（有代理只走代理，绝不静默改走直连）。
+   */
+  proxyMode?: ProxyMode
   /** 单次连接超时（ms） */
   timeoutMs?: number
   /**
@@ -596,45 +604,117 @@ export async function dial(options: DialOptions): Promise<DialResult> {
   // 若与直连竞速，直连一旦先成功就会静默绕过代理 ——
   // 出口 IP 与用户预期不符，且没有任何报错（最难察觉的一类故障）。
   //
-  // 语义约定：
-  //   有代理 → 只走代理；代理全失败 → 抛错（不静默改走直连）
-  //   无代理 → 走直连/优选候选
+  // 语义约定（`proxyMode` 决定，详见 types.ts 的 ProxyMode）：
+  //   only（默认）→ 有代理只走代理；代理全失败 → 试反代池 → 抛错（**绝不直连**）
+  //   global       → 代理优先 → 直连/优选 → 反代池
+  //   fallback     → 直连/优选优先 → 代理 → 反代池
+  //   smart        → 目标是 CF 网段时走代理（直连必败）；否则直连优先
   const groups = groupCandidates(candidates)
-  const { proxy: proxyCandidates, direct: directCandidates, fallback } = groups
+  const { landing, proxyIp, direct: directCandidates, fallback } = groups
+  const hasProxy = landing.length > 0 || proxyIp.length > 0
 
-  if (proxyCandidates.length > 0) {
-    const attempts = proxyCandidates.map(attemptOf)
-    try {
-      return await raceDial(attempts, concurrent)
-    } catch (err) {
-      // 代理全失败：直接抛错，不静默改走直连（出口必须符合用户预期）。
-      // 但**降权候选**（CF 网段的 ProxyIP 等）仍可一试 —— 它们本来就是用户配的。
-      if (fallback.length === 0) throw err
-      for (const candidate of fallback) {
-        try {
-          return await attemptOf(candidate)()
-        } catch {
-          /* 继续尝试下一个降权候选 */
-        }
+  // ----------------------------------------------------------------
+  // 三个「通道组」拨号器
+  // ----------------------------------------------------------------
+
+  /**
+   * 落地代理组（SOCKS5 / HTTP / HTTPS）：**顺序故障转移**。
+   *
+   * ## 为什么不用并发竞速
+   *
+   * 多个 SOCKS5 并发竞速会让**所有**代理服务器同时向目标站建连，
+   * 然后因为「已经有更好的候选」而被强行断开 ——
+   * 白白消耗代理服务器的连接数与配额（有些代理按并发连接计费）。
+   *
+   * 顺序故障转移只占用**一个**代理连接，失败才换下一个。
+   *
+   * 代价：第一个代理慢时会多等 —— 但代理握手本来就有超时兜底。
+   */
+  const dialLanding = async (): Promise<DialResult> => {
+    if (landing.length === 0) throw new Error('未配置落地代理')
+    let lastErr: unknown
+    for (const candidate of landing) {
+      try {
+        return await attemptOf(candidate)()
+      } catch (err) {
+        lastErr = err
+        // 继续试下一个落地代理
       }
-      throw err
     }
+    throw lastErr ?? new Error('落地代理全部失败')
   }
 
-  const attempts = directCandidates.map(attemptOf)
-  try {
-    return await raceDial(attempts, concurrent)
-  } catch (err) {
-    // 正常候选全失败 → 继续尝试剩余的反代入口
-    // （CF 网段场景：relayRest 是预解析时没进主竞速的那些；
-    //   其它场景：这里才第一次解析反代入口，正常路径零开销）
+  /**
+   * ProxyIP 组：**并发竞速**。
+   *
+   * ProxyIP 只要 TCP 连上就算成功（1 RTT），并发无害且更快。
+   * （落地代理是 2~3 RTT，两类混池会让 ProxyIP 永远赢 —— 见 CandidateGroups 注释。）
+   */
+  const dialProxyIp = async (): Promise<DialResult> => {
+    if (proxyIp.length === 0) throw new Error('未配置 ProxyIP')
+    return await raceDial(
+      proxyIp.map(attemptOf),
+      true
+    )
+  }
+
+  /**
+   * 「代理链」：落地代理优先，失败再试 ProxyIP。
+   *
+   * 顺序的理由：落地代理（SOCKS5/HTTP）是**真正的出口代理** ——
+   * 用户配它通常是为了指定出口 IP。
+   * 而 ProxyIP 本质是「固定的反代入口」（与 relayPool 同一类机制），
+   * 让它排在落地代理之后，就不会再出现
+   * 「配了 SOCKS5 却总是从 ProxyIP 出去」这种静默不符预期的行为。
+   */
+  const dialProxyChain = async (): Promise<DialResult> => {
+    let lastErr: unknown
+    if (landing.length > 0) {
+      try {
+        return await dialLanding()
+      } catch (err) {
+        lastErr = err
+      }
+    }
+    if (proxyIp.length > 0) {
+      try {
+        return await dialProxyIp()
+      } catch (err) {
+        lastErr = err
+      }
+    }
+    throw lastErr ?? new Error('没有可用的代理')
+  }
+
+  /**
+   * 直连 / 优选组：并发竞速。
+   *
+   * 命名加 `Group` 后缀是为了不和模块级的 `dialDirect(options)` 撞名 ——
+   * 后者是「连到某个 hostname:port」的底层实现。
+   */
+  const dialDirectGroup = async (): Promise<DialResult> => {
+    return await raceDial(
+      directCandidates.map(attemptOf),
+      concurrent
+    )
+  }
+
+  /**
+   * 反代池：分批尝试。
+   *
+   * （CF 网段场景：relayRest 是预解析时没进主竞速的那些；
+   *   其它场景：这里才第一次解析反代入口，正常路径零开销）
+   */
+  const dialRelay = async (): Promise<DialResult | null> => {
     let restRelay = relayRest
     if (restRelay.length === 0 && options.relayPool) {
       restRelay = await collectRelay([], { ...options.relayPool, deadline })
     }
-    const viaRelay = await tryRelayInBatches(restRelay, attemptOf, concurrent)
-    if (viaRelay) return viaRelay
-    if (fallback.length === 0) throw err
+    return await tryRelayInBatches(restRelay, attemptOf, concurrent)
+  }
+
+  /** 降权候选（CF 网段）：顺序尝试 */
+  const dialFallback = async (): Promise<DialResult | null> => {
     for (const candidate of fallback) {
       try {
         return await attemptOf(candidate)()
@@ -642,6 +722,94 @@ export async function dial(options: DialOptions): Promise<DialResult> {
         /* 继续尝试下一个降权候选 */
       }
     }
-    throw err
+    return null
+  }
+
+  // ----------------------------------------------------------------
+  // 按模式选路
+  // ----------------------------------------------------------------
+
+  // 没有代理：走直连 / 优选 → 反代池 → 降权候选（原有路径）
+  if (!hasProxy) {
+    try {
+      return await dialDirectGroup()
+    } catch (err) {
+      const viaRelay = await dialRelay()
+      if (viaRelay) return viaRelay
+      const viaFallback = await dialFallback()
+      if (viaFallback) return viaFallback
+      throw err
+    }
+  }
+
+  const mode: ProxyMode = options.proxyMode ?? 'only'
+
+  // 目标是 Cloudflare 网段 → 直连必然被拒（TCP Loop）→ 代理优先。
+  //
+  // 这也是 `smart` 模式的核心判断：CF 网段目标用直连是**确定失败**，
+  // 没有必要先白等一次超时。
+  const cfTarget = targetIsCfIp || resolvedAllCf
+
+  // ----------------------------------------------------------------
+  // only（默认）：有代理只走代理
+  // ----------------------------------------------------------------
+  //
+  // ⚠️ **绝不回退直连** —— 直连会暴露 Cloudflare 原生出口 IP，
+  // 与用户「配置代理是为了指定出口」的意图相悖（AGENTS.md §1.11）。
+  //
+  // 但**反代池可以试**：它同样是第三方出口（不是 CF 原生 IP），
+  // 而且是本项目默认就会用的通道 —— 代理全挂时用它兜底，
+  // 比整条请求失败要好。
+  if (mode === 'only') {
+    try {
+      return await dialProxyChain()
+    } catch (err) {
+      const viaRelay = await dialRelay()
+      if (viaRelay) return viaRelay
+      const viaFallback = await dialFallback()
+      if (viaFallback) return viaFallback
+      throw err
+    }
+  }
+
+  // ----------------------------------------------------------------
+  // global / smart(CF 目标)：代理优先
+  // ----------------------------------------------------------------
+  if (mode === 'global' || (mode === 'smart' && cfTarget)) {
+    try {
+      return await dialProxyChain()
+    } catch (proxyErr) {
+      // smart + CF 目标：直连必然被拒，不浪费一次超时
+      if (mode === 'global') {
+        try {
+          return await dialDirectGroup()
+        } catch {
+          /* 继续往下 */
+        }
+      }
+      const viaRelay = await dialRelay()
+      if (viaRelay) return viaRelay
+      const viaFallback = await dialFallback()
+      if (viaFallback) return viaFallback
+      throw proxyErr
+    }
+  }
+
+  // ----------------------------------------------------------------
+  // fallback / smart(非 CF 目标)：直连优先
+  // ----------------------------------------------------------------
+  try {
+    return await dialDirectGroup()
+  } catch (directErr) {
+    try {
+      return await dialProxyChain()
+    } catch {
+      /* 继续往下 */
+    }
+    const viaRelay = await dialRelay()
+    if (viaRelay) return viaRelay
+    const viaFallback = await dialFallback()
+    if (viaFallback) return viaFallback
+    throw directErr
   }
 }

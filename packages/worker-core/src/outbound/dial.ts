@@ -366,25 +366,84 @@ async function dialViaProxy(
   }
 }
 
-/** 并发竞速：多个候选同时拨号，取最先成功者 */
-async function raceDial(
-  attempts: Array<() => Promise<DialResult>>,
-  concurrent: boolean
-): Promise<DialResult> {
-  if (attempts.length === 0) throw new Error('没有可用的出站拨号方式')
-  if (attempts.length === 1 || !concurrent) {
-    let lastError: unknown = new Error('拨号失败')
-    for (const attempt of attempts) {
-      try {
-        return await attempt()
-      } catch (err) {
-        lastError = err
-      }
-    }
-    throw lastError
-  }
+/**
+ * 单次拨号竞速允许的**最大同时在飞连接数**。
+ *
+ * ## 依据：Workers 单请求同时出站 TCP 连接上限 = 6 条
+ *
+ * Cloudflare Workers 在**一个请求内**同时打开的出站 TCP 连接上限是 6 条。
+ * 超出上限的 `connect()` 会立刻失败 —— 这种失败**不代表候选本身不可用**，
+ * 它纯粹是平台硬约束：候选被白白浪费、`onFailure` 分级诊断里混进一堆假失败，
+ * 用户侧表现为偶发的「明明有可用候选却失败」。
+ *
+ * 收敛前的最坏情况是 1（目标直连）+ N（DoH 解析出的优选 IP）
+ * + 8（反代第一批，原先 `RELAY_BATCH_SIZE = 8`）= 10 条以上同时发起，
+ * 必然撞墙。现在所有竞速池共用一个窗口宽度，在飞数不会超过平台上限。
+ *
+ * ## 为什么恰好取 6、刻意不留「安全余量」
+ *
+ * 上限是**硬约束**，宽度只要 ≤ 6 就不会触发；真正的安全保证来自
+ * 「窗口宽度受限 + 候选全覆盖」的调度，而不是靠少试候选换余量。
+ * 取 4 之类的余量只会让每一批少试 2 个候选，而反代入口质量参差 ——
+ * 少试直接降低命中概率（实测：只试前 8 个成功率 40%，
+ * 分批覆盖全部候选可达 90%+）。所以 6 就是刻意贴着上限取的。
+ *
+ * ## 为什么不用信号量把全部候选串行化
+ *
+ * 串行化同样不会超限，但会**牺牲失败转移速度**：每个候选要等满一次
+ * 连接超时才轮到下一个，8 个坏候选 × 8s 超时 = 64s，客户端早就断开了。
+ * 窗口化（批内并发竞速、批间串行）在「不超限」与「快速失败转移」之间取平衡，
+ * 而平台上限本来就是硬约束，没必要退化到一次只连一个。
+ *
+ * 导出仅为便于测试与上层复用；**不要在下层代码里另定义一份**（会漂移）。
+ */
+export const MAX_SIMULTANEOUS_CONNECTS = 6
 
-  return await new Promise<DialResult>((resolve, reject) => {
+/**
+ * 单条错误信息里最多展开多少条失败原因。
+ *
+ * 失败证据不能丢（会进 `/__diag`），但也不能无限膨胀 ——
+ * 候选再多，诊断里保留**最后若干条 + 总数**就够了。
+ */
+const MAX_ERRORS_IN_MESSAGE = 8
+
+/** 把未知异常转成可读文案（失败原因最终要进诊断，不能是 "[object Object]"） */
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message
+  return typeof err === 'string' ? err : String(err)
+}
+
+/**
+ * 汇总一组失败原因：保留**最后若干条 + 总数**。
+ *
+ * 不做成「只留第一条」：竞速里第一条失败通常是最不具代表性的
+ * （比如降权候选先失败），最后一条才最接近真实原因。
+ */
+function summarizeErrors(errors: readonly unknown[]): string {
+  if (errors.length === 0) return '未知原因'
+  const messages = errors.map(errorMessage)
+  const tail = messages.slice(-MAX_ERRORS_IN_MESSAGE)
+  const omitted = messages.length - tail.length
+  const prefix = omitted > 0 ? `（共 ${messages.length} 条，省略前 ${omitted} 条）` : ''
+  return `${prefix}${tail.join('；')}`
+}
+
+/**
+ * 一批候选的并发竞速：第一个成功者胜出。
+ *
+ * 与旧实现的唯一差别是作用域 —— 旧实现一次性把**全部**候选扔进竞速池，
+ * 这里只处理「一个窗口」内的候选，由 `raceDial` 决定何时开下一批。
+ *
+ * 语义保持不变：
+ *   - 有人成功 → 立刻 resolve，不等同批其它候选；
+ *   - **迟到的成功结果要 close 掉**，否则会泄漏一条已建立的 TCP 连接
+ *     （Workers 的 `writable.close()` 等于关闭整个连接，这里正是需要的）；
+ *   - 整批失败才 reject，并带上每一批的失败原因。
+ */
+function raceBatch(attempts: ReadonlyArray<() => Promise<DialResult>>): Promise<DialResult> {
+  if (attempts.length === 0) return Promise.reject(new Error('没有可用的出站拨号方式'))
+
+  return new Promise<DialResult>((resolve, reject) => {
     let pending = attempts.length
     let settled = false
     const errors: unknown[] = []
@@ -393,10 +452,11 @@ async function raceDial(
       attempt().then(
         (result) => {
           if (settled) {
+            // 本批已经有别的候选赢了：关掉这条多余连接
             try {
               result.writable.getWriter().close()
             } catch {
-              /* 忽略 */
+              /* 忽略：已关闭或 writable 已被锁定 */
             }
             return
           }
@@ -408,12 +468,82 @@ async function raceDial(
           pending -= 1
           if (pending === 0 && !settled) {
             settled = true
-            reject(errors[0] ?? new Error('拨号失败'))
+            reject(
+              new Error(`本批 ${attempts.length} 个候选全部失败：${summarizeErrors(errors)}`)
+            )
           }
         }
       )
     }
   })
+}
+
+/**
+ * 并发竞速：多个候选按**窗口**分批拨号，取最先成功者。
+ *
+ * ## 窗口语义（不是截断候选）
+ *
+ * `concurrent` 为 true 且候选多于一个时，按 `MAX_SIMULTANEOUS_CONNECTS`
+ * 分批发起：**一批全部失败后**才发下一批；任一批有人成功就立刻返回。
+ *
+ * ⚠️ 语义上**所有候选都会被尝试**，只是同时在飞的宽度受限。
+ * 绝不能改成「只取前 6 个」—— 那会直接丢掉候选与失败证据：
+ * 反代入口质量参差（同一域名下有的通有的不通），少试几个候选
+ * 会让命中概率从 90%+ 掉到 40%，而且诊断里看不到后面的候选为什么没试。
+ *
+ * ⚠️ `concurrent === false` 或只有一个候选时**保持原有顺序语义**，
+ * 不做窗口化 —— 顺序模式本来就是「一次一个」，
+ * 再套窗口只会改变既有行为而没有任何收益。
+ *
+ * ## 全部失败时的错误
+ *
+ * 聚合**每一批**的失败原因（至少保留最后一条 + 总数），
+ * 不能只丢一个空错误：这个错误会进 `/__diag` 与 close reason，
+ * 是排查「为什么连不上」的唯一线索。
+ */
+async function raceDial(
+  attempts: Array<() => Promise<DialResult>>,
+  concurrent: boolean
+): Promise<DialResult> {
+  if (attempts.length === 0) throw new Error('没有可用的出站拨号方式')
+
+  // 顺序故障转移：保持原行为不变（concurrent=false 或只有一个候选）
+  if (!concurrent || attempts.length <= 1) {
+    let lastError: unknown = new Error('拨号失败')
+    for (const attempt of attempts) {
+      try {
+        return await attempt()
+      } catch (err) {
+        lastError = err
+      }
+    }
+    throw lastError
+  }
+
+  /** 每一批的失败摘要（全部批次失败时聚合，诊断不丢） */
+  const batchFailures: string[] = []
+  let lastError: unknown = new Error('拨号失败')
+
+  // 窗口化：一批全失败才发下一批，任一批成功立刻返回
+  for (let start = 0; start < attempts.length; start += MAX_SIMULTANEOUS_CONNECTS) {
+    const batch = attempts.slice(start, start + MAX_SIMULTANEOUS_CONNECTS)
+    try {
+      return await raceBatch(batch)
+    } catch (err) {
+      lastError = err
+      batchFailures.push(errorMessage(err))
+      // 本批全失败 → 继续下一批（**不丢候选**）
+    }
+  }
+
+  const error = new Error(
+    `全部 ${attempts.length} 个候选均失败（分 ${batchFailures.length} 批，` +
+      `每批最多 ${MAX_SIMULTANEOUS_CONNECTS} 个并发）：\n` +
+      batchFailures.join('\n'),
+    // 保留最后一次的原始异常作为 cause，方便上层按错误类型做判断
+    { cause: lastError }
+  )
+  throw error
 }
 
 /**

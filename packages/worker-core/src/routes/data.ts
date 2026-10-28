@@ -17,7 +17,6 @@ import { handleEdgeProbe } from '../probe'
 import { handleWebSocket } from '../protocols/websocket-self'
 import { handleXhttp } from '../protocols/xhttp'
 import { parseProxyPool, type ProxyEndpoint } from '../outbound/proxy-pool'
-import { jsonError } from '../ui/neutral'
 import { VERSION_PATH, versionResponse, BUILD_VERSION } from '../version'
 import { loadDataPlaneConfig } from './control'
 
@@ -32,6 +31,26 @@ export function collectProxies(config: UserConfig): ProxyEndpoint[] {
   // （代理服务器本身走 TLS，需 connect({secureTransport:'on'})）。
   proxies.push(...parseProxyPool(config.httpProxy, 'http'))
   return proxies
+}
+
+/**
+ * 校验 `/__diag` 的访问令牌。
+ *
+ * 允许两种形式：完整 UUID，或 UUID 前 8 位（用户在面板 / 工单里通常只贴短令牌）。
+ * 也接受 `x-cfpilot-token` 请求头 —— 便于脚本调用时不把凭据留在 URL 里。
+ *
+ * ⚠️ 未配置 UUID 时一律拒绝（fail-closed）：一个还没配好的部署
+ * 绝不能因为「uuid 为空」而把诊断内容公开给所有人。
+ */
+function diagAuthorized(request: Request, url: URL, uuid: string): boolean {
+  if (!uuid) return false
+  const token = (
+    url.searchParams.get('token') ??
+    request.headers.get('x-cfpilot-token') ??
+    ''
+  ).trim()
+  if (!token) return false
+  return token === uuid || token === uuid.slice(0, 8)
 }
 
 /**
@@ -65,32 +84,6 @@ export async function routeDataPlane(
     return versionResponse()
   }
 
-  // 出站诊断端点：自研数据面专有。
-  //
-  // 完整诊断装不进 WebSocket close frame（最多 123 字节），
-  // 超长还会被 Cloudflare 边缘**静默丢弃整个 close frame**（真机实测）。
-  // 所以另辟这个端点，让「为什么连不上」能被完整看到。
-  if (url.pathname === '/__diag') {
-    const { recentDiagnostics } = await import('../protocols/websocket-self')
-    const { recentXhttpDiagnostics } = await import('../protocols/xhttp')
-    return new Response(
-      JSON.stringify(
-        {
-          ok: true,
-          // 只有一套实现了（vendor 已于 移除），固定返回 self
-          impl: 'self',
-          // 版本号：排查「线上跑的到底是哪一版」时最直接的依据
-          build: BUILD_VERSION,
-          recent: recentDiagnostics(),
-          xhttp: recentXhttpDiagnostics(),
-        },
-        null,
-        2
-      ),
-      { status: 200, headers: { 'Content-Type': 'application/json; charset=utf-8' } }
-    )
-  }
-
   // 出口地区端点（社区约定的 `GET /region` 形式）。
   //
   // 报告当前请求落在哪个边缘机房、推断出哪个国家/地区，
@@ -122,25 +115,65 @@ export async function routeDataPlane(
   }
 
   const config = await loadDataPlaneConfig(env)
+
+  // 出站诊断端点：自研数据面专有。
+  //
+  // 完整诊断装不进 WebSocket close frame（最多 123 字节），
+  // 超长还会被 Cloudflare 边缘**静默丢弃整个 close frame**（真机实测）。
+  // 所以另辟这个端点，让「为什么连不上」能被完整看到。
+  //
+  // ## 为什么必须鉴权、且必须放在 loadDataPlaneConfig 之后
+  //
+  // 诊断内容包含**用户最近访问的目标域名与失败原因**（隐私数据），
+  // 以及 `impl` / `build`（内部实现与版本特征）。任何知道域名的人都能读
+  // 是不可接受的 —— 该校验需要 `config.uuid`，因此只能放在配置加载之后
+  // （`/region` 那种不碰 KV 的纯机房诊断才允许放在配置加载之前）。
+  if (url.pathname === '/__diag') {
+    if (!diagAuthorized(request, url, config.uuid)) return null
+    const { recentDiagnostics } = await import('../protocols/websocket-self')
+    const { recentXhttpDiagnostics } = await import('../protocols/xhttp')
+    return new Response(
+      JSON.stringify(
+        {
+          ok: true,
+          // 只有一套实现了（vendor 已于 移除），固定返回 self
+          impl: 'self',
+          // 版本号：排查「线上跑的到底是哪一版」时最直接的依据
+          build: BUILD_VERSION,
+          recent: recentDiagnostics(),
+          xhttp: recentXhttpDiagnostics(),
+        },
+        null,
+        2
+      ),
+      { status: 200, headers: { 'Content-Type': 'application/json; charset=utf-8' } }
+    )
+  }
+
   const upgrade = request.headers.get('Upgrade')?.toLowerCase()
 
   if (url.pathname === config.wsPath) {
     if (upgrade !== 'websocket') {
-      return jsonError('该路径需要 WebSocket 升级', 400)
+      // 绝不向外暴露协议报错：明文 JSON（「该路径需要 WebSocket 升级」）
+      // 是运行期最直接的代理指纹，爬虫一探就知道这里是代理入口。
+      // 返回 null → 外层用 neutralPage(200) 伪装成普通静态站。
+      return null
     }
     return await handleWebSocket(request, 'vless', config, collectProxies(config), ctx)
   }
 
   if (config.enableTrojan && url.pathname === config.trojanPath) {
     if (upgrade !== 'websocket') {
-      return jsonError('该路径需要 WebSocket 升级', 400)
+      // 同上：入站路径的非 WS 访问一律静默，不暴露任何协议信息。
+      return null
     }
     return await handleWebSocket(request, 'trojan', config, collectProxies(config), ctx)
   }
 
   if (config.enableXhttp && url.pathname === config.xhttpPath) {
     if (request.method !== 'POST') {
-      return jsonError('XHTTP 需要 POST 请求', 405)
+      // 同上：非 POST 访问静默化为普通静态站，别让 405 成为指纹。
+      return null
     }
     return await handleXhttp(request, config, collectProxies(config))
   }

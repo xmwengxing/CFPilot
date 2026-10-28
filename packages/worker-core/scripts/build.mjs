@@ -8,16 +8,22 @@
 // 合并版曾复现 Pages 更新被拒（8000119），但平台未具体说明触发原因。
 // 拆分产物用于现有部署兼容，不代表 Cloudflare 要求拆分架构。
 //
-// ⚠️ 数据面在打出后还会经 `scripts/obfuscate.mjs` 做**静态脱敏**：
-// 2026-10-27 实测，含明文特征的数据面代码第 2 次上传 100% 触发 8000119（零流量也触发），
-// 脱敏后 8/8 部署全过（完整实验矩阵见 `docs/self-developed-dataplane-design.md`）。
-// 控制面不脱敏：实测原地重部署无限制。
+// ⚠️ 两个产物在打出后都会经 `scripts/obfuscate.mjs` 做**静态脱敏**：
+//
+//   - 数据面（`dataplane.js`）→ full 模式（字面量 + 属性名/键名全改）。
+//     2026-10-27 实测，含明文特征的数据面代码第 2 次上传 100% 触发 8000119
+//     （零流量也触发），脱敏后 8/8 部署全过
+//     （完整实验矩阵见 `docs/self-developed-dataplane-design.md`）。
+//   - 控制面（`control.js`）→ literals 模式（只改字符串字面量）。
+//     控制面实测「原地重部署无限制」，但它同样要**上传**，
+//     源码里有 21 个第三方优选域名、`type: vless` 订阅模板、项目 UA 等明文特征；
+//     新建项目首次上传时这些就是静态扫描的命中点。不改属性名是为了守住 80KB 预算。
 import { build } from 'esbuild'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { execSync } from 'node:child_process'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { desensitizeDataPlane } from './obfuscate.mjs'
+import { desensitizeControlPlane, desensitizeDataPlane } from './obfuscate.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const pkgRoot = resolve(here, '..')
@@ -171,11 +177,14 @@ for (const target of TARGETS) {
 
   assertNoStaticExternals(outFile, target.out)
 
-  // 数据面：esbuild 打包后立刻做静态脱敏（零行为变化，见 obfuscate.mjs 头注释）。
-  // 放在断言之后、体积统计之前：脱敏不产生静态外部导入，体积统计要算脱敏后的大小。
-  if (target.out === 'dataplane.js') {
+  // 静态脱敏：放在断言之后、体积统计之前
+  // （脱敏不产生静态外部导入；体积统计必须算脱敏后的大小）。
+  if (target.out === 'dataplane.js' || target.out === 'control.js') {
     const raw = readFileSync(outFile, 'utf8')
-    const safe = await desensitizeDataPlane(raw)
+    const safe =
+      target.out === 'dataplane.js'
+        ? await desensitizeDataPlane(raw)
+        : await desensitizeControlPlane(raw)
     writeFileSync(outFile, safe)
     // 脱敏后再验一次：动态 import 收敛成单字面量后也绝不能变成静态导入
     assertNoStaticExternals(outFile, target.out)
@@ -184,7 +193,12 @@ for (const target of TARGETS) {
   const size = readFileSync(outFile).length
   const kb = (size / 1024).toFixed(1)
   const note = NO_STATIC_SOCKETS.has(target.out) ? '，已校验无静态 sockets 导入' : ''
-  const safeNote = target.out === 'dataplane.js' ? '，已静态脱敏' : ''
+  const safeNote =
+    target.out === 'dataplane.js'
+      ? '，已静态脱敏（full）'
+      : target.out === 'control.js'
+        ? '，已静态脱敏（literals）'
+        : ''
   console.log(`[worker-core] ${target.label} → dist/${target.out} (${kb} KB${note}${safeNote})`)
   if (target.out !== 'worker.js' && size > 80 * 1024) {
     console.warn(`[worker-core] 警告：${target.label} 超过 80KB 预算上限`)

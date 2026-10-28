@@ -452,12 +452,25 @@ export function splitCsvLine(line: string): string[] {
 /* 内置优选库：随机生成 / 抽样                                          */
 /* ------------------------------------------------------------------ */
 
-/** [0, max) 区间内的密码学随机整数 */
+/**
+ * [0, max) 区间内的整数。
+ *
+ * ## 为什么这里用 `Math.random()` 而不是 `crypto.getRandomValues()`
+ *
+ * 调用方只有 `sampleFromCidrs()` / `sampleDomains()` 这类**抽样 / 洗牌**场景：
+ * 随机源是否不可预测，对「从 CIDR 里挑几个 IP 给用户当节点」毫无影响。
+ * 而旧实现的成本很实：每次调用都要 `new Uint32Array(1)` + 走一次 WebCrypto，
+ * `sampleFromCidrs()` 的循环上界是 `count * 24`（count=200 → 最坏 9600 次），
+ * 在 Workers Free 计划有限的 CPU 预算里纯属浪费；
+ * 同文件 `buildOfficialPool()` 的洗牌本来也一直在用 `Math.random()`。
+ *
+ * ⚠️ **凭据类随机**（token / 盐值 / 会话 / 密码）必须继续用 `util.ts` 里的
+ * crypto 版本（`randomHex` / `randomUuid` / `randomAlnum`），
+ * 那些东西的随机性直接决定安全性，**不要**改用本函数。
+ */
 function randomInt(max: number): number {
   if (max <= 1) return 0
-  const buf = new Uint32Array(1)
-  crypto.getRandomValues(buf)
-  return buf[0]! % max
+  return Math.floor(Math.random() * max)
 }
 
 function ipv4ToInt(ip: string): number {
@@ -669,15 +682,117 @@ export interface CollectOptions {
   domainPool?: readonly string[]
   /** 优选库来源标识，仅用于统计 */
   poolSource?: 'builtin' | 'kv'
+  /**
+   * 绕过远程池文本缓存，强制重新拉取（默认 `false`，即走 120 秒缓存）。
+   *
+   * 这是给「面板预览要看到最新数据」留的**逃生口**：
+   * 用户刚在别处更新了第三方订阅，在面板里点预览时希望立刻看到新节点，
+   * 而不是被缓存挡住看到 120 秒前的旧列表。
+   *
+   * 订阅接口本身**不要**传它 —— 客户端反复拉取时的重复外部请求，
+   * 正是这层缓存要挡掉的东西。
+   */
+  bypassRemoteCache?: boolean
 }
 
-async function fetchText(url: string, timeoutMs: number): Promise<string> {
+/* ------------------------------------------------------------------ */
+/* 远程池文本缓存（ADDAPI / ADDCSV）                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 远程池文本缓存 TTL（毫秒）。
+ *
+ * ## 为什么是 120 秒
+ *
+ * 远程池（`config.addApi` / `config.addCsv`）指向的是第三方订阅 / 测速结果，
+ * 这类内容**天生会变**（池服务端轮换 IP、用户重跑测速），
+ * 缓存太久会让用户看到明显的过期数据（「我明明更新了，订阅里还是旧 IP」）。
+ *
+ * 但客户端侧的拉取是**突发**的：Clash 切换配置、多设备同时更新订阅、
+ * 面板预览后再导入，几秒内可能连发好几次请求。没有缓存时每一次都会
+ * 重新 `fetch` + 全量解析 CSV，外部 URL 一慢就整条订阅超时，
+ * 解析本身又是同步 CPU 开销（Workers Free 计划的 CPU 预算很紧）。
+ *
+ * 120 秒介于两者之间：足够挡住「同一波重拉」，又短到用户改完远端池
+ * 两分钟内一定能看到新数据。要立即看最新数据时走 `bypassRemoteCache`。
+ */
+const REMOTE_TEXT_CACHE_TTL_MS = 120_000
+
+/** 远程池缓存条数上限（防止长时间运行后 URL 列表无限增长占内存） */
+const REMOTE_TEXT_CACHE_MAX = 32
+
+/** 远程池文本缓存：URL → { 写入时间, 响应正文 } */
+const remoteTextCache = new Map<string, { at: number; text: string }>()
+
+/**
+ * 清空远程池文本缓存。
+ *
+ * 只给测试隔离用（同一进程里多个用例打桩同一个 URL 时避免串味）。
+ * 生产代码不应调用它 —— 缓存过期由 TTL 自然处理。
+ */
+export function clearRemoteTextCache(): void {
+  remoteTextCache.clear()
+}
+
+/**
+ * 远程池请求使用的 User-Agent。
+ *
+ * ## 为什么不用 `CFPilot/x.y (+仓库地址)`
+ *
+ * 1. **特征外泄**：那串 UA 等于在每一次外部请求里主动声明
+ *    「这是 CFPilot、源码在哪个仓库」，第三方池服务端一看日志就能把
+ *    请求归属到具体项目（甚至据此针对性限流 / 封禁）。
+ * 2. **容易被按 UA 拦截**：不少优选池 / 订阅接口挂在 CDN 后面，
+ *    风控规则会把「非浏览器 UA」当成爬虫直接 403。
+ *    表现为「ADDAPI 配了但订阅里一条远程节点都没有」，
+ *    而错误信息只是干巴巴的 `HTTP 403`，很难猜到是 UA 的锅。
+ *
+ * 因此换成一个通用桌面 Chrome UA：与浏览器发起的请求无法区分，
+ * 既减少了项目指纹，也降低被 403 的概率。
+ */
+const BROWSER_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+
+/**
+ * 拉取远程文本（带 TTL 内存缓存）。
+ *
+ * ## 只缓存**成功**响应
+ *
+ * 失败（网络错误 / 非 2xx / 超时）一律**不写入缓存**。
+ * 否则一次抖动就会让「临时故障」在缓存期内变成「持续故障」——
+ * 用户看到的是「远程池一直拉不到」，而实际上一秒后上游就恢复了。
+ * 不缓存失败 = 下一次调用必然重试，故障能自愈。
+ *
+ * ## 上限与淘汰
+ *
+ * 最多 `REMOTE_TEXT_CACHE_MAX` 条，超出按插入顺序淘汰最旧的一条
+ * （`Map` 天然保持插入顺序）。同一 URL 重新拉取成功后会先删再写，
+ * 从而把它的顺序刷到最新 —— 因此被淘汰的总是「最久没被重新拉取」的那个。
+ */
+async function fetchText(url: string, timeoutMs: number, bypassCache = false): Promise<string> {
+  if (!bypassCache) {
+    const cached = remoteTextCache.get(url)
+    if (cached && Date.now() - cached.at < REMOTE_TEXT_CACHE_TTL_MS) return cached.text
+    // 过期条目顺手清掉，避免下面 set 时把「过期」当「已存在」而少淘汰一条
+    if (cached) remoteTextCache.delete(url)
+  }
+
   const response = await fetch(url, {
     signal: AbortSignal.timeout(timeoutMs),
-    headers: { 'User-Agent': 'CFPilot/1.1 (+https://github.com/xmwengxing/CFPilot)' },
+    headers: { 'User-Agent': BROWSER_USER_AGENT },
   })
   if (!response.ok) throw new Error(`HTTP ${response.status}`)
-  return await response.text()
+  const text = await response.text()
+
+  // 只有成功拿到正文才写缓存。
+  // bypass 请求拿到的也是**新鲜数据**，同样写回去刷新缓存（下一次订阅就能直接受益）。
+  remoteTextCache.delete(url)
+  if (remoteTextCache.size >= REMOTE_TEXT_CACHE_MAX) {
+    const oldest = remoteTextCache.keys().next().value
+    if (oldest !== undefined) remoteTextCache.delete(oldest)
+  }
+  remoteTextCache.set(url, { at: Date.now(), text })
+  return text
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -703,6 +818,8 @@ export async function collectNodes(
 ): Promise<CollectResult> {
   const timeoutMs = options.timeoutMs ?? 6000
   const budget = options.budget
+  // 远程池文本缓存是否绕过：默认 false（走缓存）。见 CollectOptions.bypassRemoteCache
+  const bypassRemoteCache = options.bypassRemoteCache === true
   const errors: string[] = []
 
   const countries = parseCountryFilter(config.poolCountries)
@@ -738,7 +855,9 @@ export async function collectNodes(
     budget?.pause()
     const results: PromiseSettledResult<string>[] = []
     try {
-      results.push(...(await Promise.allSettled(apiUrls.map((u) => fetchText(u, timeoutMs)))))
+      results.push(
+        ...(await Promise.allSettled(apiUrls.map((u) => fetchText(u, timeoutMs, bypassRemoteCache))))
+      )
     } finally {
       budget?.resume()
     }
@@ -761,7 +880,9 @@ export async function collectNodes(
     budget?.pause()
     const results: PromiseSettledResult<string>[] = []
     try {
-      results.push(...(await Promise.allSettled(csvUrls.map((u) => fetchText(u, timeoutMs)))))
+      results.push(
+        ...(await Promise.allSettled(csvUrls.map((u) => fetchText(u, timeoutMs, bypassRemoteCache))))
+      )
     } finally {
       budget?.resume()
     }

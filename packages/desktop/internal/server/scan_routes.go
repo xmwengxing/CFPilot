@@ -142,6 +142,9 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 	s.scan.cancel = cancel
 	s.scan.mu.Unlock()
 
+	// 进度节流器（见 scan.ProgressThrottle）
+	throttle := scan.NewProgressThrottle()
+
 	opt := scan.Options{
 		Host:       host,
 		Port:       req.Port,
@@ -167,6 +170,16 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 		SpeedBytes:       req.SpeedBytes,
 		Top:              req.Top,
 		Progress: func(p scan.Progress) {
+			// ⚠️ **必须节流**。
+			//
+			// 三个阶段都是**逐候选**回调的，默认采样 6556 时
+			// 单次扫描会产生 7000+ 条日志（真机实测 15349 条 / 1 MB），
+			// 把运行日志窗口完全冲垮 —— 关键信息（阶段切换 / 结果）全被淹没。
+			//
+			// 节流后单次扫描约 150~200 条（见 scan.ProgressThrottle）。
+			if !throttle.ShouldReport(p) {
+				return
+			}
 			msg := p.Message
 			if p.Total > 0 {
 				msg = fmt.Sprintf("%s（%d/%d）", p.Message, p.Done, p.Total)

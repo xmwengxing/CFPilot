@@ -286,7 +286,7 @@ export function coloToCountry(colo: string | undefined | null): string {
 const BUILTIN_PER_DOMAIN = 4
 
 /**
- * 反代入口的**每批并发数**。
+ * 反代入口的**每批并发数**（= 一个并发窗口的宽度）。
  *
  * 反代入口的质量参差（同一域名下有的通有的不通），
  * 所以**不能只取少数几个** —— 实测：
@@ -297,14 +297,24 @@ const BUILTIN_PER_DOMAIN = 4
  * 下一批在前一批全失败时才发起。这样既覆盖全部入口，
  * 又不会一次性几十个连接同时打出去。
  *
- * ⚠️ **修正：批次大小受 Worker 子请求预算约束**。
- * `connect()` 与 `fetch()` 都计入单次调用 50 个子请求的上限（免费计划），
- * 32 个并发连接 + DoH 解析轻松超限（真机实测
- * `Too many subrequests by single Worker invocation`）。
- * 内置表现在只精选 3 个域名（见 RELAY_DOMAIN_LIMIT），
- * 批次降到 8 是给**用户自配大量入口**的场景兜底。
+ * ## ⚠️ 一批 = 一个并发窗口，**不能超过平台上限**
+ *
+ * Workers **单请求同时出站 TCP 连接上限是 6 条**。
+ * 这里的一批会被 `dial.ts` 直接放进同一个竞速池 —— 目标在 CF 网段时，
+ * 反代第一批还会通过 `relayAsPrimary` 与直连/优选候选同池竞速。
+ * 因此批次大小必须 ≤ 6：原先取 8 时，一批 8 条加上直连/优选候选
+ * 会同时发起 10 条以上，超出上限的连接立刻抛错 —— 候选被白白浪费，
+ * `onFailure` 分级诊断里混进假失败，用户侧表现为偶发
+ *「明明有可用候选却失败」（详见 `dial.ts` 的 `MAX_SIMULTANEOUS_CONNECTS`）。
+ *
+ * ⚠️ **不要再往上调大**：这是并发窗口宽度，不是「子请求预算的余量」。
+ * 子请求预算（免费计划 50 次/调用）由内置域名精选（`RELAY_DOMAIN_LIMIT`）
+ * 与跳过 TXT 控制，与这里是两个独立约束（连接数上限 6 条，子请求上限 50 次）。
+ *
+ * ⚠️ `collectRelayEndpoints` 的 fetch 并发**不**受这个常量约束 ——
+ * 那是 fetch 子请求，不占出站 TCP 连接名额，不要顺手把它一起调小。
  */
-export const RELAY_BATCH_SIZE = 8
+export const RELAY_BATCH_SIZE = 6
 
 /**
  * 默认选取的内置反代域名数。

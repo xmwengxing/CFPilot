@@ -8,7 +8,8 @@
  */
 import type { Env, UserConfig } from '../types'
 import type { Store } from '../store'
-import { LOCAL_IPS_KEY, ROUTE_PROFILE_KEY } from '../config'
+import { LOCAL_IPS_KEY, ROUTE_PROFILE_KEY, loadDomainLibrary } from '../config'
+import { CpuBudget } from '../budget'
 import type { RenderContext, SubFormat } from '../sub-engine'
 import { collectNodes, renderSubscription, resolveSubPorts, sanitizeSubName } from '../sub-engine'
 import { handleEdgeProbe } from '../probe'
@@ -54,7 +55,18 @@ async function handleSubscription(
     ? resolveFormat(explicit)
     : (resolveFormatByUserAgent(request.headers.get('User-Agent')) ?? resolveFormat(null))
   const localIps = (await store.get(LOCAL_IPS_KEY)) ?? ''
-  const collected = await collectNodes(config, localIps)
+  // 面板自定义域名库必须对订阅生效：此前只有面板预览（`/api/v1/nodes`）传了
+  // `domainPool`，订阅退回内置域名库 —— 用户在面板里配的自定义优选域名
+  // 在实际订阅里**完全不生效**，且没有任何提示。
+  const domainPool = await loadDomainLibrary(store)
+  // 预算建在 KV 读之后：墙钟近似会把 I/O 等待算成 CPU，建早了会在远程池
+  // 拉取期间假阳性报「CPU 预算不足」，订阅直接缺节点。
+  const budget = new CpuBudget(8)
+  const collected = await collectNodes(config, localIps, {
+    budget,
+    domainPool: domainPool.length > 0 ? domainPool : undefined,
+    bypassRemoteCache: false,
+  })
 
   // 分流规则：默认用**内核内置的 GEOSITE/GEOIP 规则**（零外部依赖、零下载）。
   //
@@ -97,6 +109,22 @@ async function handleSubscription(
       'Subscription-Userinfo': '',
     },
   })
+}
+
+/** 常见静态资源扩展名 —— 面板路径永远不带扩展名 */
+const STATIC_ASSET = /\.(?:ico|png|jpe?g|gif|svg|webp|avif|css|js|mjs|map|txt|xml|json|webmanifest|woff2?|ttf|eot)$/i
+
+/**
+ * 本地粗判「这条路径有没有可能是面板页」。
+ *
+ * 只做**黑名单**：`/`、带文件扩展名的静态资源（`/favicon.ico`、`/robots.txt`、
+ * `/xxx.js` 等）一定不是面板页。绝不能反过来写成「必须以 PANEL_PATH 开头」的
+ * 白名单 —— `PANEL_PATH` 可由用户自定义，白名单一旦与实际配置不一致
+ * 就会把面板本身打成 404。
+ */
+function mayBePanelPage(pathname: string): boolean {
+  if (pathname === '/' || pathname === '') return false
+  return !STATIC_ASSET.test(pathname)
 }
 
 /**
@@ -144,6 +172,11 @@ export async function routeControlPlane(
   if (url.pathname === '/sub' || url.pathname.startsWith('/sub/')) {
     return await handleSubscription(request, url, store, env)
   }
+
+  // 明显不像面板页的路径直接放弃，**不调用 getAuth**：
+  // `getAuth` 会读 KV（首次引导还会写），而 `/`、`/favicon.ico`、`/robots.txt`
+  // 以及各种爬虫探测路径都会打到这里，无谓消耗 KV 读配额与 CPU。
+  if (!mayBePanelPage(url.pathname)) return null
 
   // 面板页面
   const auth = await getAuth(store, env)

@@ -496,6 +496,18 @@ func forEachIPAdaptive[In any, Out any](
 	current := maxConcurrency
 
 	out := make([]Out, 0, len(items))
+	// ⚠️ **进度计数必须跨批次累计**。
+	//
+	// forEachIP 内部的计数器是**每批从 1 开始**的。
+	// 直接透传的话，界面上的进度会变成：
+	//
+	//     1/600 … 200/600   1/600 … 200/600   1/600 … 200/600
+	//
+	// 看起来就是「序号一直重置、永远到不了 600/600」。
+	// （真机症状：阶段一之二 显示到 120/600 又回到 1/600 狂刷。）
+	//
+	// 所以这里给每批的进度加上**已完成批次的偏移**。
+	offset := 0
 	for start := 0; start < len(items); start += batchSize {
 		end := start + batchSize
 		if end > len(items) {
@@ -503,8 +515,13 @@ func forEachIPAdaptive[In any, Out any](
 		}
 		batch := items[start:end]
 
-		results := forEachIP(ctx, batch, current, fn, onProgress, nil)
+		results := forEachIP(ctx, batch, current, fn, func(done int) {
+			if onProgress != nil {
+				onProgress(offset + done)
+			}
+		}, nil)
 		out = append(out, results...)
+		offset += len(batch)
 
 		// 评估本批成功率
 		okCount := 0

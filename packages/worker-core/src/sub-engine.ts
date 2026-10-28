@@ -1100,13 +1100,77 @@ export function resolveSubPorts(config: UserConfig): number[] {
  * 客户端导入订阅后自动填入的名字取自 `Content-Disposition` 的 filename
  * （Clash Verge 实测如此），因此这里不能带引号 / 反斜杠 / 换行，
  * 也不要带扩展名（否则名称变成"CFPilot.yaml"）。
+ *
+ * ## 为什么还要去掉 `/ | : ; & ? # %`（2026-10-28 用户报障）
+ *
+ * 用户反馈加订阅后卡片名显示成 `\"CFPilot\` —— 带引号与斜杠。
+ * 根因是 `Content-Disposition` 里 `filename="..."` 的**引号被客户端原样保留**，
+ * 而名称里若再含 `/`、`|` 这类字符，有的客户端会把它当路径/分隔符二次截断。
+ * 所以：
+ *   1. 名称里**不允许**出现任何 URL / 路径 / 响应头分隔符；
+ *   2. 下发时能不用引号就不用（见 `subDisposition`），只有含空格等字符才引号包裹。
  */
 export function sanitizeSubName(name: string): string {
   const cleaned = String(name || '')
-    .replace(/["\\\r\n]/g, '')
+    // 响应头 / URL / 路径分隔符与转义符一律剔除
+    .replace(/["'`\\\r\n\t/|;:&?#%]/g, '')
+    // 其它控制字符
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    // 连续空白压成一个
+    .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 64)
+    .trim()
   return cleaned || 'CFPilot'
+}
+
+/** HTTP `token` 允许的字符集（RFC 7230）。命中就不需要引号包裹 */
+const HTTP_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
+
+/**
+ * 生成 `Content-Disposition` 的 filename 部分。
+ *
+ * 三种客户端行为都要兼容：
+ *   1. 只认 `filename=` 且**不去引号**（用户实测的那种）：名称是纯 ASCII token 时不加引号；
+ *   2. 认 `filename=` 且会去引号：加不加都对；
+ *   3. 认 `filename*=UTF-8''`：额外提供一份百分号编码，中文名也能正确落名。
+ *
+ * ⚠️ HTTP 头只允许 ASCII：`filename=` 里绝不能出现中文，
+ * 否则 Workers 可能直接拒绝这个响应头、客户端也会拿到乱码。
+ * 所以非 ASCII 名称在 `filename=` 里退回一个 ASCII 兜底，真名交给 `filename*=`。
+ */
+export function subContentDisposition(name: string): string {
+  const safe = sanitizeSubName(name)
+  // eslint-disable-next-line no-control-regex
+  const hasNonAscii = /[^\u0020-\u007e]/.test(safe)
+  const ascii = hasNonAscii ? safe.replace(/[^\u0020-\u007e]/g, '').trim() || 'CFPilot' : safe
+  const plain = HTTP_TOKEN.test(ascii) ? ascii : `"${ascii.replace(/["\\]/g, '')}"`
+  return `inline; filename=${plain}; filename*=UTF-8''${rfc5987Encode(safe)}`
+}
+
+/** RFC 5987 百分号编码（仅保留 UTF-8 字节的 att-char） */
+export function rfc5987Encode(text: string): string {
+  return encodeURIComponent(text).replace(
+    /['()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`
+  )
+}
+
+/**
+ * `Profile-Title` 头：非 ASCII 时按 RFC 2047 Base64 编码。
+ *
+ * 纯 ASCII 直接原样下发（绝大多数客户端读得懂），
+ * 含中文时客户端若不按 RFC 2047 解码就会显示乱码 —— 编码后反而更普遍兼容。
+ */
+export function subProfileTitle(name: string): string {
+  const safe = sanitizeSubName(name)
+  // eslint-disable-next-line no-control-regex
+  if (!/[^\u0020-\u007e]/.test(safe)) return safe
+  const bytes = new TextEncoder().encode(safe)
+  let binary = ''
+  for (const b of bytes) binary += String.fromCharCode(b)
+  return `=?UTF-8?B?${btoa(binary)}?=`
 }
 
 /**

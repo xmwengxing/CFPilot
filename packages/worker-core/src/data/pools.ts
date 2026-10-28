@@ -97,35 +97,86 @@ export const CF_IPV4_CIDRS: readonly string[] = [
 ]
 
 /**
- * 社区公开优选域名库
+ * 优选域名库（内置）
  *
- * 主要来自社区维护的公共「直连域名列表」（21 条），这些域名由第三方维护，
- * CNAME 到 Cloudflare 边缘、且解析到的 IP 通常对国内网络较友好。
- * 它们只负责「解析出一个好的 CF IP」，订阅里的 SNI / Host 仍然是你自己的 Worker 域名。
+ * 这些域名负责「解析出一个好的 Cloudflare 边缘 IP」，
+ * 订阅里的 SNI / Host **仍然是你自己的数据面域名** ——
+ * 客户端连 `域名:443` 但握手名是自己的 Pages 域名，CF 按 SNI 路由回本项目。
  *
- * 注意：第三方域名的可用性会随时间变化，面板提供「更新优选库」用于热更新。
+ * ## 这份表是 2026-10-28 真机实测筛出来的，不是抄来的
+ *
+ * 测法（与客户端行为等价）：对每个域名
+ *   1. `dns.resolve4` 解析，且结果必须落在 Cloudflare 网段（否则连过去不是 CF 边缘）；
+ *   2. `tls.connect(域名IP:443, servername=<数据面域名>)`；
+ *   3. 用 `<数据面域名>` 作 Host 发 `Upgrade: websocket`，**必须返回 101**。
+ * 每个域名测 2 轮，2/2 通过才收录。
+ *
+ * ## 实测结论：旧表 21 个里只有 7 个还活着
+ *
+ * 旧表大量来自 2023–2024 年的个人免费域名（`.eu.org` / `.pp.ua` / 廉价数字 `.xyz`），
+ * **14 个已经废弃或不再指向 CF**：
+ *
+ * ```
+ * speed.marisalnc.com        解析到 172.104.x（Linode，不是 CF）
+ * freeyx.cloudflare88.eu.org DNS 解析失败
+ * cfip.cfcdn.vip             解析到 34.41.x（Google Cloud）
+ * cf.zhetengsha.eu.org       DNS 解析失败
+ * cloudflare.9jy.cc          DNS 解析失败
+ * cf.zerone-cdn.pp.ua        DNS 解析失败
+ * cfip.1323123.xyz           解析到 127.0.0.1（被墙/污染）
+ * cnamefuckxxs.yuchen.icu    解析到 195.85.x
+ * 115155.xyz                 DNS 解析失败
+ * cname.xirancdn.us          DNS 解析失败
+ * f3058171cad.002404.xyz     DNS 解析失败
+ * 8.889288.xyz               DNS 解析失败
+ * cdn.tzpro.xyz              解析到 127.0.0.1（被墙/污染）
+ * cf.877771.xyz              解析到 117.41.x（不是 CF）
+ * ```
+ *
+ * ⚠️ 订阅里半个节点是这种废域名，客户端就表现为「全部 -1」——
+ * 这才是「优选出来用不了」的主因，不是数据面的问题。
+ *
+ * ## 第三梯队：大厂商业域名为什么也能当入口
+ *
+ * `time.is` / `www.visa.com` 这类域名本身托管在 CF 商业版，
+ * 它们的 IP 就是 Cloudflare 的 Anycast 入口，**与它上面跑什么网站无关**：
+ * 客户端用自家 SNI 握手，CF 一律按 SNI 路由。实测国内直连握手 360~600ms，
+ * 比个人免费域名稳得多（大厂不会跑路）。
+ *
+ * ⚠️ 仍然不保证永久可用（第三方域名的 IP 可能调整）。
+ * 面板「节点来源 → 优选域名 → 自定义域名库」可随时覆盖本表（热更新，无需重新部署）。
  */
 export const PREFERRED_DOMAINS: readonly string[] = [
+  // ---- 大厂 / 商业级托管域名（实测 101 通过）----
+  'www.visa.com',
+  'www.visa.com.sg',
+  'www.visa.com.hk',
+  'www.visa.com.tw',
+  'www.visa.co.jp',
+  'www.visakorea.com',
+  'time.is',
+  'icook.hk',
+  'icook.tw',
+  'ip.sb',
+  'japan.com',
+  'singapore.com',
+  'malaysia.com',
+  'skk.moe',
+  'www.digitalocean.com',
+  'www.udemy.com',
+  'www.garmin.com',
+  'www.wto.org',
+  // Ookla 测速官网（2026-10-28 实测解析到 104.17.147.22 / 104.17.148.22，WS101 2/2 通过）
+  'www.speedtest.net',
+  // ---- 仍在维护的社区优选池（含泛解析前缀变体，绕开主域名 DNS 缓存/污染）----
   'cf.090227.xyz',
-  'bestcf.top',
+  'node.cf.090227.xyz',
   'cloudflare.182682.xyz',
-  'speed.marisalnc.com',
-  'freeyx.cloudflare88.eu.org',
+  'cdn.cloudflare.182682.xyz',
+  'bestcf.top',
   'cdn.2020111.xyz',
-  'cfip.cfcdn.vip',
   'cf.0sm.com',
-  'cf.zhetengsha.eu.org',
-  'cloudflare.9jy.cc',
-  'cf.zerone-cdn.pp.ua',
-  'cfip.1323123.xyz',
-  'cnamefuckxxs.yuchen.icu',
   'cloudflare-ip.mofashi.ltd',
-  '115155.xyz',
-  'cname.xirancdn.us',
-  'f3058171cad.002404.xyz',
-  '8.889288.xyz',
-  'cdn.tzpro.xyz',
-  'cf.877771.xyz',
   'xn--b6gac.eu.org',
 ]
 

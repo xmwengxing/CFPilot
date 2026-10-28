@@ -11,7 +11,13 @@ import type { Store } from '../store'
 import { LOCAL_IPS_KEY, ROUTE_PROFILE_KEY, loadDomainLibrary } from '../config'
 import { CpuBudget } from '../budget'
 import type { RenderContext, SubFormat } from '../sub-engine'
-import { collectNodes, renderSubscription, resolveSubPorts, sanitizeSubName } from '../sub-engine'
+import {
+  collectNodes,
+  renderSubscription,
+  resolveSubPorts,
+  subContentDisposition,
+  subProfileTitle,
+} from '../sub-engine'
 import { handleEdgeProbe } from '../probe'
 import { getPanelHtml } from '../ui/panel'
 import { jsonError } from '../ui/neutral'
@@ -103,10 +109,14 @@ async function handleSubscription(
     headers: {
       'Content-Type': rendered.contentType,
       'Cache-Control': 'no-store',
-      'Content-Disposition': `inline; filename="${rendered.fileName}"`,
-      // 部分客户端（如 Shadowrocket）优先读 Profile-Title 作为订阅名
-      'Profile-Title': sanitizeSubName(config.subName),
-      'Subscription-Userinfo': '',
+      // 订阅名下发（2026-10-28 用户报「卡片名带引号和斜杠」后重做）：
+      //   filename=      纯 ASCII token 时**不加引号** —— 有的客户端会把引号原样当成名字
+      //   filename*=     额外给一份 RFC 5987 编码，中文名也能正确落名
+      //   Profile-Title  Clash / mihomo 读它做卡片标题，非 ASCII 时按 RFC 2047 编码
+      'Content-Disposition': subContentDisposition(config.subName),
+      'Profile-Title': subProfileTitle(config.subName),
+      // 客户端靠它算剩余流量/到期；空值会让部分客户端弹出解析警告，明确给 0 更干净
+      'Subscription-Userinfo': 'upload=0; download=0; total=0; expire=0',
     },
   })
 }

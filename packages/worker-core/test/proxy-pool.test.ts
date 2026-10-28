@@ -82,6 +82,7 @@ describe('数据面出站池汇总（逻辑与 routes/data.ts 的 collectProxies
     proxyIp: '',
     socks5: '',
     httpProxy: '',
+    proxyMode: 'only',
     nat64: '',
     concurrentDial: true,
     resolvePreferred: true,

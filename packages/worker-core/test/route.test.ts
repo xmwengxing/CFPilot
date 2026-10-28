@@ -227,17 +227,18 @@ describe('候选分组（代理与直连必须互斥）', () => {
       optimizedIps: [{ ip: '9.9.9.9', port: 443 }],
     })
     const groups = groupCandidates(list)
-    expect(groups.proxy).toHaveLength(1)
-    expect(groups.proxy[0]!.via?.kind).toBe('socks5')
-    // 直连与优选都在 direct 组，**不在** proxy 组
+    expect(groups.landing).toHaveLength(1)
+    expect(groups.landing[0]!.via?.kind).toBe('socks5')
+    // 直连与优选都在 direct 组，**不在** 代理组
     expect(groups.direct.map((c) => c.source)).toEqual(['direct', 'optimized'])
     expect(groups.direct.every((c) => c.source !== 'proxy')).toBe(true)
   })
 
-  it('无代理时 proxy 组为空', () => {
+  it('无代理时代理组为空', () => {
     const list = buildRouteCandidates(base)
     const groups = groupCandidates(list)
-    expect(groups.proxy).toHaveLength(0)
+    expect(groups.landing).toHaveLength(0)
+    expect(groups.proxyIp).toHaveLength(0)
     expect(groups.direct).toHaveLength(1)
   })
 
@@ -251,10 +252,10 @@ describe('候选分组（代理与直连必须互斥）', () => {
     expect(groups.fallback.length).toBeGreaterThan(0)
     expect(groups.fallback.every((c) => c.deprioritized)).toBe(true)
     expect(groups.direct.every((c) => !c.deprioritized)).toBe(true)
-    expect(groups.proxy.every((c) => !c.deprioritized)).toBe(true)
+    expect(groups.landing.every((c) => !c.deprioritized)).toBe(true)
   })
 
-  it('多个代理都在 proxy 组内（可竞速）', () => {
+  it('多个落地代理都在 landing 组内', () => {
     const list = buildRouteCandidates({
       ...base,
       proxies: [
@@ -264,8 +265,54 @@ describe('候选分组（代理与直连必须互斥）', () => {
       ],
     })
     const groups = groupCandidates(list)
-    expect(groups.proxy).toHaveLength(3)
-    expect(groups.proxy.map((c) => c.via?.kind)).toEqual(['socks5', 'http', 'https'])
+    expect(groups.landing).toHaveLength(3)
+    expect(groups.landing.map((c) => c.via?.kind)).toEqual(['socks5', 'http', 'https'])
+  })
+})
+
+describe('ProxyIP 与落地代理必须分开（2026-10-28 修）', () => {
+  const base = { targetHost: 'example.com', targetPort: 443 }
+
+  it('ProxyIP（kind=direct）与 SOCKS5 分到不同组', () => {
+    const list = buildRouteCandidates({
+      ...base,
+      proxies: [
+        { host: '1.2.3.4', port: 443, kind: 'direct' }, // ProxyIP
+        { host: 's1.example', port: 1080, kind: 'socks5' },
+      ],
+    })
+    const groups = groupCandidates(list)
+    expect(groups.proxyIp).toHaveLength(1)
+    expect(groups.proxyIp[0]!.via?.kind).toBe('direct')
+    expect(groups.landing).toHaveLength(1)
+    expect(groups.landing[0]!.via?.kind).toBe('socks5')
+  })
+
+  it('两者绝不混在同一组（否则 ProxyIP 的 1 RTT 必然赢过 SOCKS5 的 2~3 RTT）', () => {
+    const list = buildRouteCandidates({
+      ...base,
+      proxies: [
+        { host: '1.2.3.4', port: 443, kind: 'direct' },
+        { host: 's1.example', port: 1080, kind: 'socks5' },
+        { host: 'h1.example', port: 8080, kind: 'http' },
+      ],
+    })
+    const groups = groupCandidates(list)
+    // 每组内部互不重叠
+    const landingHosts = groups.landing.map((c) => c.host)
+    const proxyIpHosts = groups.proxyIp.map((c) => c.host)
+    expect(landingHosts.some((h) => proxyIpHosts.includes(h))).toBe(false)
+    expect(groups.landing.length + groups.proxyIp.length).toBe(3)
+  })
+
+  it('只有 ProxyIP 时它落在 proxyIp 组', () => {
+    const list = buildRouteCandidates({
+      ...base,
+      proxies: [{ host: '1.2.3.4', port: 443, kind: 'direct' }],
+    })
+    const groups = groupCandidates(list)
+    expect(groups.proxyIp).toHaveLength(1)
+    expect(groups.landing).toHaveLength(0)
   })
 })
 

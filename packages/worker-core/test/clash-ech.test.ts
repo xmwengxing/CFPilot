@@ -22,6 +22,7 @@ function makeConfig(over: Partial<UserConfig> = {}): UserConfig {
     trojanPath: '/trojan',
     xhttpPath: '/xhttp',
     add: '', addApi: '', addCsv: '',
+    proxyMode: 'only',
     poolOfficial: true, officialCount: 20, poolDomain: true, domainCount: 10,
     poolManual: false, poolCountries: '', dls: 0, maxLatency: 0, maxNodes: 0,
     proxyIp: '', socks5: '', httpProxy: '', nat64: '', concurrentDial: true,

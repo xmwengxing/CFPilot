@@ -313,7 +313,11 @@ export class CloudflareClient {
     // 404 = 键不存在，这是唯一可以安全当成「空」的情况
     if (response.status === 404) return null
     if (!response.ok) {
-      throw new Error(`读取 KV 失败（无法确认归属）：HTTP ${response.status}`)
+      const text = await response.text().catch(() => '')
+      // 保留 Cloudflare 的错误文案（如「Invalid API Token」），
+      // 但前缀统一加上「无法确认归属」—— 调用方据此拒绝放行。
+      const detail = parseApiError(response.status, text).message
+      throw new Error(`读取 KV 失败（无法确认归属）：${detail}`)
     }
     return await response.text()
   }

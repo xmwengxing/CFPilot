@@ -417,32 +417,77 @@ func (c *Client) CreateKVNamespace(ctx context.Context, accountID, title string)
 	return &out, nil
 }
 
-// GetKVValue 读 KV 值；不存在或失败时返回 ("", false)。
+// KVReadState 是 KV 读取的三态结果。
 //
-// 与 Electron 版语义一致：KV 读失败不作为致命错误，
-// 因为它只用于「部署前提示会覆盖配置」，不该阻塞部署。
-func (c *Client) GetKVValue(ctx context.Context, accountID, nsID, key string) (string, bool) {
+// ## 为什么要三态
+//
+// 「键不存在」与「读不到」必须区分：
+//
+//   - 键不存在（HTTP 404）→ 可以安全当成「空」
+//   - 读不到（403 / 500 / 网络异常）→ **不能**当成「空」
+//
+// 旧实现两者都返回 `("", false)`，于是 KV 归属判定在
+// 「KV 属于别的账号」「Token 没权限」「网络断了」时
+// 全部落到 `empty`（**不阻断**）→ 继续建项目、写 KV，
+// 产出孤儿 Pages 项目与半成品实例。
+//
+// ⚠️ 与 CLI 版 packages/cli/src/deploy/cf-api.ts 的 getKvValue 语义一致
+// （AGENTS.md §2.2：两端行为必须一致）。
+type KVReadState int
+
+const (
+	// KVFound：键存在。
+	KVFound KVReadState = iota
+	// KVNotFound：键不存在（HTTP 404）。
+	KVNotFound
+	// KVError：读取失败（403 / 500 / 网络异常 / 响应异常）。
+	KVError
+)
+
+// GetKVValueState 读 KV 值，区分「不存在」与「读取失败」。
+//
+// 返回的 error 只在 KVError 时非空，描述里保留 Cloudflare 原文。
+func (c *Client) GetKVValueState(ctx context.Context, accountID, nsID, key string) (string, KVReadState, error) {
 	p := fmt.Sprintf("/accounts/%s/storage/kv/namespaces/%s/values/%s",
 		accountID, nsID, url.PathEscape(key))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.apiBase+p, nil)
 	if err != nil {
-		return "", false
+		return "", KVError, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 
 	res, err := c.httpC.Do(req)
 	if err != nil {
-		return "", false
+		return "", KVError, err
 	}
 	defer func() { _ = res.Body.Close() }()
+
+	if res.StatusCode == http.StatusNotFound {
+		return "", KVNotFound, nil
+	}
 	if res.StatusCode != http.StatusOK {
-		return "", false
+		return "", KVError, fmt.Errorf("读取 KV 失败：HTTP %d", res.StatusCode)
 	}
 	raw, err := io.ReadAll(res.Body)
 	if err != nil {
+		return "", KVError, err
+	}
+	return string(raw), KVFound, nil
+}
+
+// GetKVValue 读 KV 值；不存在或失败时返回 ("", false)。
+//
+// ⚠️ 这是**宽松**版本：「不存在」与「读取失败」都当 false。
+//
+// 只适用于「读不到也无所谓」的场景（扫描时的可选探测）。
+// **需要区分两者的地方必须用 GetKVValueState** ——
+// 典型是 KV 归属判定（读不到时不可放行）。
+func (c *Client) GetKVValue(ctx context.Context, accountID, nsID, key string) (string, bool) {
+	raw, state, _ := c.GetKVValueState(ctx, accountID, nsID, key)
+	if state != KVFound {
 		return "", false
 	}
-	return string(raw), true
+	return raw, true
 }
 
 // SetKVValue 写 KV 值（text/plain）。

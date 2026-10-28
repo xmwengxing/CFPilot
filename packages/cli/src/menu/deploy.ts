@@ -6,7 +6,10 @@ import type { ParsedArgs } from '../shared/args'
 import { c, box, status } from './ui'
 import { ask, confirm, select } from './prompt'
 import { loadConfig, saveConfig, resolveToken } from './store'
+import type { Config } from './store'
 import { CloudflareClient } from '../deploy/cf-api'
+import type { CloudflareAccount } from '../deploy/cf-api'
+import { findAccountByKv } from '../deploy/account-resolve'
 import { checkTokenPermissions, renderTokenCheck } from '../deploy/token-check'
 
 /** 构造子命令参数对象（避免拼接字符串再解析）。 */
@@ -14,9 +17,72 @@ function makeArgs(flags: Record<string, string | boolean>): ParsedArgs {
   return { command: '', flags, positionals: [] }
 }
 
+/**
+ * 解析本次部署要用的账号。
+ *
+ * ⚠️ **绝不能静默用 accounts[0]**。
+ *
+ * KV 是**账号作用域**的：账号取自 A、KV 取自 B 时，
+ * 部署会在 A 里建出孤儿 Pages 项目、KV 绑定失败、配置写不进去
+ * → 半成品实例 + 一堆垃圾，用户完全不知道发生了什么。
+ *
+ * 顺序：
+ *   1. 配置里已有的账号（与 cfg.kvNamespaceId 出自同一次同步，同源）；
+ *   2. 配置里有 KV 但没有账号 → 按 **KV 的归属账号**反查（最准）；
+ *   3. 还没有就**列出让用户选**（交互式菜单，本就该问清楚）；
+ *   4. 只有一个账号就直接用它。
+ *
+ * @returns 账号 ID；用户取消或出错时返回空串（调用方应中止）。
+ */
+async function resolveAccountId(token: string, cfg: Config): Promise<string> {
+  if (cfg.accountId) return cfg.accountId
+
+  const client = new CloudflareClient({ token })
+  let accounts: CloudflareAccount[]
+  try {
+    accounts = await client.listAccounts()
+  } catch (err) {
+    status('fail', `读取账号列表失败：${err instanceof Error ? err.message : String(err)}`)
+    return ''
+  }
+  if (accounts.length === 0) {
+    status('fail', '该 Token 没有可访问的账号')
+    return ''
+  }
+
+  // 配置里有 KV 但没有账号 → KV 属于谁就用谁（比「问用户」更准）
+  if (cfg.kvNamespaceId) {
+    const { owner } = await findAccountByKv(client, accounts, cfg.kvNamespaceId)
+    if (owner) {
+      saveConfig({ accountId: owner.id, accountName: owner.name })
+      return owner.id
+    }
+    status('warn', `配置的 KV ${cfg.kvNamespaceId} 不在可见的账号下，将重新选择`)
+  }
+
+  if (accounts.length === 1) {
+    const only = accounts[0]!
+    saveConfig({ accountId: only.id, accountName: only.name })
+    return only.id
+  }
+
+  const picked = await select(
+    '检测到多个账号，请选择本次部署使用哪个',
+    accounts.map((a) => ({ label: a.name, value: a.id, hint: a.id.slice(0, 12) + '…' }))
+  )
+  if (!picked) {
+    status('info', '已取消')
+    return ''
+  }
+  const chosen = accounts.find((a) => a.id === picked)
+  if (!chosen) return ''
+  saveConfig({ accountId: chosen.id, accountName: chosen.name })
+  return chosen.id
+}
+
 /** 部署菜单（新建 / 更新）。 */
 export async function menuDeploy(mode: 'fresh' | 'update'): Promise<void> {
-  const cfg = loadConfig()
+  let cfg = loadConfig()
   const token = resolveToken()
   if (!token) {
     status('warn', '尚未配置 API Token')
@@ -24,8 +90,15 @@ export async function menuDeploy(mode: 'fresh' | 'update'): Promise<void> {
     return
   }
 
+  // ⚠️ **必须先确定账号**（见 resolveAccountId 的说明）。
+  // 部署命令在没拿到 --account 时会退回「token 的第一个账号」，
+  // 而 KV 来自本地配置 —— 两者可能分属不同账号。
+  const accountId = await resolveAccountId(token, cfg)
+  if (!accountId) return
+  cfg = loadConfig()
+
   box(mode === 'fresh' ? '部署新实例' : '更新现有实例', [
-    `${c.gray('账号')}  ${cfg.accountName || c.yellow('待检测')}`,
+    `${c.gray('账号')}  ${cfg.accountName || accountId}`,
     `${c.gray('KV')}    ${cfg.kvNamespaceId || c.gray('（自动）')}`,
     `${c.gray('模式')}  ${mode === 'fresh' ? '全新部署' : '更新现有'}`,
   ])
@@ -52,23 +125,12 @@ export async function menuDeploy(mode: 'fresh' | 'update'): Promise<void> {
     token,
     yes: true,
     mode: mode === 'fresh' ? 'fresh' : 'update',
+    // ⚠️ 账号与 KV 来自同一份配置 → 不会错配。
+    account: accountId,
   }
   if (mode === 'fresh') flags['new-kv'] = true
   if (panelPassword) flags['panel-password'] = panelPassword
   if (cfg.kvNamespaceId && mode === 'update') flags['kv'] = cfg.kvNamespaceId
-
-  // ⚠️ **必须把已配置的账号一起传过去**。
-  //
-  // 之前菜单从不传 `--account`，于是部署命令会退回「token 的第一个账号」——
-  // 而 KV 来自本地配置。两者可以**分属不同账号**：
-  //
-  //   账号取自 accounts[0]（A），KV 取自 cfg.kvNamespaceId（B）
-  //
-  // → 部署落到 A，却带着 B 的 KV ID → 在 A 里建出孤儿项目，
-  //   绑定 KV 失败、配置写不进去 → 半成品实例，用户完全不知道发生了什么。
-  //
-  // 传了 `--account` 后，账号与 KV 就来自同一份配置，不会错配。
-  if (cfg.accountId) flags['account'] = cfg.accountId
 
   const { runDeployCommand } = await import('../deploy/command')
   await runDeployCommand(makeArgs(flags))
@@ -90,7 +152,15 @@ export async function menuChangePassword(): Promise<void> {
   status('info', '正在读取实例信息…')
   try {
     const client = new CloudflareClient({ token })
-    const raw = await client.getKvValue(cfg.accountId, cfg.kvNamespaceId, 'CFP_DEPLOY_MANIFEST')
+    // ⚠️ getKvValue 只把 404（键不存在）当 null，其它错误（403 / 网络）会抛错。
+    // 「读不到」必须与「没有部署记录」区分开 —— 否则会误报「该 KV 里没有部署记录」。
+    let raw: string | null
+    try {
+      raw = await client.getKvValue(cfg.accountId, cfg.kvNamespaceId, 'CFP_DEPLOY_MANIFEST')
+    } catch (err) {
+      status('fail', `读取部署记录失败：${err instanceof Error ? err.message : String(err)}`)
+      return
+    }
     if (!raw) {
       status('fail', '该 KV 里没有部署记录')
       return

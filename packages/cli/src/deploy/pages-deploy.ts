@@ -197,23 +197,39 @@ export interface DeployManifest {
 }
 
 /**
- * 读取部署清单；不存在返回 null。
+ * 读取部署清单。
  *
- * 导出供 CLI / GUI 复用：靠它可以列出账号下有哪些 CFPilot 实例。
+ * ## 返回值语义
+ *
+ *   - `null`：**只有「键确实不存在」**（404）才返回 null
+ *   - 读取失败（403 / 500 / 网络异常）→ **抛错**
+ *   - 清单存在但 JSON 损坏 → **抛错**（同样是「无法确认归属」）
+ *
+ * ⚠️ 之前这里 `catch { return null }` 把「读不到」与「不存在」混为一谈：
+ * 于是归属判定在「Token 没权限」「网络断了」时会误判成「这个 KV 里没有清单」
+ * → verdict 落到 `empty`（**不阻断**）→ 继续建项目、写 KV。
+ *
+ * 「读不到 = 无法确认 = 不可放行」是硬约束（见 inspectKvOwnership）。
  */
 export async function readManifest(
   client: CloudflareClient,
   accountId: string,
   namespaceId: string
 ): Promise<DeployManifest | null> {
+  // getKvValue 只把 404（键不存在）当 null，其余错误一律抛出
+  const raw = await client.getKvValue(accountId, namespaceId, MANIFEST_KEY)
+  if (raw === null) return null
+  let parsed: unknown
   try {
-    const raw = await client.getKvValue(accountId, namespaceId, MANIFEST_KEY)
-    if (!raw) return null
-    const parsed = JSON.parse(raw) as DeployManifest
-    return parsed && parsed.v === 1 ? parsed : null
-  } catch {
-    return null
+    parsed = JSON.parse(raw)
+  } catch (err) {
+    throw new Error(
+      `读取 KV 失败（无法确认归属）：部署清单 ${MANIFEST_KEY} 不是合法 JSON` +
+        `（${err instanceof Error ? err.message : String(err)}）`
+    )
   }
+  const manifest = parsed as DeployManifest
+  return manifest && manifest.v === 1 ? manifest : null
 }
 
 /**
@@ -221,6 +237,10 @@ export async function readManifest(
  *
  * 用于「一个账号跑多个 CFPilot 实例」的场景：每个实例一个 KV，
  * 靠清单键识别归属，而不是靠命名空间标题猜测。
+ *
+ * ⚠️ 单个命名空间的清单读不出来（403 / 网络）时**跳过**它，
+ * 不让一个坏命名空间毁掉整个列表 —— 但这也意味着列表可能不完整，
+ * 调用方要能接受这一点。
  */
 export async function listCfPilotNamespaces(
   client: CloudflareClient,
@@ -229,7 +249,13 @@ export async function listCfPilotNamespaces(
   const namespaces = await client.listKvNamespaces(accountId)
   const out: Array<{ id: string; title: string; manifest: DeployManifest }> = []
   for (const ns of namespaces) {
-    const manifest = await readManifest(client, accountId, ns.id)
+    let manifest: DeployManifest | null = null
+    try {
+      manifest = await readManifest(client, accountId, ns.id)
+    } catch {
+      // 读不到 → 这个命名空间的状态未知，跳过（不假装它「不是本项目的实例」）
+      continue
+    }
     if (manifest) out.push({ id: ns.id, title: ns.title, manifest })
   }
   return out
@@ -285,6 +311,27 @@ export interface KvOwnershipInfo {
 }
 
 /**
+ * 「无法确认 KV 归属」时的判定结果。
+ *
+ * ⚠️ **不能落到 `empty`** —— 那等于「归属确认通过」，部署会继续建项目、写 KV。
+ *
+ * 归到 `occupied` 是因为它本来就是**阻断**语义（AGENTS.md §1.3 的五个分支里，
+ * `occupied` 与 `foreign` / `stale` 一样是「必须拒绝」的一类）。
+ * 这里**不新增第六个分支**：五个分支必须与两个 GUI 版本完全一致。
+ *
+ * detail 里带上原始原因（权限 / 网络 / 清单损坏），用户才知道该做什么。
+ */
+function unableToConfirm(err: unknown): KvOwnershipInfo {
+  const reason = err instanceof Error ? err.message : String(err)
+  return {
+    verdict: 'occupied',
+    manifest: null,
+    detail: `无法确认 KV 归属（${reason}）—— 请检查 Token 权限与网络后重试`,
+    blocking: true,
+  }
+}
+
+/**
  * 探测 KV 命名空间的归属。
  *
  * ## 为什么必须探测而不是靠字段值猜
@@ -303,27 +350,20 @@ export async function inspectKvOwnership(
 ): Promise<KvOwnershipInfo> {
   // ⚠️ **读不到 ≠ 不存在**。
   //
-  // `getKvValue` 现在只把 404（键不存在）当 null，其它错误（403 / 500 / 网络异常）
+  // `getKvValue` 只把 404（键不存在）当 null，其它错误（403 / 500 / 网络异常）
   // 一律抛出。读不到时**绝不能**落到 `empty` ——
   // 那等于「归属确认通过」，于是会去建项目、写 KV，
   // 产出孤儿 Pages 项目与半成品实例。
   //
   // 读不到时按 `occupied` 处理（**不可放行**），并在 detail 里说清原因。
+  //
+  // ⚠️ 五分支语义（AGENTS.md §1.3）保持不变：empty / owned / occupied /
+  // foreign / stale —— 与两个 GUI 版本完全一致，这里不新增第六个分支。
   let manifest: DeployManifest | null
-  let legacyConfig: string | null
-  let cfpilotConfig: string | null
   try {
     manifest = await readManifest(client, accountId, namespaceId)
-    legacyConfig = await client.getKvValue(accountId, namespaceId, 'config')
-    cfpilotConfig = await client.getKvValue(accountId, namespaceId, 'CONFIG')
   } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err)
-    return {
-      verdict: 'occupied',
-      manifest: null,
-      detail: `无法确认 KV 归属（${reason}）—— 请检查 Token 权限与网络后重试`,
-      blocking: true,
-    }
+    return unableToConfirm(err)
   }
 
   if (manifest) {
@@ -344,6 +384,12 @@ export async function inspectKvOwnership(
   }
 
   // 没有清单：看有没有别的产品留下的痕迹
+  let legacyConfig: string | null
+  try {
+    legacyConfig = await client.getKvValue(accountId, namespaceId, 'config')
+  } catch (err) {
+    return unableToConfirm(err)
+  }
   if (legacyConfig !== null) {
     return {
       verdict: 'foreign',
@@ -354,6 +400,12 @@ export async function inspectKvOwnership(
       // 理由见上方 KvOwnership 的注释（配额共享 / 语义污染 / 用户预期）。
       blocking: true,
     }
+  }
+  let cfpilotConfig: string | null
+  try {
+    cfpilotConfig = await client.getKvValue(accountId, namespaceId, 'CONFIG')
+  } catch (err) {
+    return unableToConfirm(err)
   }
   if (cfpilotConfig !== null) {
     return {
@@ -464,17 +516,36 @@ async function writeEffectiveConfig(
   log: (m: string) => void
 ): Promise<void> {
   // 读旧值，保留用户手动配置的字段（优选池 / 代理池 / 订阅域名等）
+  //
+  // ⚠️ **读失败时不能盲目覆盖**：旧值读不到（403 / 网络）就当成「空」，
+  // 写回去会把用户在面板里配的优选池、代理池、订阅域名全部抹掉。
+  //
+  // 读不到就**跳过写入**（凭据由部署时注入的环境变量兜底，
+  // 内核的优先级是 KV(CONFIG) > 环境变量 > 默认值），
+  // 并给出明确告警 —— 宁可少写一个键，也不能毁掉用户的配置。
   let existing: Record<string, unknown> = {}
+  let raw: string | null
   try {
-    const raw = await client.getKvValue(accountId, namespaceId, 'CONFIG')
-    if (raw) {
+    raw = await client.getKvValue(accountId, namespaceId, 'CONFIG')
+  } catch (err) {
+    warnings.push(
+      `读取既有 KV 配置失败：${err instanceof Error ? err.message : String(err)}\n` +
+        '  已跳过写入 CONFIG（避免覆盖你在面板里改过的优选池 / 代理池 / 订阅域名）。\n' +
+        '  内核会回退到环境变量（UUID / WS 路径 / Trojan 密码来自部署时注入的 env）。\n' +
+        '  → 请检查 Token 的 KV 读取权限与网络连通性后重试。'
+    )
+    return
+  }
+  if (raw) {
+    try {
       const parsed = JSON.parse(raw) as unknown
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         existing = parsed as Record<string, unknown>
       }
+    } catch {
+      // 旧值不是合法 JSON：按空处理（下面的写入会把坏数据换成好数据）
+      warnings.push('既有 KV 配置不是合法 JSON，已按空配置重写')
     }
-  } catch {
-    /* 旧值解析失败时按空处理，下面会写全凭据字段 */
   }
 
   const merged: Record<string, unknown> = {
@@ -721,7 +792,23 @@ export async function deployPagesSplit(
   const effectiveBuild = kernel.build || (options.localBuild ?? '').trim()
   /* ---------------- 0. 读部署清单，判断首次还是更新 ---------------- */
 
-  const manifest = await readManifest(client, options.accountId, options.kvNamespaceId)
+  // ⚠️ 读不到清单 = **无法确认这个 KV 里有没有既有部署**。
+  //
+  // 之前 `readManifest` 把错误吞掉返回 null，于是「读失败」被当成
+  // 「没有清单」→ 进入**首次部署**分支 → 生成新的 UUID / WS 路径，
+  // 把线上实例的凭据改掉（用户的订阅当场失效）。
+  //
+  // 现在读失败直接中止部署：宁可停下，也不能改坏别人的实例。
+  let manifest: DeployManifest | null
+  try {
+    manifest = await readManifest(client, options.accountId, options.kvNamespaceId)
+  } catch (err) {
+    throw new Error(
+      `读取 KV 部署清单失败，已中止部署：${err instanceof Error ? err.message : String(err)}\n` +
+        '  → 无法确认该 KV 里是否已有部署，继续部署可能改坏既有实例的凭据。\n' +
+        '  → 请检查 Token 的 KV 读取权限与网络连通性后重试。'
+    )
+  }
 
   // 生效的配置：更新部署且要求保留凭据时，用 KV 里的旧值；
   // 首次部署时对缺项生成随机值（调用方可以只传部分参数）。

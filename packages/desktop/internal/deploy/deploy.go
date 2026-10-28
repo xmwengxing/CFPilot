@@ -579,10 +579,33 @@ func (d *Deployer) inspectKvOwnership(ctx context.Context, manifest *Manifest, c
 	}
 
 	// 没有清单：探测别的产品留下的痕迹
-	if _, ok := d.client.GetKVValue(ctx, d.opt.AccountID, d.opt.KVNamespaceID, "config"); ok {
+	//
+	// ⚠️ **「读不到」不能当成「不存在」**。
+	//
+	// 旧实现用 `GetKVValue`（不存在与失败都返回 false），
+	// 于是「KV 属于别的账号」「Token 没权限」「网络断了」时
+	// 两个判据全为 false → 落到 `OwnEmpty`（**不阻断**）
+	// → 继续建项目、写 KV → 孤儿 Pages 项目 + 半成品实例。
+	//
+	// 现在用三态读取：读不到时按 `OwnOccupied` 处理（**不可放行**）。
+	// ⚠️ 五分支语义保持不变（不新增第六个分支）——
+	// 与 CLI 版 packages/cli/src/deploy/pages-deploy.ts 一致
+	// （AGENTS.md §1.3 / §2.2）。
+	legacyConfig, legacyState, legacyErr := d.client.GetKVValueState(ctx, d.opt.AccountID, d.opt.KVNamespaceID, "config")
+	if legacyState == cfapi.KVError {
+		return OwnOccupied, fmt.Sprintf("无法确认 KV 归属（读取 config 键失败：%v）—— 请检查 Token 权限与网络后重试", legacyErr)
+	}
+	if legacyState == cfapi.KVFound {
+		_ = legacyConfig
 		return OwnForeign, "含旧版第三方实现的 config 键，该命名空间正被其它项目使用"
 	}
-	if _, ok := d.client.GetKVValue(ctx, d.opt.AccountID, d.opt.KVNamespaceID, ConfigKey); ok {
+
+	cfpilotConfig, cfpilotState, cfpilotErr := d.client.GetKVValueState(ctx, d.opt.AccountID, d.opt.KVNamespaceID, ConfigKey)
+	if cfpilotState == cfapi.KVError {
+		return OwnOccupied, fmt.Sprintf("无法确认 KV 归属（读取 CONFIG 键失败：%v）—— 请检查 Token 权限与网络后重试", cfpilotErr)
+	}
+	if cfpilotState == cfapi.KVFound {
+		_ = cfpilotConfig
 		return OwnStale, "含 CFPilot 的 CONFIG 键但没有部署清单（残留配置，可能是清单被删或手工写入）"
 	}
 	return OwnEmpty, "空命名空间"

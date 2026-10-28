@@ -32,6 +32,18 @@
    */
   let autoCheckOnAbout: (() => void) | null = null
 
+  /**
+   * 切到「日志」页时自动加载一次日志。
+   *
+   * 为什么只在「还没加载过」时拉：用户可能正在读日志内容，
+   * 每次切页都重拉会把滚动位置顶回底部、把刚看到的内容冲掉。
+   * 想看最新内容点「刷新」即可。
+   *
+   * 与 autoCheckOnAbout 同样用「模块级可空引用」，
+   * 因为 loadLogs 定义在后面。
+   */
+  let autoLoadLogs: (() => void) | null = null
+
   function switchPage(name: string): void {
     document.querySelectorAll('#nav button').forEach((b) => {
       b.classList.toggle('active', (b as HTMLElement).dataset.page === name)
@@ -44,6 +56,10 @@
     // 说明页：自动查一次更新
     if (name === 'about' && autoCheckOnAbout) {
       autoCheckOnAbout()
+    }
+    // 日志页：第一次切进来时自动加载一次（已加载过就不重复拉）
+    if (name === 'logs' && autoLoadLogs) {
+      autoLoadLogs()
     }
   }
 
@@ -1179,6 +1195,188 @@
     })
   }
 
+  /* ------------------------------------------------------------------ */
+  /* 日志页                                                              */
+  /* ------------------------------------------------------------------ */
+
+  /** 日志是否已经成功加载过一次（切页时据此决定要不要自动拉） */
+  let logsLoaded = false
+
+  /** 已知的日志文件路径（「打开日志文件所在文件夹」要用） */
+  let logsFilePath = ''
+
+  /** 一键优选是否正在运行（防止重复点击） */
+  let quickScanRunning = false
+
+  /**
+   * 读取并渲染日志页的内容。
+   *
+   * @param tail 取文件末尾多少行（默认 500；后端上限 5000）
+   */
+  async function loadLogs(tail = 500): Promise<void> {
+    const view = document.getElementById('logsView')
+    const badge = document.getElementById('logsBadge')
+    if (!view) return
+
+    if (badge) {
+      badge.textContent = '加载中…'
+      badge.className = 'badge info'
+    }
+
+    try {
+      const result = await window.cfpilot.getLogs(tail)
+
+      // 后端失败时返回 { ok:false, error }；
+      // 适配层在某些错误形态下会直接抛异常，两条路都要处理。
+      if (!result || !result.ok) {
+        const msg = (result && result.error) || '未知错误'
+        if (badge) { badge.textContent = '读取失败'; badge.className = 'badge err' }
+        // 后端的错误文案本身常带「读取日志失败：」前缀，别叠两遍
+        view.textContent = msg.indexOf('读取日志失败') >= 0 ? msg : '读取日志失败：' + msg
+        log('读取日志失败：' + msg, 'err')
+        return
+      }
+
+      const lines = result.lines ?? []
+
+      // 日志里有 IP、路径、错误详情 —— 逐行转义后再插入，
+      // 绝不能把日志原文当 HTML 塞进页面。
+      view.innerHTML = lines.length > 0
+        ? lines.map((l) => escapeHtml(l)).join('\n')
+        : '（日志文件是空的）'
+
+      // 自动滚到底部：用户最关心的是最新几行
+      view.scrollTop = view.scrollHeight
+
+      logsLoaded = true
+      logsFilePath = result.path ?? ''
+
+      $text('logsPath').textContent = result.path || '—'
+      $text('logsSize').textContent =
+        result.sizeText || (typeof result.size === 'number' ? result.size + ' 字节' : '—')
+      const total = typeof result.total === 'number' ? result.total : lines.length
+      $text('logsTotal').textContent = total + ' 行'
+
+      if (badge) { badge.textContent = '已加载'; badge.className = 'badge ok' }
+
+      // 提示：只显示了尾部 / 有轮转出来的历史文件
+      const hints: string[] = []
+      if (result.truncated) {
+        hints.push('文件共 ' + total + ' 行，只显示最后 ' + lines.length + ' 行')
+      }
+      const rotated = result.rotated ?? []
+      if (rotated.length > 0) {
+        hints.push('历史日志（已轮转）：' + rotated.join('、'))
+      }
+      $text('logsHint').textContent =
+        hints.length > 0 ? hints.join('；') : '已是最新内容。'
+
+      // 知道路径了才能打开所在文件夹
+      const openBtn = document.getElementById('btnLogsOpenFolder') as HTMLButtonElement | null
+      if (openBtn) openBtn.disabled = !logsFilePath
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (badge) { badge.textContent = '读取失败'; badge.className = 'badge err' }
+      view.textContent = msg.indexOf('读取日志失败') >= 0 ? msg : '读取日志失败：' + msg
+      log('读取日志失败：' + msg, 'err')
+    }
+  }
+
+  /** 绑定日志页的按钮 */
+  function bindLogs(): void {
+    document.getElementById('btnLogsRefresh')!.addEventListener('click', async () => {
+      await loadLogs()
+    })
+
+    /**
+     * 打开日志文件所在文件夹。
+     *
+     * 走通用的「在文件管理器中定位文件」接口 ——
+     * 后端打开的是传入文件**所在的目录**，所以传日志文件本身即可。
+     */
+    document.getElementById('btnLogsOpenFolder')!.addEventListener('click', async () => {
+      if (!logsFilePath) {
+        log('还不知道日志文件路径，请先点「刷新」', 'warn')
+        return
+      }
+      try {
+        await window.cfpilot.revealFile(logsFilePath)
+        log('已在文件管理器中打开日志目录', 'ok')
+      } catch (err) {
+        log('打开日志目录失败：' + (err instanceof Error ? err.message : String(err)), 'err')
+      }
+    })
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 一键优选并回填                                                      */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * 设置一键优选的状态提示。
+   *
+   * 用 badge 区分成功/失败/进行中 —— 与界面其它状态提示的观感一致。
+   */
+  function setQuickScanHint(kind: 'idle' | 'busy' | 'ok' | 'err', text: string): void {
+    const hint = document.getElementById('quickScanHint')
+    if (!hint) return
+    if (kind === 'idle') {
+      hint.textContent = text
+      return
+    }
+    const badge = kind === 'ok' ? 'ok' : kind === 'err' ? 'err' : 'info'
+    const mark = kind === 'ok' ? '✅' : kind === 'err' ? '❌' : '⏳'
+    hint.innerHTML =
+      '<span class="badge ' + badge + '" style="margin-left:0">' + mark + '</span> ' +
+      escapeHtml(text)
+  }
+
+  /**
+   * 绑定「一键优选并回填」按钮。
+   *
+   * 与托盘菜单里的「一键优选 IP」是**同一个后端接口**（POST /api/scan/quick）：
+   * 后台跑完整优选并回填面板，完成后由后端弹系统通知。
+   */
+  function bindQuickScan(): void {
+    const btn = document.getElementById('btnQuickScan') as HTMLButtonElement | null
+    if (!btn) return
+
+    btn.addEventListener('click', async () => {
+      // 用独立标志位而不是只看 btn.disabled ——
+      // setBusy() 会批量改按钮的 disabled，可能把这里的禁用状态冲掉。
+      if (quickScanRunning) return
+      quickScanRunning = true
+      btn.disabled = true
+      btn.textContent = '优选中…'
+      setQuickScanHint('busy', '正在后台优选并回填，通常要几分钟…')
+      log('开始一键优选（后台运行，完成后会有系统通知）')
+
+      try {
+        const result = await window.cfpilot.quickScan()
+        if (result && result.ok) {
+          const msg = result.message ||
+            ('优选成功，共 ' + (result.count ?? 0) + ' 个优选 IP 已填入面板')
+          setQuickScanHint('ok', msg)
+          log('✅ ' + msg, 'ok')
+          // 优选过程会写日志 → 顺手把日志页刷新一次
+          await loadLogs()
+        } else {
+          const msg = (result && result.error) || '未知错误'
+          setQuickScanHint('err', msg)
+          log('一键优选失败：' + msg, 'err')
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        setQuickScanHint('err', msg)
+        log('一键优选异常：' + msg, 'err')
+      } finally {
+        quickScanRunning = false
+        btn.disabled = false
+        btn.textContent = '一键优选并回填'
+      }
+    })
+  }
+
   let pendingUpdateUrl = ''
 
   /**
@@ -1669,8 +1867,21 @@
     bindCredentials()
     bindDeploy()
     bindScan()
+    bindLogs()
+    bindQuickScan()
     bindUpdater()
     bindPush()
+
+    // 切到「日志」页时自动加载一次。
+    //
+    // 赋值给前面声明的可空引用（与 autoCheckOnAbout 同一套做法）：
+    // switchPage 定义在前面，这里赋的值它能直接用。
+    autoLoadLogs = () => {
+      // 已经加载过就不重复拉 —— 用户可能正在读日志内容，
+      // 每次切页都重拉会把滚动位置顶回底部。
+      if (logsLoaded) return
+      void loadLogs()
+    }
 
     /**
      * 托盘菜单跳转。
@@ -1682,7 +1893,7 @@
      */
     const pageParam = new URLSearchParams(location.search).get('page')
     if (pageParam) {
-      const valid = ['cred', 'deploy', 'scan', 'about']
+      const valid = ['cred', 'deploy', 'scan', 'about', 'logs']
       if (valid.includes(pageParam)) {
         switchPage(pageParam)
         log('已跳转到「' + pageParam + '」页')

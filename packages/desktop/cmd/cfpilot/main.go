@@ -25,12 +25,14 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -39,6 +41,7 @@ import (
 
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/config"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/kernel"
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/logfile"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/notify"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/server"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/tray"
@@ -67,14 +70,32 @@ func main() {
 		return
 	}
 
-	if *consoleFlag {
-		// 与配置同目录的 cfpilot.log，追加写入
+	// 日志文件（始终写，不只在 --console 时写）
+	//
+	// 为什么始终写：界面的「日志」页签要能随时查看历史，
+	// 而之前只有 --console 才写文件 → 平时根本没日志可看。
+	//
+	// 用 logfile.Writer 而不是裸 os.File：它带**滚动上限**，
+	// 扫描进度每秒几十行，不限制体积很快就把磁盘写满了。
+	{
 		dir, err := config.EnsureDir()
 		if err == nil {
-			if f, ferr := os.OpenFile(dir+string(os.PathSeparator)+"cfpilot.log",
-				os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); ferr == nil {
-				log.SetOutput(f)
-				defer func() { _ = f.Close() }()
+			w, werr := logfile.New(
+				filepath.Join(dir, "cfpilot.log"),
+				logfile.DefaultMaxBytes,
+				logfile.DefaultMaxBackups,
+			)
+			if werr == nil {
+				// --console：同时输出到终端（原来它才是「写文件」的开关，
+				// 现在文件始终写，这个参数只控制是否也打终端）
+				if *consoleFlag {
+					log.SetOutput(io.MultiWriter(w, os.Stderr))
+				} else {
+					log.SetOutput(w)
+				}
+				defer func() { _ = w.Close() }()
+			} else {
+				log.Printf("[cfpilot] 打开日志文件失败：%v", werr)
 			}
 		}
 	}
@@ -213,6 +234,32 @@ func main() {
 			st := checker.Check(ctx)
 			logUpdateState(st)
 			openPage(url, "deploy")
+		}()
+	})
+
+	// 一键优选 IP：后台跑优选 + 回填，完成后弹气泡通知。
+	//
+	// 失败也会弹 —— 静默失败最让人困惑（「我点了，怎么没反应」）。
+	app.SetQuickScanHandler(func() {
+		go func() {
+			// 扫描 + 回填可能要几分钟，给足超时
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+			defer cancel()
+
+			res := srv.RunQuickScan(ctx)
+			if res.OK {
+				notify.ShowViaShell(notify.Message{
+					Title: "CFPilot 优选完成",
+					Body:  res.Message,
+				})
+				log.Printf("[cfpilot] 一键优选完成：%s", res.Message)
+			} else {
+				notify.ShowViaShell(notify.Message{
+					Title: "CFPilot 优选失败",
+					Body:  res.Error + "\n（详情见界面「日志」页）",
+				})
+				log.Printf("[cfpilot] 一键优选失败：%s", res.Error)
+			}
 		}()
 	})
 

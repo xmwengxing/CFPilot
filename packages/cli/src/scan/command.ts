@@ -179,7 +179,7 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
   }
 
   const port = flagNumber(args, 'port', 443)
-  const top = flagNumber(args, 'top', 15)
+  const top = flagNumber(args, 'top', 8)
   let token = flagString(args, 'token')
   const noCallback = flagBool(args, 'no-callback')
   // --ask-callback：扫描结束后交互询问是否回填（菜单模式用）

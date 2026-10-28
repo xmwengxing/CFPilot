@@ -27,6 +27,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -186,10 +187,20 @@ type LogEntry struct {
 func (s *Server) logf(msg string) { s.logLevel(msg, "info") }
 
 // logLevel 推送指定级别的日志。
+//
+// ⚠️ **同时写进日志文件**。
+//
+// 之前只推 SSE（界面的底部日志面板），不落文件 ——
+// 于是「界面开着时能看到日志、关掉就没了」，
+// 用户排查问题（比如一键优选失败）时无从查起。
+//
+// 现在文件是完整记录，界面的「日志」页签读的就是它。
 func (s *Server) logLevel(msg, level string) {
 	s.events.publish("log", LogEntry{
 		Message: msg,
 		Level:   level,
 		At:      time.Now().UnixMilli(),
 	})
+	// 写文件（带时间戳，与 Go 标准 log 的格式一致）
+	log.Printf("[%s] %s", level, msg)
 }

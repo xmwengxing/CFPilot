@@ -47,7 +47,7 @@ scan 选项:
                           （默认校验：发 PING 并验证数据面回 {"pong":true}）
                           目标没有探针端点时会自动降级为纯 101 校验
   --no-speed             跳过测速，只按延迟排序
-  --top <n>              返回条数，默认 15
+  --top <n>              返回条数，默认 8
   --concurrency <n>      阶段一 TCP 并发，默认 300
   --tls-concurrency <n>  阶段一 TLS 握手并发，默认 64
                           TLS 握手是 CPU 密集型操作，过高会让本机成为瓶颈

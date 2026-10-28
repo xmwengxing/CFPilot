@@ -9,7 +9,8 @@
 // 本脚本做静态交叉校验：
 //   1. renderer.js 里调用的每个 window.cfpilot.xxx 都必须在 adapter 里存在
 //   2. adapter 里每处 `post('/api/...')` / `get('/api/...')` 都必须是后端真实路由
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
 
 const rendererPath = 'packages/ui/dist/renderer.js'
 const adapterPath = 'packages/desktop/webui/adapter.js'
@@ -63,11 +64,16 @@ if (unused.length > 0) {
 console.log('\n=== API 路由完整性 ===\n')
 
 // 收集后端注册的所有路由
+//
+// ⚠️ 不要写死 .go 文件清单：后端每加一个模块就会新开一个文件
+//    （日志页的 log_routes.go 就是例子）。写死的清单会漏掉新文件 ——
+//    于是「界面调了不存在的路由」变成**永久误报**，
+//    报错久了大家就不再相信这个脚本的输出，真出问题时也看不见了。
+// 这里直接扫 server 目录下的全部 .go 文件。
 const routes = new Set()
-for (const f of ['server.go', 'cred_routes.go', 'deploy_routes.go', 'scan_routes.go', 'update_routes.go', 'events.go']) {
-  const p = `${serverDir}/${f}`
-  if (!existsSync(p)) continue
-  const src = readFileSync(p, 'utf8')
+for (const f of readdirSync(serverDir)) {
+  if (!f.endsWith('.go')) continue
+  const src = readFileSync(join(serverDir, f), 'utf8')
   for (const m of src.matchAll(/HandleFunc\("([^"]+)"/g)) {
     routes.add(m[1])
   }

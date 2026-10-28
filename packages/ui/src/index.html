@@ -318,6 +318,9 @@
       padding: 12px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
       white-space: pre-wrap; word-break: break-all; color: #b9c8ff; max-height: 240px; overflow-y: auto;
     }
+    /* 日志页的内容框：沿用 .result-box 的观感，只是更高一些。
+       放在 .result-box 之后，靠同权重覆盖 max-height。 */
+    .logview { max-height: 420px; }
     table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 14px; }
     th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
     th { color: var(--muted); font-weight: 500; font-size: 11.5px; }
@@ -338,6 +341,7 @@
       <button data-page="deploy">一键部署</button>
       <button data-page="scan">本地真连接优选</button>
       <button data-page="about">说明</button>
+      <button data-page="logs">日志</button>
     </nav>
 
     <div class="body">
@@ -627,6 +631,29 @@
 
         <!-- ============ 优选 ============ -->
         <section class="page" id="page-scan">
+          <!--
+            一键优选并回填
+
+            与托盘菜单里的「一键优选 IP」走**同一个后端接口**
+            （POST /api/scan/quick）：后台跑完整优选 + 回填面板，完成后弹系统通知。
+
+            为什么放在优选页最上面：用户本来就在这一页，
+            手动优选要自己填域名/路径，一键优选不需要 —— 它用已部署实例的配置。
+          -->
+          <div class="card">
+            <h2>⚡ 一键优选并回填</h2>
+            <p class="desc">
+              后台跑一次完整的真连接优选，并把结果<b>直接写回面板</b>的「手动优选 IP」。
+              与托盘菜单里的「一键优选 IP」是同一个后端接口，跑完会弹系统通知。
+            </p>
+            <div class="btn-row">
+              <button class="btn btn-primary" id="btnQuickScan">一键优选并回填</button>
+            </div>
+            <p class="tip" id="quickScanHint" style="margin-top:10px">
+              耗时与手动优选相同（通常几分钟），期间界面照常可用。
+            </p>
+          </div>
+
           <div class="card">
             <h2>⚡ 本地真连接优选</h2>
             <p class="desc">
@@ -674,7 +701,7 @@
               </div>
               <div class="field">
                 <label>保留条数（--top）</label>
-                <input type="number" id="optTop" value="15" min="1" max="100" />
+                <input type="number" id="optTop" value="8" min="1" max="100" />
                 <p class="tip">
                   · 建议 <b>10~20</b>，过多增加请求没有实际意义<br>
                   · 端口固定 <b>443</b>——其他端口请在web面板中配置（不推荐）
@@ -876,6 +903,41 @@
               <b>提示「版本相同已跳过」？</b>说明线上已是最新版本，无需重新部署；需要强制更新就勾选「强制重新部署」。<br><br>
               <b>部署失败？</b>看下方日志里的具体错误；权限问题可对照「凭据」页的权限说明。
             </div>
+          </div>
+        </section>
+
+        <!-- ============ 日志 ============ -->
+        <section class="page" id="page-logs">
+          <div class="card">
+            <h2>📄 运行日志 <span class="badge info" id="logsBadge">未加载</span></h2>
+            <p class="desc">
+              程序日志写在 <code>~/.cfpilot-gui/cfpilot.log</code>。
+              下方显示的是文件末尾的若干行；要看完整内容、或者用别的工具分析，
+              点「打开日志文件所在文件夹」。
+            </p>
+
+            <p class="kv-row" style="margin:0 0 6px">
+              <span class="k">文件路径</span><span class="v" id="logsPath">—</span>
+            </p>
+            <p class="kv-row" style="margin:0 0 6px">
+              <span class="k">文件大小</span><span class="v" id="logsSize">—</span>
+            </p>
+            <p class="kv-row" style="margin:0">
+              <span class="k">总行数</span><span class="v" id="logsTotal">—</span>
+            </p>
+
+            <div class="btn-row" style="margin-top:12px">
+              <button class="btn btn-primary" id="btnLogsRefresh">刷新</button>
+              <button class="btn btn-ghost" id="btnLogsOpenFolder" disabled>打开日志文件所在文件夹</button>
+            </div>
+            <p class="tip" id="logsHint" style="margin-top:8px">
+              切到本页时会自动加载一次；想看最新内容点「刷新」。
+            </p>
+          </div>
+
+          <div class="card">
+            <h2>🖨️ 日志内容</h2>
+            <pre class="result-box logview" id="logsView">（还没有加载日志）</pre>
           </div>
         </section>
       </div>

@@ -46,7 +46,7 @@ function normalizeWsPath(raw: string | undefined, fallback: string): string {
         '  这是 Git-Bash 的自动路径转换行为，不是本工具的问题。\n' +
         '  三种绕开方式，任选其一：\n' +
         '    1. 用等号写法：      --path=/vless\n' +
-        '    2. 加环境变量：      MSYS_NO_PATHCONV=1 cfpilot-scanner scan ...\n' +
+        '    2. 加环境变量：      MSYS_NO_PATHCONV=1 cfpilot scan ...\n' +
         '    3. 换用 PowerShell / CMD 执行\n'
     )
     process.exit(1)

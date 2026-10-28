@@ -9,7 +9,8 @@ describe('面板 gzip 往返', () => {
     const html = await getPanelHtml()
 
     expect(html).toContain('<!DOCTYPE html>')
-    expect(html).toContain('CFPilot 管理面板')
+    // 冒烟断言：标题文案（与页面内可见标题一致）
+    expect(html).toContain('CFPilot 管理控制台')
     expect(html).toContain('id="btnScan"')
     expect(html).toContain('id="cfgUuid"')
     // 关键 JS 逻辑仍在

@@ -9,7 +9,7 @@
  *
  * ⚠️ 这不是「Cloudflare 要求拆分」的结论，而是**当前唯一实测可用的安排**。
  * Cloudflare 未说明具体触发原因，因此不能断定是哪段代码、哪条规则导致的。
- * 详见 docs/cloudflare-deployment-diagnosis.md。
+ * 详见 AGENTS.md §1.13（Cloudflare 网段目标只能靠反代入口打通）。
  *
  * ## 部署形态
  *

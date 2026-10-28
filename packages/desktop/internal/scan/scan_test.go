@@ -24,6 +24,8 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"fmt"
+	"io"
+	"log"
 	"math/big"
 	"net"
 	"net/http"
@@ -66,6 +68,9 @@ func newTLSServer(t *testing.T, handler http.Handler) *testServer {
 	srv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
+		// 测速默认开 3 条连接，收满字节后会立刻关闭其余连接 ——
+		// 服务端看到的是「TLS 握手期间 EOF」，属预期行为，别刷测试输出。
+		ErrorLog: log.New(io.Discard, "", 0),
 	}
 	go func() { _ = srv.Serve(tlsLn) }()
 
@@ -261,6 +266,9 @@ func TestProbeTCP(t *testing.T) {
 }
 
 // 测速：能拿到数据即成功，并算出速度。
+//
+// 口径已对齐 CLI：多连接（默认 3）+ 丢预热后的**稳态吞吐**。
+// 服务端必须回 `x-probe-bytes`，否则会被判成「不是探针端点」。
 func TestMeasureDownload(t *testing.T) {
 	payload := strings.Repeat("x", 64*1024)
 	srv := newTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -268,6 +276,8 @@ func TestMeasureDownload(t *testing.T) {
 		// 客户端只能等到 deadline 才知道「数据发完了」（测试会白等十几秒）。
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		// 探针端点独有标记（新口径必校验）：少了它会被判成 Pages 欢迎页。
+		w.Header().Set("X-Probe-Bytes", strconv.Itoa(len(payload)))
 		_, _ = w.Write([]byte(payload))
 	}))
 	defer srv.stop()
@@ -281,8 +291,16 @@ func TestMeasureDownload(t *testing.T) {
 	if res.Bytes < 64*1024 {
 		t.Errorf("应收到至少 64KB，实际 %d", res.Bytes)
 	}
-	if res.SpeedMBps <= 0 {
-		t.Errorf("速度应大于 0，实际 %f", res.SpeedMBps)
+	// 对外口径是稳态值；旧字段 SpeedMBps 必须等于它（防止调用方漏改）。
+	if res.SteadyMBps <= 0 {
+		t.Errorf("稳态速度应大于 0，实际 %f", res.SteadyMBps)
+	}
+	if res.SpeedMBps != res.SteadyMBps {
+		t.Errorf("SpeedMBps 必须等于 SteadyMBps（兼容字段），实际 %f vs %f",
+			res.SpeedMBps, res.SteadyMBps)
+	}
+	if res.Connections < 1 {
+		t.Errorf("至少应有 1 条连接完成握手，实际 %d", res.Connections)
 	}
 }
 
@@ -291,6 +309,8 @@ func TestMeasureDownload(t *testing.T) {
 // 这正是「connect 成功但收不到数据」的模拟。
 func TestMeasureDownloadEmptyBody(t *testing.T) {
 	srv := newTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 带探针标记，确保失败原因是「没有载荷」而不是「响应头不匹配」。
+		w.Header().Set("X-Probe-Bytes", "16384")
 		w.WriteHeader(http.StatusOK)
 		// 不写任何 body
 	}))
@@ -301,6 +321,12 @@ func TestMeasureDownloadEmptyBody(t *testing.T) {
 
 	if res.OK {
 		t.Errorf("没有 body 不该判成功（这正是「假活」的来源），bytes=%d", res.Bytes)
+	}
+	if res.Bytes != 0 {
+		t.Errorf("没有 body 时不应收到负载字节，实际 %d", res.Bytes)
+	}
+	if res.Error == "" {
+		t.Error("应给出可读的失败原因")
 	}
 }
 
@@ -325,6 +351,8 @@ func TestRunEndToEnd(t *testing.T) {
 		// 客户端只能等到 deadline 才知道「数据发完了」（测试会白等十几秒）。
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		// 新口径会校验探针标记，缺了它测速必失败（阶段三会跳过这个候选）。
+		w.Header().Set("X-Probe-Bytes", strconv.Itoa(len(payload)))
 		_, _ = w.Write([]byte(payload))
 	}))
 	defer srv.stop()
@@ -421,7 +449,9 @@ func TestRunAllFail(t *testing.T) {
 
 // 地区筛选：匹配时只保留该地区。
 func TestRunCountryFilter(t *testing.T) {
-	payload := strings.Repeat("z", 16*1024)
+	// ⚠️ 载荷必须 ≥32KB：新口径（对照 CLI）固定要求 32KB 才算拿到真二进制流，
+	// 与 SpeedBytes 无关。这里用 64KB，避免「响应头 OK 但载荷不足」被淘汰。
+	payload := strings.Repeat("z", 64*1024)
 	srv := newTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("bytes") == "" && strings.HasPrefix(r.URL.Path, "/__edge") {
 			w.Header().Set("Cf-Ray", "abc123-NRT")
@@ -432,6 +462,8 @@ func TestRunCountryFilter(t *testing.T) {
 		// 客户端只能等到 deadline 才知道「数据发完了」（测试会白等十几秒）。
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		// 新口径会校验探针标记，缺了它测速必失败（阶段三会跳过这个候选）。
+		w.Header().Set("X-Probe-Bytes", strconv.Itoa(len(payload)))
 		_, _ = w.Write([]byte(payload))
 	}))
 	defer srv.stop()
@@ -443,7 +475,7 @@ func TestRunCountryFilter(t *testing.T) {
 		Candidates:     []string{srv.Addr},
 		Countries:      []string{"SIN"},
 		Top:            10,
-		SpeedBytes:     16 * 1024,
+		SpeedBytes:     64 * 1024,
 		SpeedTimeoutMs: 2000,
 	})
 	if err != nil {
@@ -554,6 +586,8 @@ func TestShortErr(t *testing.T) {
 		{"connection refused", "连接被拒"},
 		{"no such host", "域名解析失败"},
 		{"connection reset by peer", "连接被重置"},
+		{"EOF", "连接被关闭"},
+		{"use of closed network connection", "连接被关闭"},
 		{"something else entirely", "something else entirely"},
 	}
 	for _, tc := range cases {
@@ -578,6 +612,8 @@ func TestDefaults(t *testing.T) {
 		"ProbeTimeoutMs":   {o.ProbeTimeoutMs, defProbeTimeoutMs},
 		"SpeedLimit":       {o.SpeedLimit, defSpeedLimit},
 		"SpeedConcurrency": {o.SpeedConcurrency, defSpeedConcurrency},
+		"SpeedConnections": {o.SpeedConnections, defSpeedConnections},
+		"SpeedDurationMs":  {o.SpeedDurationMs, defSpeedDurationMs},
 		"SpeedTimeoutMs":   {o.SpeedTimeoutMs, defSpeedTimeoutMs},
 		"SpeedBytes":       {o.SpeedBytes, defSpeedBytes},
 		"Top":              {o.Top, defTop},
@@ -589,5 +625,37 @@ func TestDefaults(t *testing.T) {
 	}
 	if o.WSPath != ProbeDefaultPath {
 		t.Errorf("WSPath 默认应为 %q，实际 %q", ProbeDefaultPath, o.WSPath)
+	}
+}
+
+// TestSpeedDefaults 守护阶段三的两条「口径级」默认值：
+//
+//  1. 候选测速**串行**（SpeedConcurrency = 1）——带宽是整条链路共享的，
+//     4 路并行测候选会让每个只测到约 1/4（「优选出来的 IP 全都只有
+//     0.1~0.9 MB/s」的主因）；
+//  2. 每个候选**多连接**（SpeedConnections = 3）——单条 TCP 受拥塞窗口 /
+//     BDP 限制，真机同一链路单流 0.47 MB/s、3 流 1.14 MB/s。
+//
+// 对照 CLI packages/cli/src/scan/scan.ts 的 speedConcurrency（默认 1）
+// 与 true-probe.ts 的 measureThroughput（connections 默认 3）。
+func TestSpeedDefaults(t *testing.T) {
+	o := Options{}.withDefaults()
+	if o.SpeedConcurrency != 1 {
+		t.Errorf("阶段三候选测速必须串行（SpeedConcurrency=1），实际 %d", o.SpeedConcurrency)
+	}
+	if o.SpeedConnections != 3 {
+		t.Errorf("每个候选应默认 3 条连接（SpeedConnections=3），实际 %d", o.SpeedConnections)
+	}
+	if o.SpeedDurationMs != 6000 {
+		t.Errorf("单次测量时长默认应为 6000ms，实际 %d", o.SpeedDurationMs)
+	}
+	if o.SpeedTimeoutMs != 12000 {
+		t.Errorf("整体预算默认应为 12000ms，实际 %d", o.SpeedTimeoutMs)
+	}
+
+	// 显式传正值时不能被默认值覆盖（自动化 / 界面仍可调）。
+	custom := Options{SpeedConcurrency: 2, SpeedConnections: 5, SpeedDurationMs: 3000}.withDefaults()
+	if custom.SpeedConcurrency != 2 || custom.SpeedConnections != 5 || custom.SpeedDurationMs != 3000 {
+		t.Errorf("显式参数被默认值覆盖了：%+v", custom)
 	}
 }

@@ -43,10 +43,9 @@ import {
   probeWs101,
   probeWsPing,
   probeTlsHandshake,
-  measureDownload,
+  measureProbeThroughput,
   measureThroughput,
   type WsProbeResult,
-  type DownloadResult,
   type TlsProbeResult,
 } from './true-probe'
 import { parseSpeedUrl, withBytes, schemeForPort, DEFAULT_SPEED_URL } from './speed-url'
@@ -347,7 +346,21 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   const probeConcurrency = options.probeConcurrency ?? 24
   const probeTimeoutMs = options.probeTimeoutMs ?? 3000
   const speedLimit = options.speedLimit ?? 30
-  const speedConcurrency = options.speedConcurrency ?? 4
+  /**
+   * 测速阶段的候选并行数，**默认 1（串行）**。
+   *
+   * ## 为什么必须串行
+   *
+   * 阶段三测的是**带宽**，而带宽是整条链路共享的资源。
+   * 2026-10-28 真机定位：默认 4 路并行时，每个候选只能分到约 1/4 带宽，
+   * 于是无论 IP 好坏，测出来全是 0.1~0.2 MB/s —— 用户看到的就是
+   * 「优选出来的 IP 全都只有 0.1~0.9 MB/s」。
+   *
+   * 并行只适合测「延迟」这类不占带宽的指标（TCP / TLS / 101 阶段就是这么做的）。
+   * 串行代价可控：每次测量有时长上限（默认 6s），30 个候选约 3 分钟；
+   * 想要更快可以调小 `--speed-limit` 或 `--speed-duration`。
+   */
+  const speedConcurrency = options.speedConcurrency ?? 1
   const speedTimeoutMs = options.speedTimeoutMs ?? 12000
   const speedBytes = options.speedBytes ?? 5 * 1024 * 1024
   const top = options.top ?? 8
@@ -627,31 +640,33 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
         stage: 3,
         done: speedDone,
         total: stage2.length,
-        message: `测速 ${speedDone}/${stage2.length} ${result.peakMBps.toFixed(1)} MB/s`,
+        message: `测速 ${speedDone}/${stage2.length} ${result.steadyMBps.toFixed(1)} MB/s`,
       })
-      return { ...item, speed: result.ok ? result.peakMBps : 0 }
+      return { ...item, speed: result.ok ? result.steadyMBps : 0 }
     })
   } else {
-    report({ type: 'stage', stage: 3, name: '真实下行速度测试（项目探针端点）', total: stage2.length })
+    report({ type: 'stage', stage: 3, name: '真实下行速度测试（项目探针端点 · 多流稳态）', total: stage2.length })
     let speedDone = 0
     speedResults = await pool(stage2, speedConcurrency, async (item) => {
-      const result: DownloadResult = await measureDownload(
-        item.ip,
-        options.port,
-        options.host,
-        speedBytes,
-        speedTimeoutMs,
-        strictProbePath
-      )
+      const result = await measureProbeThroughput({
+        ip: item.ip,
+        port: options.port,
+        host: options.host,
+        bytes: speedBytes,
+        path: strictProbePath,
+        connections: options.speedConnections ?? 3,
+        durationMs: options.speedDurationMs ?? 6000,
+        timeoutMs: speedTimeoutMs,
+      })
       speedDone++
       report({
         type: 'progress',
         stage: 3,
         done: speedDone,
         total: stage2.length,
-        message: `测速 ${speedDone}/${stage2.length} ${result.speedMBps.toFixed(1)} MB/s`,
+        message: `测速 ${speedDone}/${stage2.length} ${result.steadyMBps.toFixed(1)} MB/s`,
       })
-      return { ...item, speed: result.ok ? result.speedMBps : 0 }
+      return { ...item, speed: result.ok ? result.steadyMBps : 0 }
     })
   }
 

@@ -5,12 +5,15 @@
  * 完整执行 TLS 握手 + WebSocket 101 升级握手，
  * 只有真正能连上「你自己的域名」的 IP 才会被保留 —— 彻底过滤掉 -1 废节点。
  *
- * 测速有两条路：
- *   1. `measureDownload()` —— 走目标项目自己的探针端点（CFPilot 是 /__edge_probe），
- *      最忠实，但要求目标项目提供该端点。
- *   2. `measureThroughput()` —— 拨号到候选 IP、但用**公开测速地址**的 SNI/Host，
- *      任何项目都能用。**必须先通过 101 校验再调用**，否则会选出
- *      「速度快但不能服务你的域名」的 IP，导入客户端全是 -1。
+ * 测速统一到 `measureThroughput()`（**只有这一套口径**）：
+ *   1. 探针端点模式（`measureProbeThroughput`）—— 拨号候选 IP、请求目标项目自己的
+ *      `/__edge_probe`，最忠实；靠 `x-probe-bytes` 响应头确认「确实是探针端点」。
+ *   2. 公开测速地址模式 —— 任何项目都能测，**必须先通过 101 校验再调用**，
+ *      否则会选出「速度快但不能服务你的域名」的 IP，导入客户端全是 -1。
+ *
+ * 两者共用同一套计量：**多连接 + 丢弃慢启动 + 窗口峰值**。
+ * ⚠️ 不要退回「单连接 / 总字节 ÷ 从拨号起算的总耗时」——
+ * 2026-10-28 真机实测这个口径会把 0.87 MB/s 的稳态链路报成 0.42 MB/s。
  */
 import * as tls from 'node:tls'
 import * as crypto from 'node:crypto'
@@ -73,9 +76,21 @@ export interface ThroughputResult {
   /** 总接收字节 */
   bytes: number
   ms: number
-  /** 滑动窗口峰值（MB/s）—— 反映链路可达带宽，受慢启动影响小 */
+  /**
+   * **稳态吞吐（MB/s）—— 对外报告的「下行速度」用它**。
+   *
+   * 口径：丢弃前 `warmupMs` 的慢启动样本后，用「剩余字节 ÷ 剩余时长」按时长加权平均。
+   * 既排除了握手/TTFB 与慢启动的拖累，又不会被单个突发的窗口拉高。
+   */
+  steadyMBps: number
+  /**
+   * 滑动窗口峰值（MB/s）。
+   *
+   * ⚠️ **只作诊断用，不要拿来排序**：2026-10-28 真机同一条链路实测，
+   * 峰值 2.46 MB/s 而稳态只有 1.14 MB/s（单个 400ms 窗口的突发会把峰值翻倍）。
+   */
   peakMBps: number
-  /** 总时长平均（MB/s）—— 会明显低于峰值，仅供参考 */
+  /** 总时长平均（MB/s）—— 含握手/TTFB 与慢启动，会明显偏低，仅供参考 */
   avgMBps: number
   /** 实际使用的并发连接数 */
   connections: number
@@ -102,6 +117,121 @@ export interface ThroughputOptions {
   connections?: number
   /** 整体超时（ms） */
   timeoutMs?: number
+  /**
+   * 响应头里**必须存在**的字段名（小写，不含冒号）。
+   *
+   * 探针端点用 `x-probe-bytes` —— 这是 CFPilot `/__edge_probe` 的独有标记。
+   *
+   * ## 为什么必须校验
+   *
+   * 测速请求打到的是候选 IP + 用户域名；如果这个域名上没有探针端点
+   * （比如对接的第三方项目），CF Pages 会回一个 **200 + HTML 欢迎页**。
+   * 那几百字节 HTML 会被当成「有数据」，产出一个速度极低但 `ok` 的假阳性节点。
+   */
+  requiredHeader?: string
+  /** 判定成功所需的最小总字节数（默认 32KB）——同样用于挡掉报错页 */
+  minBytes?: number
+}
+
+/**
+ * 吞吐窗口计（纯逻辑、无 I/O，便于单测）。
+ *
+ * ## 为什么不能用「总字节 / 总耗时」
+ *
+ * TCP 慢启动让开头几秒远低于链路能力。2026-10-28 真机实测同一条链路
+ * 逐秒速率：`0.19 → 0.25 → 0.29 → 0.20 → 0.50 → 0.47 → 0.52 → 0.81 → 0.87` MB/s。
+ * 5MB 整段平均只有 **0.42** MB/s，而稳态已到 **0.87** —— 低估一倍以上。
+ * 更糟的是阶段三原本还并发测多个候选（默认 4 路），
+ * 4 条流分摊同一条链路后每个候选只剩约 1/4 带宽，最终报出 0.1~0.2 MB/s。
+ *
+ * ## 为什么对外用「稳态均值」而不是「窗口峰值」
+ *
+ * 真机同一条链路、3 条并行连接、400ms 窗口实测：
+ * 逐窗 `0.38 0.42 0.91 0.43 1.05 1.63 1.04 1.05 1.49 1.40 1.11 2.46 0.66`，
+ * 稳态均值 **1.14** MB/s，而峰值 **2.46** MB/s —— 单个突发窗口能把峰值翻倍。
+ * 所以：对外报 `steadyMBps`（预热后的时长加权均值），峰值只留作诊断。
+ */
+export class WindowMeter {
+  private readonly startedAt: number
+  private readonly warmupMs: number
+  private readonly windowMs: number
+  private windowBytes = 0
+  private windowStart: number
+  private peak = 0
+  private total = 0
+  /** 预热之后累计的字节与**秒数**（注意 settle 里的 dt 已经是秒） */
+  private steadyBytes = 0
+  private steadySeconds = 0
+
+  constructor(options: { startedAt: number; warmupMs?: number; windowMs?: number }) {
+    this.startedAt = options.startedAt
+    this.warmupMs = options.warmupMs ?? 1000
+    this.windowMs = options.windowMs ?? 500
+    this.windowStart = options.startedAt
+  }
+
+  /** 累计收到的字节到当前窗口 */
+  add(bytes: number): void {
+    if (bytes <= 0) return
+    this.windowBytes += bytes
+    this.total += bytes
+  }
+
+  /** 结算当前窗口（由定时器按 windowMs 调用）；返回当前峰值（MB/s） */
+  tick(now: number): number {
+    this.settle(now)
+    return this.peak
+  }
+
+  /**
+   * 收尾：结算最后一个不完整窗口，并处理「链路很快、没到预热期就下完预算」的兜底。
+   */
+  finish(now: number): number {
+    this.settle(now)
+    // 快速链路（或极小预算）会在 warmupMs 之前就传完：此时一个窗口都没结算过，
+    // peak 会停在 0，被误判成「测速失败」。用整段平均兜底。
+    const elapsed = (now - this.startedAt) / 1000
+    if (this.peak === 0 && this.total > 0 && elapsed > 0) {
+      this.peak = this.total / 1024 / 1024 / elapsed
+    }
+    this.windowBytes = 0
+    this.windowStart = now
+    return this.peak
+  }
+
+  /** 结算一个窗口：慢启动期内只丢弃，不记峰值/稳态 */
+  private settle(now: number): void {
+    const dt = (now - this.windowStart) / 1000
+    if (dt <= 0) return
+    const bytes = this.windowBytes
+    this.windowBytes = 0
+    this.windowStart = now
+    if (now - this.startedAt < this.warmupMs) return
+    this.steadyBytes += bytes
+    this.steadySeconds += dt
+    const speed = bytes / dt / 1024 / 1024
+    if (speed > this.peak) this.peak = speed
+  }
+
+  /** 已接收总字节 */
+  get totalBytes(): number {
+    return this.total
+  }
+
+  /** 当前峰值（MB/s） */
+  get peakMBps(): number {
+    return this.peak
+  }
+
+  /**
+   * 稳态吞吐（MB/s）：预热之后按时长加权的平均。
+   *
+   * 若整段都在预热期（链路极快），退回整段平均 —— 否则会报 0。
+   */
+  get steadyMBps(): number {
+    if (this.steadySeconds > 0) return this.steadyBytes / 1024 / 1024 / this.steadySeconds
+    return this.peak
+  }
 }
 
 /**
@@ -539,174 +669,13 @@ export function probeTlsHandshake(
   })
 }
 
-/**
- * 阶段三：在用户自己的域名下测试真实下行速度
- */
-export function measureDownload(
-  ip: string,
-  port: number,
-  host: string,
-  bytes: number,
-  timeoutMs = 12000,
-  path = '/__edge_probe'
-): Promise<DownloadResult> {
-  return new Promise((resolve) => {
-    const started = Date.now()
-    let headerEnd = -1
-    let received = 0
-    let settled = false
-    /**
-     * 响应头缓冲（Buffer 累积，不转字符串）。
-     *
-     * 旧实现每收一个 chunk 就 `chunk.toString('latin1')` 拼成字符串，
-     * 再 `indexOf('\r\n\r\n')` 找边界，找到后又 `Buffer.from(buffer, 'latin1')`
-     * 转回 Buffer —— 大吞吐测速时每秒几十兆的编解码与内存分配纯属浪费。
-     * 直接在 Buffer 上找分隔符即可。
-     */
-    let headerBuf: Buffer = Buffer.alloc(0)
-    /** HTTP 状态码；未拿到响应头前为 0 */
-    let status = 0
-    /**
-     * 判定「有效载荷」的最小字节数。
-     *
-     * ⚠️ 不能只判 `received > 0`：404 / 403 的报错页也有几百字节 HTML，
-     * 会被当成「测速成功」，产出一个速度极低的假阳性节点。
-     * 要求至少收到 32KB 才认为拿到了真正的二进制流。
-     */
-    const minPayload = Math.min(bytes, 32 * 1024)
-
-    const finish = (result: Omit<DownloadResult, 'ms'>): void => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      try {
-        socket.destroy()
-      } catch {
-        /* 已销毁 */
-      }
-      resolve({ ...result, ms: Date.now() - started })
-    }
-
-    /**
-     * 统一判定「这次测速算不算成功」。
-     *
-     * 三个条件缺一不可：
-     *   1. 状态码 200（探针端点正常响应）
-     *   2. 载荷量达到 minPayload（不是几十字节的报错页）
-     *   3. 超时 / 提前结束走同一条判定，避免「连接断了但算成功」
-     */
-    const judge = (): { ok: boolean; error?: string } => {
-      if (status !== 200) {
-        return { ok: false, error: status === 0 ? '未收到响应头' : `HTTP ${status}` }
-      }
-      if (received < minPayload) {
-        return { ok: false, error: `载荷不足（${received}/${minPayload} 字节）` }
-      }
-      return { ok: true }
-    }
-
-    const request = [
-      `GET ${path}?bytes=${bytes} HTTP/1.1`,
-      `Host: ${host}`,
-      `User-Agent: ${USER_AGENT}`,
-      'Accept: */*',
-      'Accept-Encoding: identity',
-      '',
-      '',
-    ].join('\r\n')
-
-    const socket = tls.connect(
-      {
-        host: ip,
-        port,
-        servername: host,
-        rejectUnauthorized: false,
-        ALPNProtocols: ['http/1.1'],
-      },
-      () => {
-        socket.write(request)
-      }
-    )
-
-    const timer = setTimeout(() => {
-      const seconds = Math.max(0.001, (Date.now() - started) / 1000)
-      const v = judge()
-      finish({
-        ok: v.ok,
-        bytes: received,
-        speedMBps: v.ok ? received / 1024 / 1024 / seconds : 0,
-        error: v.ok ? undefined : v.error ?? '下载超时',
-      })
-    }, timeoutMs)
-
-    socket.setTimeout(timeoutMs, () => {
-      const seconds = Math.max(0.001, (Date.now() - started) / 1000)
-      const v = judge()
-      finish({
-        ok: v.ok,
-        bytes: received,
-        speedMBps: v.ok ? received / 1024 / 1024 / seconds : 0,
-        error: v.ok ? undefined : v.error ?? '下载超时',
-      })
-    })
-
-    socket.on('error', (err: Error) => {
-      finish({ ok: false, bytes: received, speedMBps: 0, error: err.message })
-    })
-
-    const settle = (): void => {
-      if (settled) return
-      const seconds = Math.max(0.001, (Date.now() - started) / 1000)
-      const v = judge()
-      finish({
-        ok: v.ok,
-        bytes: received,
-        speedMBps: v.ok ? received / 1024 / 1024 / seconds : 0,
-        error: v.ok ? undefined : v.error ?? '未收到完整响应',
-      })
-    }
-
-    socket.on('data', (chunk: Buffer) => {
-      if (headerEnd < 0) {
-        headerBuf = headerBuf.length === 0 ? chunk : Buffer.concat([headerBuf, chunk])
-        // 在 Buffer 上直接找分隔符（避免 latin1 编解码往返）
-        const idx = headerBuf.indexOf('\r\n\r\n')
-        if (idx < 0) {
-          if (headerBuf.length > 8192) finish({ ok: false, bytes: 0, speedMBps: 0, error: '响应头异常' })
-          return
-        }
-        // ⚠️ 必须校验状态码：探针端点返回 404 / 403 时，
-        // 报错页也有字节数，不校验就会被当成「测速成功」。
-        const head = headerBuf.subarray(0, idx).toString('latin1')
-        const code = /^HTTP\/1\.[01]\s+(\d{3})/.exec(head)?.[1]
-        status = code ? Number(code) : 0
-        if (status !== 200) {
-          finish({ ok: false, bytes: 0, speedMBps: 0, error: `HTTP ${status || '?'}` })
-          return
-        }
-        headerEnd = idx + 4
-        const body = headerBuf.subarray(headerEnd)
-        received += body.byteLength
-        headerEnd = 0
-        // 释放已消费的缓冲（避免大响应时一直持有）
-        headerBuf = Buffer.alloc(0)
-      } else {
-        received += chunk.byteLength
-      }
-      if (received >= bytes) settle()
-    })
-
-    socket.on('end', settle)
-    socket.on('close', settle)
-  })
-}
 
 /**
  * 通用吞吐测量：拨号到候选 IP，但用**外部测速地址**的 SNI/Host 发起下载。
  *
  * ## 为什么需要它
  *
- * `measureDownload()` 要求目标项目提供探针端点（如 `/__edge_probe`）。
+ * `measureProbeThroughput()` 要求目标项目提供探针端点（如 `/__edge_probe`）。
  * 对接第三方项目时对方没有这个端点，测速就永远是 0。
  * 本函数改为请求一个**公开的大文件地址**，因此任何项目都能测。
  *
@@ -740,6 +709,8 @@ export function measureThroughput(options: ThroughputOptions): Promise<Throughpu
     windowMs = 400,
     connections = 3,
     timeoutMs = 20000,
+    requiredHeader,
+    minBytes = 32 * 1024,
   } = options
 
   const connCount = Math.max(1, Math.min(8, connections))
@@ -747,13 +718,12 @@ export function measureThroughput(options: ThroughputOptions): Promise<Throughpu
   return new Promise((resolve) => {
     const started = Date.now()
     let settled = false
-    let totalBytes = 0
-    /** 所有连接的字节数汇总，用于窗口速率 */
-    let windowBytes = 0
-    let windowStart = started
-    let peak = 0
+    /** 窗口计量：丢弃慢启动期后按窗口取峰值（见 WindowMeter 注释） */
+    const meter = new WindowMeter({ startedAt: started, warmupMs, windowMs })
     let openedCount = 0
     let lastError = ''
+    /** 响应头不匹配（目标没有探针端点）：立即判失败，不必等时长跑完 */
+    let headerMismatch = false
     const sockets: tls.TLSSocket[] = []
 
     const finish = (): void => {
@@ -768,24 +738,26 @@ export function measureThroughput(options: ThroughputOptions): Promise<Throughpu
           /* 已销毁 */
         }
       }
-      // 收尾时把最后一个窗口也算进去（若已过慢启动期）
-      const elapsedNow = Date.now() - started
-      if (elapsedNow >= warmupMs) {
-        const dt = (Date.now() - windowStart) / 1000
-        if (dt > 0) {
-          const speed = windowBytes / dt / 1024 / 1024
-          if (speed > peak) peak = speed
-        }
+      const now = Date.now()
+      const peakMBps = meter.finish(now)
+      const totalBytes = meter.totalBytes
+      const elapsed = Math.max(0.001, (now - started) / 1000)
+      const ok = !headerMismatch && totalBytes >= minBytes
+      let error: string | undefined
+      if (!ok) {
+        if (headerMismatch) error = lastError || '目标不支持探针测速'
+        else if (totalBytes === 0) error = lastError || '未收到数据'
+        else error = lastError || `载荷不足（${totalBytes}/${minBytes} 字节）`
       }
-      const elapsed = Math.max(0.001, (Date.now() - started) / 1000)
       resolve({
-        ok: totalBytes > 0,
+        ok,
         bytes: totalBytes,
-        ms: Date.now() - started,
-        peakMBps: Number(peak.toFixed(2)),
+        ms: now - started,
+        steadyMBps: Number(meter.steadyMBps.toFixed(2)),
+        peakMBps: Number(peakMBps.toFixed(2)),
         avgMBps: Number((totalBytes / 1024 / 1024 / elapsed).toFixed(2)),
         connections: openedCount,
-        error: totalBytes > 0 ? undefined : lastError || '未收到数据',
+        error,
       })
     }
 
@@ -857,14 +829,21 @@ export function measureThroughput(options: ThroughputOptions): Promise<Throughpu
             socket.destroy()
             return
           }
+          // 探针端点独有标记校验：没有这个头的 200 是别的项目的欢迎页，
+          // 把它的 HTML 当成「测速数据」会产出假阳性节点。
+          if (requiredHeader && !head.toLowerCase().includes(`${requiredHeader.toLowerCase()}:`)) {
+            headerMismatch = true
+            lastError = `目标不支持探针测速（响应头缺少 ${requiredHeader}，可改用 --speed-mode url）`
+            socket.destroy()
+            finish()
+            return
+          }
           headerDone = true
           const body = headerBuffer.subarray(idx + 4)
-          totalBytes += body.byteLength
-          windowBytes += body.byteLength
+          meter.add(body.byteLength)
           headerBuffer = Buffer.alloc(0)
         } else {
-          totalBytes += chunk.byteLength
-          windowBytes += chunk.byteLength
+          meter.add(chunk.byteLength)
         }
         if (Date.now() - started > durationMs) finish()
       })
@@ -878,17 +857,9 @@ export function measureThroughput(options: ThroughputOptions): Promise<Throughpu
       })
     }
 
-    // 每 windowMs 结算一次窗口速率，慢启动期内的样本丢弃
+    // 每 windowMs 结算一次窗口速率；慢启动期内的样本只丢弃不记峰值
     const ticker = setInterval(() => {
-      const now = Date.now()
-      const dt = (now - windowStart) / 1000
-      if (dt <= 0) return
-      const bytes = windowBytes
-      windowBytes = 0
-      windowStart = now
-      if (now - started < warmupMs) return
-      const speed = bytes / dt / 1024 / 1024
-      if (speed > peak) peak = speed
+      meter.tick(Date.now())
     }, windowMs)
 
     const timer = setTimeout(finish, durationMs + 4000)
@@ -897,5 +868,68 @@ export function measureThroughput(options: ThroughputOptions): Promise<Throughpu
     for (let i = 0; i < connCount; i++) {
       setTimeout(openOne, i * 60)
     }
+  })
+}
+
+/** 探针端点测速参数 */
+export interface ProbeThroughputOptions {
+  ip: string
+  port: number
+  /** 数据面域名（同时作为 TLS SNI 与 Host） */
+  host: string
+  /** 每条连接请求的字节上限（服务端会按它封顶） */
+  bytes: number
+  /** 探针端点路径，默认 /__edge_probe */
+  path?: string
+  connections?: number
+  durationMs?: number
+  warmupMs?: number
+  windowMs?: number
+  timeoutMs?: number
+}
+
+/**
+ * 阶段三：走**目标项目自己的探针端点**做真实下行测速。
+ *
+ * ## 与旧实现的区别（2026-10-28 真机定位后重写）
+ *
+ * 旧实现是「单连接、限时 12 秒、下载固定 5MB，然后 `总字节 / 从拨号起算的总耗时`」。
+ * 真机同一条链路实测，旧口径报 0.42 MB/s，而实际链路能力是 **1.14 MB/s**。
+ * 差距来自三处，按影响排序：
+ *
+ * | 因素 | 实测倍数 | 说明 |
+ * |---|---|---|
+ * | 单连接 → 3 条并行 | **×2.4** | 单条 TCP 受拥塞窗口 / BDP 限制，填不满链路 |
+ * | 4 路候选并行 → 串行 | **×4** | 带宽是共享的，4 条流互相抢（见 scan.ts 的 speedConcurrency） |
+ * | 含慢启动 → 丢预热后稳态 | ×1.05 | 预热只占整段 1/6，收益是个位数百分比 |
+ *
+ * 三项叠加正好解释「优选出来的 IP 全都只有 0.1~0.9 MB/s」：
+ * 0.42（单流整段均值）÷ 4（候选抢带宽）× 2.4（多流不足）≈ 0.1。
+ *
+ * 现在统一到与公开测速地址**同一套口径**：
+ *   1. 多连接（默认 3）；
+ *   2. 丢弃前 `warmupMs`（默认 1s）的慢启动样本，报**稳态均值**（不是峰值，
+ *      真机单窗口突发能把峰值翻倍）；
+ *   3. 校验 `x-probe-bytes` 响应头 —— 否则别的项目返回的 200 欢迎页会被当成数据。
+ */
+export async function measureProbeThroughput(
+  options: ProbeThroughputOptions
+): Promise<ThroughputResult> {
+  const rawPath = options.path && options.path.length > 0 ? options.path : '/__edge_probe'
+  const separator = rawPath.includes('?') ? '&' : '?'
+  return await measureThroughput({
+    ip: options.ip,
+    port: options.port,
+    sniHost: options.host,
+    requestHost: options.host,
+    path: `${rawPath}${separator}bytes=${options.bytes}`,
+    connections: options.connections,
+    durationMs: options.durationMs,
+    warmupMs: options.warmupMs,
+    windowMs: options.windowMs,
+    timeoutMs: options.timeoutMs,
+    // /__edge_probe 的独有标记：少了它就不是「我们自己的探针端点」
+    requiredHeader: 'x-probe-bytes',
+    minBytes: 32 * 1024,
   })
 }

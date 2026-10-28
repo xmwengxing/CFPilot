@@ -26,14 +26,40 @@ const (
 	// 而超时后**不再重试**（见下方 tlsProbe 的 shouldRetry），
 	// 所以单 IP 最坏只占 2 秒而不是 8 秒。
 	defTLSTimeoutMs     = 2000
-	defProbeLimit       = 120   // 进入阶段二的候选数
-	defProbeConcurrency = 24    // 阶段二并发
-	defProbeTimeoutMs   = 3000  // 阶段二超时
-	defSpeedLimit       = 30    // 进入阶段三的候选数
-	defSpeedConcurrency = 4     // 阶段三并发
-	defSpeedTimeoutMs   = 12000 // 阶段三超时
-	defSpeedBytes       = 5 * 1024 * 1024
-	defTop              = 8
+	defProbeLimit       = 120  // 进入阶段二的候选数
+	defProbeConcurrency = 24   // 阶段二并发
+	defProbeTimeoutMs   = 3000 // 阶段二超时
+	defSpeedLimit       = 30   // 进入阶段三的候选数
+
+	// defSpeedConcurrency 是**候选之间**的测速并行数，默认 1（串行）。
+	//
+	// ## 为什么必须串行（对照 CLI packages/cli/src/scan/scan.ts 的 speedConcurrency）
+	//
+	// 阶段三测的是**带宽**，而带宽是整条链路共享的资源。
+	// 2026-10-28 真机定位：默认 4 路并行时，每个候选只能分到约 1/4 带宽，
+	// 于是无论 IP 好坏，测出来全是 0.1~0.2 MB/s —— 用户看到的就是
+	// 「优选出来的 IP 全都只有 0.1~0.9 MB/s」。
+	//
+	// 并行只适合测「延迟」这类不占带宽的指标（TCP / TLS / 101 阶段就是这么做的）。
+	// 串行代价可控：每次测量有时长上限（默认 6s），30 个候选约 3 分钟；
+	// 想更快可以调小 SpeedLimit 或 SpeedDurationMs。
+	defSpeedConcurrency = 1
+
+	// defSpeedConnections 是**每个候选**的并发连接数，默认 3。
+	//
+	// 单条 TCP 受拥塞窗口 / BDP 限制，在高延迟线路上填不满实际带宽。
+	// 真机同一条链路实测：单流稳态 0.47 MB/s，3 流稳态 1.14 MB/s（×2.4）。
+	// 对照 CLI 的 speedConnections（measureProbeThroughput 的 connections）。
+	defSpeedConnections = defMeasureConnections
+
+	// defSpeedDurationMs 是单次测量时长（对照 CLI 的 speedDurationMs）。
+	defSpeedDurationMs = defMeasureDurationMs
+
+	// defSpeedTimeoutMs 是**整体预算**（含拨号 / 握手 / 传输），到点必返回。
+	// ⚠️ 这是「测速永远挂住」缺陷的兜底，不要退化。
+	defSpeedTimeoutMs = 12000
+	defSpeedBytes     = defMeasureBytes
+	defTop            = 8
 )
 
 // Options 是扫描参数。
@@ -78,9 +104,17 @@ type Options struct {
 	ProbeTimeoutMs   int
 	SpeedLimit       int
 	SpeedConcurrency int
-	SpeedTimeoutMs   int
-	SpeedBytes       int
-	Top              int
+	// SpeedConnections 是每个候选的并发连接数（0 = 默认 3）。
+	//
+	// 阶段三的「并发」有两层，别混淆：
+	//   - SpeedConcurrency：**候选之间**并行（默认 1 串行，带宽共享）；
+	//   - SpeedConnections：**同一个候选**开几条 TCP 流（默认 3，单流填不满链路）。
+	SpeedConnections int
+	// SpeedDurationMs 是单次测量时长（0 = 默认 6000ms），不含整体预算。
+	SpeedDurationMs int
+	SpeedTimeoutMs  int
+	SpeedBytes      int
+	Top             int
 
 	// SkipSpeed 跳过阶段三的下行测速。
 	//
@@ -139,6 +173,8 @@ func (o Options) withDefaults() Options {
 	set(&o.ProbeTimeoutMs, defProbeTimeoutMs)
 	set(&o.SpeedLimit, defSpeedLimit)
 	set(&o.SpeedConcurrency, defSpeedConcurrency)
+	set(&o.SpeedConnections, defSpeedConnections)
+	set(&o.SpeedDurationMs, defSpeedDurationMs)
 	set(&o.SpeedTimeoutMs, defSpeedTimeoutMs)
 	set(&o.SpeedBytes, defSpeedBytes)
 	set(&o.Top, defTop)
@@ -402,21 +438,43 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 		return &Summary{Entries: entries, Stats: stats}, nil
 	}
 
-	report(Progress{Stage: "speed", Total: len(stage3), Message: "阶段三：真实下行测速"})
+	report(Progress{Stage: "speed", Total: len(stage3), Message: "阶段三：真实下行测速（多流稳态）"})
 
 	type speedOut struct {
 		ws WSResult
 		dl DownloadResult
 	}
+	// 进度文案要带**稳态值**（对外口径），因此记录最近一次测量结果。
+	// 默认 SpeedConcurrency = 1（串行），这里的加锁只为兼容显式调高并发的场景。
+	var speedMu sync.Mutex
+	lastSteady := 0.0
 	speedResults := forEachIP(ctx, stage3, opt.SpeedConcurrency, func(r WSResult) (speedOut, bool) {
 		// ⚠️ 测速必须打**探针端点**（ProbePath），不是代理的 WS 路径。
 		// 用 WS 路径打 GET 只会拿到 17 字节的升级失败响应，
 		// 算出来的速度是 0.000004 MB/s（用户实测踩过）。
-		dl := MeasureDownload(ctx, r.IP, opt.Port, opt.Host, opt.SpeedBytes,
-			msDuration(opt.SpeedTimeoutMs), opt.ProbePath)
+		//
+		// 口径对照 CLI packages/cli/src/scan/true-probe.ts 的
+		// measureProbeThroughput：多连接（默认 3）+ 丢预热 + 稳态吞吐。
+		dl := MeasureThroughput(ctx, MeasureOptions{
+			IP:          r.IP,
+			Port:        opt.Port,
+			Host:        opt.Host,
+			BytesWanted: opt.SpeedBytes,
+			Timeout:     msDuration(opt.SpeedTimeoutMs),
+			Path:        opt.ProbePath,
+			Connections: opt.SpeedConnections,
+			Duration:    msDuration(opt.SpeedDurationMs),
+		})
+		speedMu.Lock()
+		lastSteady = dl.SteadyMBps
+		speedMu.Unlock()
 		return speedOut{ws: r, dl: dl}, dl.OK
 	}, func(done int) {
-		report(Progress{Stage: "speed", Done: done, Total: len(stage3), Message: "阶段三：真实下行测速"})
+		speedMu.Lock()
+		steady := lastSteady
+		speedMu.Unlock()
+		report(Progress{Stage: "speed", Done: done, Total: len(stage3),
+			Message: fmt.Sprintf("阶段三：真实下行测速（稳态 %.1f MB/s）", steady)})
 	}, nil)
 
 	// 组装结果：只保留测速成功的
@@ -428,7 +486,8 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 			Colo:    sr.ws.Colo,
 			Latency: sr.ws.Latency,
 			TLSMs:   tlsMsOf[sr.ws.IP],
-			Speed:   sr.dl.SpeedMBps,
+			// ⚠️ 对外报**稳态值**，不是窗口峰值（峰值只作诊断）。
+			Speed: sr.dl.SteadyMBps,
 		})
 	}
 

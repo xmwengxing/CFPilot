@@ -328,7 +328,11 @@ export async function runDeployCommand(args: ParsedArgs): Promise<void> {
     trojanPassword,
     wsPath,
     enableTrojan: true,
-    enableXhttp: false,
+    // XHTTP 默认开启（2026-10-28 用户要求）：
+    // 数据面上它只是多一条「必须带合法 VLESS 头」的 POST 路由，开了不影响安全；
+    // 想关在面板「入站配置 → 启用服务端 XHTTP 入站监听」关即可
+    //（KV 配置优先级高于环境变量，面板开关会覆盖这里的默认值）。
+    enableXhttp: true,
     mode,
     keepCredentials,
     skipSameVersion,

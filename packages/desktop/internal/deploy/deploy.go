@@ -87,7 +87,7 @@ type Options struct {
 	//
 	// ⚠️ 默认值必须与 CLI 一致（AGENTS.md §2.2：CLI 是部署语义的权威实现）。
 	//
-	// CLI 的 deploy/command.ts 固定传 enableTrojan: true / enableXhttp: false，
+	// CLI 的 deploy/command.ts 固定传 enableTrojan: true / enableXhttp: true，
 	// 并据此写 KV 的 CONFIG 与 Pages 的 ENABLE_TROJAN / ENABLE_XHTTP 环境变量。
 	// Go 侧之前用零值 false，而 HTTP 层从不设置这两个字段
 	// → GUI 部署出来的实例 Trojan 被强制关闭，与 CLI 部署出来的不一致。
@@ -225,12 +225,14 @@ func DefaultOptions() Options {
 		WaitInterval:    3 * time.Second,
 		Log:             func(string) {},
 		// 与 CLI 对齐（packages/cli/src/deploy/command.ts）：
-		// enableTrojan: true / enableXhttp: false。
+		// enableTrojan: true / enableXhttp: true。
+		// XHTTP 自 2026-10-28 起默认开启：数据面上它只是多一条需要合法 VLESS 头的
+		// POST 路由，用户想关在面板「入站配置」里关即可（面板写 KV，优先级高于环境变量）。
 		//
 		// ⚠️ 之前这里是 Go 零值 false —— Trojan 被强制关闭，
 		// GUI 部署出来的实例与 CLI 部署出来的行为不一致。
 		EnableTrojan: true,
-		EnableXHTTP:  false,
+		EnableXHTTP:  true,
 	}
 }
 

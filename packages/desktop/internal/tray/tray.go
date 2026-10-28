@@ -56,6 +56,8 @@ type App struct {
 	mCheckAppUpdate *systray.MenuItem
 	// mCheckDeployUpdate 是「检查部署更新」菜单项
 	mCheckDeployUpdate *systray.MenuItem
+	// mQuickScan 是「一键优选 IP」菜单项
+	mQuickScan *systray.MenuItem
 
 	// updateState 保存最近一次自动检查的结果（用于菜单项上的提示文字）。
 	updateState *UpdateState
@@ -68,6 +70,8 @@ type App struct {
 	onCheckAppUpdate func()
 	// onCheckDeployUpdate 回调：检查部署更新（由 main 注入）
 	onCheckDeployUpdate func()
+	// onQuickScan 回调：一键优选 IP（由 main 注入）
+	onQuickScan func()
 	// checker 是后台更新检查器（可为 nil）
 	checker *UpdateChecker
 }
@@ -131,6 +135,16 @@ func (a *App) handleCheckDeployUpdate() {
 		a.onCheckDeployUpdate()
 	}
 }
+
+// handleQuickScan 点击「一键优选 IP」。
+func (a *App) handleQuickScan() {
+	if a.onQuickScan != nil {
+		a.onQuickScan()
+	}
+}
+
+// SetQuickScanHandler 设置「一键优选 IP」的实现。
+func (a *App) SetQuickScanHandler(fn func()) { a.onQuickScan = fn }
 
 // Run 启动托盘（阻塞，直到退出）。
 //
@@ -238,8 +252,15 @@ func (a *App) onReady() {
 	// 两个版本独立：外壳可以是 0.7.5 而线上内核还是 0.7.3。
 	a.mCheckAppUpdate = systray.AddMenuItem("检查应用更新", "检查是否有新版本可下载")
 	a.mCheckDeployUpdate = systray.AddMenuItem("检查部署更新", "检查线上内核是否有新版本")
-	a.mCheckAppUpdate.Click(func() { a.onCheckAppUpdate() })
-	a.mCheckDeployUpdate.Click(func() { a.onCheckDeployUpdate() })
+	a.mCheckAppUpdate.Click(func() { a.handleCheckAppUpdate() })
+	a.mCheckDeployUpdate.Click(func() { a.handleCheckDeployUpdate() })
+
+	// ---- 一键优选 ----
+	//
+	// 后台跑一次「真连接优选 + 回填面板」，完成后弹气泡通知。
+	// 失败也会弹（提示去界面看日志）。
+	a.mQuickScan = systray.AddMenuItem("一键优选 IP", "自动优选并回填到面板，完成后通知")
+	a.mQuickScan.Click(func() { a.handleQuickScan() })
 
 	// ---- 局域网访问（复选菜单项）----
 	a.mLAN = systray.AddMenuItemCheckbox("允许局域网访问", "同一网络的其它设备可访问", false)

@@ -262,6 +262,8 @@ func (s *Server) routes() http.Handler {
 
 	// 服务管理 API（托盘里的功能也用这些接口，做到「界面与托盘同一套逻辑」）
 	mux.HandleFunc("/api/service/status", s.guard(s.handleServiceStatus))
+	// 日志浏览（界面「日志」页签用）
+	s.registerLogRoutes(mux)
 	mux.HandleFunc("/api/service/port", s.guard(s.handleServicePort))
 	mux.HandleFunc("/api/service/stop", s.guard(s.handleServiceStop))
 

@@ -420,7 +420,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           candidates: plan.candidates,
           // 国家过滤（可多选）：不传 = 全量；无效代码在 normalizeCountryFilter 里被丢弃
           countries: Array.isArray(body.countries) ? body.countries : undefined,
-          top: body.top ?? 15,
+          top: body.top ?? 8,
           // ⚠️ 必须透传这些参数，否则桥接服务永远用默认值：
           //   wsPath / probePath —— 对接第三方项目（路径不是 /__edge_probe）时，
           //     阶段二会硬连默认探针路径 → 全军覆没

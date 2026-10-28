@@ -229,6 +229,60 @@ async function pool<T, R>(
 }
 
 /**
+ * 自适应并发池。
+ *
+ * ## 为什么需要
+ *
+ * 并发不是越高越好 —— 高并发会撞上本机/网络侧的瓶颈，
+ * 表现为「超时率随并发上升」，反而拿不到更多可用节点。
+ *
+ * 真机实测（本机开着 TUN 代理、且代理用的就是本项目的订阅节点）：
+ *
+ *   并发  20  → TCP 成功率 100%
+ *   并发  50  → TCP 100%，但 TLS 阶段掉到 4%
+ *   并发 100  → TCP 49%
+ *   并发 300  → TCP 26%
+ *
+ * 固定并发在这类环境里会直接崩掉。这里改成**按批评估、自动升降**：
+ *
+ *   每批 200 个候选跑完后看成功率：
+ *     < 40%  → 并发减半（下限 8）
+ *     > 85%  → 并发翻倍（上限 = 请求值）
+ *
+ * 网络好时自动升回高并发（速度不损失），
+ * 网络被限速/被 TUN 干扰时自动退到能跑通的并发度（结果不空）。
+ *
+ * ⚠️ 与 Go 版 packages/desktop/internal/scan/scan.go 的自适应池语义一致
+ * （AGENTS.md §2.2：两端行为必须一致）。
+ */
+async function poolAdaptive<T, R extends { ok: boolean }>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>,
+  batchSize = 200
+): Promise<R[]> {
+  const out: R[] = []
+  const maxConcurrency = Math.max(1, concurrency)
+  let current = maxConcurrency
+
+  for (let start = 0; start < items.length; start += batchSize) {
+    const batch = items.slice(start, start + batchSize)
+    const results = await pool(batch, current, worker)
+    out.push(...results)
+
+    // 评估本批成功率
+    const okCount = results.reduce((n, r) => n + (r.ok ? 1 : 0), 0)
+    const rate = results.length > 0 ? okCount / results.length : 1
+    if (rate < 0.4) {
+      current = Math.max(8, Math.floor(current / 2))
+    } else if (rate > 0.85) {
+      current = Math.min(maxConcurrency, current * 2)
+    }
+  }
+  return out
+}
+
+/**
  * 判断错误是否属于「超时」。
  *
  * 超时意味着「这个 IP 在当前网络下不可用」，重试一次也是同样结果，
@@ -296,7 +350,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   const speedConcurrency = options.speedConcurrency ?? 4
   const speedTimeoutMs = options.speedTimeoutMs ?? 12000
   const speedBytes = options.speedBytes ?? 5 * 1024 * 1024
-  const top = options.top ?? 15
+  const top = options.top ?? 8
   /**
    * 国家 / 地区筛选（作用于已识别机房的候选）。
    *
@@ -322,7 +376,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   // ---- 阶段一：TCP 握手初筛 ----
   report({ type: 'stage', stage: 1, name: 'TCP 握手初筛', total: candidates.length })
   let done = 0
-  const tcpResults = await pool(candidates, concurrency, async (ip) => {
+  const tcpResults = await poolAdaptive(candidates, concurrency, async (ip) => {
     const result = await withRetry(retries, () => tcpPing(ip, options.port, tcpTimeoutMs))
     done++
     if (done % 500 === 0 || done === candidates.length) {
@@ -366,7 +420,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
 
   report({ type: 'stage', stage: 1, name: 'TLS 握手筛选', total: tlsInput.length })
   let tlsDone = 0
-  const tlsResults = await pool(tlsInput, tlsConcurrency, async (item) => {
+  const tlsResults = await poolAdaptive(tlsInput, tlsConcurrency, async (item) => {
     // TLS 探测的「成功」判定是 tlsMs > 0（它没有 ok 字段）
     //
     // ⚠️ 超时不重试：TLS 握手超时说明这个 IP 在当前网络下就是不可用，

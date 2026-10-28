@@ -74,6 +74,51 @@ interface CFPilotKvOption {
   dataSubdomain?: string
 }
 
+/**
+ * 日志读取结果（对应 Go 版的 GET /api/logs?tail=N）。
+ *
+ * ⚠️ 本文件是**全局脚本**（没有 import/export），
+ *    里面的 interface 靠「全局增强」对整个项目可见。
+ *    所以这里**不能**写 `export` —— 一旦写成模块，
+ *    `interface Window` 就不再增强全局 Window，界面全部报类型错。
+ */
+interface LogsResult {
+  ok: boolean
+  /** 日志文件完整路径 */
+  path?: string
+  /** 文件大小（字节） */
+  size?: number
+  /** 人类可读的大小，如 "120.6 KB" */
+  sizeText?: string
+  /** 返回的**最后 N 行** */
+  lines?: string[]
+  /** 文件总行数 */
+  total?: number
+  /** 是否只返回了尾部（总行数 > 返回行数） */
+  truncated?: boolean
+  /** 轮转出去的历史日志文件名（可能为空） */
+  rotated?: string[]
+  error?: string
+}
+
+/**
+ * 一键优选结果（对应 Go 版的 POST /api/scan/quick）。
+ *
+ * 与托盘菜单里的「一键优选 IP」是同一个后端接口。
+ */
+interface QuickScanResult {
+  ok: boolean
+  /** 优选出来的 IP 数量 */
+  count?: number
+  /** 数据面域名 */
+  host?: string
+  /** 控制面面板域名 */
+  panel?: string
+  /** 给用户看的成功提示 */
+  message?: string
+  error?: string
+}
+
 interface Window {
   cfpilot: {
     /** 列出所有账户配置（不含 Token 明文） */
@@ -234,6 +279,26 @@ interface Window {
     }>
     /** 优选器支持的国家列表（与面板 / 命令行版同源） */
     listScanCountries(): Promise<Array<{ code: string; name: string }>>
+    /**
+     * 读取本机日志文件（末尾若干行）。
+     *
+     * @param tail 取末尾多少行（默认 500，后端上限 5000）
+     */
+    getLogs(tail?: number): Promise<LogsResult>
+    /**
+     * 一键优选并回填面板。
+     *
+     * 与托盘菜单里的「一键优选 IP」是同一个后端接口：
+     * 后台跑完整优选 + 回填面板，完成后弹系统通知。
+     */
+    quickScan(): Promise<QuickScanResult>
+    /**
+     * 在文件管理器中打开文件所在的文件夹。
+     *
+     * 日志页的「打开日志文件所在文件夹」用它 ——
+     * 后端打开的是传入文件**所在目录**，所以传日志文件本身即可。
+     */
+    revealFile(file: string): Promise<{ ok: boolean; path?: string; error?: string }>
     detectAccount(): Promise<{ accountId: string; accountName: string }>
     listKvOptions(accountId: string): Promise<{
       options: CFPilotKvOption[]

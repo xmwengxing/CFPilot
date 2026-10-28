@@ -48,6 +48,8 @@ func (s *Server) registerScanRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/scan/parse-candidates", s.guard(s.handleScanParseCandidates))
 	mux.HandleFunc("/api/scan/scanner-token", s.guard(s.handleScanScannerToken))
 	mux.HandleFunc("/api/scan/push-results", s.guard(s.handleScanPushResults))
+	// 一键优选（托盘菜单与界面按钮共用）
+	mux.HandleFunc("/api/scan/quick", s.guard(s.handleScanQuick))
 }
 
 // scanRequest 是扫描请求体（字段与 Electron 版 ScanParams 对齐）。

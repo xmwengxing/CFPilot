@@ -33,7 +33,7 @@ const (
 	defSpeedConcurrency = 4     // 阶段三并发
 	defSpeedTimeoutMs   = 12000 // 阶段三超时
 	defSpeedBytes       = 5 * 1024 * 1024
-	defTop              = 15
+	defTop              = 8
 )
 
 // Options 是扫描参数。
@@ -81,6 +81,14 @@ type Options struct {
 	SpeedTimeoutMs   int
 	SpeedBytes       int
 	Top              int
+
+	// SkipSpeed 跳过阶段三的下行测速。
+	//
+	// 跳过时结果按 **101 延迟**排序（测速结果为 0），
+	// 用于「只要能用、不在乎快慢」的场景（一键优选、后台任务）。
+	//
+	// ⚠️ 与 CLI 的 --no-speed 语义一致（packages/cli/src/scan/scan.ts）。
+	SkipSpeed bool
 
 	// Progress 接收进度回调（可为 nil）
 	Progress func(Progress)
@@ -134,13 +142,19 @@ func (o Options) withDefaults() Options {
 	set(&o.SpeedTimeoutMs, defSpeedTimeoutMs)
 	set(&o.SpeedBytes, defSpeedBytes)
 	set(&o.Top, defTop)
+	// ⚠️ 两个默认值必须**各自独立**判断。
+	//
+	// 原来 ProbePath 的赋值被**嵌在** `if o.WSPath == ""` 里面 ——
+	// 于是「设了 WSPath 但没设 ProbePath」时 ProbePath 保持空串，
+	// 阶段三会 GET 一个空路径 → 测速全失败 → 结果 0 条。
+	//
+	// 界面「自动识别」正是会填 WSPath（代理路径）而不一定填 ProbePath，
+	// 所以这个组合在实际使用中会出现。
 	if o.WSPath == "" {
-		if o.WSPath == "" {
-			o.WSPath = ProbeDefaultPath
-		}
-		if o.ProbePath == "" {
-			o.ProbePath = ProbeDefaultPath
-		}
+		o.WSPath = ProbeDefaultPath
+	}
+	if o.ProbePath == "" {
+		o.ProbePath = ProbeDefaultPath
 	}
 	return o
 }
@@ -187,7 +201,7 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 	// ================= 阶段一：TCP 握手初筛 =================
 	report(Progress{Stage: "tcp", Total: len(opt.Candidates), Message: "阶段一：TCP 握手初筛"})
 
-	tcpResults := forEachIP(ctx, opt.Candidates, opt.Concurrency, func(ip string) (TCPResult, bool) {
+	tcpResults := forEachIPAdaptive(ctx, opt.Candidates, opt.Concurrency, func(ip string) (TCPResult, bool) {
 		var last TCPResult
 		for attempt := 0; attempt < opt.Retries; attempt++ {
 			last = ProbeTCP(ctx, ip, opt.Port, msDuration(opt.TCPTimeoutMs))
@@ -201,7 +215,7 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 		return last, false
 	}, func(done int) {
 		report(Progress{Stage: "tcp", Done: done, Total: len(opt.Candidates), Message: "阶段一：TCP 握手初筛"})
-	}, nil)
+	}, 200)
 
 	stats["tcpOk"] = len(tcpResults)
 	if len(tcpResults) == 0 {
@@ -236,7 +250,7 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 		tlsInput = sorted[:tlsCandidateLimit]
 	}
 
-	tlsOK := forEachIP(ctx, tlsInput, opt.TLSConcurrency, func(t TCPResult) (TLSResult, bool) {
+	tlsOK := forEachIPAdaptive(ctx, tlsInput, opt.TLSConcurrency, func(t TCPResult) (TLSResult, bool) {
 		// ⚠️ 超时不重试：TLS 握手超时说明这个 IP 在当前网络下就是不可用，
 		// 再试一次也是同样的结果，却要让并发槽位多占一个超时周期。
 		// 只有「连接被重置」这类偶发错误才值得重试。
@@ -256,7 +270,7 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 		return r, false
 	}, func(done int) {
 		report(Progress{Stage: "tls", Done: done, Total: len(tlsInput), Message: "阶段一之二：TLS 握手筛选"})
-	}, nil)
+	}, 200)
 
 	stats["tlsOk"] = len(tlsOK)
 	if len(tlsOK) == 0 {
@@ -363,6 +377,31 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 	stats["stage3Input"] = len(stage3)
 
 	// ================= 阶段三：真实下行测速 =================
+	//
+	// SkipSpeed 时不做测速，直接把 101 通过的候选当作结果
+	// （速度记 0，排序退化为按 101 延迟）。
+	if opt.SkipSpeed {
+		report(Progress{Stage: "speed", Total: len(stage3), Message: "阶段三：跳过测速（按延迟排序）"})
+		entries := make([]Entry, 0, len(stage3))
+		for _, r := range stage3 {
+			entries = append(entries, Entry{
+				IP:      r.IP,
+				Port:    opt.Port,
+				Colo:    r.Colo,
+				Latency: r.Latency,
+				TLSMs:   tlsMsOf[r.IP],
+				Speed:   0,
+			})
+		}
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Latency < entries[j].Latency })
+		if len(entries) > opt.Top {
+			entries = entries[:opt.Top]
+		}
+		stats["speedOk"] = len(entries)
+		stats["skippedSpeed"] = 1
+		return &Summary{Entries: entries, Stats: stats}, nil
+	}
+
 	report(Progress{Stage: "speed", Total: len(stage3), Message: "阶段三：真实下行测速"})
 
 	type speedOut struct {
@@ -411,6 +450,103 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 		Message: fmt.Sprintf("完成：%d 个可用节点", len(entries))})
 
 	return &Summary{Entries: entries, Stats: stats}, nil
+}
+
+// forEachIPAdaptive 是**自适应并发**的版本。
+//
+// ## 为什么需要
+//
+// 并发不是越高越好 —— 高并发会撞上本机/网络侧的瓶颈，
+// 表现为「超时率随并发上升」，反而拿不到更多可用节点。
+//
+// 真机实测（本机开着 TUN 代理、且代理用的就是本项目的订阅节点）：
+//
+//	并发  20  → TCP 成功率 100%
+//	并发  50  → TCP 100%，但 TLS 阶段掉到 4%
+//	并发 100  → TCP 49%
+//	并发 300  → TCP 26%
+//
+// 固定并发在这类环境里会直接崩掉（阶段一就全军覆没）。
+// 这里改成**按批评估、自动升降**：
+//
+//	每批 200 个候选跑完后看成功率：
+//	  < 40%  → 并发减半（下限 8）
+//	  > 85%  → 并发翻倍（上限 = 请求值）
+//
+// 网络好时自动升回高并发（速度不损失），
+// 网络被限速/被 TUN 干扰时自动退到能跑通的并发度（结果不空）。
+//
+// ⚠️ 与 CLI 版 packages/cli/src/scan/scan.ts 的 poolAdaptive 语义一致
+// （AGENTS.md §2.2：两端行为必须一致）。
+func forEachIPAdaptive[In any, Out any](
+	ctx context.Context,
+	items []In,
+	concurrency int,
+	fn func(In) (Out, bool),
+	onProgress func(done int),
+	batchSize int,
+) []Out {
+	if batchSize <= 0 {
+		batchSize = 200
+	}
+	maxConcurrency := concurrency
+	if maxConcurrency < 1 {
+		maxConcurrency = 1
+	}
+	current := maxConcurrency
+
+	out := make([]Out, 0, len(items))
+	for start := 0; start < len(items); start += batchSize {
+		end := start + batchSize
+		if end > len(items) {
+			end = len(items)
+		}
+		batch := items[start:end]
+
+		results := forEachIP(ctx, batch, current, fn, onProgress, nil)
+		out = append(out, results...)
+
+		// 评估本批成功率
+		okCount := 0
+		for _, r := range results {
+			if itemOK(r) {
+				okCount++
+			}
+		}
+		rate := 1.0
+		if len(results) > 0 {
+			rate = float64(okCount) / float64(len(results))
+		}
+		if rate < 0.4 {
+			current = current / 2
+			if current < 8 {
+				current = 8
+			}
+		} else if rate > 0.85 {
+			current = current * 2
+			if current > maxConcurrency {
+				current = maxConcurrency
+			}
+		}
+	}
+	return out
+}
+
+// itemOK 判断一个探测结果是否成功。
+//
+// TCPResult / TLSResult / WSResult 都有 ok 字段，
+// 这里用类型断言统一处理（避免为每个类型写一遍）。
+func itemOK(v any) bool {
+	switch r := v.(type) {
+	case TCPResult:
+		return r.OK
+	case TLSResult:
+		return r.OK
+	case WSResult:
+		return r.OK
+	default:
+		return false
+	}
 }
 
 // ------------------------------------------------------------------

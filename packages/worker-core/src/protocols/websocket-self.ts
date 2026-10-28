@@ -468,10 +468,20 @@ export async function handleWebSocket(
     }
 
     // 认证已在 parseTarget 里完成（VLESS 校验 UUID / Trojan 校验口令），
-    // 失败时不会走到这里 —— 因此现在可以安全地回响应头。
+    // 失败时不会走到这里。
     //
-    // 社区通用做法：先回协议响应头，客户端据此判定入站已建立。
-    sendResponseHeader(new Uint8Array(0))
+    // ## ⚠️ 协议响应头**只有 VLESS 有**，Trojan 一个字节都不能回
+    //
+    // VLESS 的响应头（版本 + Addons 长度）是协议的一部分，客户端收到它才认为入站已建立。
+    // 但 **Trojan 协议没有响应头** —— 服务端认证通过后直接进入透明转发，
+    // 客户端收到的第一个字节就是目标站的数据。
+    //
+    // 2026-10-28 真机定位（用户报「Trojan 节点全部 -1」）：
+    // 这里原先对两种协议都发 `[0x00, 0x00]`，于是 trojan 客户端在自己的下行流最前面
+    // 吃到两个 NUL 字节 —— TLS 记录头被这两个字节顶偏，握手直接失败。
+    // 真机抓到的下行开头是 `0000 485454502f312e31...`（== `\0\0HTTP/1.1`），
+    // 而正确报文必须以目标站的第一个字节开头。
+    if (mode === 'vless') sendResponseHeader(new Uint8Array(0))
 
     // 出站：失败分级上报，便于定位（不再一律表现为「目标不可达」）
     const failures: DialFailure[] = []

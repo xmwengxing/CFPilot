@@ -825,10 +825,12 @@ func TestConfigMergeKeepsExistingFields(t *testing.T) {
 }
 
 // enableTrojan / enableXhttp 必须与 CLI 一致
-// （CLI 的 deploy/command.ts 固定传 enableTrojan: true / enableXhttp: false）。
+// （CLI 的 deploy/command.ts 固定传 enableTrojan: true / enableXhttp: true）。
 //
 // 之前 Go 侧是零值 false —— Trojan 被强制关闭，
 // GUI 部署出来的实例与 CLI 部署出来的行为不同。
+//
+// XHTTP 自 2026-10-28 起也默认 true（用户要求「默认开启，面板控制」）。
 func TestConfigTrojanMatchesCLI(t *testing.T) {
 	f := newFakeCF()
 	d, _ := newTestDeployer(t, f, nil)
@@ -844,8 +846,8 @@ func TestConfigTrojanMatchesCLI(t *testing.T) {
 	if cfg["enableTrojan"] != true {
 		t.Errorf("enableTrojan 应为 true（与 CLI 一致），实际 %v", cfg["enableTrojan"])
 	}
-	if cfg["enableXhttp"] != false {
-		t.Errorf("enableXhttp 应为 false（与 CLI 一致），实际 %v", cfg["enableXhttp"])
+	if cfg["enableXhttp"] != true {
+		t.Errorf("enableXhttp 应为 true（与 CLI 一致，面板可关），实际 %v", cfg["enableXhttp"])
 	}
 }
 

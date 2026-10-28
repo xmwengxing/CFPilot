@@ -22,6 +22,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -94,6 +95,17 @@ func main() {
 					log.SetOutput(w)
 				}
 				defer func() { _ = w.Close() }()
+
+				// ⚠️ **把 stderr 也转进日志文件**。
+				//
+				// Go 的 panic / runtime 致命错误（OOM、goroutine 死锁）
+				// 都写到 **fd 2**，托盘模式下 stderr 不可见 →
+				// 用户只看到「服务被强制退出」，日志里什么都没有。
+				//
+				// 这里用管道把 stderr 接过来，抄进日志文件：
+				// 万一有 panic 逃过了各处的 recover 兜底，
+				// 至少日志里能留下现场。
+				redirectStderrToLog(w)
 			} else {
 				log.Printf("[cfpilot] 打开日志文件失败：%v", werr)
 			}
@@ -369,6 +381,46 @@ func isPortFree(port int) bool {
 	}
 	_ = ln.Close()
 	return true
+}
+
+// redirectStderrToLog 把进程的 stderr 接到日志文件。
+//
+// # 为什么
+//
+// Go 的 panic 与 runtime 致命错误（OOM、goroutine 死锁）都写到 **fd 2**。
+// 托盘模式下 stderr 没有可见的终端 → 用户只看到「服务被强制退出」，
+// 日志文件里**什么都没有**，事后完全无从查起。
+//
+// 把它接到日志文件后，至少现场会被留下来。
+//
+// # 注意
+//
+//   - 只复制，不改写内容（panic 的格式保持原样，便于对照）
+//   - 每行加 `[stderr]` 前缀，方便和普通日志区分
+//   - 复制协程自身的 panic 也会被吞掉（写日志时 panic）→ 用 recover 兜住
+func redirectStderrToLog(w io.Writer) {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return
+	}
+	orig := os.Stderr
+	os.Stderr = pw
+
+	go func() {
+		defer func() { _ = recover() }()
+		sc := bufio.NewScanner(pr)
+		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for sc.Scan() {
+			_, _ = fmt.Fprintf(w, "[stderr] %s\n", sc.Text())
+		}
+		_ = pr.Close()
+	}()
+
+	// 原 stderr 保留一份（--console 时终端仍能看到）
+	go func() {
+		defer func() { _ = recover() }()
+		_, _ = io.Copy(orig, pr)
+	}()
 }
 
 func fatal(err error) {

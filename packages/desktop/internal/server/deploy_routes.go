@@ -34,6 +34,7 @@ import (
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/cfapi"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/deploy"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/kernel"
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/safe"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/store"
 )
 
@@ -250,6 +251,21 @@ func (s *Server) handleDeployRun(w http.ResponseWriter, r *http.Request) {
 			s.deploy.mu.Lock()
 			s.deploy.running = false
 			s.deploy.mu.Unlock()
+		}()
+
+		// ⚠️ **panic 兜底**：部署跑在后台 goroutine 里，
+		// panic 会让**整个进程**退出（托盘 + 服务 + 日志一起消失），
+		// 而 panic 信息在托盘模式的 stderr 里用户看不见。
+		//
+		// 接住 → 记日志（含堆栈）→ 报给界面，进程继续跑。
+		defer func() {
+			if r := safe.Recover("部署任务"); r != nil {
+				s.logLevel("部署过程发生内部错误，详情已记入日志（服务继续运行）", "err")
+				s.events.publish("deploy-status", map[string]any{
+					"ok":    false,
+					"error": "部署过程发生内部错误，详情已记入日志",
+				})
+			}
 		}()
 
 		res, runErr := deploy.New(opt).Run(context.Background())

@@ -16,12 +16,19 @@
 ## 目录
 
 - [部署](#部署)
+
 - [优选 IP](#优选-ip)
+
 - [导入订阅](#导入订阅)
+
 - [使用须知](#使用须知)
+
 - [常见问题](#常见问题)
+
 - [技术实现](#技术实现)
+
 - [配置项与环境变量](#配置项与环境变量)
+
 - [免责声明](#免责声明)
 
 ***
@@ -53,8 +60,11 @@ npx -y cfpilot@latest deploy
 **注意事项**
 
 - 全程约 1-3 分钟，取决于 Cloudflare API 响应
+
 - 遇到 `8000119` 会自动同项目重试 3 次，仍失败则换项目名重建（自动同步 `DATA_HOST`）
+
 - 部署完成后**立即保存面板密码** —— 云端环境变量是加密的，之后无法再读
+
 - 同一账号部署第二个实例：加 `--new-kv`
 
 </details>
@@ -107,7 +117,9 @@ cfpilot config      # 配置管理
 **注意事项**
 
 - 首次进入「配置」菜单填 Token，会自动识别账号与已有实例
+
 - 配置保存在 `~/.cfpilot/config.json`，Token 显示时脱敏
+
 - 需要 Node.js 18+
 
 </details>
@@ -119,11 +131,11 @@ cfpilot config      # 配置管理
 
 到 [Releases](https://github.com/xmwengxing/CFPilot/releases) 下载对应平台文件：
 
-| 平台 | 文件 |
-|---|---|
+| 平台          | 文件                                       |
+| ----------- | ---------------------------------------- |
 | Windows x64 | `cfpilot-<版本>-windows-amd64.exe`（8.3 MB） |
-| Linux x64 | `cfpilot-<版本>-linux-amd64`（先 `chmod +x`） |
-| Linux arm64 | `cfpilot-<版本>-linux-arm64` |
+| Linux x64   | `cfpilot-<版本>-linux-amd64`（先 `chmod +x`） |
+| Linux arm64 | `cfpilot-<版本>-linux-arm64`               |
 
 运行后托盘出现图标，系统浏览器自动打开管理界面。
 
@@ -132,43 +144,47 @@ cfpilot config      # 配置管理
 界面分四个页签：**凭据 / 部署 / 优选 / 说明**，下方是常驻日志。
 
 - **凭据页**：填 Token → 自动检测账号 → 自动列出 KV
+
 - **部署页**：全新部署时若无 KV 会自动创建
+
 - **优选页**：「自动识别」一次填好域名与 WS 路径 → 开始优选 → 回填面板
+
 - **说明页**：安全说明、Token 权限清单
 
 **注意事项**
 
 - 单文件静态可执行，**零依赖**，不需要预装 Node.js
+
 - 启动后**自动打开**管理界面（`--no-browser` 可关）
+
 - 服务只监听 `127.0.0.1`，凭据存在本机 `~/.cfpilot-gui/secrets.json`
+
 - 右键托盘可查看服务状态、复制地址、修改端口、启停服务
+
 - 常用参数：`--no-browser`（不自动开浏览器）、`--no-tray`（无桌面环境）、
   `--console`（日志写文件）、`--check`（只自检）
 
 ### 托盘菜单
 
-| 菜单项 | 作用 |
-|---|---|
-| 打开业务界面 | 打开管理界面 |
-| 复制服务地址 | 复制当前地址 |
-| 停止服务 | 启停本地服务 |
-| 切换端口 | 预设端口，一键切换 |
-| 允许局域网访问 | 同网段其它设备可访问 |
+| 菜单项        | 作用                         |
+| ---------- | -------------------------- |
+| 打开业务界面     | 打开管理界面                     |
+| 复制服务地址     | 复制当前地址                     |
+| 停止服务       | 启停本地服务                     |
+| 切换端口       | 预设端口，一键切换                  |
+| 允许局域网访问    | 同网段其它设备可访问                 |
 | **检查应用更新** | 检查 exe 有无新版（外壳 / 界面 / 优选器） |
-| **检查部署更新** | 检查线上内核有无新版（数据面 / 控制面） |
-| 退出 CFPilot | 停止服务并退出 |
-
-**平时自动检查**：启动 20 秒后查一次，之后每小时一次。
-发现新版时菜单标题变成「检查应用更新（有新版 0.7.6）」并弹气泡通知。
-
-点这两个菜单项会**打开对应页签**（说明页 / 一键部署页），落地时提示已经就绪。
+| **检查部署更新** | 检查线上内核有无新版（数据面 / 控制面）      |
+| 退出 CFPilot | 停止服务并退出                    |
 
 ### 部署代码可以独立更新
 
 **部署用的内核代码可在任意版本下更新**：
 
 - 应用在部署前从 GitHub Release 拉取**最新**的内核产物
+
 - 拉不到（离线）时自动用内置版本，不影响部署
+
 - 「检查状态」明确显示三个版本：
 
   ```
@@ -184,14 +200,12 @@ CLI 工具同样支持从 Release 拉取最新内核。
 <details>
 <summary><b>④ 手动部署（Cloudflare 控制台）</b></summary>
 
-<br>
+<br>命令行受阻时的备用方案。用仓库根目录的两份压缩包手动上传。
 
-命令行受阻时的备用方案。用仓库根目录的两份压缩包手动上传。
-
-| 文件 | 用途 |
-|---|---|
-| [`CFPilot-dataplane.zip`](CFPilot-dataplane.zip) | 数据面（纯转发） |
-| [`CFPilot-control.zip`](CFPilot-control.zip) | 控制面（面板与订阅） |
+| 文件                                               | 用途         |
+| ------------------------------------------------ | ---------- |
+| [`CFPilot-dataplane.zip`](CFPilot-dataplane.zip) | 数据面（纯转发）   |
+| [`CFPilot-control.zip`](CFPilot-control.zip)     | 控制面（面板与订阅） |
 
 > 两份包随每次构建自动更新，与本仓库代码一致。
 
@@ -202,34 +216,40 @@ Cloudflare 控制台 → **存储和数据库 → KV** → 创建命名空间，
 **第 2 步：部署数据面**
 
 1. **Workers 和 Pages → 创建 → Pages → 上传资产**
+
 2. 项目名随意（建议普通名称，如 `blog-assets-sync`）
+
 3. 上传 `CFPilot-dataplane.zip`，记下项目域名（形如 `xxx.pages.dev`）
+
 4. **设置 → 变量和密钥**，添加：
 
-   | 名称 | 值 |
-   |---|---|
-   | `UUID` | 自己的 UUID（36 位标准格式） |
-   | `WS_PATH` | 自定义路径，如 `/abc123` |
-   | `ENABLE_TROJAN` | `true` / `false` |
-   | `ENABLE_XHTTP` | `true` / `false` |
+   | 名称              | 值                  |
+   | --------------- | ------------------ |
+   | `UUID`          | 自己的 UUID（36 位标准格式） |
+   | `WS_PATH`       | 自定义路径，如 `/abc123`  |
+   | `ENABLE_TROJAN` | `true` / `false`   |
+   | `ENABLE_XHTTP`  | `true` / `false`   |
 
 5. **设置 → 函数 → KV 命名空间绑定**：变量名 `KV` → 第 1 步的命名空间
+
 6. **重新上传一次压缩包**（绑定与变量只对之后的部署生效）
 
 **第 3 步：部署控制面**
 
 1. 另建一个 Pages 项目，上传 `CFPilot-control.zip`
+
 2. **设置 → 变量和密钥**：
 
-   | 名称 | 值 |
-   |---|---|
-   | `UUID` | 与数据面相同 |
-   | `WS_PATH` | 与数据面相同 |
-   | `DATA_HOST` | 第 2 步记下的**数据面域名** |
-   | `PANEL_PATH` | 面板路径，如 `/mypanel` |
-   | `ADMIN_PASSWORD` | 面板登录密码 |
+   | 名称               | 值                 |
+   | ---------------- | ----------------- |
+   | `UUID`           | 与数据面相同            |
+   | `WS_PATH`        | 与数据面相同            |
+   | `DATA_HOST`      | 第 2 步记下的**数据面域名** |
+   | `PANEL_PATH`     | 面板路径，如 `/mypanel` |
+   | `ADMIN_PASSWORD` | 面板登录密码            |
 
 3. **设置 → 函数 → KV 命名空间绑定**：`KV` → 同一个命名空间
+
 4. **重新上传一次压缩包**
 
 **第 4 步：访问**
@@ -241,7 +261,7 @@ Cloudflare 控制台 → **存储和数据库 → KV** → 创建命名空间，
 
 </details>
 
----
+***
 
 ## 优选 IP
 
@@ -269,16 +289,16 @@ npx -y cfpilot@latest scan
 
 回填后面板「节点来源 → 手动优选 IP」即可看到列表。
 
----
+***
 
 ## 导入订阅
 
 面板首页给出三种订阅地址，**按 User-Agent 自动识别格式**：
 
-| 客户端 | 拿到的格式 |
-|---|---|
-| Clash Verge / Clash / mihomo | YAML |
-| sing-box | JSON |
+| 客户端                             | 拿到的格式       |
+| ------------------------------- | ----------- |
+| Clash Verge / Clash / mihomo    | YAML        |
+| sing-box                        | JSON        |
 | v2rayN / Shadowrocket / NekoBox | Base64 分享链接 |
 
 也可显式指定：`?target=clash` / `?target=singbox` / `?target=base64`。
@@ -294,33 +314,26 @@ npx -y cfpilot@latest scan
 在 [Cloudflare 控制台 → API Tokens](https://dash.cloudflare.com/profile/api-tokens)
 创建**自定义 Token**，按下面三项勾选（分类都是 **Account**，权限级别都是 **Read/Write**）：
 
-| 权限项（控制台显示名）       | 级别 | 用途                                       |
-| ------------------------ | -- | ---------------------------------------- |
-| **Account Settings Read** | Read | 读取账号列表（`GET /accounts`）                  |
-| **Workers KV Storage Write** | Write | 建 KV、读写部署清单与 `CONFIG`                |
-| **Pages Write**          | Write | 建/删 Pages 项目、上传内核、绑 KV、配环境变量、绑自定义域名 |
+| 权限项（控制台显示名）                  | 级别   | 用途                                  |
+| ---------------------------- | ---- | ----------------------------------- |
+| **Account Settings Read**    | Read | 读取账号列表（`GET /accounts`）             |
+| **Workers KV Storage Write** | Edit | 建 KV、读写部署清单与 `CONFIG`               |
+| **Pages Write**              | Edit | 建/删 Pages 项目、上传内核、绑 KV、配环境变量、绑自定义域名 |
 
 **为什么只要这 3 项？**
 
 现在唯一受支持的部署形态是 **Pages 双项目**，它只调用这三类接口：
 
-| 调用                                        | 对应权限               |
-| ---------------------------------------- | ------------------ |
-| `GET /accounts`                          | Account Settings Read |
-| `…/storage/kv/namespaces…`                | Workers KV Storage Write |
-| `…/pages/projects…`                      | Pages Write         |
+| 调用                         | 对应权限                        |
+| -------------------------- | --------------------------- |
+| `GET /accounts`            | Account Settings Read       |
+| `…/storage/kv/namespaces…` | Workers KV Storage Write    |
+| `…/pages/projects…`        | Pages Write                 |
+| 可选，仅用于显示 Token 有效期；        | **Account API Tokens Read** |
 
-**不需要**（常见误配，多勾了只会放大风险）：
-
-| 权限项                       | 为什么不需要                                     |
-| ------------------------ | ---------------------------------------- |
-| **Workers Scripts Write/Read** | Pages 部署走 `…/pages/projects/{n}/deployments` 上传内核，不经过 Workers 脚本 API |
-| **Zone Read / DNS Write / Workers Routes Write** | 部署路径不调用任何 zone 级接口；Pages 自定义域名也走 Pages API |
-| **Account API Tokens Read**  | 可选，仅用于显示 Token 有效期；不给也能正常部署        |
-
-> ⚠️ **不要用 `Edit Cloudflare Workers` 预设模板** ——
+> ⚠️ **不要用** **`Edit Cloudflare Workers`** **预设模板** ——
 > 它只给 Workers Scripts / KV / Routes / Tail / R2 + Account Settings，
-> **不含 `Pages Write`**，用它部署会在创建 Pages 项目时报 403。
+> **不含** **`Pages Write`**，用它部署会在创建 Pages 项目时报 403。
 
 验证权限（只读探测，不改账号）：
 
@@ -357,24 +370,11 @@ npx -y cfpilot@latest token --check
 「检查更新」「下载内核」「更新应用」需访问 GitHub。
 两端内置**三级回退**：
 
-| 顺序 | 通道                              | 说明                                            |
-| -- | ------------------------------- | --------------------------------------------- |
-| 1  | 直连 GitHub                        | 最快；通就不走后面                            |
-| 2  | 镜像代理的 GitHub                   | `ghfast.top` / `ghproxy.net` / `gh-proxy.com`   |
-| 3  | **免 API 通道**                     | 只用 `github.com` 的 URL（`releases/latest` 的 302 里带版本号） |
-
-第 3 条最可靠 —— 它只用 `github.com` 的地址，**任何下载镜像都能代理**，
-不依赖镜像是否支持 GitHub API。
-
-**要做什么？** 什么都不用做。直连失败会自动切换，日志会输出连接通道：
-
-```
-[cfpilot] 直连 GitHub API 不可用，已改用镜像 ghfast.top
-[cfpilot] GitHub API 与镜像均不可用，已改用免 API 通道（版本 0.8.1）
-```
-
-连镜像也全挂了？部署**不会失败** —— 会自动回退到**应用内置的内核**继续部署
-（只是部署的是旧内核，界面会提示「内置 x.y.z」）。
+| 顺序 | 通道           | 说明                                                   |
+| -- | ------------ | ---------------------------------------------------- |
+| 1  | 直连 GitHub    | 最快；通就不走后面                                            |
+| 2  | 镜像代理的 GitHub | `ghfast.top` / `ghproxy.net` / `gh-proxy.com`        |
+| 3  | **免 API 通道** | 只用 `github.com` 的 URL（`releases/latest` 的 302 里带版本号） |
 
 完全离线的环境可以显式关掉远程内核：
 
@@ -568,4 +568,4 @@ CFPilot/
 
 ## License
 
-[MIT](LICENSE)   
+[MIT](LICENSE)

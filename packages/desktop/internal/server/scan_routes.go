@@ -26,6 +26,7 @@ import (
 
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/cfapi"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/deploy"
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/safe"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/scan"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/store"
 )
@@ -183,6 +184,22 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 			s.scan.cancel = nil
 			s.scan.mu.Unlock()
 			cancel()
+		}()
+
+		// ⚠️ **panic 兜底**：扫描跑在后台 goroutine 里，
+		// 这里 panic 会让**整个进程**退出（托盘 + 服务 + 日志一起消失），
+		// 而 panic 信息在托盘模式下的 stderr 里用户看不见 ——
+		// 表现就是「服务莫名被强制退出」。
+		//
+		// 接住 → 记日志（含堆栈）→ 报给界面，进程继续跑。
+		defer func() {
+			if r := safe.Recover("优选扫描"); r != nil {
+				s.logLevel("优选过程发生内部错误，详情已记入日志（服务继续运行）", "err")
+				s.events.publish("scan-result", map[string]any{
+					"ok":    false,
+					"error": "优选过程发生内部错误，详情已记入日志",
+				})
+			}
 		}()
 
 		sum, err := scan.Run(ctx, opt)

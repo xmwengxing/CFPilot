@@ -399,6 +399,8 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
     speedBytes: flagNumber(args, 'speed-bytes', 5 * 1024 * 1024),
     speedMode,
     speedUrl,
+    // 默认串行：带宽是共享资源，并行测多个候选会互相抢带宽（见 scan.ts 的 speedConcurrency 注释）
+    speedConcurrency: flagNumber(args, 'speed-concurrency', 1),
     speedConnections: flagNumber(args, 'speed-conns', 3),
     speedDurationMs: flagNumber(args, 'speed-duration', 6000),
     top,

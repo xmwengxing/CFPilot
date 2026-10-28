@@ -86,13 +86,17 @@ func TestProgressThrottleAlwaysReportsLast(t *testing.T) {
 // 真机表现：阶段三卡在 29/30 超过 8 分钟不动，
 // 进程里挂着一个 ESTABLISHED 但没有数据流动的连接。
 //
-// 修法：加**整体预算**（与 CLI 版 measureDownload 的
+// 修法：加**整体预算**（与 CLI 版 measureThroughput 的
 // `setTimeout(..., timeoutMs)` 同义），超时即判「测速超时」。
+// 新口径下它是多连接 + 稳态计量，但「到点必返回」的约束不变。
 func TestMeasureDownloadHasTotalBudget(t *testing.T) {
 	// 假服务器（**真 TLS**）：回响应头后**极慢地 trickle** 数据，
 	// 永远发不满 —— 这种行为下「只靠读超时」的旧实现会永远挂着。
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
+		// 带探针标记：让失败原因落在「载荷不足 / 超时」，
+		// 而不是被响应头校验提前判死（那样测不到整体预算）。
+		w.Header().Set("X-Probe-Bytes", "1048576")
 		w.WriteHeader(http.StatusOK)
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()

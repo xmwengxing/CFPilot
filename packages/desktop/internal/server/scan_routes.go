@@ -84,7 +84,15 @@ type scanRequest struct {
 	ProbeConcurrency int `json:"probeConcurrency"`
 	SpeedLimit       int `json:"speedLimit"`
 	SpeedConcurrency int `json:"speedConcurrency"`
-	SpeedBytes       int `json:"speedBytes"`
+	// SpeedConnections 是每个候选的并发连接数（对照 CLI 的 --speed-conns，默认 3）。
+	//
+	// 界面早已在 runScan 里传这个字段（optSpeedConns），但后端此前没解，
+	// 于是「测速并发连接数」输入框对桌面版完全无效。
+	SpeedConnections int `json:"speedConnections"`
+	// SpeedDurationMs 是单次测量时长（对照 CLI 的 --speed-duration，默认 6000）。
+	// 同上：界面 optSpeedDur 一直有传，后端此前丢弃。
+	SpeedDurationMs int `json:"speedDurationMs"`
+	SpeedBytes      int `json:"speedBytes"`
 }
 
 // handleScanRun 启动扫描（异步）。
@@ -167,6 +175,8 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 		ProbeConcurrency: req.ProbeConcurrency,
 		SpeedLimit:       req.SpeedLimit,
 		SpeedConcurrency: req.SpeedConcurrency,
+		SpeedConnections: req.SpeedConnections,
+		SpeedDurationMs:  req.SpeedDurationMs,
 		SpeedBytes:       req.SpeedBytes,
 		Top:              req.Top,
 		Progress: func(p scan.Progress) {
@@ -253,7 +263,7 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 		// 用户无法在日志里核对结果，也看不到测速是否真的在跑。
 		if len(sum.Entries) > 0 {
 			s.logLevel(fmt.Sprintf("优选完成：%d 个可用节点", len(sum.Entries)), "ok")
-			s.logLevel("排名  地址                     机房  TLS(ms)  TCP(ms)  下行(MB/s)", "info")
+			s.logLevel("排名  地址                     机房  TLS(ms)  TCP(ms)  稳态(MB/s)", "info")
 			for i, e := range sum.Entries {
 				if i >= 30 {
 					s.logLevel(fmt.Sprintf("  …（其余 %d 条见页面表格）", len(sum.Entries)-30), "info")

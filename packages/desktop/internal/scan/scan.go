@@ -45,10 +45,11 @@ const (
 	// 想更快可以调小 SpeedLimit 或 SpeedDurationMs。
 	defSpeedConcurrency = 1
 
-	// defSpeedConnections 是**每个候选**的并发连接数，默认 3。
+	// defSpeedConnections 是**每个候选**的并发连接数，默认 8。
 	//
-	// 单条 TCP 受拥塞窗口 / BDP 限制，在高延迟线路上填不满实际带宽。
-	// 真机同一条链路实测：单流稳态 0.47 MB/s，3 流稳态 1.14 MB/s（×2.4）。
+	// 单条 TCP 受丢包 / 拥塞窗口 / BDP 限制，在跨境线路上填不满实际带宽。
+	// 2026-10-28 直连实测同一个 IP：1 条 0.12 MB/s、3 条 0.47、8 条 1.15、
+	// 16 条 2.22 —— 用 3 条会系统性低估 2~4 倍。
 	// 对照 CLI 的 speedConnections（measureProbeThroughput 的 connections）。
 	defSpeedConnections = defMeasureConnections
 

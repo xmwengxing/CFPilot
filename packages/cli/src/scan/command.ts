@@ -73,7 +73,9 @@ async function resolveCandidatesFromArgs(args: ParsedArgs): Promise<string[]> {
   return resolveCandidates({
     sample: flagNumber(args, 'sample', 6556),
     cidr: flagList(args, 'cidr'),
-    seed: flagNumber(args, 'seed', 24301),
+    // ⚠️ 不传 seed = 每次随机（默认）。只有用户显式给了 --seed 才固定，
+    // 否则「每次跑都测同一批 IP」——那批落在劣质路由段上时永远测不出好 IP。
+    seed: args.flags['seed'] !== undefined ? flagNumber(args, 'seed', 24301) : undefined,
   })
 }
 
@@ -401,7 +403,10 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
     speedUrl,
     // 默认串行：带宽是共享资源，并行测多个候选会互相抢带宽（见 scan.ts 的 speedConcurrency 注释）
     speedConcurrency: flagNumber(args, 'speed-concurrency', 1),
-    speedConnections: flagNumber(args, 'speed-conns', 3),
+    // 并发连接数：跨境链路上单条 TCP 受丢包 / 拥塞窗口限制。
+    // 2026-10-28 直连实测同一个 IP：1 条 0.12 MB/s、3 条 0.47、8 条 1.15、16 条 2.22 ——
+    // 用 3 条会系统性低估 2~4 倍。默认 8 条，贴近浏览器/客户端的真实多连接行为。
+    speedConnections: flagNumber(args, 'speed-conns', 8),
     speedDurationMs: flagNumber(args, 'speed-duration', 6000),
     top,
     onProgress: (event) => printProgress(event, quiet),

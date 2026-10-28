@@ -1,6 +1,6 @@
 {
   "name": "@cfpilot/ui",
-  "version": "0.9.5",
+  "version": "0.9.6",
   "private": true,
   "description": "CFPilot 图形界面源码（单一来源，供 Go 版 / Electron 版共用）",
   "type": "module",

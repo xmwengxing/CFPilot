@@ -633,18 +633,19 @@ func TestDefaults(t *testing.T) {
 //  1. 候选测速**串行**（SpeedConcurrency = 1）——带宽是整条链路共享的，
 //     4 路并行测候选会让每个只测到约 1/4（「优选出来的 IP 全都只有
 //     0.1~0.9 MB/s」的主因）；
-//  2. 每个候选**多连接**（SpeedConnections = 3）——单条 TCP 受拥塞窗口 /
-//     BDP 限制，真机同一链路单流 0.47 MB/s、3 流 1.14 MB/s。
+//  2. 每个候选**多连接**（SpeedConnections = 8）——单条 TCP 受丢包 / 拥塞窗口 /
+//     BDP 限制。2026-10-28 直连实测同一个 IP：1 条 0.12 MB/s、3 条 0.47、
+//     8 条 1.15、16 条 2.22，用 3 条会系统性低估 2~4 倍。
 //
 // 对照 CLI packages/cli/src/scan/scan.ts 的 speedConcurrency（默认 1）
-// 与 true-probe.ts 的 measureThroughput（connections 默认 3）。
+// 与 true-probe.ts 的 measureThroughput（connections 默认 8）。
 func TestSpeedDefaults(t *testing.T) {
 	o := Options{}.withDefaults()
 	if o.SpeedConcurrency != 1 {
 		t.Errorf("阶段三候选测速必须串行（SpeedConcurrency=1），实际 %d", o.SpeedConcurrency)
 	}
-	if o.SpeedConnections != 3 {
-		t.Errorf("每个候选应默认 3 条连接（SpeedConnections=3），实际 %d", o.SpeedConnections)
+	if o.SpeedConnections != 8 {
+		t.Errorf("每个候选应默认 8 条连接（SpeedConnections=8），实际 %d", o.SpeedConnections)
 	}
 	if o.SpeedDurationMs != 6000 {
 		t.Errorf("单次测量时长默认应为 6000ms，实际 %d", o.SpeedDurationMs)

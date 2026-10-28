@@ -20,7 +20,14 @@ export type IpFamily = 'v4' | 'v6' | 'both'
 
 /** 默认采样上限（与 CLI --sample 默认值一致） */
 export const DEFAULT_CANDIDATE_SAMPLE = 20000
-/** 默认随机种子（与 CLI --seed 默认值一致） */
+/**
+ * 历史固定种子（仅用于复现旧结果，**不再是默认值**）。
+ *
+ * ⚠️ 2026-10-28 修复：它曾经是 `--seed` 的默认值，导致**每次运行采到的候选
+ * 完全一样**（`--sample` 不变时），抽到劣质路由段就永远测不出好 IP。
+ * 现在默认改为 `randomSeed()`（见 `resolveCandidates`），
+ * 只有显式 `--seed 24301` 才会回到这份历史样本。
+ */
 export const DEFAULT_CANDIDATE_SEED = 24301
 /**
  * 本地桥接服务未指定采样数时的默认值。
@@ -41,7 +48,12 @@ export interface CandidateOptions {
   sample?: number
   /** 自定义网段：可以是单个网段、逗号/换行分隔的字符串，或网段数组 */
   cidr?: string | string[]
-  /** 随机种子，默认 24301；相同种子结果可复现 */
+  /**
+   * 随机种子。
+   *
+   * **不传 = 每次跑都换一批候选**（默认行为，见 `randomSeed`）；
+   * 传了就固定，相同种子结果可复现（排查问题 / 对比报告时用）。
+   */
   seed?: number
   /** 地址族，默认 both */
   family?: IpFamily
@@ -93,10 +105,19 @@ async function loadCloudflareCidrs(family: IpFamily): Promise<string[]> {
  * 生成候选 IP 列表（不涉及本地文件读取）。
  *
  * 与 CLI 的 --ip-file 分支互补：文件读取留在 cli.ts，这里只负责网段 → IP。
+ *
+ * ## 默认种子必须每次不同（2026-10-28 修复）
+ *
+ * 早前 `seed` 默认写死 `DEFAULT_CANDIDATE_SEED = 24301`，
+ * 于是**只要 `--sample` 不变，每次跑出来的候选列表 100% 一模一样**：
+ * 若那批 IP 恰好落在当地运营商的劣质路由段上，重跑一百次也是同一批慢 IP，
+ * 用户只会得出「优选出来的都慢」的结论 —— 实际是样本池僵死。
+ *
+ * 现在不传 `seed` 就用「时间 ^ 随机数」生成新种子；传了就照旧可复现。
  */
 export async function resolveCandidates(opts: CandidateOptions = {}): Promise<string[]> {
   const sample = opts.sample ?? DEFAULT_CANDIDATE_SAMPLE
-  const seed = opts.seed ?? DEFAULT_CANDIDATE_SEED
+  const seed = opts.seed ?? randomSeed()
   const family = opts.family ?? 'both'
 
   const customCidrs = normalizeCidrInput(opts.cidr)
@@ -106,6 +127,11 @@ export async function resolveCandidates(opts: CandidateOptions = {}): Promise<st
 
   const cidrs = await loadCloudflareCidrs(family)
   return expandCidrs(cidrs, { sample, seed })
+}
+
+/** 动态随机种子：让每次运行的采样子集都不同 */
+export function randomSeed(): number {
+  return (Date.now() ^ Math.floor(Math.random() * 0x100000000)) >>> 0
 }
 
 /**

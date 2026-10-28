@@ -52,11 +52,15 @@ type Mirror struct {
 	Prefix string
 }
 
-// Mirrors 是下载镜像列表。
+// Mirrors 是下载镜像列表（按实测可用性排序）。
+//
+// 第一个成功的就用它，所以把实测可用的放前面。
+//
+// ⚠️ 与 CLI 版 packages/cli/src/shared/github-mirrors.ts 的 MIRRORS 一致。
 var Mirrors = []Mirror{
+	{Name: "ghfast.top", Prefix: "https://ghfast.top/"},
 	{Name: "ghproxy.net", Prefix: "https://ghproxy.net/"},
 	{Name: "gh-proxy.com", Prefix: "https://gh-proxy.com/"},
-	{Name: "ghfast.top", Prefix: "https://ghfast.top/"},
 }
 
 // CheckResult 是检查更新的结果。
@@ -154,7 +158,7 @@ func Check(ctx context.Context, current string) *CheckResult {
 //
 // tag 前缀同时兼容 `desktop-v*` 与旧的 `gui-v*`。
 func fetchReleases(ctx context.Context) ([]Release, error) {
-	all, err := fetchAllReleases(ctx)
+	all, err := FetchAllReleasesFallback(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +185,7 @@ func fetchReleases(ctx context.Context) ([]Release, error) {
 // 内核产物（cfpilot-kernel-*.js）与平台无关，
 // 不能按平台过滤，否则会漏掉只发内核不发安装包的发行版。
 func FetchReleases(ctx context.Context) ([]Release, error) {
-	return fetchAllReleases(ctx)
+	return FetchAllReleasesFallback(ctx)
 }
 
 // fetchAllReleases 拉取发行版列表，只做「tag 合法 + 非草稿 + 非预发布」的过滤。
@@ -209,6 +213,14 @@ func fetchAllReleases(ctx context.Context) ([]Release, error) {
 		return nil, fmt.Errorf("GitHub API 返回 %d", res.StatusCode)
 	}
 
+	return parseReleases(res.Body)
+}
+
+// parseReleases 解析 GitHub Releases API 的响应，并过滤出有效发行版。
+//
+// 抽成独立函数是为了让「镜像回退」与「直连」共用同一套解析逻辑
+// （见 mirrors.go 的 fetchReleasesFrom）。
+func parseReleases(body io.Reader) ([]Release, error) {
 	var raw []struct {
 		Tag        string  `json:"tag_name"`
 		Draft      bool    `json:"draft"`
@@ -216,7 +228,7 @@ func fetchAllReleases(ctx context.Context) ([]Release, error) {
 		Body       string  `json:"body"`
 		Assets     []Asset `json:"assets"`
 	}
-	if err := json.NewDecoder(res.Body).Decode(&raw); err != nil {
+	if err := json.NewDecoder(body).Decode(&raw); err != nil {
 		return nil, fmt.Errorf("GitHub API 返回格式异常：%w", err)
 	}
 

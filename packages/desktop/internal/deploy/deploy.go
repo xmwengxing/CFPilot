@@ -84,6 +84,15 @@ type Options struct {
 	ScannerToken   string
 
 	// ---- 功能开关 ----
+	//
+	// ⚠️ 默认值必须与 CLI 一致（AGENTS.md §2.2：CLI 是部署语义的权威实现）。
+	//
+	// CLI 的 deploy/command.ts 固定传 enableTrojan: true / enableXhttp: false，
+	// 并据此写 KV 的 CONFIG 与 Pages 的 ENABLE_TROJAN / ENABLE_XHTTP 环境变量。
+	// Go 侧之前用零值 false，而 HTTP 层从不设置这两个字段
+	// → GUI 部署出来的实例 Trojan 被强制关闭，与 CLI 部署出来的不一致。
+	//
+	// 要覆盖时由调用方显式赋值（DefaultOptions 之后再改）。
 	EnableTrojan bool
 	EnableXHTTP  bool
 	// ResolvePreferred 用 nil 表示「不注入」，true/false 表示显式指定
@@ -215,6 +224,13 @@ func DefaultOptions() Options {
 		WaitTimeout:     90 * time.Second,
 		WaitInterval:    3 * time.Second,
 		Log:             func(string) {},
+		// 与 CLI 对齐（packages/cli/src/deploy/command.ts）：
+		// enableTrojan: true / enableXhttp: false。
+		//
+		// ⚠️ 之前这里是 Go 零值 false —— Trojan 被强制关闭，
+		// GUI 部署出来的实例与 CLI 部署出来的行为不一致。
+		EnableTrojan: true,
+		EnableXHTTP:  false,
 	}
 }
 
@@ -242,14 +258,12 @@ func (d *Deployer) Run(ctx context.Context) (*Result, error) {
 		wsPath:         d.opt.WSPath,
 	}
 
-	controlName := d.opt.ControlProject
-	dataName := d.opt.DataProject
-	// requestedControl 是**用户原始输入**的控制面项目名。
+	// controlName / dataName 是**本次实际要用的**项目名。
 	//
-	// 归属校验必须用它，不能用被清单覆盖后的 controlName ——
-	// 后者在有清单时恒等于 manifest.ControlProject，拿它去比对永远相等，
-	// 归属校验形同虚设。
-	requestedControl := strings.TrimSpace(d.opt.ControlProject)
+	// 更新模式下会被清单覆盖（同一实例原地更新）；
+	// 全新模式下保持调用方给的值，为空则在归属校验**之前**补随机名。
+	controlName := strings.TrimSpace(d.opt.ControlProject)
+	dataName := strings.TrimSpace(d.opt.DataProject)
 	// previousDataProject 必须在被 manifest 覆盖**之前**捕获，
 	// 否则两边相等就判断不出「换过名」。
 	previousDataProject := ""
@@ -295,20 +309,18 @@ func (d *Deployer) Run(ctx context.Context) (*Result, error) {
 		d.log("· 未检测到已有部署，进入首次部署模式")
 	}
 
-	// ---------------- 0b. 归属校验（写入任何键之前） ----------------
+	// ---------------- 0b. 项目名兜底（必须在归属校验之前） ----------------
 	//
-	// ⚠️ 必须在「生成随机项目名」和「创建项目 / 写 KV / 部署」之前。
+	// 与 CLI 的 deployPagesSplit（packages/cli/src/deploy/pages-deploy.ts）
+	// **顺序完全一致**：更新模式已在上面按清单填好；走到这里仍为空的
+	// （首次部署 + 调用方留空，如 GUI 的可选项目名输入框）生成随机名。
 	//
-	// 这里传的是**可能为空**的 controlName ——
-	// 空表示调用方没指定项目名（GUI 的项目名是可选框），
-	// 这种情况下清单里的名字就是这个实例的身份，assertKvOwnership 会认领它。
-	// 如果先填了随机名再校验，随机名与清单必然不同，同一个实例的
-	// 原地更新会被误判成「越界」，用户每次更新都被拒。
-	if err := d.assertKvOwnership(ctx, manifest, requestedControl); err != nil {
-		return nil, err
-	}
-
-	// 项目名兜底：归属校验通过之后才生成随机名
+	// ⚠️ 顺序不能颠倒 —— 归属校验比对的是**即将实际使用的项目名**。
+	//
+	// 若「先校验后随机」，校验用的就是用户原始输入（可能为空串），
+	// 空串会被误判成 owned → 「全新部署」复用同一个 KV 时，
+	// 会把另一个现役实例的清单认成自己的 → 用新凭据覆盖 CONFIG
+	// → 老实例的客户端节点全部失效（跨账户串号）。
 	if controlName == "" {
 		controlName = RandomWorkerName()
 	}
@@ -317,6 +329,20 @@ func (d *Deployer) Run(ctx context.Context) (*Result, error) {
 	}
 	d.result.Control.Name = controlName
 	d.result.Data.Name = dataName
+
+	// ---------------- 0c. 归属校验（写入任何键之前） ----------------
+	//
+	// ⚠️ 必须在「创建项目 / 写 KV / 部署」之前。
+	// 越界写入会直接改坏别人的线上项目（订阅指向错误 UUID、
+	// 面板路径与密码被覆盖、会话可跨实例复用），事后极难清理。
+	//
+	// 校验用的是**解析后的** controlName（对照 CLI）：
+	//   - 更新模式 → 来自清单 → 同一个实例的原地更新判为 owned，不被误拒
+	//   - 全新模式 → 随机名 → 与清单里的名字必不相等 → 判为 occupied
+	//     （必须换 KV，或用户显式勾选「强制」接管）
+	if err := d.assertKvOwnership(ctx, manifest, controlName); err != nil {
+		return nil, err
+	}
 
 	// 首次部署：缺项的凭据生成随机值
 	if eff.panelPath == "" {
@@ -511,8 +537,14 @@ const (
 
 // inspectKvOwnership 探测 KV 归属。
 //
-// 与 Electron 版 packages/deploy-wizard/src/pages-deploy.ts 的
-// inspectKvOwnership 一一对应，五种判定完全一致。
+// 与 CLI 的 packages/cli/src/deploy/pages-deploy.ts 的 inspectKvOwnership
+// **一一对应**，五种判定完全一致（AGENTS.md §1.3）：
+//
+//	empty    空命名空间
+//	owned    清单属于本实例
+//	occupied 清单属于另一个 CFPilot 实例
+//	foreign  含小写 config 键（旧版第三方实现）
+//	stale    含大写 CONFIG 但无清单（残留配置）
 //
 // ## 为什么不能只看清单
 //
@@ -528,10 +560,17 @@ const (
 // CFPilot 已是纯自研数据面（vendor 移除），
 // 不与旧版第三方实现共用 KV：会共享配额、混淆 schema、让排查变难。
 // 因此 foreign **连 Force 都不放行** —— 要部署就换一个干净的 KV。
-func (d *Deployer) inspectKvOwnership(ctx context.Context, manifest *Manifest, requestedControl string) (Ownership, string) {
-	if manifest != nil && manifest.ControlProject != "" {
-		// 调用方没指定项目名（GUI 的项目名是可选框）→ 清单里的就是本实例身份
-		if strings.TrimSpace(requestedControl) == "" || manifest.ControlProject == requestedControl {
+//
+// ## ⚠️ controlProject 必须是「即将实际使用的项目名」
+//
+// 比对是**严格相等**（CLI 同款）。绝不能有「请求里的项目名为空 ⇒ 认领」
+// 这条规则：GUI 的项目名框是可选的（默认空串），
+// 空串一旦被当成 owned，「全新部署」复用同一个 KV 时就会
+// 用新凭据覆盖另一个现役实例的 CONFIG（跨账户串号）。
+func (d *Deployer) inspectKvOwnership(ctx context.Context, manifest *Manifest, controlProject string) (Ownership, string) {
+	if manifest != nil {
+		// 严格相等：清单里的控制面项目名必须与本次实际使用的项目名一致。
+		if manifest.ControlProject == controlProject {
 			return OwnOwned, fmt.Sprintf("已由 CFPilot 部署（控制面 %s / 数据面 %s）",
 				manifest.ControlProject, manifest.DataProject)
 		}
@@ -556,8 +595,11 @@ func (d *Deployer) inspectKvOwnership(ctx context.Context, manifest *Manifest, r
 // 因此这里一律返回 error（不是 warnings）。
 //
 // Force 只对 occupied / stale 生效；foreign 是硬约束，Force 也不放行。
-func (d *Deployer) assertKvOwnership(ctx context.Context, manifest *Manifest, requestedControl string) error {
-	verdict, detail := d.inspectKvOwnership(ctx, manifest, requestedControl)
+//
+// controlProject 是**本次实际使用的**控制面项目名（对照 CLI 的
+// assertKvOwnership：传空串会被误判成 occupied）。
+func (d *Deployer) assertKvOwnership(ctx context.Context, manifest *Manifest, controlProject string) error {
+	verdict, detail := d.inspectKvOwnership(ctx, manifest, controlProject)
 
 	switch verdict {
 	case OwnEmpty, OwnOwned:
@@ -656,14 +698,40 @@ func (d *Deployer) writeManifest(ctx context.Context, old *Manifest, eff effecti
 //
 // ⚠️ 写的是**大写** `CONFIG`（CFPilot 数据面读它），
 // 绝不是小写 `config`（那是旧版第三方实现的键，往里写会整体覆盖共栖项目配置）。
+//
+// ## ⚠️ 必须**合并**而不是整体覆盖
+//
+// 对照 CLI 的 writeEffectiveConfig
+// （packages/cli/src/deploy/pages-deploy.ts：`{ ...existing, uuid, ... }`）：
+//
+// 整体覆盖会把用户在面板里配过的 40+ 个配置项
+// （poolOfficial / poolManual / proxyIp / socks5 / httpProxy / relayPool /
+// subDomain / resolvePreferred …）**全部抹掉** —— 面板保存一次就丢一次，
+// 用户以为保存了，其实下次部署就被覆盖。
+//
+// 旧值读不到或解析失败时按空 map 处理（下面会写全凭据字段）。
 func (d *Deployer) writeEffectiveConfig(ctx context.Context, eff effective) error {
-	cfg := map[string]any{
-		"uuid":           eff.uuid,
-		"trojanPassword": eff.trojanPassword,
-		"wsPath":         eff.wsPath,
-		"enableTrojan":   d.opt.EnableTrojan,
-		"enableXhttp":    d.opt.EnableXHTTP,
+	// 读旧值，保留用户手动配置的字段（优选池 / 代理池 / 订阅域名等）
+	cfg := map[string]any{}
+	if raw, ok := d.client.GetKVValue(ctx, d.opt.AccountID, d.opt.KVNamespaceID, ConfigKey); ok {
+		if trimmed := strings.TrimSpace(raw); trimmed != "" {
+			var existing map[string]any
+			// ⚠️ 必须判 nil：JSON 文本 "null" 能解析成功但结果是 nil map，
+			// 直接赋值会让后面的写入 panic（assignment to entry in nil map）。
+			if err := json.Unmarshal([]byte(trimmed), &existing); err == nil && existing != nil {
+				cfg = existing
+			} else {
+				d.warn("已有 KV 配置解析失败，本次只写入凭据字段（面板里配过的设置会丢失）")
+			}
+		}
 	}
+
+	// 覆盖本次部署的凭据类字段；其余字段保持旧值不动。
+	cfg["uuid"] = eff.uuid
+	cfg["trojanPassword"] = eff.trojanPassword
+	cfg["wsPath"] = eff.wsPath
+	cfg["enableTrojan"] = d.opt.EnableTrojan
+	cfg["enableXhttp"] = d.opt.EnableXHTTP
 	if d.opt.ResolvePreferred != nil {
 		cfg["resolvePreferred"] = *d.opt.ResolvePreferred
 	}

@@ -28,17 +28,33 @@ export interface Config {
   wsPath?: string
 }
 
-const CONFIG_DIR = join(homedir(), '.cfpilot')
-const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
+/**
+ * 配置目录。
+ *
+ * 默认 `~/.cfpilot`；`CFPILOT_CONFIG_DIR` 可覆盖 —— **仅供测试隔离**，
+ * 避免单元测试写到用户真实的配置里。
+ *
+ * ⚠️ 每次调用都重新读环境变量（不是模块加载时求值），
+ * 否则测试里 `vi.stubEnv` 会不生效。
+ */
+function configDir(): string {
+  const override = process.env.CFPILOT_CONFIG_DIR?.trim()
+  return override ? override : join(homedir(), '.cfpilot')
+}
+
+function configFile(): string {
+  return join(configDir(), 'config.json')
+}
 
 export function configPath(): string {
-  return CONFIG_FILE
+  return configFile()
 }
 
 export function loadConfig(): Config {
-  if (!existsSync(CONFIG_FILE)) return {}
+  const file = configFile()
+  if (!existsSync(file)) return {}
   try {
-    return JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) as Config
+    return JSON.parse(readFileSync(file, 'utf8')) as Config
   } catch {
     return {}
   }
@@ -51,12 +67,13 @@ export function saveConfig(patch: Partial<Config>): void {
   for (const k of Object.keys(next) as Array<keyof Config>) {
     if (next[k] === '' || next[k] === undefined) delete next[k]
   }
-  mkdirSync(CONFIG_DIR, { recursive: true })
-  writeFileSync(CONFIG_FILE, JSON.stringify(next, null, 2) + '\n', 'utf8')
+  mkdirSync(configDir(), { recursive: true })
+  writeFileSync(configFile(), JSON.stringify(next, null, 2) + '\n', 'utf8')
 }
 
 export function clearConfig(): void {
-  if (existsSync(CONFIG_FILE)) writeFileSync(CONFIG_FILE, '{}\n', 'utf8')
+  const file = configFile()
+  if (existsSync(file)) writeFileSync(file, '{}\n', 'utf8')
 }
 
 /**

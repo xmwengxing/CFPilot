@@ -107,8 +107,42 @@ export async function runDeployCommand(args: ParsedArgs): Promise<void> {
       process.exitCode = 1
       return
     }
-    resolvedAccount = accounts[0]!.id
-    process.stdout.write(`使用账号：${accounts[0]!.name}（${accounts[0]!.id}）\n`)
+
+    // ⚠️ **给了 --kv 时不能盲取 accounts[0]**。
+    //
+    // KV 是**账号作用域**的：accounts[0] 未必是那个 KV 所属的账号
+    // （`/accounts` 的返回顺序不保证与用户预期一致）。
+    // 一旦错配，就是「账号 A + 账号 B 的 KV」——
+    // 真写入会被 CF 拒绝（不会写坏别人），
+    // 但**会在 A 里凭空建出孤儿 Pages 项目**，并留下一堆半成品实例。
+    //
+    // 所以这里用 KV 反查它属于哪个账号。
+    if (kvId) {
+      let found = ''
+      for (const acc of accounts) {
+        const namespaces = await client.listKvNamespaces(acc.id)
+        if (namespaces.some((ns) => ns.id === kvId)) {
+          found = acc.id
+          break
+        }
+      }
+      if (!found) {
+        process.stderr.write(
+          `✗ KV ${kvId} 不属于该 Token 的任何账号（${accounts
+            .map((a) => a.name)
+            .join('、')}）—— 请用 --account 指定正确的账号\n`
+        )
+        process.exitCode = 1
+        return
+      }
+      resolvedAccount = found
+      const acc = accounts.find((a) => a.id === found)!
+      process.stdout.write(`使用账号：${acc.name}（${acc.id}，由 --kv 反查）\n`)
+    } else {
+      // 没给 --kv 时才回落第一个账号（全新部署的常见场景）
+      resolvedAccount = accounts[0]!.id
+      process.stdout.write(`使用账号：${accounts[0]!.name}（${accounts[0]!.id}）\n`)
+    }
   }
 
   // --list-kv：只列出账号下的实例，不部署

@@ -293,21 +293,54 @@ npx -y cfpilot@latest scan
 
 ### API Token 权限
 
-在 [Cloudflare 控制台 → API Tokens](https://dash.cloudflare.com/profile/api-tokens) 创建自定义 Token：
+在 [Cloudflare 控制台 → API Tokens](https://dash.cloudflare.com/profile/api-tokens)
+创建**自定义 Token**，按下面三项勾选（分类都是 **Account**，权限级别都是 **Read/Write**）：
 
-| 分类                 | 权限项                                                      | 用途               |
-| ------------------ | -------------------------------------------------------- | ---------------- |
-| Account            | **Account Settings** → Read                              | 读取账号列表           |
-| Developer Platform | **Workers KV Storage** → Edit                            | 建 KV、读写配置        |
-| Developer Platform | **Workers Scripts** → Edit                               | 上传内核             |
-| Developer Platform | **Pages** → Edit                                         | `pages-split` 需要 |
-| Zone               | **Zone** → Read、**DNS** → Edit、**Workers Routes** → Edit | 只有绑定自定义域名才需要     |
+| 权限项（控制台显示名）       | 级别 | 用途                                       |
+| ------------------------ | -- | ---------------------------------------- |
+| **Account Settings Read** | Read | 读取账号列表（`GET /accounts`）                  |
+| **Workers KV Storage Write** | Write | 建 KV、读写部署清单与 `CONFIG`                |
+| **Pages Write**          | Write | 建/删 Pages 项目、上传内核、绑 KV、配环境变量、绑自定义域名 |
 
-不想逐项勾就用 `Edit Cloudflare Workers` 预设模板。验证权限：
+**为什么只要这 3 项？**
+
+现在唯一受支持的部署形态是 **Pages 双项目**，它只调用这三类接口：
+
+| 调用                                        | 对应权限               |
+| ---------------------------------------- | ------------------ |
+| `GET /accounts`                          | Account Settings Read |
+| `…/storage/kv/namespaces…`                | Workers KV Storage Write |
+| `…/pages/projects…`                      | Pages Write         |
+
+**不需要**（常见误配，多勾了只会放大风险）：
+
+| 权限项                       | 为什么不需要                                     |
+| ------------------------ | ---------------------------------------- |
+| **Workers Scripts Write/Read** | Pages 部署走 `…/pages/projects/{n}/deployments` 上传内核，不经过 Workers 脚本 API |
+| **Zone Read / DNS Write / Workers Routes Write** | 部署路径不调用任何 zone 级接口；Pages 自定义域名也走 Pages API |
+| **Account API Tokens Read**  | 可选，仅用于显示 Token 有效期；不给也能正常部署        |
+
+> ⚠️ **不要用 `Edit Cloudflare Workers` 预设模板** ——
+> 它只给 Workers Scripts / KV / Routes / Tail / R2 + Account Settings，
+> **不含 `Pages Write`**，用它部署会在创建 Pages 项目时报 403。
+
+验证权限（只读探测，不改账号）：
 
 ```bash
-npx -y cfpilot@latest token --check --zone example.com
+npx -y cfpilot@latest token --check
 ```
+
+带 `--zone <域名>` 会额外探测 zone 级权限（只有要托管**跨账号**的自定义域名时才需要）。
+
+<details>
+<summary><b>📋 点开看「照着勾」的图解</b>（哪些必勾 / 哪些不用勾 / 操作步骤）</summary>
+
+<img src="docs/images/cfpilot-token-permissions.png" alt="Cloudflare API Token 权限勾选指引" width="880">
+
+</details>
+
+> 同一份指引的 HTML 源文件：[`docs/cfpilot-token-permissions.html`](docs/cfpilot-token-permissions.html)
+> （可直接在浏览器打开或打印成 PDF）
 
 ### 一个 KV 只能装一个实例
 
@@ -320,6 +353,37 @@ npx -y cfpilot@latest token --check --zone example.com
 - 更新实例：自动探测到唯一的实例并复用（UUID 与 WS 路径不变，订阅地址不用改）
 
 - 多实例：`--kv <命名空间ID>` 明确指定
+
+### 没有科学上网时的镜像回退
+
+「检查更新」「下载内核」「更新应用」都要访问 GitHub。
+国内网络直连 `api.github.com` 经常超时（实测 12 秒连不上），
+直连 `github.com` 也可能被重置 —— 所以两端都内置了**三级回退**：
+
+| 顺序 | 通道                              | 说明                                            |
+| -- | ------------------------------- | --------------------------------------------- |
+| 1  | 直连 GitHub                        | 最快；通就不走后面的                            |
+| 2  | 镜像代理的 GitHub                   | `ghfast.top` / `ghproxy.net` / `gh-proxy.com`   |
+| 3  | **免 API 通道**                     | 只用 `github.com` 的 URL（`releases/latest` 的 302 里带版本号） |
+
+第 3 条最可靠 —— 因为它只用 `github.com` 的地址，**任何下载镜像都能代理**，
+不依赖镜像是否支持 GitHub API。
+
+**要做什么？** 什么都不用做。直连失败会自动切换，日志里会写明当前走的哪个通道：
+
+```
+[cfpilot] 直连 GitHub API 不可用，已改用镜像 ghfast.top
+[cfpilot] GitHub API 与镜像均不可用，已改用免 API 通道（版本 0.8.1）
+```
+
+连镜像也全挂了？部署**不会失败** —— 会自动回退到**应用内置的内核**继续部署
+（只是部署的是旧内核，界面会提示「内置 x.y.z」）。
+
+完全离线的环境可以显式关掉远程内核：
+
+```bash
+CFPILOT_KERNEL_REMOTE=0 npx -y cfpilot@latest deploy
+```
 
 ### 数据面出站能力边界
 

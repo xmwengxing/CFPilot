@@ -45,6 +45,26 @@ import (
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/update"
 )
 
+// downloadSources 生成「直连 + 各镜像」的候选源列表。
+//
+// 与 update 包的镜像表保持一致（update.Mirrors 是唯一真相）。
+func downloadSources(url string) []struct {
+	Name string
+	URL  string
+} {
+	sources := []struct {
+		Name string
+		URL  string
+	}{{Name: "GitHub", URL: url}}
+	for _, m := range update.Mirrors {
+		sources = append(sources, struct {
+			Name string
+			URL  string
+		}{Name: m.Name, URL: m.Prefix + url})
+	}
+	return sources
+}
+
 const (
 	// ControlAssetName 是控制面内核产物在 Release 里的附件名。
 	ControlAssetName = "cfpilot-kernel-control.js"
@@ -293,36 +313,52 @@ func downloadAsset(ctx context.Context, url, name string) ([]byte, error) {
 		return nil, fmt.Errorf("%s 的下载地址为空", name)
 	}
 
+	// 直连 + 各镜像（国内直连 GitHub 经常超时）
+	//
+	// ⚠️ 与 CLI 版 packages/cli/src/deploy/kernel-remote.ts 的 downloadAsset 一致。
+	var errs []string
+	for _, src := range downloadSources(url) {
+		raw, err := downloadAssetFrom(ctx, src.URL, name)
+		if err == nil {
+			return raw, nil
+		}
+		errs = append(errs, fmt.Sprintf("%s: %v", src.Name, err))
+	}
+	return nil, fmt.Errorf("下载 %s 失败 —— %s", name, strings.Join(errs, "；"))
+}
+
+// downloadAssetFrom 从单个 URL 下载一个内核产物。
+func downloadAssetFrom(ctx context.Context, url, name string) ([]byte, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, remoteTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("下载 %s 失败：%w", name, err)
+		return nil, fmt.Errorf("%w", err)
 	}
 	req.Header.Set("User-Agent", "CFPilot-Desktop")
 
 	client := &http.Client{Timeout: remoteTimeout}
 	res, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("下载 %s 失败：%w", name, err)
+		return nil, fmt.Errorf("%w", err)
 	}
 	defer func() { _ = res.Body.Close() }()
 
 	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("下载 %s 失败：HTTP %d", name, res.StatusCode)
+		return nil, fmt.Errorf("HTTP %d", res.StatusCode)
 	}
 
 	// 多读 1 字节用于判断是否超限
 	raw, err := io.ReadAll(io.LimitReader(res.Body, maxRemoteAssetSize+1))
 	if err != nil {
-		return nil, fmt.Errorf("读取 %s 失败：%w", name, err)
+		return nil, fmt.Errorf("读取失败：%w", err)
 	}
 	if len(raw) > maxRemoteAssetSize {
-		return nil, fmt.Errorf("%s 超过 %d 字节上限，疑似异常内容", name, maxRemoteAssetSize)
+		return nil, fmt.Errorf("超过 %d 字节上限，疑似异常内容", maxRemoteAssetSize)
 	}
 	if len(raw) == 0 {
-		return nil, fmt.Errorf("%s 内容为空", name)
+		return nil, fmt.Errorf("内容为空")
 	}
 	return raw, nil
 }

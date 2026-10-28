@@ -174,8 +174,12 @@
   let es = null
   let esReady = false
 
-  /** 建立（或复用）SSE 连接 */
-  function ensureStream() {
+  /**
+   * 真正建立 SSE 连接。
+   *
+   * 只在**会话已建立**之后才调用 —— 见 ensureStream 的说明。
+   */
+  function openStream() {
     if (es) return
     es = new EventSource('/api/events')
 
@@ -203,9 +207,52 @@
     })
 
     es.addEventListener('error', function () {
-      // EventSource 会自动重连；连接断开时把标志复位，
-      // 下次订阅时能重新走 open 流程
       esReady = false
+      // ⚠️ **必须把 es 置空**，否则这条连接就彻底废了。
+      //
+      // EventSource 的规范行为：收到**非 200 响应**（比如 401）时，
+      // 浏览器会「永久失败」这条连接 —— **不会自动重连**。
+      // 而 es 变量还指着这个已死的对象 → ensureStream() 里的
+      // `if (es) return` 会认为「已经建好了」→ 永远不再重建。
+      //
+      // 症状：界面能打开、按钮能点，但**实时日志一条都不来**
+      //（只有界面自己打的日志有）。
+      //
+      // 所以这里主动清空，让下次 ensureStream() 能重建。
+      // （网络类错误 EventSource 自己会重连，但那种情况
+      //   readyState 是 CONNECTING 而不是 CLOSED，不该重建。）
+      if (es && es.readyState === 2 /* CLOSED */) {
+        es = null
+      }
+    })
+  }
+
+  /**
+   * 建立（或复用）SSE 连接。
+   *
+   * ## ⚠️ 必须等会话建立完成再连
+   *
+   * `/api/events` 走会话校验，没有 Cookie 就是 **401**。
+   * 而 EventSource 收到非 200 响应会**永久失败**（不重连）——
+   * 于是「会话 Cookie 还没种下就发起 SSE」会一次性毁掉整条推送通道。
+   *
+   * 真实故障（2026-10-28）：`sessionReady` 的 fetch 与
+   * `new EventSource(...)` 几乎同时发出，EventSource 先落地 → 401 →
+   * 之后**整个会话都收不到任何实时日志**，
+   * 表现为「点开始部署只显示『开始部署』，后面再没有新日志」。
+   *
+   * 现在改成：等 `sessionReady` 落地后再建连接。
+   */
+  function ensureStream() {
+    if (es) return
+    if (!sessionReady) return
+    sessionReady.then(function (ok) {
+      if (es) return
+      if (!ok) {
+        console.error('[cfpilot] 会话未建立，实时日志不可用（刷新页面可重试）')
+        return
+      }
+      openStream()
     })
   }
 

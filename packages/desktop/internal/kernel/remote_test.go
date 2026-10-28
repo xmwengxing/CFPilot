@@ -110,6 +110,22 @@ func withGitHubBase(t *testing.T, base string) {
 	old := update.APIBase
 	update.APIBase = base + "/releases"
 	t.Cleanup(func() { update.APIBase = old })
+
+	// ⚠️ **单元测试必须与网络隔离**。
+	//
+	// 真实运行时有「镜像回退」与「免 API 通道」两级兜底
+	// （国内直连 GitHub 不通时的救命稻草）。
+	// 但那些兜底会打到**真实的镜像站** —— 单元测试里如果还开着，
+	// 一旦网络可用，测试就会去下载真的内核（慢、且结果随网络变化）。
+	//
+	// 所以这里把镜像列表清空，并把免 API 通道的基址也指向本地假服务器。
+	oldMirrors := update.Mirrors
+	update.Mirrors = nil
+	t.Cleanup(func() { update.Mirrors = oldMirrors })
+
+	oldWeb := update.ReleasesWebBase
+	update.ReleasesWebBase = base + "/releases-web"
+	t.Cleanup(func() { update.ReleasesWebBase = oldWeb })
 }
 
 // useLocalKernel 让 Load() 优先读临时目录里的「本地内核」。
@@ -123,6 +139,18 @@ func useLocalKernel(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("CFPILOT_KERNEL_DIR", dir)
+}
+
+// withoutMirrors 关掉下载镜像回退。
+//
+// 单元测试必须与网络隔离：真实运行时有镜像兜底
+// （国内直连 GitHub 不通时的救命稻草），
+// 但开着的话测试会真的去连镜像站 —— 慢，且结果随网络变化。
+func withoutMirrors(t *testing.T) {
+	t.Helper()
+	old := update.Mirrors
+	update.Mirrors = nil
+	t.Cleanup(func() { update.Mirrors = old })
 }
 
 // useCacheDir 把内核缓存指向临时目录。
@@ -188,6 +216,48 @@ func TestFetchRemoteInfoAPIFailure(t *testing.T) {
 	}
 	if info != nil {
 		t.Error("出错时不该返回 info")
+	}
+}
+
+// 免 API 通道：GitHub API 全挂时，仍能通过 `releases/latest` 的 302 拿到版本。
+//
+// 这是国内无科学上网环境下的救命稻草 ——
+// 它只用 github.com 的 URL，任何下载镜像都能代理。
+func TestFetchRemoteInfoFallsBackToNoAPIChannel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/releases-web/latest") {
+			w.Header().Set("Location", "https://example.com/releases/tag/v0.9.9")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	old := update.APIBase
+	update.APIBase = srv.URL + "/releases"
+	t.Cleanup(func() { update.APIBase = old })
+
+	oldMirrors := update.Mirrors
+	update.Mirrors = nil
+	t.Cleanup(func() { update.Mirrors = oldMirrors })
+
+	oldWeb := update.ReleasesWebBase
+	update.ReleasesWebBase = srv.URL + "/releases-web"
+	t.Cleanup(func() { update.ReleasesWebBase = oldWeb })
+
+	info, err := FetchRemoteInfo(context.Background())
+	if err != nil {
+		t.Fatalf("免 API 通道应成功：%v", err)
+	}
+	if info.Version != "0.9.9" {
+		t.Errorf("版本应为 0.9.9，实际 %q", info.Version)
+	}
+	if !strings.Contains(info.ControlURL, ControlAssetName) {
+		t.Errorf("控制面下载地址应含 %s，实际 %q", ControlAssetName, info.ControlURL)
+	}
+	if !strings.Contains(info.DataURL, DataAssetName) {
+		t.Errorf("数据面下载地址应含 %s，实际 %q", DataAssetName, info.DataURL)
 	}
 }
 
@@ -376,6 +446,7 @@ func TestFetchRemoteKernelUsesCache(t *testing.T) {
 // 超过大小上限的产物要被拒。
 func TestFetchRemoteKernelRejectsOversized(t *testing.T) {
 	useCacheDir(t)
+	withoutMirrors(t)
 
 	big := make([]byte, maxRemoteAssetSize+1)
 	for i := range big {
@@ -399,6 +470,7 @@ func TestFetchRemoteKernelRejectsOversized(t *testing.T) {
 // 空内容要被拒。
 func TestFetchRemoteKernelRejectsEmpty(t *testing.T) {
 	useCacheDir(t)
+	withoutMirrors(t)
 
 	srv, _ := fakeGitHub(t, nil, map[string][]byte{
 		ControlAssetName: {},

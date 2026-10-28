@@ -11,6 +11,30 @@ import { listCfPilotNamespaces } from '../deploy/pages-deploy'
 
 /** 从 Cloudflare 同步账号 / KV / 控制面信息（写回本地配置）。 */
 async function syncFromCloud(token: string): Promise<boolean> {
+  // ⚠️ **先清空上一个账户的全部字段**（在任何探测之前）。
+  //
+  // `saveConfig` 是**合并语义**（`{ ...current, ...patch }`），
+  // 没在 patch 里的字段全部保留。于是「换 Token」后配置会变成：
+  //
+  //   { token: tokenB, accountId: A, kvNamespaceId: KVA,
+  //     panelHost: A的域名, dataHost: A的域名, wsPath: A的WS路径 }
+  //
+  // —— **新 Token 配旧账户的 KV 与域名**。
+  // 后续回填会打到上一个账户的面板、改密码会改到上一个账户的实例。
+  //
+  // 清空放在这里（而不是菜单分支）是为了**覆盖所有调用方**：
+  // 交互菜单、`syncAccount()`、以及任何直接调用本函数的地方。
+  //
+  // 注意 `saveConfig` 会把空串**删除**（不留下空键），语义正好是「清空」。
+  saveConfig({
+    accountId: '',
+    accountName: '',
+    kvNamespaceId: '',
+    panelHost: '',
+    dataHost: '',
+    wsPath: '',
+  })
+
   try {
     const client = new CloudflareClient({ token })
 
@@ -35,6 +59,16 @@ async function syncFromCloud(token: string): Promise<boolean> {
     // ---- KV 与实例 ----
     const namespaces = await client.listKvNamespaces(account.id)
     if (namespaces.length === 0) {
+      // ⚠️ 这里也要**清空**旧实例信息。
+      // 之前直接 return，导致上一个账户的 kvNamespaceId / panelHost /
+      // dataHost / wsPath 全部留在配置里 —— 配着新 Token，
+      // 却指着上一个账户的 KV 与域名。
+      saveConfig({
+        kvNamespaceId: '',
+        panelHost: '',
+        dataHost: '',
+        wsPath: '',
+      })
       status('info', '该账号下还没有 KV（首次部署时会自动创建）')
       return true
     }
@@ -56,10 +90,14 @@ async function syncFromCloud(token: string): Promise<boolean> {
         chosen = instances.find((i) => i.id === picked) ?? instances[0]!
       }
 
+      // ⚠️ `wsPath` 之前**从不更新** —— 它是上一个账户的残留值。
+      // WS 路径是**每实例**的（写在内核的 CONFIG 里），
+      // 不跟着实例走就一定会错。
       saveConfig({
         kvNamespaceId: chosen.id,
         panelHost: chosen.manifest.controlSubdomain,
         dataHost: chosen.manifest.dataSubdomain,
+        wsPath: chosen.manifest.credentials?.wsPath ?? '',
       })
       status('ok', `实例：${chosen.manifest.controlProject} / ${chosen.manifest.dataProject}`)
       status('info', `控制面：${chosen.manifest.controlSubdomain}`)
@@ -68,8 +106,15 @@ async function syncFromCloud(token: string): Promise<boolean> {
     }
 
     // 无实例：只记录 KV 供选择
+    //
+    // 同样要清掉上一个账户的实例信息（域名 / WS 路径）。
     if (namespaces.length === 1) {
-      saveConfig({ kvNamespaceId: namespaces[0]!.id })
+      saveConfig({
+        kvNamespaceId: namespaces[0]!.id,
+        panelHost: '',
+        dataHost: '',
+        wsPath: '',
+      })
       status('info', `KV：${namespaces[0]!.title}（尚无部署）`)
     } else {
       const picked = await select(
@@ -84,7 +129,12 @@ async function syncFromCloud(token: string): Promise<boolean> {
         ]
       )
       if (picked) {
-        saveConfig({ kvNamespaceId: picked })
+        saveConfig({
+          kvNamespaceId: picked,
+          panelHost: '',
+          dataHost: '',
+          wsPath: '',
+        })
         status('ok', 'KV 已保存')
       }
     }
@@ -153,6 +203,8 @@ export async function menuConfig(): Promise<void> {
           status('warn', '未输入，已取消')
           break
         }
+        // 只存 Token —— 旧账户的字段由 syncFromCloud 在探测前统一清空
+        // （见该函数开头的说明：那里覆盖所有调用方）。
         saveConfig({ token })
         status('ok', 'Token 已保存')
 

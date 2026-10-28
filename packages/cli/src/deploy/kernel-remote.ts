@@ -33,6 +33,12 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { compareSemver } from '../shared/version-util'
+import {
+  RELEASES_WEB,
+  apiSources,
+  downloadSources,
+  fetchLatestVersionWithoutApi,
+} from '../shared/github-mirrors'
 
 /** 控制面内核产物在 Release 里的附件名。 */
 export const CONTROL_ASSET_NAME = 'cfpilot-kernel-control.js'
@@ -140,21 +146,9 @@ export async function fetchRemoteKernelInfo(
   // 显式关闭远程（受限网络 / 离线环境 / 自动化流水线）
   if (isRemoteDisabled()) return null
 
-  let releases: GitHubRelease[]
-  try {
-    const response = await fetch(`${RELEASES_API}?per_page=20`, {
-      headers: {
-        Accept: 'application/vnd.github+json',
-        'User-Agent': 'CFPilot-CLI',
-      },
-      signal: AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS),
-    })
-    if (!response.ok) return null
-    const payload: unknown = await response.json()
-    if (!Array.isArray(payload)) return null
-    releases = payload.filter(isGitHubRelease)
-  } catch {
-    // 网络不可达 / 限流 / JSON 异常 —— 都按「查不到」处理
+  const releases = await fetchReleasesWithFallback(options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
+  if (releases.length === 0) {
+    // 连 API 与免 API 通道都拿不到 —— 按「查不到」处理
     return null
   }
 
@@ -175,6 +169,63 @@ export async function fetchRemoteKernelInfo(
     return { version: item.version, controlUrl, dataUrl }
   }
   return null
+}
+
+/**
+ * 查 Release 列表，带**镜像回退**。
+ *
+ * ## 三级通道
+ *
+ *  1. 直连 `api.github.com`
+ *  2. 镜像代理的 `api.github.com`（实测多数镜像的 API 通道不通，但有的能用）
+ *  3. **免 API 通道**：只用 `github.com` 的 URL
+ *     （`releases/latest` 的 302 里带版本号）——
+ *     这条最可靠，因为**任何下载镜像都能代理 github.com**。
+ *
+ * 第 3 条拿不到「全部资产列表」，只能按命名约定构造已知资产名的 URL。
+ * 对本项目够用：内核两个产物的名字是**固定名**。
+ *
+ * @returns 拿到的发行版列表；全失败返回空数组
+ */
+async function fetchReleasesWithFallback(timeoutMs: number): Promise<GitHubRelease[]> {
+  // ---- 通道 1 + 2：API（含镜像）----
+  const apiUrl = `${RELEASES_API}?per_page=20`
+  for (const source of apiSources(apiUrl)) {
+    try {
+      const response = await fetch(source.url, {
+        headers: {
+          Accept: 'application/vnd.github+json',
+          'User-Agent': 'CFPilot-CLI',
+        },
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+      if (!response.ok) continue
+      const payload: unknown = await response.json()
+      if (!Array.isArray(payload)) continue
+      const releases = payload.filter(isGitHubRelease)
+      if (releases.length > 0) return releases
+    } catch {
+      // 试下一个源
+    }
+  }
+
+  // ---- 通道 3：免 API ----
+  const version = await fetchLatestVersionWithoutApi(timeoutMs)
+  if (!version) return []
+
+  // 按固定名构造两个内核资产的 URL
+  const controlUrl = `${RELEASES_WEB}/latest/download/${CONTROL_ASSET_NAME}`
+  const dataUrl = `${RELEASES_WEB}/latest/download/${DATA_ASSET_NAME}`
+  const pseudo: GitHubRelease = {
+    tag_name: `v${version}`,
+    draft: false,
+    prerelease: false,
+    assets: [
+      { name: CONTROL_ASSET_NAME, browser_download_url: controlUrl },
+      { name: DATA_ASSET_NAME, browser_download_url: dataUrl },
+    ],
+  }
+  return [pseudo]
 }
 
 /** 在附件列表里找指定名字的资产下载地址。 */
@@ -218,24 +269,35 @@ function isGitHubRelease(value: unknown): value is GitHubRelease {
 async function downloadAsset(url: string, timeoutMs: number): Promise<string> {
   if (!url.trim()) throw new Error('下载地址为空')
 
-  const response = await fetch(url, {
-    headers: { 'User-Agent': 'CFPilot-CLI' },
-    signal: AbortSignal.timeout(timeoutMs),
-  })
-  if (!response.ok) {
-    throw new Error(`下载失败：HTTP ${response.status}`)
-  }
+  // 直连 + 各镜像（国内直连 GitHub 经常超时）
+  const errors: string[] = []
+  for (const source of downloadSources(url)) {
+    try {
+      const response = await fetch(source.url, {
+        headers: { 'User-Agent': 'CFPilot-CLI' },
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+      if (!response.ok) {
+        errors.push(`${source.name}: HTTP ${response.status}`)
+        continue
+      }
 
-  // 先看 Content-Length，能提前拒掉明显超限的
-  const declared = response.headers.get('content-length')
-  if (declared) {
-    const size = Number(declared)
-    if (Number.isFinite(size) && size > MAX_ASSET_BYTES) {
-      throw new Error(`内核产物超过 ${MAX_ASSET_BYTES} 字节上限，疑似异常内容`)
+      // 先看 Content-Length，能提前拒掉明显超限的
+      const declared = response.headers.get('content-length')
+      if (declared) {
+        const size = Number(declared)
+        if (Number.isFinite(size) && size > MAX_ASSET_BYTES) {
+          errors.push(`${source.name}: 超过 ${MAX_ASSET_BYTES} 字节上限`)
+          continue
+        }
+      }
+
+      return await readBodyWithLimit(response)
+    } catch (err) {
+      errors.push(`${source.name}: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
-
-  return await readBodyWithLimit(response)
+  throw new Error(`所有下载源均失败 —— ${errors.join('；')}`)
 }
 
 /**

@@ -69,6 +69,8 @@ type Server struct {
 	scan scanState
 	// update 是更新下载状态
 	update updateState
+	// cfBase 覆盖 Cloudflare API 根地址（测试用；生产恒为空 → 走官方地址）
+	cfBase string
 }
 
 // New 创建一个服务实例（不启动监听）。
@@ -89,6 +91,16 @@ func New(settings config.DesktopSettings) (*Server, error) {
 // SetStore 注入凭据库（测试用；生产环境用默认目录）。
 func (s *Server) SetStore(st *store.Store) {
 	s.store = st
+}
+
+// SetCFAPIBase 注入 Cloudflare API 根地址（测试用）。
+//
+// 生产恒为空 —— 空串会让 cfapi 走官方地址（cfapi.DefaultAPIBase）。
+// 测试要指向 httptest 服务器，才能验证
+// 「请求里的 kvNamespaceId 是否真被用上」「外部 Token 是否被落盘」
+// 这类**接口契约**（它们都是踩过坑才写对的规则）。
+func (s *Server) SetCFAPIBase(base string) {
+	s.cfBase = base
 }
 
 // BootToken 返回一次性启动令牌（供托盘「打开界面」拼接 URL）。

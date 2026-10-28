@@ -1,11 +1,11 @@
-# CFPilot（CP面板）
+# CFPilot
 
 > Cloudflare 代理微内核 · 真连接优选面板 · 一键部署
 > MIT License · 控制面+数据面完全自研（无第三方内核依赖）
 
 · 把「代理内核 + 优选订阅 + 本地真连接优选 + 中文部署向导」整合成一套方案；
 
-· 采用双 pages 项目部署：控制面 pages (web管理面板) + 数据面（CF流量转发）；
+· 采用双 pages 项目部署：控制面 pages (web管理面板) + 数据面（流量转发）；
 
 · 零外部依赖和引用，稳定无1101，支持在触发CF限制后更新部署；
 
@@ -60,8 +60,6 @@ npx -y cfpilot@latest deploy
 **注意事项**
 
 - 全程约 1-3 分钟，取决于 Cloudflare API 响应
-
-- 遇到 `8000119` 会自动同项目重试 3 次，仍失败则换项目名重建（自动同步 `DATA_HOST`）
 
 - 部署完成后**立即保存面板密码** —— 云端环境变量是加密的，之后无法再读
 
@@ -183,7 +181,7 @@ cfpilot config      # 配置管理
 
 - 应用在部署前从 GitHub Release 拉取**最新**的内核产物
 
-- 拉不到（离线）时自动用内置版本，不影响部署
+- 拉不到（离线）时自动用内置版本
 
 - 「检查状态」明确显示三个版本：
 
@@ -200,7 +198,7 @@ CLI 工具同样支持从 Release 拉取最新内核。
 <details>
 <summary><b>④ 手动部署（Cloudflare 控制台）</b></summary>
 
-<br>命令行受阻时的备用方案。用仓库根目录的两份压缩包手动上传。
+<br>备用方案，用仓库根目录的两份压缩包手动上传。
 
 | 文件                                               | 用途         |
 | ------------------------------------------------ | ---------- |
@@ -319,29 +317,7 @@ npx -y cfpilot@latest scan
 | **Account Settings Read**    | Read | 读取账号列表（`GET /accounts`）             |
 | **Workers KV Storage Write** | Edit | 建 KV、读写部署清单与 `CONFIG`               |
 | **Pages Write**              | Edit | 建/删 Pages 项目、上传内核、绑 KV、配环境变量、绑自定义域名 |
-
-**为什么只要这 3 项？**
-
-现在唯一受支持的部署形态是 **Pages 双项目**，它只调用这三类接口：
-
-| 调用                         | 对应权限                        |
-| -------------------------- | --------------------------- |
-| `GET /accounts`            | Account Settings Read       |
-| `…/storage/kv/namespaces…` | Workers KV Storage Write    |
-| `…/pages/projects…`        | Pages Write                 |
-| 可选，仅用于显示 Token 有效期；        | **Account API Tokens Read** |
-
-> ⚠️ **不要用** **`Edit Cloudflare Workers`** **预设模板** ——
-> 它只给 Workers Scripts / KV / Routes / Tail / R2 + Account Settings，
-> **不含** **`Pages Write`**，用它部署会在创建 Pages 项目时报 403。
-
-验证权限（只读探测，不改账号）：
-
-```bash
-npx -y cfpilot@latest token --check
-```
-
-带 `--zone <域名>` 会额外探测 zone 级权限（只有要托管**跨账号**的自定义域名时才需要）。
+| **Account API Tokens**       | Read | 可选，仅用于显示 Token 有效期；                 |
 
 <details>
 <summary><b>📋 点开看「照着勾」的图解</b>（哪些必勾 / 哪些不用勾 / 操作步骤）</summary>
@@ -350,10 +326,7 @@ npx -y cfpilot@latest token --check
 
 </details>
 
-> 同一份指引的 HTML 源文件：[`docs/cfpilot-token-permissions.html`](docs/cfpilot-token-permissions.html)
-> （可直接在浏览器打开或打印成 PDF）
-
-### 一个 KV 只能装一个实例
+> ### 一个 KV 只能装一个实例
 
 内核在 KV 里用的键全局平铺（`CONFIG` / `PANEL_PATH` / `SESSION:*` …），无实例前缀。
 两个实例共用一个 KV 会互相覆盖 UUID、WS 路径和面板密码 —— 向导写入前会校验归属，
@@ -462,16 +435,7 @@ WebSocket close frame 装不下这些（且超长会被边缘静默丢弃），�
 | 二  | **WS 101 握手 + PING/PONG 响应体校验**              | Enterprise 专属 IP、SNI 阻断、「101 通但数据面不响应」的假活 IP |
 | 三  | 仅对通过前两阶的 IP 请求 `/__edge_probe?bytes=N` 测真实下行 | —                                            |
 
-为什么阶段一要单独测 TLS 握手：真机实测 TCP 延迟集中在 8~~40ms（无区分度），
-而 TLS 握手耗时 768ms~~3531ms（相差 4.6 倍），**两者相关系数接近 0** ——
-TCP 9ms 的 IP 握手可能要 3.5 秒，客户端超时就是 `-1`。
-
-为什么候选要按可用率加权：Cloudflare 的 IPv4 空间大部分是区域/租户专用分配，
-真机实测 6 个官方网段 **0% 可用**。按网段大小平均分配预算会让一半以上候选来自这些废段。
-
-### 数据面
-
-单一自研实现，无第三方内核依赖（产物 43KB）。
+单一自研实现，无第三方内核依赖。
 
 | 能力       | 支持情况                               |
 | -------- | ---------------------------------- |

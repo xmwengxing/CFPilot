@@ -11,6 +11,7 @@ import {
   clearDnsCache,
   isIpLiteral,
   parseTxtIps,
+  TXT_LIST_SENTINEL,
   resolveEndpointIps,
   splitHostPort,
 } from '../src/outbound/doh'
@@ -71,8 +72,8 @@ describe('parseTxtIps', () => {
     expect(result.map((r) => r.hostname)).toEqual(['1.2.3.4', '5.6.7.8'])
   })
 
-  it('哨兵 @edgetunnel 返回空', () => {
-    expect(parseTxtIps('@edgetunnel', 443)).toEqual([])
+  it('哨兵返回空（哨兵值由构建期注入，测试用常量）', () => {
+    expect(parseTxtIps(TXT_LIST_SENTINEL, 443)).toEqual([])
   })
 
   it('非 IP 内容被忽略', () => {

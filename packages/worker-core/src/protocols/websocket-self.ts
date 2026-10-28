@@ -6,9 +6,9 @@
  * 历史第三方实现（`wsHandler`）目前仍在生产使用，作为回退实现保留。
  * 本文件是自研实现，取三家成熟项目之长：
  *   - **历史实现**：出站三级候选（代理 → 直连 → 优选 IP）与竞速语义
- *   - **BPB**：先回协议响应头再中继（客户端据此判定入站已建立）
- *   - **cfnew**：首包数据缓存（竞速期间客户端已发的数据不能丢）
- *   - **edgetunnel**：出站失败必须**可诊断**，不能吞异常
+ *   - **先回协议响应头**：再中继（客户端据此判定入站已建立）
+ *   - **首包数据缓存**：竞速期间客户端已发的数据不能丢
+ *   - **可诊断性**：出站失败必须能看出原因，不能吞异常
  *
  * ## 相对归档版本（archive/self-developed-dataplane）的关键修正
  *
@@ -53,9 +53,9 @@ const DIAL_TIMEOUT_MS = 5000
  * 即：TCP 握手成功、协议响应头 `[0,0]` 已回，但目标站一个字节都不回。
  * 客户端侧表现为「连着但永远等不到响应」，超时后 -1。
  *
- * edgetunnel 的解法（`connecttoPry()`）：**直连成功后若下行无数据，
+ * 通用解法（参考 `connecttoPry()`）：**直连成功后若下行无数据，
  * 自动重拨到反代入口**（第三方服务器按 SNI 转发，出口不是 Cloudflare，
- * 因而不受该限制）。BPB 用 NAT64 前缀达到同样目的。
+ * 因而不受该限制）。用 NAT64 前缀可达到同样目的。
  *
  * 因此这里做同一件事：建连后 `DOWNLINK_STALL_MS` 内没收到任何下行字节，
  * 就关闭当前出站、改连反代入口重试一次。
@@ -425,7 +425,7 @@ export async function handleWebSocket(
    *
    * ## 顺序（重要，本地真机验证发现）
    *
-   * **先回协议响应头，再做出站** —— 与 BPB 一致：
+   * **先回协议响应头，再做出站** —— 社区通用做法：
    *
    * ```js
    * // vendor: 认证通过立刻发头，后续处理异步做
@@ -471,7 +471,7 @@ export async function handleWebSocket(
     // 认证已在 parseTarget 里完成（VLESS 校验 UUID / Trojan 校验口令），
     // 失败时不会走到这里 —— 因此现在可以安全地回响应头。
     //
-    // BPB / vendor 做法：先回协议响应头，客户端据此判定入站已建立。
+    // 社区通用做法：先回协议响应头，客户端据此判定入站已建立。
     sendResponseHeader(new Uint8Array(0))
 
     // 出站：失败分级上报，便于定位（不再一律表现为「目标不可达」）
@@ -533,7 +533,7 @@ export async function handleWebSocket(
 
     writer = dialed.writable.getWriter()
 
-    // cfnew / vendor 做法：把协议头之后已收到的数据整体补写。
+    // 通用做法：把协议头之后已收到的数据整体补写。
     // buffer 里可能不只有首帧的负载——拨号期间到达的后续帧也会暂存进
     // buffer（见 message 处理器里 `if (!writer)` 分支），
     // 因此这里必须整段补写，而不是只写第一帧。
@@ -555,7 +555,7 @@ export async function handleWebSocket(
    *
    * Cloudflare Workers 的 `connect()` 对部分目标（Google / YouTube / GitHub
    * 等 443）**TCP 能建连但一个字节都收不到**。这不是我们的代码问题，
-   * 是 Cloudflare 边缘出口的限制 —— 同类项目（edgetunnel / BPB）的解法都是
+   * 是 Cloudflare 边缘出口的限制 —— 同类实现的解法都是
    * 「假活时改走反代入口」：第三方服务器按 SNI 把流量转到目标站，
    * 出口不是 Cloudflare，因而不受该限制。
    *

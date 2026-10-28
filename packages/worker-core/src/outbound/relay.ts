@@ -67,7 +67,7 @@ export function regionOfEntry(entry: string): string {
 }
 
 /**
- * 地区邻接表（借鉴 cfnew 的 `nn()`）。
+ * 地区邻接表（社区常见做法）。
  *
  * 用途：**按当前地区优先，其次地理/线路上邻近的地区**，
  * 最后才是其余地区。邻接比「按表顺序轮转」更符合实际：
@@ -91,7 +91,7 @@ export const REGION_ADJACENCY: Readonly<Record<string, readonly string[]>> = {
 export const REGION_ORDER: readonly string[] = ['US', 'SG', 'JP', 'KR', 'DE', 'SE', 'NL', 'FI', 'GB']
 
 /**
- * 按「当前地区 → 邻近 → 其余」对地区码排序（借鉴 cfnew 的 `rn()`）。
+ * 按「当前地区 → 邻近 → 其余」对地区码排序。
  *
  * @param current 当前地区码（通常由边缘机房 colo 推出）；空表示未知
  */
@@ -456,7 +456,7 @@ export function selectRelayDomains(
   const current = coloToCountry(colo)
 
   // 地区排序：当前机房所在国家 → 地理/线路邻近 → 其余。
-  // 邻接关系见 REGION_ADJACENCY（借鉴 cfnew）。
+  // 邻接关系见 REGION_ADJACENCY。
   const rank = rankRegions(current)
   const regionRank = (domain: string): number => {
     const region = BUILTIN_RELAY_REGION[domain]
@@ -559,7 +559,7 @@ export async function collectRelayEndpoints(options: RelayPoolOptions = {}): Pro
   // 上面的交错只保证「前几个候选覆盖多个地区」，顺序仍是表顺序
   // （HK → JP → SG → US → …）。加上这步后，与美国机房相邻的地区
   // （SG/JP/KR）会排到欧洲地区（DE/GB/SE/NL/FI）前面 —— 更符合实际线路
-  // （借鉴 cfnew 的 REGION_ADJACENCY）。
+  // （见 REGION_ADJACENCY）。
   //
   // ⚠️ 用户自配部分**不参与重排**：用户显式指定即表示最可信，保持原样在最前。
   const head = out.slice(0, userCount)

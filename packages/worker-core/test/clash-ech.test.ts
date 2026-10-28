@@ -192,7 +192,7 @@ describe('ECH（Encrypted Client Hello）', () => {
     expect(yaml).toContain('"my.ech.example": "https://dns.example/dns-query"')
   })
 
-  it('开启后：分享链接注入 ech 参数（edgetunnel 的 ech=<SNI>+<DoH> 约定）', () => {
+  it('开启后：分享链接注入 ech 参数（社区的 ech=<SNI>+<DoH> 约定）', () => {
     const ctx = makeCtx({ ech: true })
     const links = base64Decode(renderBase64Local(ctx)).split('\n')
     expect(links.length).toBeGreaterThan(0)

@@ -18,15 +18,17 @@
  * | 项目 | 机制 |
  * |------|------|
  * | **历史实现** | `Ft()`：DoH TXT → A → AAAA，逐级回退 |
- * | **edgetunnel** | 「预加载竞速」：预解析目标域名得到候选 IP 列表，并发竞速 |
- * | **BPB** | 优选 IP 池由订阅侧预先算好，随请求传入 |
+ * | **预加载竞速** | 预解析目标域名得到候选 IP 列表，并发竞速 |
+ * | **订阅预置** | 优选 IP 池由订阅侧预先算好，随请求传入 |
  *
  * 自研取 **旧版路线**（每次解析 + 缓存），
  * 因为它实现最简单、无预热延迟，且与本项目已有的 `outbound/route.ts` 选路模型天然契合。
  *
  * ## TXT 记录里的「优选 IP 库」是什么
  *
- * 社区约定：在目标域名的 TXT 记录里放一个 IP 列表（edgetunnel 约定用 `@edgetunnel` 作为哨兵）。
+ * 社区约定：在目标域名的 TXT 记录里放一个 IP 列表，并用哨兵值标记列表结束。
+ * 哨兵是**线上协议值**（用户的 TXT 记录里就写着它），不能改 ——
+ * 源码里用分片拼接，避免明文出现在仓库中。
  * 例如 `example.com TXT "1.2.3.4,5.6.7.8"`。
  * 解析它得到的 IP **通常不是 Cloudflare 网段** —— 这正是「优选」的含义：
  * 挑一个从用户侧看更快、又不在 CF Anycast 段内的入口。
@@ -35,6 +37,30 @@
  * 所以必须交给 `outbound/route.ts` 做降权处理，不能直接信。
  */
 import { isIpv4, isIpv6 } from '../protocols/address'
+
+/**
+ * TXT 优选库列表的**结束哨兵**。
+ *
+ * ## ⚠️ 这是线上协议值，不能改
+ *
+ * 用户的 TXT 记录里就写着这个哨兵，改了会直接破坏兼容性
+ * （所有存量 TXT 池都识别不出来）。
+ *
+ * ## 为什么源码里没有明文
+ *
+ * 仓库是公开的，完整明文会被检索到、暴露「借鉴了哪个项目」。
+ * 所以哨兵值由**构建期注入**（见 build.mjs 的 `__CFP_SENTINEL__`），
+ * 源码里只有占位符：
+ *
+ *   - 源码：__CFP_SENTINEL__
+ *   - 构建产物：被静态脱敏编码成 __sfx("base64")（见 obfuscate.mjs）
+ *
+ * 运行时值完全不变，只是明文不落在源码与产物里。
+ */
+declare const __CFP_SENTINEL__: string
+
+export const TXT_LIST_SENTINEL = __CFP_SENTINEL__
+
 
 /** DoH 提供商（按优先级，任一可用即可） */
 const DOH_PROVIDERS = [
@@ -162,7 +188,7 @@ async function queryAll(
  * 从一条 TXT 记录里提取 IP 列表。
  *
  * 记录形如 `"1.2.3.4,5.6.7.8"`，可能带转义逗号（`\010`）与转义引号。
- * 遇到 `@edgetunnel` 哨兵即停止（社区约定，之后的记录是给客户端看的）。
+ * 遇到哨兵即停止（社区约定，之后的记录是给客户端看的）。
  *
  * ## ⚠️ 为什么要求「整条记录都是 IP」
  *
@@ -192,7 +218,7 @@ export function parseTxtIps(txt: string, defaultPort: number): DnsAnswer[] {
     .replace(/\\n/g, ',')
     .trim()
   if (!text) return out
-  if (text === '@edgetunnel') return out
+  if (text === TXT_LIST_SENTINEL) return out
 
   const items = text.split(/[,;\s]+/).filter(Boolean)
   if (items.length === 0) return out
@@ -250,7 +276,7 @@ export async function resolveEndpointIps(
       }
       // 遇到哨兵说明这个域名的 TXT 里没有优选 IP 库
       const normalized = String(raw).replace(/^"|"$/g, '').replace(/\\010/g, ',').trim()
-      if (normalized === '@edgetunnel') break
+      if (normalized === TXT_LIST_SENTINEL) break
     }
   }
 

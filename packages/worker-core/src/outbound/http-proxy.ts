@@ -4,7 +4,7 @@
  * 同时用于两种代理：
  *   - `http://`  代理服务器本身走明文
  *   - `https://` 代理服务器本身走 TLS（由 Workers 的 `secureTransport:'on'` 终结，
- *     本函数在 TLS 之上发明文 CONNECT —— 与 edgetunnel 的 `httpsConnect` 一致）
+ *     本函数在 TLS 之上发明文 CONNECT）
  */
 import { ByteStream } from '../protocols/stream'
 
@@ -40,7 +40,7 @@ export async function httpConnect(
   const target = `${hostname}:${port}`
 
   try {
-    // 代理认证（RFC 7235 Basic）。edgetunnel 同样用 Proxy-Authorization 头。
+    // 代理认证（RFC 7235 Basic），用 Proxy-Authorization 头。
     const authHeader =
       auth.username && auth.password
         ? `Proxy-Authorization: Basic ${btoa(`${auth.username}:${auth.password}`)}\r\n`

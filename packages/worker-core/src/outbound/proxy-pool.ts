@@ -32,13 +32,13 @@ export interface ProxyEndpoint {
  * 解析单条代理条目：支持 `socks5://host:port`、`http://host:port`、`https://host:port`、`host:port`。
  *
  * `defaultKind` 决定**没有协议前缀**的裸 `host:port` 怎么解释：
- *   - 用于 PROXYIP 配置时应传 'direct'（BPB / edgetunnel 的 ProxyIP 语义是
+ *   - 用于 PROXYIP 配置时应传 'direct'（ProxyIP 的通用语义是
  *     「连到这个地址并复用其 SNI 落到目标」，不是 SOCKS5 握手）
  *   - 用于 SOCKS5 配置时应传 'socks5'
  *
  * `https://` 与 `http://` 的区别：代理服务器本身走 TLS
  * （需 `connect({secureTransport:'on'})`），而不是明文 CONNECT。
- * 这是 edgetunnel 支持的类型。
+ * 这是通用支持的类型。
  */
 export function parseProxyEntry(entry: string, defaultKind: ProxyKind = 'direct'): ProxyEndpoint | null {
   const text = entry.trim()

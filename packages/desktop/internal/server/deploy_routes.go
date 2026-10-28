@@ -687,7 +687,7 @@ func (s *Server) handleAccountDetect(w http.ResponseWriter, r *http.Request) {
 // 归属判定与部署侧的 inspectKvOwnership 保持一致：
 //
 //	instance  本工具部署的实例（含清单）
-//	foreign   被 CFNext 占用 —— **界面应禁用**
+//	foreign   被旧版第三方实现占用 —— **界面应禁用**
 //	cfpilot   含 CFPilot 配置但无清单（残留）
 //	empty     空
 func (s *Server) handleKvList(w http.ResponseWriter, r *http.Request) {

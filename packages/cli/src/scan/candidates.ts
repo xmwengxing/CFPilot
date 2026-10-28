@@ -116,7 +116,7 @@ export async function resolveCandidates(opts: CandidateOptions = {}): Promise<st
  *
  * ## 私网/保留地址过滤
  *
- * 借鉴 cfnew 的 `isPublicAddress`：把 `127.0.0.1` / `192.168.x` / `10.x` /
+ * 与社区通用 `isPublicAddress` 一致：把 `127.0.0.1` / `192.168.x` / `10.x` /
  * `100.64.x`（CGNAT）/ `198.18.x`（fake-ip）/ 组播等**非公网地址**剔除。
  *
  * 为什么：这些地址连上去会以不同方式失败（拒绝 / 超时 / 连到自己的路由器），

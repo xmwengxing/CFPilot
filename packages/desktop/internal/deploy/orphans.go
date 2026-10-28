@@ -17,7 +17,7 @@ package deploy
 //
 // 绝不删：
 //   - 清单里正在使用的项目
-//   - 名字完全无关的项目（如用户的 cfnext）
+//   - 名字完全无关的项目（如用户的其它 Worker）
 
 import (
 	"context"

@@ -3,7 +3,7 @@
  *
  * ## 重要修正
  *
- * 早前实现把 ACL4SSR 风格的 ini 用 gzip+base64 内嵌进部署代码，
+ * 早前实现把 ini 格式的配置用 gzip+base64 内嵌进部署代码，
  * 并把其中远端 `ruleset=` 翻译成 `RULE-SET,<name>,<策略>`，
  * 但**没有生成配套的 `rule-providers:` 段** → Clash 报
  *
@@ -26,8 +26,8 @@ import {
 const SAMPLE = [
   '[custom]',
   ';不要随意改变关键字，否则会导致出错',
-  'ruleset=🎯 全球直连,https://raw.githubusercontent.com/cmliu/ACL4SSR/main/Clash/CFnat.list',
-  'ruleset=📹 油管视频,https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Ruleset/YouTube.list',
+  'ruleset=🎯 全球直连,https://raw.githubusercontent.com/example/rulesets/CFnat.list',
+  'ruleset=📹 油管视频,https://raw.githubusercontent.com/example/rulesets/YouTube.list',
   'ruleset=🎯 全球直连,[]GEOIP,CN',
   'ruleset=🐟 漏网之鱼,[]FINAL',
   '',
@@ -46,7 +46,7 @@ describe('parseRouteProfile', () => {
     expect(profile.rules).toHaveLength(4)
     expect(profile.rules[0]).toEqual({
       group: '🎯 全球直连',
-      value: 'https://raw.githubusercontent.com/cmliu/ACL4SSR/main/Clash/CFnat.list',
+      value: 'https://raw.githubusercontent.com/example/rulesets/CFnat.list',
       inline: false,
     })
   })

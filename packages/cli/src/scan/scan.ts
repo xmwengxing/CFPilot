@@ -240,7 +240,7 @@ function isTimeoutError(error: string | undefined): boolean {
 }
 
 /**
- * 带重试的执行器（借鉴 cfnew 的「多候选逐个尝试」思路）。
+ * 带重试的执行器（社区通用的「多候选逐个尝试」思路）。
  *
  * ## 为什么需要
  *
@@ -248,7 +248,7 @@ function isTimeoutError(error: string | undefined): boolean {
  * 运营商链路瞬时丢包）。早期实现一次定生死，把这些偶发失败当成
  * 「IP 不可用」，白丢一批好 IP。
  *
- * cfnew 的 `probePreferred` 对域名目标会 `addresses.slice(0, 4)` 逐个试；
+ * 社区通用的 `probePreferred` 对域名目标会 `addresses.slice(0, 4)` 逐个试；
  * 我们面对的是「已知 IP 列表」，等价做法是**对同一个 IP 重试几次**，
  * 取第一次成功的结果（延迟取成功那次，不是平均值）。
  *

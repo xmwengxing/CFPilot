@@ -62,7 +62,7 @@ async function handleSubscription(
   //
   // ## 为什么不内嵌一份规则配置文件
   //
-  // 早前把一份 ACL4SSR 风格的 ini 用 gzip+base64 嵌进部署代码，问题有三：
+  // 早前把一份 ini 格式的分流配置用 gzip+base64 嵌进部署代码，问题有三：
   //   1. 那份 ini 的 `ruleset=` 指向远端规则集，需要配套 `rule-providers:`，
   //      我们没生成 → Clash 报 `rule set [CFnat] not found`，**订阅整个加载失败**；
   //   2. 部署代码里出现大段 gzip+base64 是明显的风控扫描特征；

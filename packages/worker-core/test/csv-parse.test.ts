@@ -1,7 +1,7 @@
 /**
  * CSV 优选列表解析增强 —— 回归测试。
  *
- * 守护 借鉴 cfnew `normalizePreferredList` 的三项增强：
+ * 守护社区通用 `normalizePreferredList` 的三项增强：
  *   1. **TLS 列过滤** —— `TLS=false` 的行对 VLESS-WS 无用（客户端到边缘必须 TLS）
  *   2. **国家 / 城市列** —— 填进 remark，客户端里显示「洛杉矶」而非裸 IP
  *   3. **无表头时的国家/城市启发式** —— 中文文本列按长度/后缀判城市或国家

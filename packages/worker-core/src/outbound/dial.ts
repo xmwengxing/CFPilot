@@ -283,7 +283,7 @@ async function dialViaProxy(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
 
   // ProxyIP 语义：连到指定地址，但请求的目标仍是原始 hostname:port。
-  // 这是 BPB / edgetunnel 等项目的通用做法，用于让出站流量落在指定的 Cloudflare 网段。
+  // 这是同类实现的通用做法，用于让出站流量落在指定的 Cloudflare 网段。
   if (proxy.kind === 'direct') {
     const socket = await connectWithTimeout(proxy.host, proxy.port, timeoutMs)
     return {
@@ -596,7 +596,7 @@ export async function dial(options: DialOptions): Promise<DialResult> {
   // 若与直连竞速，直连一旦先成功就会静默绕过代理 ——
   // 出口 IP 与用户预期不符，且没有任何报错（最难察觉的一类故障）。
   //
-  // 语义对齐 edgetunnel：
+  // 语义约定：
   //   有代理 → 只走代理；代理全失败 → 抛错（不静默改走直连）
   //   无代理 → 走直连/优选候选
   const groups = groupCandidates(candidates)
@@ -607,7 +607,7 @@ export async function dial(options: DialOptions): Promise<DialResult> {
     try {
       return await raceDial(attempts, concurrent)
     } catch (err) {
-      // 代理全失败：按 edgetunnel 语义直接抛错，不静默改走直连。
+      // 代理全失败：直接抛错，不静默改走直连（出口必须符合用户预期）。
       // 但**降权候选**（CF 网段的 ProxyIP 等）仍可一试 —— 它们本来就是用户配的。
       if (fallback.length === 0) throw err
       for (const candidate of fallback) {

@@ -23,7 +23,7 @@
 //     否则订阅里的 sni/host 全指向已删除的旧域名，所有节点失效。
 //
 //  4. **写 KV 的是大写 `CONFIG` 键，绝不是小写 `config`**。
-//     小写键是 CFNext 原版的，往里写会整体覆盖共栖项目的配置。
+//     小写键是旧版第三方实现的，往里写会整体覆盖共栖项目的配置。
 //
 //  5. **清单里的 build 读不到就写空串，绝不写 "unknown"**。
 //     假值会让「检查状态」显示「线上内核 unknown ≠ 本地 xxx」，用户看不懂。
@@ -46,7 +46,7 @@ import (
 const (
 	// ManifestKey 是部署清单键，判断 KV 归属**只能**靠它。
 	ManifestKey = "CFP_DEPLOY_MANIFEST"
-	// ConfigKey 是内核配置键（大写！小写 config 是 CFNext 的，绝不能写）。
+	// ConfigKey 是内核配置键（大写！小写 config 是旧版第三方实现的，绝不能写）。
 	ConfigKey = "CONFIG"
 )
 
@@ -503,7 +503,7 @@ const (
 	OwnOwned Ownership = "owned"
 	// OwnOccupied 清单属于另一个 CFPilot 实例，必须拒绝
 	OwnOccupied Ownership = "occupied"
-	// OwnForeign 被原版 CFNext 占用（存在小写 config 键）—— **必须拒绝**
+	// OwnForeign 被旧版第三方实现占用（存在小写 config 键）—— **必须拒绝**
 	OwnForeign Ownership = "foreign"
 	// OwnStale 含 CFPilot 的 CONFIG 但无清单（残留配置），必须拒绝
 	OwnStale Ownership = "stale"
@@ -518,15 +518,15 @@ const (
 //
 // KV 里的键是**全局平铺**的，没有实例前缀。判断「这个 KV 属于谁」
 // 唯一可靠依据是清单键；但清单可能被删、被手工改写，
-// 也可能是 CFNext 早就占着的命名空间（那种情况根本没有清单）。
+// 也可能是旧版第三方实现早就占着的命名空间（那种情况根本没有清单）。
 // 所以还要探测两个配置键：
-//   - 小写 `config`   → CFNext 原版在用 → foreign
+//   - 小写 `config`   → 旧版第三方实现在用 → foreign
 //   - 大写 `CONFIG`   → CFPilot 残留 → stale
 //
 // ## ⚠️ foreign 为什么是硬阻断
 //
 // CFPilot 已是纯自研数据面（vendor 移除），
-// 不与 CFNext 共用 KV：会共享配额、混淆 schema、让排查变难。
+// 不与旧版第三方实现共用 KV：会共享配额、混淆 schema、让排查变难。
 // 因此 foreign **连 Force 都不放行** —— 要部署就换一个干净的 KV。
 func (d *Deployer) inspectKvOwnership(ctx context.Context, manifest *Manifest, requestedControl string) (Ownership, string) {
 	if manifest != nil && manifest.ControlProject != "" {
@@ -541,7 +541,7 @@ func (d *Deployer) inspectKvOwnership(ctx context.Context, manifest *Manifest, r
 
 	// 没有清单：探测别的产品留下的痕迹
 	if _, ok := d.client.GetKVValue(ctx, d.opt.AccountID, d.opt.KVNamespaceID, "config"); ok {
-		return OwnForeign, "含 CFNext 的 config 键，该命名空间正被原版 CFNext 项目使用"
+		return OwnForeign, "含旧版第三方实现的 config 键，该命名空间正被其它项目使用"
 	}
 	if _, ok := d.client.GetKVValue(ctx, d.opt.AccountID, d.opt.KVNamespaceID, ConfigKey); ok {
 		return OwnStale, "含 CFPilot 的 CONFIG 键但没有部署清单（残留配置，可能是清单被删或手工写入）"
@@ -568,7 +568,7 @@ func (d *Deployer) assertKvOwnership(ctx context.Context, manifest *Manifest, re
 		// 硬阻断：连 Force 都不放行
 		return fmt.Errorf(
 			"该 KV 命名空间%s。\n"+
-				"  CFPilot 的数据面已完全自研，不再与 CFNext 共用同一命名空间。\n"+
+				"  CFPilot 的数据面已完全自研，不再与旧版第三方实现共用同一命名空间。\n"+
 				"  → 请为 CFPilot 新建一个独立的 KV。\n"+
 				"  → 此判定不可用「强制」绕过。", detail)
 
@@ -655,7 +655,7 @@ func (d *Deployer) writeManifest(ctx context.Context, old *Manifest, eff effecti
 // writeEffectiveConfig 把生效的凭据写进 KV 的 CONFIG 键。
 //
 // ⚠️ 写的是**大写** `CONFIG`（CFPilot 数据面读它），
-// 绝不是小写 `config`（那是 CFNext 原版的键，往里写会整体覆盖共栖项目配置）。
+// 绝不是小写 `config`（那是旧版第三方实现的键，往里写会整体覆盖共栖项目配置）。
 func (d *Deployer) writeEffectiveConfig(ctx context.Context, eff effective) error {
 	cfg := map[string]any{
 		"uuid":           eff.uuid,
@@ -683,7 +683,7 @@ func (d *Deployer) writeEffectiveConfig(ctx context.Context, eff effective) erro
 //
 // KV 绑定两个名字：
 //   - `KV`：CFPilot 内核读的名字
-//   - `K` ：CFNext 风格的名字
+//   - `K` ：兼容旧版实现的名字
 //
 // 少绑一个就会有一侧读不到配置。
 func (d *Deployer) configureProject(ctx context.Context, project, label string, eff effective) {

@@ -25,7 +25,7 @@ import { loadDataPlaneConfig } from './control'
 export function collectProxies(config: UserConfig): ProxyEndpoint[] {
   const proxies: ProxyEndpoint[] = []
   // PROXYIP 是「指定落地地址」，不是 SOCKS5 代理；裸 host:port 必须按直连语义解析。
-  // 历史上这里固定传 'socks5'，导致 BPB 风格的 ProxyIP 配置被当成 SOCKS5 握手而全部失败。
+  // 历史上这里固定传 'socks5'，导致 direct 风格的 ProxyIP 配置被当成 SOCKS5 握手而全部失败。
   proxies.push(...parseProxyPool(config.proxyIp, 'direct'))
   proxies.push(...parseProxyPool(config.socks5, 'socks5'))
   // HTTP_PROXY 里的 `https://` 前缀会被 parseProxyEntry 识别为 'https' 类型
@@ -91,7 +91,7 @@ export async function routeDataPlane(
     )
   }
 
-  // 出口地区端点（借鉴 cfnew 的 `GET /region`）。
+  // 出口地区端点（社区约定的 `GET /region` 形式）。
   //
   // 报告当前请求落在哪个边缘机房、推断出哪个国家/地区，
   // 以及反代入口的地区优先级。用途：

@@ -107,6 +107,24 @@ export async function handleApi(
   }
 
   // ---- 扫描回调（Bearer 令牌鉴权，不依赖面板会话） ----
+  //
+  // ## ⚠️ 回填必须**覆盖**面板原有的「手动优选 IP」
+  //
+  // 优选池有四层，订阅节点来自 L1 + L2：
+  //
+  //   L1  LOCAL_PREFERRED_IPS  ← 本地真连接优选的结果（这里写入）
+  //   L2  config.add           ← 面板「手动优选 IP」输入框
+  //   L3  config.addApi        ← 远程 TXT 池
+  //   L4  config.addCsv        ← 远程 CSV 池
+  //
+  // 旧实现只写 L1、不动 L2 → 订阅里 **L1 + L2 都在** →
+  // 用户看到「回填了但订阅仍是旧 IP 的节点」。
+  //
+  // 修法：回填时同时清空 L2（config.add）。
+  // 理由：两者是同一用途（优选 IP 池），而回填的是**实测过真连接**的结果，
+  // 质量高于手填；用户手动加的那批保留反而会拉低整体可用率。
+  //
+  // 只清 config.add，**不动** addApi / addCsv —— 那是用户自己配的远程池。
   if (path === '/preferred-ips' && method === 'POST') {
     const header = request.headers.get('Authorization') ?? ''
     const token = header.startsWith('Bearer ') ? header.slice(7).trim() : header.trim()
@@ -124,7 +142,16 @@ export async function handleApi(
       .filter((line) => line.length > 0)
       .join('\n')
     await store.put(LOCAL_IPS_KEY, cleaned)
-    return json({ ok: true, count: list.length })
+
+    // 覆盖：清空面板手填的「手动优选 IP」，让订阅里只有本次回填的结果
+    let clearedManual = false
+    if ((config.add ?? '').trim() !== '') {
+      await saveConfig(store, mergeConfig(config, { add: '' }))
+      ctx.onConfigChanged()
+      clearedManual = true
+    }
+
+    return json({ ok: true, count: list.length, clearedManual })
   }
 
   // ---- 以下接口需要面板会话 ----

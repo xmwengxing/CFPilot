@@ -3,7 +3,7 @@
  *
  * 设计取舍：
  *   1. 不内置「静态 IP 表」——Cloudflare 的 IP 是 anycast，静态表会随时间失效。
- *      edgetunnel 的做法也是「远程 CIDR 随机生成」，这里沿用同样的思路。
+ *      社区常见做法也是「远程 CIDR 随机生成」，这里沿用同样的思路。
  *   2. 域名库来自公开的社区优选域名（见 PREFERRED_DOMAINS 注释），
  *      订阅里 domain 只用于 DNS 解析到优质 CF 边缘 IP，SNI / Host 仍是用户自己的 Worker 域名。
  *   3. 国家只是「机房所在国家」的聚合视图：CF 的 anycast IP 本身没有国家归属，
@@ -99,7 +99,7 @@ export const CF_IPV4_CIDRS: readonly string[] = [
 /**
  * 社区公开优选域名库
  *
- * 主要搬运自 byJoey/cfnew 的「直连域名列表」（21 条），这些域名由第三方维护，
+ * 主要来自社区维护的公共「直连域名列表」（21 条），这些域名由第三方维护，
  * CNAME 到 Cloudflare 边缘、且解析到的 IP 通常对国内网络较友好。
  * 它们只负责「解析出一个好的 CF IP」，订阅里的 SNI / Host 仍然是你自己的 Worker 域名。
  *

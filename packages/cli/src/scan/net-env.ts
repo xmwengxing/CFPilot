@@ -101,7 +101,7 @@ export function isFakeIp(ip: string): boolean {
 }
 
 /**
- * 判断是否为**公网可路由**地址（借鉴 cfnew 的 `isPublicAddress`）。
+ * 判断是否为**公网可路由**地址（与社区通用 `isPublicAddress` 一致）。
  *
  * ## 为什么需要
  *

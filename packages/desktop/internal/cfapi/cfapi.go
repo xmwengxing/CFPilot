@@ -594,7 +594,7 @@ func (c *Client) UpdatePagesEnv(ctx context.Context, accountID, name string, var
 // BindPagesKV 给 Pages 项目绑定 KV 命名空间。
 //
 // bindings 的键是**绑定名**，值是命名空间 ID。
-// CFPilot 需要绑两个名字：`KV`（自研内核读）与 `K`（CFNext 风格）。
+// CFPilot 需要绑两个名字：`KV`（自研内核读）与 `K`（兼容部分旧版实现）。
 // 少绑一个就会有一侧读不到配置。
 func (c *Client) BindPagesKV(ctx context.Context, accountID, name string, bindings map[string]string) error {
 	type kvBinding struct {

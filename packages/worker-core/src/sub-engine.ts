@@ -193,7 +193,7 @@ const SPEED_HEADER_KEYS = ['下载速度', '速度', 'speed', 'download']
 const LATENCY_HEADER_KEYS = ['平均延迟', '延迟', 'latency', 'delay', '响应时间', 'rtt']
 const COLO_HEADER_KEYS = ['colo', '机房', '数据中心', '地区', 'region']
 /**
- * 国家 / 城市列表头键（借鉴 cfnew 的 `normalizePreferredList`）。
+ * 国家 / 城市列表头键（社区通用的 `normalizePreferredList` 形式）。
  *
  * 用途：把国家/城市填进 remark —— 用户在客户端里能直接看到
  * 「🇺🇸 洛杉矶」这样的节点名，比裸 IP 或三字母机房码更直观。
@@ -201,7 +201,7 @@ const COLO_HEADER_KEYS = ['colo', '机房', '数据中心', '地区', 'region']
 const COUNTRY_HEADER_KEYS = ['国家', 'country', '国别']
 const CITY_HEADER_KEYS = ['城市', 'city']
 /**
- * TLS 列表头键（借鉴 cfnew）。
+ * TLS 列表头键（社区通用形式）。
  *
  * CloudflareSpeedTest 的 CSV 有一列 `TLS`（true/false），
  * 表示该 IP 是否支持 TLS 握手。`false` 的行对 VLESS-WS 无用
@@ -292,7 +292,7 @@ export function parseCsvText(text: string, options: CsvParseOptions = {}): CsvPa
     if (cells.length === 0) continue
 
     // TLS 列：明确为 false 的行直接丢弃（客户端到边缘必须 TLS）。
-    // 借鉴 cfnew：`tlsIndex >= 0 && fields[tlsIndex]?.toLowerCase() !== 'true'` → 跳过。
+    // 社区通用约定：`tlsIndex >= 0 && fields[tlsIndex]?.toLowerCase() !== 'true'` → 跳过。
     // 这里稍宽松：空值不丢（有些导出工具不填这一列），只有明确的 false/no/0 才丢。
     if (hasHeader && tlsIndex >= 0 && cells[tlsIndex]) {
       const tlsCell = cells[tlsIndex]!.trim().toLowerCase()
@@ -386,7 +386,7 @@ export function parseCsvText(text: string, options: CsvParseOptions = {}): CsvPa
     if (!clean) continue
 
     // remark 优先级：城市 > 国家 > 机房码。
-    // 借鉴 cfnew 的 `nameIndex` 选择顺序（国家/城市/数据中心取第一个非空）。
+    // 社区通用约定：`nameIndex` 选择顺序（国家/城市/数据中心取第一个非空）。
     const remark = city || country || colo
     // country 兜底：有国家列用国家列；否则按 colo 推断
     const countryCode = country || countryOfColo(colo.toUpperCase())
@@ -479,7 +479,7 @@ function intToIpv4(value: number): string {
  * 从 CIDR 列表中随机抽取 IP（同一次调用内不重复）。
  *
  * Cloudflare 的 IP 是 anycast，静态列表必然会过期，所以「官方优选 IP」按需随机生成，
- * 这也是 edgetunnel 的做法（从远程 CIDR 随机取）。
+ * 社区通用做法（从远程 CIDR 随机取）。
  */
 export function sampleFromCidrs(cidrs: readonly string[], count: number): string[] {
   const usable: Array<{ base: number; hostBits: number }> = []
@@ -1003,7 +1003,7 @@ function portsForEntry(entry: NodeEntry, ctx: RenderContext): number[] {
 /**
  * ECH 查询参数。
  *
- * 参照 edgetunnel 的做法：`&ech=<SNI>+<DoH 地址>`。
+ * 社区通用约定：`&ech=<SNI>+<DoH 地址>`。
  * 客户端解析出这两个值后，用 DoH 查询目标域名的 ECH 配置，
  * 并把 ClientHello 里的真实 SNI 加密。
  *
@@ -1186,10 +1186,10 @@ export function renderClash(ctx: RenderContext): string {
 
   // 分流规则与附加代理组：来自 route-profile ini（内置或 KV 覆盖）。
   //
-  // 借鉴 cfnew 的做法：订阅自带 ACL4SSR 风格的分流规则与代理组，
+  // 社区通用做法：订阅自带 ini 风格的分流规则与代理组，
   // 用户导入后 YouTube / Netflix / OpenAI 等自动走代理，不用自己找规则。
   //
-  // ini 里的 `ruleset=` 指向公共远端 list（ACL4SSR 等），
+  // ini 里的 `ruleset=` 指向公共远端 list，
   // 因此**分流数据永远是新的**，只有「用哪些 list + 怎么分组」固定。
   //
   // ⚠️ 必须在写 proxy-groups **之前**算好：ini 里定义的组要并进
@@ -1271,7 +1271,7 @@ export function renderSingbox(ctx: RenderContext): string {
   /**
    * sing-box 的 ECH 配置。
    *
-   * 参照 edgetunnel：`tls.ech = { enabled: true, query_server_name: <SNI> }`。
+   * 社区通用约定：`tls.ech = { enabled: true, query_server_name: <SNI> }`。
    * sing-box 1.13+ 才支持该字段，旧版会忽略（不会导致解析失败）。
    */
   const echField = (): Record<string, unknown> => {

@@ -142,7 +142,7 @@ export interface UserConfig {
   /**
    * 是否在出站前自动用 DoH 解析目标域名以获得优选 IP 候选。
    *
-   * 机制与 DoH 逐级回退、edgetunnel 的「预加载竞速」一致：
+   * 机制与 DoH 逐级回退、「预加载竞速」一致：
    * TXT 记录里的社区优选 IP 库优先，回退 A / AAAA。
    *
    * 为什么需要：Worker **连不回 Cloudflare 自家的 Anycast 地址**
@@ -223,7 +223,7 @@ export interface UserConfig {
   echHost: string
   /** 自定义 ECH DNS（DoH 地址），留空用客户端默认 */
   echDns: string
-  /** 是否下发 TLS Fragment 参数（BPB 风格，部分内核支持） */
+  /** 是否下发 TLS Fragment 参数（部分内核支持该扩展） */
   tlsFragment: boolean
   /** TLS Fragment 长度范围 */
   tlsFragmentSize: string

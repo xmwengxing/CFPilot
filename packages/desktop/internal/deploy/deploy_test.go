@@ -348,7 +348,7 @@ func TestWritesUppercaseConfigKey(t *testing.T) {
 		t.Error("必须写入大写 CONFIG 键")
 	}
 	if _, has := f.kvWrites["config"]; has {
-		t.Error("绝不能写入小写 config 键（那是 CFNext 的，会覆盖共栖项目配置）")
+		t.Error("绝不能写入小写 config 键（那是旧版第三方实现的，会覆盖共栖项目配置）")
 	}
 
 	// CONFIG 里要有 UUID 与 WS 路径
@@ -528,12 +528,12 @@ func TestOwnershipForceSkips(t *testing.T) {
 	}
 }
 
-// KV 里有 CFNext 的小写 config 键 → 硬阻断。
+// KV 里有旧版第三方实现的小写 config 键 → 硬阻断。
 //
-// CFPilot 是纯自研数据面，不与 CFNext 共用 KV。
+// CFPilot 是纯自研数据面，不与旧版第三方实现共用 KV。
 func TestOwnershipForeignBlocked(t *testing.T) {
 	f := newFakeCF()
-	f.kvSeed["config"] = `{"uuid":"cfnext-uuid"}`
+	f.kvSeed["config"] = `{"uuid":"third-party-uuid"}`
 
 	d, _ := newTestDeployer(t, f, func(o *Options) {
 		o.ControlProject = "mycontrol"
@@ -542,10 +542,10 @@ func TestOwnershipForeignBlocked(t *testing.T) {
 
 	_, err := d.Run(context.Background())
 	if err == nil {
-		t.Fatal("含 CFNext config 键时必须阻断")
+		t.Fatal("含旧版第三方实现的 config 键时必须阻断")
 	}
-	if !strings.Contains(err.Error(), "CFNext") {
-		t.Errorf("错误信息应提到 CFNext，实际：%v", err)
+	if !strings.Contains(err.Error(), "第三方") {
+		t.Errorf("错误信息应提到第三方实现，实际：%v", err)
 	}
 	if !strings.Contains(err.Error(), "独立的 KV") {
 		t.Errorf("错误信息应指导新建独立 KV，实际：%v", err)
@@ -562,7 +562,7 @@ func TestOwnershipForeignBlocked(t *testing.T) {
 // foreign 是硬约束：连 Force 也不放行。
 func TestOwnershipForeignIgnoresForce(t *testing.T) {
 	f := newFakeCF()
-	f.kvSeed["config"] = `{"uuid":"cfnext-uuid"}`
+	f.kvSeed["config"] = `{"uuid":"third-party-uuid"}`
 
 	d, _ := newTestDeployer(t, f, func(o *Options) {
 		o.ControlProject = "mycontrol"
@@ -574,8 +574,8 @@ func TestOwnershipForeignIgnoresForce(t *testing.T) {
 	if err == nil {
 		t.Fatal("foreign 判定下 Force 也不能绕过")
 	}
-	if !strings.Contains(err.Error(), "CFNext") {
-		t.Errorf("错误信息应提到 CFNext，实际：%v", err)
+	if !strings.Contains(err.Error(), "第三方") {
+		t.Errorf("错误信息应提到第三方实现，实际：%v", err)
 	}
 	if len(f.created) != 0 {
 		t.Errorf("不该创建项目，实际 %v", f.created)

@@ -3,7 +3,7 @@
  *
  * 用内存流模拟一个 HTTP 代理服务器，验证：
  * ① CONNECT 请求行与 Host 头正确
- * ② 带凭据时发出 Proxy-Authorization（edgetunnel 同款）
+ * ② 带凭据时发出 Proxy-Authorization（通用做法）
  * ③ 代理返回非 200 时明确报错（不能静默吞掉）
  * ④ CONNECT 响应之后紧跟的隧道数据不丢失
  */

@@ -167,7 +167,7 @@ export interface RouteInput {
  *
  * `https` 的语义：代理服务器本身走 TLS（需要 `connect({secureTransport:'on'})`），
  * 与 HTTP 代理的「明文 CONNECT 到代理、再由代理做 CONNECT」不同。
- * 这是本项目相对 edgetunnel 的增强。
+ * 这是本项目相对通用实现的增强。
  */
 export type ProxyKind = 'direct' | 'socks5' | 'http' | 'https'
 
@@ -302,7 +302,7 @@ export function buildRouteCandidates(input: RouteInput): RouteCandidate[] {
  * 若代理候选与直连候选同池竞速，直连一旦先成功就会**静默绕过代理** ——
  * 出口 IP 与用户预期不符，而且没有任何报错（最难察觉的一类故障）。
  *
- * 语义对齐 edgetunnel（`connecttoPry`）：
+ * 语义约定（参考 `connecttoPry`）：
  *   - 有代理 → 只走代理；代理全失败 → 抛错（不静默改走直连）
  *   - 无代理 → 走直连 / 优选 IP
  *

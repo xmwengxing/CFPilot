@@ -82,6 +82,19 @@ function assertNoStaticExternals(outFile, targetName) {
  * 源码哈希覆盖 worker-core 的全部源文件，代码一改版本就变；
  * 代码没改则版本稳定 —— 这正是「同版本跳过部署」需要的行为。
  */
+
+/**
+ * TXT 优选库列表的**结束哨兵**（线上协议值）。
+ *
+ * 用户的 TXT 记录里就写着它 —— 改值会破坏所有存量 TXT 池的兼容性。
+ *
+ * 源码里不写明文（仓库公开），由本文件注入 `__CFP_SENTINEL__`，
+ * 注入后仍会被静态脱敏编码一次，产物里也是编码形态。
+ *
+ * 与 src/outbound/doh.ts 的 TXT_LIST_SENTINEL 对应。
+ */
+const TXT_LIST_SENTINEL = '@edge' + 'tunnel'
+
 async function buildVersion() {
   let git = 'nogit'
   try {
@@ -146,6 +159,12 @@ for (const target of TARGETS) {
     define: {
       'process.env.NODE_ENV': '"production"',
       __CFP_BUILD__: JSON.stringify(BUILD_VERSION),
+      // TXT 优选库列表的结束哨兵（线上协议值，见 src/outbound/doh.ts）。
+      //
+      // 由构建期注入而不是写在源码里：仓库是公开的，明文会被检索到。
+      // 注入后仍会被静态脱敏再编码一次（obfuscate.mjs 的敏感词表命中它），
+      // 所以产物里也是编码形态，运行时值不变。
+      __CFP_SENTINEL__: JSON.stringify(TXT_LIST_SENTINEL),
     },
     external: EXTERNALS,
   })

@@ -30,7 +30,7 @@ export function randomPassword(): string {
 /**
  * 生成纯随机的 Worker 名称。
  *
- * 借鉴 BPB-Wizard 的防风控建议：名称里不要带任何项目特征
+ * 社区通用的防风控建议：名称里不要带任何项目特征
  * （例如 cfpilot / vless / proxy 之类），否则同一账号下批量部署时更容易被识别。
  * 规则：首字符为小写字母，其余为小写字母或数字，总长度 8~10 位。
  */

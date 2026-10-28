@@ -13,6 +13,18 @@ import { randomHex } from './util'
 const MAX_PROBE_BYTES = 15 * 1024 * 1024
 const DEFAULT_PROBE_BYTES = 2 * 1024 * 1024
 
+/**
+ * 测速用的 64KB 填充块（模块级常量，只初始化一次）。
+ *
+ * 内容无关紧要（全是 'a'），关键是**永不修改** —— 所有并发测速连接共享同一份内存，
+ * 用 `subarray()` 切出各自需要的长度。
+ */
+const PROBE_CHUNK: Uint8Array = (() => {
+  const buf = new Uint8Array(64 * 1024)
+  buf.fill(0x61)
+  return buf
+})()
+
 export async function handleEdgeProbe(request: Request): Promise<Response> {
   const url = new URL(request.url)
 
@@ -48,8 +60,12 @@ export async function handleEdgeProbe(request: Request): Promise<Response> {
     ? Math.min(requested, MAX_PROBE_BYTES)
     : DEFAULT_PROBE_BYTES
 
-  const chunk = new Uint8Array(64 * 1024)
-  for (let i = 0; i < chunk.length; i++) chunk[i] = 0x61
+  // 测速块**模块级常量**：只初始化一次。
+  //
+  // 旧实现每次请求都 `new Uint8Array(64KB)` 再跑 65536 次循环填 0x61 ——
+  // 多流并发测速时（一条候选 8~16 条连接）这纯粹是白烧 CPU。
+  // 缓冲区永不修改，所有连接共享同一份内存。
+  const chunk = PROBE_CHUNK
 
   let sent = 0
   const stream = new ReadableStream<Uint8Array>({
@@ -68,6 +84,17 @@ export async function handleEdgeProbe(request: Request): Promise<Response> {
     status: 200,
     headers: {
       'Content-Type': 'application/octet-stream',
+      // ⚠️ **不要**试图给流式响应加 `Content-Length`。
+      //
+      // 2026-10-28 本地 workerd 实测：对 ReadableStream 响应设置
+      // `Content-Length` 会被运行时**直接丢弃**，实际发出的仍是
+      // `Transfer-Encoding: chunked`（curl -D 抓到的头里没有 content-length）。
+      // 所以「加长度让客户端收满即止」这条路在 Workers 上走不通 ——
+      // 客户端必须靠「固定时长窗口」结算速度（见 CLI 的 measureThroughput），
+      // 而不是等流结束。
+      //
+      // 明确声明不压缩：测速要的是原始吞吐，任何压缩都会让结果失真。
+      'Content-Encoding': 'identity',
       'Cache-Control': 'no-store',
       'Access-Control-Allow-Origin': '*',
       'X-Probe-Bytes': String(bytes),

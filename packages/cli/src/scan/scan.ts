@@ -630,7 +630,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
         sniHost: parsedUrl.host,
         requestHost: parsedUrl.host,
         path: requestPath,
-        connections: options.speedConnections ?? 3,
+        connections: options.speedConnections ?? 8,
         durationMs: options.speedDurationMs ?? 6000,
         timeoutMs: options.speedTimeoutMs ?? 20000,
       })
@@ -640,7 +640,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
         stage: 3,
         done: speedDone,
         total: stage2.length,
-        message: `测速 ${speedDone}/${stage2.length} ${result.steadyMBps.toFixed(1)} MB/s`,
+        message: `测速 ${speedDone}/${stage2.length} [${item.probe.colo || 'UNK'}] ${result.steadyMBps.toFixed(1)} MB/s`,
       })
       return { ...item, speed: result.ok ? result.steadyMBps : 0 }
     })
@@ -654,7 +654,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
         host: options.host,
         bytes: speedBytes,
         path: strictProbePath,
-        connections: options.speedConnections ?? 3,
+        connections: options.speedConnections ?? 8,
         durationMs: options.speedDurationMs ?? 6000,
         timeoutMs: speedTimeoutMs,
       })
@@ -664,7 +664,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
         stage: 3,
         done: speedDone,
         total: stage2.length,
-        message: `测速 ${speedDone}/${stage2.length} ${result.steadyMBps.toFixed(1)} MB/s`,
+        message: `测速 ${speedDone}/${stage2.length} [${item.probe.colo || 'UNK'}] ${result.steadyMBps.toFixed(1)} MB/s`,
       })
       return { ...item, speed: result.ok ? result.steadyMBps : 0 }
     })

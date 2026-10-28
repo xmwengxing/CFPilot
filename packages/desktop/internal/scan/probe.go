@@ -272,13 +272,19 @@ func ProbeWS101(ctx context.Context, ip string, port int, host string, timeout t
 // ⚠️ 逐项对照 CLI packages/cli/src/scan/true-probe.ts 的 measureThroughput 默认值，
 // 两边**必须保持同一套语义**（AGENTS.md §2.2：CLI 是权威实现）：
 //
-//	connections = 3    多流才能填满链路（单流受拥塞窗口 / BDP 限制）
+//	connections = 8    多流才能填满链路（单流受拥塞窗口 / BDP 限制）
 //	durationMs  = 6000 单次测量时长（不是整体预算）
 //	warmupMs    = 1000 丢弃 TCP 慢启动样本
 //	windowMs    = 400  滑动窗口峰值（只作诊断）
 //	minBytes    = 32KB 挡掉报错页 / 欢迎页
+//
+// connections 从 3 提到 8 的依据（2026-10-28 直连实测，同一 IP、同一时段）：
+//
+//	1 条 = 0.12 MB/s、3 条 = 0.47、8 条 = 1.15、16 条 = 2.22 MB/s
+//
+// 跨境链路单条 TCP 受丢包 / 拥塞窗口限制，用 3 条会系统性低估 2~4 倍。
 const (
-	defMeasureConnections = 3
+	defMeasureConnections = 8
 	defMeasureDurationMs  = 6000
 	defMeasureWarmupMs    = 1000
 	defMeasureWindowMs    = 400
@@ -286,9 +292,8 @@ const (
 	defMeasureBytes       = 5 * 1024 * 1024
 	// defMeasureTimeoutMs 是兜底的整体预算（正常调用方都会显式传）。
 	defMeasureTimeoutMs = 20000
-	// maxMeasureConnections 是单次测量的连接数上限：
-	// 再高只是在客户端侧排队，并不会让整条链路更快。
-	maxMeasureConnections = 8
+	// maxMeasureConnections 是单次测量的连接数上限。
+	maxMeasureConnections = 16
 )
 
 // DownloadResult 是测速结果。

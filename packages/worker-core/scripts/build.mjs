@@ -101,6 +101,22 @@ function assertNoStaticExternals(outFile, targetName) {
  */
 const TXT_LIST_SENTINEL = '@edge' + 'tunnel'
 
+/**
+ * 包的语义版本号（0.9.4 这类），注入产物供面板「系统内核版本」显示。
+ *
+ * 与 `BUILD_VERSION`（`<git短hash>-<源码哈希>`）的区别：
+ *   - `PKG_VERSION` 人读友好，用来确认「部署的到底是哪个版本」；
+ *   - `BUILD_VERSION` 精确到内容，用来判断「线上和本地是不是同一份代码」。
+ * 面板两个都显示。
+ */
+const PKG_VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(resolve(pkgRoot, 'package.json'), 'utf8')).version ?? '0.0.0'
+  } catch {
+    return '0.0.0'
+  }
+})()
+
 async function buildVersion() {
   let git = 'nogit'
   try {
@@ -165,6 +181,9 @@ for (const target of TARGETS) {
     define: {
       'process.env.NODE_ENV': '"production"',
       __CFP_BUILD__: JSON.stringify(BUILD_VERSION),
+      // 语义版本号（0.9.4），面板「系统内核版本」显示用。
+      // 与 BUILD_VERSION 一起返回：前者人读、后者精确到内容。
+      __CFP_PKG_VERSION__: JSON.stringify(PKG_VERSION),
       // TXT 优选库列表的结束哨兵（线上协议值，见 src/outbound/doh.ts）。
       //
       // 由构建期注入而不是写在源码里：仓库是公开的，明文会被检索到。

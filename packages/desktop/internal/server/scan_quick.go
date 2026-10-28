@@ -137,6 +137,9 @@ func (s *Server) RunQuickScan(ctx context.Context) QuickScanResult {
 	scanCtx, cancelScan := context.WithTimeout(ctx, 12*time.Minute)
 	defer cancelScan()
 
+	// 进度节流器（见 scan.ProgressThrottle）
+	throttle := scan.NewProgressThrottle()
+
 	summary, err := scan.Run(scanCtx, scan.Options{
 		Host:       host,
 		Port:       443,
@@ -145,6 +148,18 @@ func (s *Server) RunQuickScan(ctx context.Context) QuickScanResult {
 		Candidates: candidates,
 		SkipSpeed:  true, // 一键优选不测速：要的是「可用」，不是「快」
 		Top:        8,    // 与 CLI / 界面的默认 top 一致（2026-10-28 起 15 → 8）
+		// 一键优选要跑一分多钟，没有进度用户会以为卡住了。
+		// 同样要节流 —— 逐候选报会把日志冲垮。
+		Progress: func(p scan.Progress) {
+			if !throttle.ShouldReport(p) {
+				return
+			}
+			msg := p.Message
+			if p.Total > 0 {
+				msg = fmt.Sprintf("%s（%d/%d）", p.Message, p.Done, p.Total)
+			}
+			s.logf(msg)
+		},
 	})
 	if err != nil {
 		return QuickScanResult{OK: false, Error: "扫描失败：" + err.Error()}

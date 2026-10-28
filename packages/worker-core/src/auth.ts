@@ -42,6 +42,19 @@ async function hashPassword(password: string, salt: string): Promise<string> {
   return await sha256Hex(`${salt}:${password}`)
 }
 
+/**
+ * 判断 KV 里存着的 `salt:hash` 是否就是给定密码的派生值。
+ *
+ * 空值、不含分隔符、缺 salt/缺 hash 的脏数据一律返回 false（视为需要重新写）。
+ * 用 `timingSafeEqual` 比较，避免逐字符比较泄露哈希前缀。
+ */
+async function hashMatches(passwordHash: string, password: string): Promise<boolean> {
+  const [salt, expected] = passwordHash.split(':')
+  if (!salt || !expected) return false
+  const actual = await hashPassword(password, salt)
+  return timingSafeEqual(actual, expected)
+}
+
 /** 规范化路径：确保有且仅有一个前导斜杠 */
 function normalizePath(path: string): string {
   return `/${path.trim().replace(/^\/+/, '')}`
@@ -73,18 +86,33 @@ export async function ensureBootstrap(
   }
 
   /* ---- 密码 ---- */
+  // ⚠️ 这一段绝不能无条件写 KV —— 写入放大是三个因素叠加出来的：
+  //   1. Cloudflare KV 免费版每天只有 1000 次写/删除，配额写光后面板保存配置、
+  //      回填优选 IP 等需要写 KV 的接口会全部 500；
+  //   2. routes/shared.ts 的 getAuth() 模块级缓存只有 60 秒，过期后每次请求
+  //      都会重新调 ensureBootstrap()；
+  //   3. 模块级缓存是「每个边缘 isolate 一份」的，全球几十个 isolate 各自冷启动，
+  //      每个都要独立引导一次。
+  // 所以「环境变量已注入」不等于「必须重新派生并落盘」：只有密码真的变了
+  // （或 KV 里还没有哈希）才写一次；密码没变读取即可，一次 KV 写都不做
+  // （get 不计入写配额）。两个 isolate 同时冷启动各写一次是可接受的下界，
+  // 不要为此引入跨请求锁或模块级可变状态。
   let passwordHash = (await store.get(ADMIN_PW_HASH_KEY)) ?? ''
   let generatedPassword: string | null = null
   const envPw = envPassword && envPassword.trim() ? envPassword.trim() : ''
 
   if (envPw) {
-    // 环境变量优先：每次启动都按当前环境变量重新派生，
-    // 因此改密码只需重新部署，不需要手动清 KV。
-    const salt = randomHex(8)
-    passwordHash = `${salt}:${await hashPassword(envPw, salt)}`
-    await store.put(ADMIN_PW_HASH_KEY, passwordHash)
-    // 环境变量已提供密码，KV 里不应再留明文副本
-    await store.delete(ADMIN_PW_PLAIN_KEY)
+    // 环境变量优先：密码变化时必须按新环境变量重新派生（重新部署即可改密码，
+    // 不需要手动清 KV）；但密码未变时复用 KV 里那份哈希，避免每次引导都重写。
+    if (!passwordHash || !(await hashMatches(passwordHash, envPw))) {
+      const salt = randomHex(8)
+      passwordHash = `${salt}:${await hashPassword(envPw, salt)}`
+      await store.put(ADMIN_PW_HASH_KEY, passwordHash)
+    }
+    // 环境变量已提供密码，KV 里不应再留明文副本。
+    // delete 同样消耗一次写配额，所以先 get：只有确实存在残留才删。
+    const plain = await store.get(ADMIN_PW_PLAIN_KEY)
+    if (plain) await store.delete(ADMIN_PW_PLAIN_KEY)
   } else if (!passwordHash) {
     // 未注入密码：随机生成并保留明文副本供用户取回
     const password = `cfp-${randomHex(8)}`

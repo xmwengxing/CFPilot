@@ -379,8 +379,34 @@ func MeasureDownload(
 	var received int64
 	var headerBuf strings.Builder
 
+	// ⚠️ **整体预算**：与 CLI 版 measureDownload 的 `setTimeout(..., timeoutMs)` 同义。
+	//
+	// 只有「每次读的超时」是**不够**的：对方持续 trickle 数据时，
+	// 每次读都能成功 → 读超时被无限推迟 → **整个测速永远不结束**。
+	//
+	// 真机踩过（2026-10-28）：目标是自己的实例（5MB 探针载荷），
+	// 链路很慢（还套着 TUN 代理），数据一直在 trickle，
+	// 测速卡在「阶段三 29/30」**超过 8 分钟**不动，
+	// 而每个连接的读超时（12s）因为「一直在收到数据」而永远不触发。
+	//
+	// 加上整体预算后：超时即判「测速超时」，该候选被淘汰，扫描继续。
+	//
+	// ⚠️ 两端语义必须一致（AGENTS.md §2.2）：
+	// CLI 侧是 `const timer = setTimeout(..., timeoutMs)`（总）+ `socket.setTimeout`（空闲）。
+	totalDeadline := time.Now().Add(timeout)
+
 	for {
-		if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		// 整体预算耗尽 → 收工（不等下一次读超时）
+		remaining := time.Until(totalDeadline)
+		if remaining <= 0 {
+			return finish(received, "测速超时")
+		}
+		// 单次读的超时不能超过整体预算的剩余量
+		readTimeout := timeout
+		if remaining < readTimeout {
+			readTimeout = remaining
+		}
+		if err := conn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
 			break
 		}
 		n, readErr := conn.Read(buf)

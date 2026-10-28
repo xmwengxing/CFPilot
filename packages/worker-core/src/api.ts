@@ -251,6 +251,10 @@ export async function handleApi(
     const result = await collectNodes(config, localIps, {
       budget,
       domainPool: domainPool.length > 0 ? domainPool : undefined,
+      // 面板预览是「点一下就要看到最新结果」的场景，必须绕过远程池缓存。
+      // 订阅走 120 秒缓存（客户端会周期性重拉，缓存挡住突发）；
+      // 预览若也吃缓存，用户改完远端 CSV/TXT 池会以为没生效。
+      bypassRemoteCache: true,
     })
     return json({
       ok: true,
@@ -334,7 +338,10 @@ async function sseEvents(request: Request, store: Store): Promise<Response> {
           /* 连接已断开 */
         }
         if (!request.signal.aborted) {
-          timer = setTimeout(() => void tick(), 3000)
+          // 每个 tick 都会 loadLocalIps(store) 读一次 KV：3 秒一次等于
+          // 面板开着就 1200 次/小时，远超「回填完刷新页面能看到变化」的需要。
+          // 15 秒一次（240 次/小时）同样覆盖该体验，还能省掉大量 KV 读。
+          timer = setTimeout(() => void tick(), 15000)
         }
       }
       await tick()

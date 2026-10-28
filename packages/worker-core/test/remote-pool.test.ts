@@ -15,7 +15,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-import { collectNodes, renderBase64 } from '../src/sub-engine'
+import { clearRemoteTextCache, collectNodes, renderBase64 } from '../src/sub-engine'
 import type { UserConfig } from '../src/types'
 
 /** 造一份最小可用的配置 */
@@ -69,6 +69,10 @@ function makeConfig(over: Partial<UserConfig> = {}): UserConfig {
 let fetchMock: ReturnType<typeof vi.fn>
 
 beforeEach(() => {
+  // 远程池文本缓存是模块级、跨用例存活的（生产上就该这样），
+  // 这里显式清空：否则前一个用例拉过的 URL 会让后一个用例直接命中缓存，
+  // 本文件里那些「重新打桩 fetch」的断言就失去意义了。
+  clearRemoteTextCache()
   fetchMock = vi.fn(async (input: string | URL) => {
     const url = String(input)
     if (url.includes('/ips.txt')) {

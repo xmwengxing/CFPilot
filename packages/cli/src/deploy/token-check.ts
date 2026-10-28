@@ -15,9 +15,28 @@
  *       · 404 → 权限正常（脚本不存在而已）
  *   - DNS：GET /zones/{zone}/dns_records
  *   - Routes：GET /zones/{zone}/workers/routes
+ *   - Pages：GET /accounts/{id}/pages/projects
  *
- * 注意：列表类接口可读只代表具备 Read；真正部署还需要 Edit 权限，
+ * 注意：列表类接口可读只代表具备 Read；真正部署还需要 Write 权限，
  * 因此表格里给出的是「缺失后果」，并在末尾提示写入类权限要求。
+ *
+ * ## ⚠️ 哪些权限是**部署真正必需**的
+ *
+ * 现在唯一受支持的部署形态是 **Pages 双项目**，它只调用这些接口：
+ *
+ *   GET  /accounts                                   → Account Settings Read
+ *   GET/POST/PUT  .../storage/kv/namespaces…         → Workers KV Storage Write
+ *   GET/PUT/DELETE  .../pages/projects…              → Pages Write
+ *
+ * 也就是说**最小权限集只有 3 项**：
+ *
+ *   Account / Account Settings Read
+ *   Account / Workers KV Storage Write
+ *   Account / Pages Write
+ *
+ * Workers 脚本 / workers.dev 子域 / DNS / Routes 这些
+ * **只被已归档的单项目 Workers 形态使用**，Pages 部署完全不碰。
+ * 所以它们在表格里标为「非必需」，别让用户为用不上的权限多勾一堆。
  */
 import {
   CloudflareClient,
@@ -205,7 +224,7 @@ export function renderTokenCheck(result: TokenCheckResult): string {
 
   lines.push('')
   lines.push('说明：列表类接口通过只代表具备读取权限；创建 / 修改类操作仍然需要 Edit 权限。')
-  lines.push('提示：部署时加 --workers-dev 可跳过自定义域名，此时 Zone / DNS / Routes 权限都不是必需的。')
+  lines.push('提示：Zone / DNS / Routes 权限只影响**跨账号**自定义域名；同账号域名由 Cloudflare 自动建 DNS 记录。')
   return `${lines.join('\n')}\n`
 }
 
@@ -314,7 +333,7 @@ export async function checkTokenPermissions(
     expectCustomDomain,
     expectCustomDomain
       ? '无法选择域名、无法绑定自定义域名，只能使用 workers.dev 地址'
-      : '自定义域名能力不可用，只能使用 workers.dev 地址',
+      : '无法托管自定义域名（Pages 默认的 *.pages.dev 域名不受影响）',
     'Token 中添加 Zone / Zone / Read',
     zoneProbe
   )
@@ -337,7 +356,7 @@ export async function checkTokenPermissions(
       'Workers KV Storage',
       true,
       '无法创建 / 绑定 KV 命名空间，部署会中断',
-      'Token 中添加 Developer Platform / Workers KV Storage / Edit',
+      'Token 中添加 Account / Workers KV Storage / Write',
       kvProbe
     )
   )
@@ -350,9 +369,9 @@ export async function checkTokenPermissions(
   rows.push(
     makeRow(
       'Workers 脚本',
-      true,
-      '无法上传或更新内核，部署会中断',
-      'Token 中添加 Developer Platform / Workers Scripts / Edit',
+      false,
+      '不影响 Pages 部署（内核走 Pages 部署接口上传，不经过 Workers 脚本 API）',
+      '仅当你要用归档的单项目 Workers 形态时才需要',
       scriptsProbe
     )
   )
@@ -365,9 +384,9 @@ export async function checkTokenPermissions(
   rows.push(
     makeRow(
       'workers.dev 子域读取',
-      true,
-      '无法拼出 https://<name>.<sub>.workers.dev 地址',
-      'Token 中添加 Developer Platform / Workers Scripts / Read',
+      false,
+      '不影响 Pages 部署（Pages 项目用自己的 *.pages.dev 域名）',
+      '仅当你要用归档的单项目 Workers 形态时才需要',
       subdomainProbe
     )
   )
@@ -398,9 +417,9 @@ export async function checkTokenPermissions(
   rows.push(
     makeRow(
       'workers.dev 路由开关',
-      true,
-      '部署后 workers.dev 会一直显示「There is nothing here yet」',
-      'Token 中添加 Developer Platform / Workers Scripts / Edit',
+      false,
+      '不影响 Pages 部署（Pages 项目用自己的 *.pages.dev 域名）',
+      '仅当你要用归档的单项目 Workers 形态时才需要',
       subdomainRouteProbe
     )
   )
@@ -415,7 +434,7 @@ export async function checkTokenPermissions(
       'Pages 项目',
       true,
       'pages-split 无法创建项目、配置变量与触发部署',
-      'Token 中添加 Developer Platform / Pages / Edit',
+      'Token 中添加 Account / Pages / Write',
       pagesProbe
     )
   )
@@ -431,7 +450,7 @@ export async function checkTokenPermissions(
       makeRow(
         'DNS 记录',
         expectCustomDomain,
-        '无法检测冲突 DNS、无法创建 CNAME；自定义域名失败时无法降级 Route + CNAME',
+        '无法自行创建 CNAME 记录（跨账号自定义域名需手动加；同账号由 Cloudflare 自动建）',
         'Token 中添加 Zone / DNS / Edit',
         { status: 'unknown', detail }
       )
@@ -440,7 +459,7 @@ export async function checkTokenPermissions(
       makeRow(
         'Worker Routes',
         expectCustomDomain,
-        '自定义域名出现 522 时无法降级 Route + CNAME，只能回退 workers.dev',
+        'Pages 自定义域名无法降级到 Route + CNAME 方案',
         'Token 中添加 Zone / Workers Routes / Edit',
         { status: 'unknown', detail }
       )
@@ -454,7 +473,7 @@ export async function checkTokenPermissions(
       makeRow(
         'DNS 记录',
         expectCustomDomain,
-        '无法检测冲突 DNS、无法创建 CNAME；自定义域名失败时无法降级 Route + CNAME',
+        '无法自行创建 CNAME 记录（跨账号自定义域名需手动加；同账号由 Cloudflare 自动建）',
         'Token 中添加 Zone / DNS / Edit',
         dnsProbe
       )
@@ -468,7 +487,7 @@ export async function checkTokenPermissions(
       makeRow(
         'Worker Routes',
         expectCustomDomain,
-        '自定义域名出现 522 时无法降级 Route + CNAME，只能回退 workers.dev',
+        'Pages 自定义域名无法降级到 Route + CNAME 方案',
         'Token 中添加 Zone / Workers Routes / Edit',
         routesProbe
       )

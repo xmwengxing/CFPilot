@@ -481,6 +481,14 @@ func TestReadLegacyManifestWithoutKernelVersion(t *testing.T) {
 }
 
 // KV 归属校验：清单属于别的实例时要拒绝部署。
+//
+// ⚠️ 必须是 **fresh 模式**才能触发 occupied：
+//
+// 更新模式（auto / update）会**复用清单里的项目名**（对照 CLI 的
+// deployPagesSplit：「同源项目名：有清单就按清单来」），
+// 因此同一个实例的原地更新判为 owned，不会被误拒。
+// occupied 只在「本次要用的项目名 ≠ 清单里的项目名」时出现 ——
+// 也就是全新部署复用了一个已存在的 KV。
 func TestOwnershipConflictRejected(t *testing.T) {
 	f := newFakeCF()
 	f.kvSeed["CFP_DEPLOY_MANIFEST"] = `{
@@ -491,6 +499,7 @@ func TestOwnershipConflictRejected(t *testing.T) {
 	}`
 
 	d, _ := newTestDeployer(t, f, func(o *Options) {
+		o.Mode = "fresh"
 		o.ControlProject = "mycontrol"
 		o.DataProject = "mydata"
 	})
@@ -518,6 +527,7 @@ func TestOwnershipForceSkips(t *testing.T) {
 	f.kvSeed["CFP_DEPLOY_MANIFEST"] = `{"v":1,"controlProject":"other","dataProject":"otherdata","credentials":{}}`
 
 	d, _ := newTestDeployer(t, f, func(o *Options) {
+		o.Mode = "fresh"
 		o.ControlProject = "mycontrol"
 		o.DataProject = "mydata"
 		o.Force = true
@@ -636,6 +646,206 @@ func TestOwnershipEmptyPasses(t *testing.T) {
 	verdict, detail := d.inspectKvOwnership(context.Background(), nil, "mycontrol")
 	if verdict != OwnEmpty {
 		t.Errorf("空 KV 应判定 empty，实际 %s（%s）", verdict, detail)
+	}
+}
+
+// 回归测试（B2）：清单里 controlProject=X、用户输入为空（→ 随机名）时，
+// fresh 模式必须判为 **occupied** 而不是 owned。
+//
+// ## 这个 bug 的实际后果
+//
+// 账户 A 已在 KV1 部署了现役实例（清单里 controlProject=X），
+// GUI 又选「全新部署」且 KV 下拉框仍是 KV1：
+// 归属校验因「用户输入为空 ⇒ 认领」被放行 → 用**全新**的
+// UUID / WS 路径 / 面板密码覆盖 KV1 的 CFP_DEPLOY_MANIFEST 与 CONFIG
+// → 老实例的客户端节点全部失效，一个 KV 挂着两套 Pages 项目。
+//
+// ## 与 CLI 的对齐
+//
+// CLI 的 deployPagesSplit 先把控制面项目名补成随机名，**再**做归属校验，
+// 比对用的是「即将实际使用的项目名」，因此这里必须是 occupied。
+func TestOwnershipFreshRandomNameIsOccupied(t *testing.T) {
+	f := newFakeCF()
+	f.kvSeed["CFP_DEPLOY_MANIFEST"] = `{
+		"v": 1,
+		"kvNamespaceId": "kv1",
+		"controlProject": "existing-control",
+		"dataProject": "existing-data",
+		"controlSubdomain": "existing-control.pages.dev",
+		"dataSubdomain": "existing-data.pages.dev",
+		"build": "old-build",
+		"at": "2026-10-20T00:00:00.000Z",
+		"credentials": {"uuid":"OLD-UUID","wsPath":"/old-ws","panelPath":"/old-panel","panelPassword":"OLD-PW","trojanPassword":"OLD-TP"}
+	}`
+
+	// 关键：用户**没有**填项目名（GUI 的项目名框是可选的，默认空）
+	d, _ := newTestDeployer(t, f, func(o *Options) {
+		o.Mode = "fresh"
+		o.ControlProject = "" // 留空 → 走随机名兜底
+		o.DataProject = ""
+		o.WaitTimeout = 2 * time.Second
+		o.WaitInterval = 10 * time.Millisecond
+	})
+
+	_, err := d.Run(context.Background())
+	if err == nil {
+		t.Fatal("全新部署复用已存在的 KV 时必须判为 occupied，不能当成 owned 放行")
+	}
+	if !strings.Contains(err.Error(), "已被另一个 CFPilot 实例占用") {
+		t.Errorf("错误信息应说明被另一实例占用，实际：%v", err)
+	}
+
+	// ⚠️ 关键：绝不能覆盖现役实例的清单与配置
+	if _, has := f.kvWrites["CFP_DEPLOY_MANIFEST"]; has {
+		t.Error("归属冲突时绝不能写回部署清单（会把现役实例的身份改掉）")
+	}
+	if _, has := f.kvWrites["CONFIG"]; has {
+		t.Error("归属冲突时绝不能写 CONFIG（会把现役实例的 UUID / WS 路径改掉）")
+	}
+	if len(f.created) != 0 {
+		t.Errorf("归属冲突时不该创建项目，实际创建了 %v", f.created)
+	}
+}
+
+// 反向保证：更新已有实例（auto 模式）**不能**被误判成 occupied。
+//
+// 更新模式会复用清单里的项目名（对照 CLI），
+// 因此归属校验必须判为 owned，部署才能正常进行。
+func TestOwnershipAutoModeReusesManifestProject(t *testing.T) {
+	f := newFakeCF()
+	f.kvSeed["CFP_DEPLOY_MANIFEST"] = `{
+		"v": 1,
+		"controlProject": "existing-control",
+		"dataProject": "existing-data",
+		"build": "old-build",
+		"at": "2026-10-20T00:00:00.000Z",
+		"credentials": {"uuid":"KEEP-UUID","wsPath":"/keep-ws","panelPath":"/keep-panel","panelPassword":"KEEP-PW","trojanPassword":"KEEP-TP"}
+	}`
+
+	// 用户没填项目名（可选框留空）→ 必须复用清单里的，而不是随机名
+	d, _ := newTestDeployer(t, f, func(o *Options) {
+		o.Mode = "auto"
+		o.ControlProject = ""
+		o.DataProject = ""
+		o.LocalBuild = "new-build"
+		o.WaitTimeout = 2 * time.Second
+		o.WaitInterval = 10 * time.Millisecond
+	})
+
+	res, err := d.Run(context.Background())
+	if err != nil {
+		t.Fatalf("更新已有实例不该被拒：%v", err)
+	}
+	if res.Control.Name != "existing-control" {
+		t.Errorf("更新时应复用清单里的控制面项目名，实际 %q", res.Control.Name)
+	}
+	if res.Data.Name != "existing-data" {
+		t.Errorf("更新时应复用清单里的数据面项目名，实际 %q", res.Data.Name)
+	}
+	// 凭据也必须沿用（客户端订阅地址不变）
+	if res.UUID != "KEEP-UUID" {
+		t.Errorf("应沿用清单里的 UUID，实际 %q", res.UUID)
+	}
+}
+
+// 回归测试（B7）：已有 CONFIG 里的字段在部署后**仍然存在**。
+//
+// 之前 writeEffectiveConfig 是整体覆盖，用户在面板里配过的
+// poolManual / poolOfficial / proxyIp / relayPool … 会被一次部署全部抹掉。
+//
+// 对照 CLI 的 writeEffectiveConfig：`{ ...existing, uuid, ... }`。
+func TestConfigMergeKeepsExistingFields(t *testing.T) {
+	f := newFakeCF()
+	// 本实例的清单（归属校验要判 owned 才能走到写配置这一步）
+	f.kvSeed["CFP_DEPLOY_MANIFEST"] = `{
+		"v": 1,
+		"kvNamespaceId": "kv1",
+		"controlProject": "mycontrol",
+		"dataProject": "mydata",
+		"build": "old-build",
+		"at": "2026-10-20T00:00:00.000Z",
+		"credentials": {"uuid":"OLD-UUID","trojanPassword":"OLD-TP","wsPath":"/old-ws","panelPath":"/old-panel","panelPassword":"OLD-PW"}
+	}`
+	// 面板里配过的内容（用户自己在面板保存的）
+	f.kvSeed["CONFIG"] = `{
+		"uuid": "OLD-UUID",
+		"trojanPassword": "OLD-TP",
+		"wsPath": "/old-ws",
+		"poolManual": "1.2.3.4",
+		"poolOfficial": ["5.6.7.8", "9.10.11.12"],
+		"proxyIp": "proxy.example.com",
+		"socks5": "socks.example.com:1080",
+		"relayPool": "https://relay.example.com",
+		"subDomain": "my.example.com",
+		"resolvePreferred": false,
+		"someUserField": {"nested": true}
+	}`
+
+	d, _ := newTestDeployer(t, f, func(o *Options) {
+		o.ControlProject = "mycontrol"
+		o.DataProject = "mydata"
+		o.WaitTimeout = 2 * time.Second
+		o.WaitInterval = 10 * time.Millisecond
+	})
+
+	res, err := d.Run(context.Background())
+	if err != nil {
+		t.Fatalf("部署失败：%v", err)
+	}
+
+	raw := f.kvWrites["CONFIG"]
+	if raw == "" {
+		t.Fatal("必须写入 CONFIG")
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		t.Fatalf("CONFIG 不是合法 JSON：%v", err)
+	}
+
+	// 用户配过的字段必须还在
+	for _, k := range []string{
+		"poolManual", "poolOfficial", "proxyIp", "socks5",
+		"relayPool", "subDomain", "resolvePreferred", "someUserField",
+	} {
+		if _, has := cfg[k]; !has {
+			t.Errorf("CONFIG 里的 %s 被抹掉了（整体覆盖回归）", k)
+		}
+	}
+	if cfg["poolManual"] != "1.2.3.4" {
+		t.Errorf("poolManual 的值应保持不变，实际 %v", cfg["poolManual"])
+	}
+
+	// 凭据类字段必须被本次部署的值覆盖
+	if cfg["uuid"] != res.UUID {
+		t.Errorf("uuid 应为本次部署的 %q，实际 %v", res.UUID, cfg["uuid"])
+	}
+	if cfg["wsPath"] != res.WSPath {
+		t.Errorf("wsPath 应为本次部署的 %q，实际 %v", res.WSPath, cfg["wsPath"])
+	}
+}
+
+// enableTrojan / enableXhttp 必须与 CLI 一致
+// （CLI 的 deploy/command.ts 固定传 enableTrojan: true / enableXhttp: false）。
+//
+// 之前 Go 侧是零值 false —— Trojan 被强制关闭，
+// GUI 部署出来的实例与 CLI 部署出来的行为不同。
+func TestConfigTrojanMatchesCLI(t *testing.T) {
+	f := newFakeCF()
+	d, _ := newTestDeployer(t, f, nil)
+
+	if _, err := d.Run(context.Background()); err != nil {
+		t.Fatalf("部署失败：%v", err)
+	}
+
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(f.kvWrites["CONFIG"]), &cfg); err != nil {
+		t.Fatalf("CONFIG 不是合法 JSON：%v", err)
+	}
+	if cfg["enableTrojan"] != true {
+		t.Errorf("enableTrojan 应为 true（与 CLI 一致），实际 %v", cfg["enableTrojan"])
+	}
+	if cfg["enableXhttp"] != false {
+		t.Errorf("enableXhttp 应为 false（与 CLI 一致），实际 %v", cfg["enableXhttp"])
 	}
 }
 

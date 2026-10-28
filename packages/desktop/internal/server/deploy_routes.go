@@ -53,10 +53,58 @@ func (s *Server) registerDeployRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/kv/create", s.guard(s.handleKvCreate))
 }
 
+// newCFClient 建一个 Cloudflare 客户端。
+//
+// 统一走 s.cfBase：生产恒为空（官方地址），
+// 测试可以指向 httptest 服务器来验证接口契约。
+func (s *Server) newCFClient(token string) *cfapi.Client {
+	return cfapi.New(cfapi.Options{Token: token, APIBase: s.cfBase})
+}
+
+// resolveKVNamespaceID 决定「本次用哪个 KV 命名空间」。
+//
+// 规则：**请求里指定的优先**，留空才回落到 profile 里保存的。
+//
+// ⚠️ 两个接口必须用同一套规则：
+//
+//	handleDeployCheck       读清单判断部署状态
+//	handleDeployCredentials 读清单返回面板凭据
+//
+// 之前凭据接口压根不解析请求体，只用 profile 里的 KV：
+// 下拉框选中的 KV 与 profile 保存的不一致时，
+// 返回的是**另一个 KV** 的面板密码 / UUID / WS 路径
+// → 用户拿错密码去登别的实例。
+func resolveKVNamespaceID(requested, profileKV string) string {
+	if v := strings.TrimSpace(requested); v != "" {
+		return v
+	}
+	return strings.TrimSpace(profileKV)
+}
+
+// deploySkipSameVersion 判断本次部署是否跳过「线上版本与本地相同」的部署。
+//
+// 规则：
+//   - mode == "update" → 不跳过（用户显式点了「更新部署」）
+//   - force（界面的「强制重新部署」）→ 不跳过
+//   - 其余 → 跳过（避免无谓触发平台审核）
+//
+// ⚠️ 之前 force 是**死字段**：界面传了，后端一次都没用，
+// 于是勾了「强制重新部署」但线上版本相同时照样跳过 → 复选框完全无效。
+// CLI 的 --force 是生效的（skipSameVersion = !flagBool(args,'force')），
+// 两端必须一致（AGENTS.md §1.3）。
+func deploySkipSameVersion(mode string, force bool) bool {
+	return mode != "update" && !force
+}
+
 // deployRequest 是部署请求体（字段与 Electron 版 runDeploy 的 params 对齐）。
 type deployRequest struct {
-	Mode  string `json:"mode"` // auto / fresh / update
-	Force bool   `json:"force"`
+	Mode string `json:"mode"` // auto / fresh / update
+	// Force 对应界面的「强制重新部署（忽略版本相同则跳过）」。
+	//
+	// ⚠️ 与 ForceKv 语义不同，两个都要看：
+	//   - Force   → 忽略「线上版本 == 本地版本」这一跳过条件
+	//   - ForceKv → 强制越过 KV 归属校验（接管另一个实例占用的 KV）
+	Force bool `json:"force"`
 	// ForceKv 对应界面的「强制覆盖 KV」
 	ForceKv bool `json:"forceKv"`
 	// NewCredentials 表示重新生成全部凭据（不沿用清单）
@@ -183,7 +231,17 @@ func (s *Server) handleDeployRun(w http.ResponseWriter, r *http.Request) {
 	opt.LocalKernelVersion = kernelVersion
 	// 「重新生成凭据」= 不沿用清单里的
 	opt.KeepCredentials = !req.NewCredentials
-	opt.SkipSameVersion = req.Mode != "update" // 显式更新时不跳过
+	// ⚠️ 「强制重新部署」= 忽略「版本相同则跳过」。
+	//
+	// req.Force 之前是死字段（声明了但一次都没用），
+	// 界面上勾了「强制重新部署」但线上版本相同时照样跳过 → 复选框完全无效。
+	// CLI 的 --force 是生效的（skipSameVersion = !flagBool(args,'force')），
+	// 两端必须一致。
+	//
+	// ⚠️ 与 opt.Force（= req.ForceKv）语义不同，别混：
+	//   - ForceKv：强制越过 KV 归属校验（另一个实例占用时接管）
+	//   - Force  ：强制重新部署（哪怕线上版本与本地相同）
+	opt.SkipSameVersion = deploySkipSameVersion(req.Mode, req.Force)
 	opt.Log = func(m string) { s.logf(m) }
 
 	// 异步执行：接口立即返回，进度走 SSE
@@ -345,16 +403,13 @@ func (s *Server) handleDeployCheck(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"state": "none", "hasDeploy": false, "reason": "no-account"})
 		return
 	}
-	kvID := strings.TrimSpace(req.KVNamespaceID)
-	if kvID == "" {
-		kvID = strings.TrimSpace(profile.KVNamespaceID)
-	}
+	kvID := resolveKVNamespaceID(req.KVNamespaceID, profile.KVNamespaceID)
 	if kvID == "" {
 		writeJSON(w, http.StatusOK, map[string]any{"state": "none", "hasDeploy": false, "reason": "no-kv"})
 		return
 	}
 
-	client := cfapi.New(cfapi.Options{Token: profile.CfToken})
+	client := s.newCFClient(profile.CfToken)
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 
@@ -498,18 +553,31 @@ func (s *Server) handleDeployCredentials(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// ⚠️ 必须解请求体里的 kvNamespaceId —— 界面传的正是「当前选中的 KV」。
+	//
+	// 之前这里连请求体都没解，只用 profile 里保存的 KV：
+	// 下拉框选中的 KV 与 profile 保存的不一致时，
+	// 返回的是**另一个 KV** 的面板密码 / UUID / WS 路径
+	// → 用户拿错密码去登别的实例。
+	//
+	// 与 handleDeployCheck 保持一致：请求优先，留空才用 profile 的。
+	var req struct {
+		KVNamespaceID string `json:"kvNamespaceId"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
 	profile, err := s.store.Active()
 	if err != nil || profile == nil || strings.TrimSpace(profile.CfToken) == "" {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "请先保存 API Token"})
 		return
 	}
-	kvID := strings.TrimSpace(profile.KVNamespaceID)
+	kvID := resolveKVNamespaceID(req.KVNamespaceID, profile.KVNamespaceID)
 	if kvID == "" {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "请先选择 KV 命名空间"})
 		return
 	}
 
-	client := cfapi.New(cfapi.Options{Token: profile.CfToken})
+	client := s.newCFClient(profile.CfToken)
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 
@@ -619,8 +687,18 @@ func (s *Server) handleAccountDetect(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
+	// usingProfileToken 表示「本次探测用的是当前 profile 自己的 Token」。
+	//
+	// ⚠️ 只有这种情况下才能把探测结果写回 profile。
+	//
+	// 调用方显式传了外部 Token（req.Token != ""）时，探测出来的账号
+	// 属于**那个外部 Token**，而当前 profile 的 CfToken 并不会更新 ——
+	// 写回 AccountID 会让 profile 变成「token A + accountId B」的混合体：
+	// 之后拿 token A 去列 account B 的 KV → 403 / 空列表。
+	// 所以外部 Token 只回显探测结果，**绝不落盘**。
 	token := strings.TrimSpace(req.Token)
-	if token == "" {
+	usingProfileToken := token == ""
+	if usingProfileToken {
 		p, err := s.store.Active()
 		if err != nil || p == nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请先填写 API Token"})
@@ -633,7 +711,7 @@ func (s *Server) handleAccountDetect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := cfapi.New(cfapi.Options{Token: token})
+	client := s.newCFClient(token)
 	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 	defer cancel()
 
@@ -655,11 +733,17 @@ func (s *Server) handleAccountDetect(w http.ResponseWriter, r *http.Request) {
 	if len(accounts) == 1 {
 		acc := accounts[0]
 		// 顺手把账号信息写回当前 profile
-		if _, e := s.store.SaveActive(store.Patch{
-			AccountID:   &acc.ID,
-			AccountName: &acc.Name,
-		}); e != nil {
-			s.logLevel("保存账号信息失败："+e.Error(), "warn")
+		//
+		// ⚠️ 仅限「用的是当前 profile 自己的 Token」：
+		// 外部 Token 探测出来的账号不属于本 profile，
+		// 写回去会造成「token A + accountId B」的混合体（见上面的说明）。
+		if usingProfileToken {
+			if _, e := s.store.SaveActive(store.Patch{
+				AccountID:   &acc.ID,
+				AccountName: &acc.Name,
+			}); e != nil {
+				s.logLevel("保存账号信息失败："+e.Error(), "warn")
+			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"accountId":   acc.ID,
@@ -667,6 +751,8 @@ func (s *Server) handleAccountDetect(w http.ResponseWriter, r *http.Request) {
 			"accounts": []map[string]string{
 				{"id": acc.ID, "name": acc.Name},
 			},
+			// saved=false 表示「只回显、没落盘」（外部 Token 探测）。
+			"saved": usingProfileToken,
 		})
 		return
 	}
@@ -679,6 +765,7 @@ func (s *Server) handleAccountDetect(w http.ResponseWriter, r *http.Request) {
 		"accountId":   "",
 		"accountName": "",
 		"accounts":    list,
+		"saved":       usingProfileToken,
 	})
 }
 

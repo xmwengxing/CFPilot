@@ -301,7 +301,31 @@ export async function inspectKvOwnership(
   namespaceId: string,
   controlProject: string
 ): Promise<KvOwnershipInfo> {
-  const manifest = await readManifest(client, accountId, namespaceId)
+  // ⚠️ **读不到 ≠ 不存在**。
+  //
+  // `getKvValue` 现在只把 404（键不存在）当 null，其它错误（403 / 500 / 网络异常）
+  // 一律抛出。读不到时**绝不能**落到 `empty` ——
+  // 那等于「归属确认通过」，于是会去建项目、写 KV，
+  // 产出孤儿 Pages 项目与半成品实例。
+  //
+  // 读不到时按 `occupied` 处理（**不可放行**），并在 detail 里说清原因。
+  let manifest: DeployManifest | null
+  let legacyConfig: string | null
+  let cfpilotConfig: string | null
+  try {
+    manifest = await readManifest(client, accountId, namespaceId)
+    legacyConfig = await client.getKvValue(accountId, namespaceId, 'config')
+    cfpilotConfig = await client.getKvValue(accountId, namespaceId, 'CONFIG')
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
+    return {
+      verdict: 'occupied',
+      manifest: null,
+      detail: `无法确认 KV 归属（${reason}）—— 请检查 Token 权限与网络后重试`,
+      blocking: true,
+    }
+  }
+
   if (manifest) {
     if (manifest.controlProject === controlProject) {
       return {
@@ -320,7 +344,6 @@ export async function inspectKvOwnership(
   }
 
   // 没有清单：看有没有别的产品留下的痕迹
-  const legacyConfig = await client.getKvValue(accountId, namespaceId, 'config')
   if (legacyConfig !== null) {
     return {
       verdict: 'foreign',
@@ -332,7 +355,6 @@ export async function inspectKvOwnership(
       blocking: true,
     }
   }
-  const cfpilotConfig = await client.getKvValue(accountId, namespaceId, 'CONFIG')
   if (cfpilotConfig !== null) {
     return {
       verdict: 'stale',

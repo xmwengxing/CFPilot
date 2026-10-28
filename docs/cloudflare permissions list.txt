@@ -1,0 +1,295 @@
+整个 32724941@qq.com's Account 账户
+Account Security Insights Partner Integrations Write
+Account Security Insights Partner Integrations Read
+Cloud Workload Security Write
+Cloud Workload Security Read
+Cloud Workload Security Deployment
+K2 Config Write
+K2 Config Read
+K2 Produce
+K2 Consume
+Network Quality Write
+Network Quality Read
+Workers Metadata Read-Only
+Workers Editor
+Workers Content Read-Only
+Workers Admin
+Realtime Read
+Messaging Read
+Messaging Edit
+Websearch Write
+Websearch Read
+Field Extractors Write
+Field Extractors Read
+Email Routing Account Rules Read
+Registrar Sandbox Domains Read
+Registrar Sandbox Domains Admin
+Fraud Feedback Write
+Fraud Feedback Read
+Account Abuse Protection PII Read
+OAuth Client Write
+OAuth Client Read
+Websearch Run
+Fraud Events Write
+Access: SAML Certificates Write
+Access: SAML Certificates Read
+MoQ Write
+MoQ Read
+DLS: Write
+DLS: Read
+Registrar Domains Admin
+Artifacts Write
+Artifacts Read
+Agent Memory Write
+Resource Sharing Read
+Account Custom Error Rules Write
+Account Custom Error Rules Read
+Account Custom Asset Write
+Account Custom Asset Read
+Email Routing Suppressions Write
+Email Routing Suppressions Read
+Flagship Evaluate
+Flagship Write
+Flagship Read
+Cloudflare One Connector Monitoring: cloudflared
+Resource Library Write
+Resource Library Read
+Tag Write
+Tag Read
+Access: Users Write
+Access: Users Read
+Access: Tags Write
+Access: Tags Read
+Access: Policies Write
+Access: Policies Read
+Access: Organizations Write
+Access: Organizations Revoke
+Access: Organizations Read
+Access: Keys Write
+Access: Keys Read
+Access: Identity Providers Write
+Access: Identity Providers Read
+Access: Groups Write
+Access: Groups Read
+Access: Apps Write
+Access: Apps Revoke
+Access: Apps Read
+AI Search Write
+AI Search Run
+AI Search Read
+AI Search Index Engine
+Account Security Center Insights Write
+Account Security Center Insights Read
+Email Sending Write
+Email Sending Read
+CASB Write
+CASB Read
+Registrar Domains Read
+MCP Portals Write
+MCP Portals Read
+SSO Connector Write
+SSO Connector Read
+Connectivity Directory Read
+Connectivity Directory Bind
+Connectivity Directory Admin
+Basin SQL Read
+Auto Rag Write Run Engine
+CF Agents Write
+CF Agents Read
+Realtime Admin
+Realtime
+Application Security Reports Read
+Agents Gateway Write
+Agents Gateway Run
+Agents Gateway Read
+Workers Containers Write
+Workers Containers Read
+Workers Observability Write
+Workers Observability Telemetry Write
+Workers Observability Read
+Basin Catalog Write
+Basin Catalog Read
+Access: SCIM Logs Read
+Zero Trust Resilience Read
+Zero Trust Resilience Write
+Secrets Store Write
+Secrets Store Read
+Cloudflare Zero Trust Secure DNS Locations Write
+Access: Policy Test Write
+Access: Policy Test Read
+Account Waiting Rooms Read
+Magic WAN Write
+Magic WAN Read
+Auto Rag Write
+Auto Rag Read
+Trust and Safety Write
+Trust and Safety Read
+Browser Run Write
+Browser Run Read
+DNS View Write
+DNS View Read
+SCIM Provisioning
+AI Gateway Run
+Radar Read
+Load Balancers Account Write
+Load Balancers Account Read
+Cloudflare CDS Compute Account Write
+Cloudflare CDS Compute Account Read
+Basin Pipelines Send
+Account DNS Settings Write
+Account DNS Settings Read
+Workers CI Write
+Workers CI Read
+Basin Pipelines Write
+Basin Pipelines Read
+Cloudforce One Write
+Cloudforce One Read
+Zero Trust: PII Read
+Cloud Email Security: Write
+Cloud Email Security: Read
+Integration Write
+AI Gateway Write
+AI Gateway Read
+DDoS Botnet Feed Write
+DDoS Botnet Feed Read
+Workers AI Write
+Queues Write
+Queues Read
+Calls Write
+Calls Read
+Address Maps Write
+Address Maps Read
+Workers AI Read
+Vectorize Write
+Vectorize Read
+Cloudflare One Networks Write
+Cloudflare One Networks Read
+Cloudflare One Connectors Write
+Cloudflare One Connectors Read
+Cloudflare One Connector: WARP Write
+Cloudflare One Connector: WARP Read
+Cloudflare One Connector: cloudflared Write
+Cloudflare One Connector: cloudflared Read
+Hyperdrive Write
+Hyperdrive Read
+Access: SCIM Population Write
+Access: SCIM Population Read
+Cloudchamber Write
+Cloudchamber Read
+Account API Gateway
+Account API Gateway Read
+Notifications Write
+Notifications Read
+URL Scanner Write
+URL Scanner Read
+Page Shield
+Access: SSH Auditing Write
+Access: SSH Auditing Read
+Access: Custom Pages Write
+Access: Custom Pages Read
+Constellation Read
+Constellation Write
+Zero Trust: Seats Write
+Cloudflare DEX Write
+Cloudflare DEX Read
+IOT Write
+IOT Read
+Page Shield Read
+Account: SSL and Certificates Read
+Account: SSL and Certificates Write
+Account API Tokens Write
+Account API Tokens Read
+Allow Request Tracer Read
+Disable ESC Write
+Disable ESC Read
+Account Custom Pages Write
+Account Custom Pages Read
+Magic Network Monitoring Admin
+Magic Network Monitoring Config Write
+Magic Network Monitoring Config Read
+HTTP Applications Write
+HTTP Applications Read
+China Network Steering Read
+China Network Steering Write
+D1 Read
+D1 Write
+Intel Write
+Pubsub Configuration Write
+Pubsub Configuration Read
+Turnstile Sites Write
+Turnstile Sites Read
+Intel Read
+Email Routing Addresses Write
+Email Routing Addresses Read
+Pages Read
+Pages Write
+Mass URL Redirects Write
+Mass URL Redirects Read
+Magic Firewall Write
+Magic Firewall Read
+L4 DDoS Managed Ruleset Write
+L4 DDoS Managed Ruleset Read
+Transform Rules Write
+Transform Rules Read
+Select Configuration Write
+Select Configuration Read
+Account WAF Write
+Account WAF Read
+Magic Firewall Packet Captures - Write PCAPs API
+Magic Firewall Packet Captures - Read PCAPs API
+Workers R2 Storage Write
+Workers R2 Storage Read
+Magic Transit Read
+Magic Transit Write
+Images Read
+Images Write
+DDoS Protection Write
+DDoS Protection Read
+Account Rulesets Read
+Account Rulesets Write
+IP Prefixes: Write
+IP Prefixes: Read
+Workers Tail Read
+Account Analytics Read
+Cloudflare Tunnel Write
+Cloudflare Tunnel Read
+Access: Organizations, Identity Providers, and Groups Revoke
+Access: Apps and Policies Revoke
+Access: Mutual TLS Certificates Write
+Access: Mutual TLS Certificates Read
+Access: Device Posture Write
+Access: Device Posture Read
+Access: Service Tokens Write
+Access: Service Tokens Read
+Access: Audit Logs Read
+Logs Write
+Logs Read
+Rule Policies Write
+Rule Policies Read
+Account Rule Lists Write
+Account Rule Lists Read
+IP Prefixes: BGP On Demand Write
+IP Prefixes: BGP On Demand Read
+Zero Trust Report
+Zero Trust Read
+Zero Trust Write
+Access: Organizations, Identity Providers, and Groups Write
+Access: Organizations, Identity Providers, and Groups Read
+Workers KV Storage Write
+Workers KV Storage Read
+Workers Scripts Write
+Workers Scripts Read
+Load Balancing: Monitors and Pools Write
+Load Balancing: Monitors and Pools Read
+Account Firewall Access Rules Write
+Account Firewall Access Rules Read
+DNS Firewall Write
+DNS Firewall Read
+Stream Write
+Stream Read
+Billing Write
+Billing Read
+Account Settings Write
+Account Settings Read
+Access: Apps and Policies Write
+Access: Apps and Policies Read

@@ -280,22 +280,42 @@ export class CloudflareClient {
    * 读取 KV 里的一个键值（不存在时返回 null）。
    *
    * 用于部署前检测「KV 已有配置会覆盖环境变量」的情况。
+   *
+   * ## ⚠️ 「读不到」与「不存在」必须区分
+   *
+   * 之前这里对 **403 / 500 / 网络异常**统统返回 `null`，
+   * 与「键不存在」混为一谈。
+   *
+   * 后果：KV 归属判定（`inspectKvOwnership`）里
+   * 「清单存在」「小写 config 存在」两个判据在
+   * 「KV 属于别的账号」「Token 没权限」「网络断了」时**全为 false**
+   * → verdict 落到 `empty`（**不阻断**）
+   * → 于是会去建项目、写 KV，产出一堆孤儿项目与半成品实例。
+   *
+   * 现在只有 **404（键不存在）** 才返回 null，
+   * 其它错误一律抛出，由调用方按「无法确认 → 不可放行」处理。
    */
   async getKvValue(accountId: string, namespaceId: string, key: string): Promise<string | null> {
+    let response: Response
     try {
-      const response = await fetch(
+      response = await fetch(
         `${this.apiBase}/accounts/${accountId}/storage/kv/namespaces/${namespaceId}/values/${encodeURIComponent(key)}`,
         {
           headers: { Authorization: `Bearer ${this.token}` },
           signal: AbortSignal.timeout(this.timeoutMs),
         }
       )
-      if (response.status === 404) return null
-      if (!response.ok) return null
-      return await response.text()
-    } catch {
-      return null
+    } catch (err) {
+      throw new Error(
+        `读取 KV 失败（无法确认归属）：${err instanceof Error ? err.message : String(err)}`
+      )
     }
+    // 404 = 键不存在，这是唯一可以安全当成「空」的情况
+    if (response.status === 404) return null
+    if (!response.ok) {
+      throw new Error(`读取 KV 失败（无法确认归属）：HTTP ${response.status}`)
+    }
+    return await response.text()
   }
 
   /**

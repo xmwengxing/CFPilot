@@ -57,6 +57,19 @@ export async function menuDeploy(mode: 'fresh' | 'update'): Promise<void> {
   if (panelPassword) flags['panel-password'] = panelPassword
   if (cfg.kvNamespaceId && mode === 'update') flags['kv'] = cfg.kvNamespaceId
 
+  // ⚠️ **必须把已配置的账号一起传过去**。
+  //
+  // 之前菜单从不传 `--account`，于是部署命令会退回「token 的第一个账号」——
+  // 而 KV 来自本地配置。两者可以**分属不同账号**：
+  //
+  //   账号取自 accounts[0]（A），KV 取自 cfg.kvNamespaceId（B）
+  //
+  // → 部署落到 A，却带着 B 的 KV ID → 在 A 里建出孤儿项目，
+  //   绑定 KV 失败、配置写不进去 → 半成品实例，用户完全不知道发生了什么。
+  //
+  // 传了 `--account` 后，账号与 KV 就来自同一份配置，不会错配。
+  if (cfg.accountId) flags['account'] = cfg.accountId
+
   const { runDeployCommand } = await import('../deploy/command')
   await runDeployCommand(makeArgs(flags))
 }

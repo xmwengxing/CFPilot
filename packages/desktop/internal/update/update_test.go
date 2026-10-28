@@ -87,6 +87,20 @@ func withAPIBase(t *testing.T, base string) {
 	old := APIBase
 	APIBase = base + "/releases"
 	t.Cleanup(func() { APIBase = old })
+
+	// ⚠️ **单元测试必须与网络隔离**。
+	//
+	// 真实运行时有「镜像回退」与「免 API 通道」两级兜底
+	// （国内直连 GitHub 不通时的救命稻草）。
+	// 但那些兜底会打到**真实的镜像站** —— 开着的话，
+	// 「API 出错」这类用例就会去下载真的内核（慢，且结果随网络变化）。
+	oldMirrors := Mirrors
+	Mirrors = nil
+	t.Cleanup(func() { Mirrors = oldMirrors })
+
+	oldWeb := ReleasesWebBase
+	ReleasesWebBase = base + "/releases-web"
+	t.Cleanup(func() { ReleasesWebBase = oldWeb })
 }
 
 // releaseJSON 造一条发行版记录。

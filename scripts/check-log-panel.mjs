@@ -52,6 +52,81 @@ for (const [name, re] of checks) {
   if (!hit) bad++
 }
 
+// ---- 拖拽手柄的定位上下文（2026-10-28 真实故障） ----
+//
+// `.log-resizer` 是 `position: absolute; top: -3px`，
+// 它的**定位参照物**必须是 `.log-panel`（`position: relative`）。
+//
+// 真实故障：`.log-panel` 那条规则因为**前面少了一个 `/*`**，
+// 被 CSS 解析器的错误恢复逻辑整条吞掉 ——
+// 解析器遇到非法 token 会一路跳过，直到遇见 `;` 或 `}`，
+// 而那条规则的结尾 `}` 正好成了吞掉它的终点。
+//
+// 结果：`.log-panel` 变成 `position: static`，
+// 手柄的定位参照物退化成视口 → 手柄跑到 y = -3（视口上方，**点不到**），
+// 用户表现为「日志窗口不能拖了，固定大小」。
+//
+// 所以这条断言不能少。
+
+const panelRule = html.match(/\.log-panel\s*\{([^}]*)\}/)
+if (!panelRule) {
+  console.log('FAIL  找不到 .log-panel 规则（可能被 CSS 解析错误吞掉了）')
+  bad++
+} else if (!/position:\s*relative/.test(panelRule[1])) {
+  console.log('FAIL  .log-panel 缺少 position: relative（拖拽手柄会定位到视口，拖不动）')
+  bad++
+} else {
+  console.log('PASS  .log-panel 有 position: relative（拖拽手柄定位正确）')
+}
+
+// ---- CSS 注释必须配平（防止再出现「少一个 /*」吞规则」） ----
+//
+// CSS 注释不嵌套，所以 `/*` 与 `*/` 必须严格交替。
+// 一旦多出一个 `*/`（比如注释开头被误删），
+// 后面直到下一个 `*/` 的内容都会被当成非法 CSS 吞掉 ——
+// 症状是「某条规则莫名其妙不生效」，极难排查。
+//
+// 这里对 <style> 块做一次严格的配平扫描。
+
+{
+  const styleMatch = html.match(/<style[^>]*>([\s\S]*?)<\/style>/)
+  if (!styleMatch) {
+    console.log('FAIL  找不到 <style> 块')
+    bad++
+  } else {
+    const css = styleMatch[1]
+    let depth = 0
+    let i = 0
+    let unbalanced = null
+    while (i < css.length) {
+      if (css.startsWith('/*', i)) {
+        depth++
+        i += 2
+        continue
+      }
+      if (css.startsWith('*/', i)) {
+        depth--
+        if (depth < 0 && !unbalanced) {
+          unbalanced = { at: i, ctx: css.slice(Math.max(0, i - 120), i + 40) }
+        }
+        i += 2
+        continue
+      }
+      i++
+    }
+    if (unbalanced) {
+      console.log('FAIL  CSS 注释不配平：出现了没有对应 /* 的 */')
+      console.log(`      位置附近：…${unbalanced.ctx.replace(/\s+/g, ' ')}…`)
+      bad++
+    } else if (depth !== 0) {
+      console.log(`FAIL  CSS 注释未闭合（缺少 ${depth} 个 */）`)
+      bad++
+    } else {
+      console.log('PASS  CSS 注释配平（不会有规则被解析错误吞掉）')
+    }
+  }
+}
+
 // ---- 反向断言：历史包袱必须已移除 ----
 
 if (/\.log-panel\s*\{[^}]*resize\s*:\s*vertical/.test(html)) {

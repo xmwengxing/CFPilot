@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>CFPilot —— Cloudflare API Token 权限勾选指引</title>
+<style>
+  :root {
+    --bg: #f0f2f5; --card: #fff; --line: #d9dee5; --text: #1d1f23;
+    --muted: #6b7280; --accent: #f6821f; --ok: #12a05c; --no: #b42318;
+    --cf: #f6821f;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.65 -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+    padding: 28px 24px 40px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  h1 { font-size: 21px; font-weight: 700; margin-bottom: 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 18px 20px 20px;
+  }
+  .card h2 { font-size: 15px; font-weight: 700; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+  .pill { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
+  .pill.req { background: #e7f6ee; color: var(--ok); }
+  .pill.opt { background: #eef1f5; color: var(--muted); }
+  .pill.no  { background: #fdeceb; color: var(--no); }
+
+  /* 模拟 Cloudflare 控制台的权限行 */
+  .row {
+    display: grid; grid-template-columns: 26px 1fr 116px;
+    align-items: center; gap: 10px;
+    padding: 9px 10px; border-radius: 8px; border: 1px solid transparent;
+  }
+  .row + .row { margin-top: 3px; }
+  .row.on { background: #f4fbf7; border-color: #b9e6cd; }
+  .row.off { opacity: .5; }
+  .cb {
+    width: 16px; height: 16px; border-radius: 4px; border: 1.5px solid #b6bfcc;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; color: #fff; font-weight: 700;
+  }
+  .row.on .cb { background: var(--ok); border-color: var(--ok); }
+  .perm { font-size: 13px; font-weight: 600; }
+  .lv {
+    font-size: 11.5px; font-weight: 600; text-align: center;
+    padding: 3px 8px; border-radius: 6px; border: 1px solid var(--line);
+    color: var(--muted); background: #fafbfc;
+  }
+  .row.on .lv { border-color: #b9e6cd; color: var(--ok); background: #fff; }
+  .lv.read { color: #1f6feb; border-color: #b9d4f5; background: #f2f7ff; }
+  .lv.write { color: var(--ok); border-color: #b9e6cd; background: #f4fbf7; }
+  .why { grid-column: 1 / -1; font-size: 12px; color: var(--muted); padding-left: 36px; margin-top: -2px; }
+  .group {
+    font-size: 11.5px; font-weight: 700; color: var(--muted); text-transform: uppercase;
+    letter-spacing: .06em; margin: 14px 0 6px; padding-left: 10px;
+  }
+  .group:first-of-type { margin-top: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid #eceff3; vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; }
+  tr:last-child td { border-bottom: none; }
+  code {
+    font: 12px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace;
+    background: #f4f6f9; border: 1px solid #e5e9ef; border-radius: 5px; padding: 1px 5px;
+  }
+  .callout {
+    margin-top: 18px; background: #fff8f0; border: 1px solid #ffd9b3;
+    border-left: 4px solid var(--cf); border-radius: 10px; padding: 14px 18px;
+  }
+  .callout h3 { font-size: 13.5px; margin-bottom: 6px; }
+  .callout p { font-size: 12.5px; color: #5b4a3a; }
+  .steps { counter-reset: s; margin: 8px 0 0; }
+  .steps li { list-style: none; font-size: 12.5px; padding: 4px 0 4px 26px; position: relative; }
+  .steps li::before {
+    counter-increment: s; content: counter(s);
+    position: absolute; left: 0; top: 5px; width: 17px; height: 17px; border-radius: 50%;
+    background: var(--cf); color: #fff; font-size: 10.5px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .foot { margin-top: 18px; font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Cloudflare API Token 权限勾选指引</h1>
+  <p class="sub">CFPilot v0.8.1 · 部署形态 = Pages 双项目 · 最小权限集只有 <b>3 项</b></p>
+
+  <div class="grid">
+    <div class="card">
+      <h2>✅ 必需权限（3 项）<span class="pill req">Account 分类</span></h2>
+      <div class="group">权限项</div>
+
+      <div class="row on">
+        <div class="cb">✓</div>
+        <div class="perm">Account Settings</div>
+        <div class="lv read">Read</div>
+        <div class="why">读取账号列表（<code>GET /accounts</code>）</div>
+      </div>
+
+      <div class="row on">
+        <div class="cb">✓</div>
+        <div class="perm">Workers KV Storage</div>
+        <div class="lv write">Write</div>
+        <div class="why">建 KV 命名空间、读写部署清单与 <code>CONFIG</code></div>
+      </div>
+
+      <div class="row on">
+        <div class="cb">✓</div>
+        <div class="perm">Pages</div>
+        <div class="lv write">Write</div>
+        <div class="why">建/删 Pages 项目、上传内核、绑 KV、配环境变量、绑自定义域名</div>
+      </div>
+
+      <h2 style="margin-top:22px">⚪ 可选权限<span class="pill opt">不影响部署</span></h2>
+      <div class="row on">
+        <div class="cb">✓</div>
+        <div class="perm">Account API Tokens</div>
+        <div class="lv read">Read</div>
+        <div class="why">仅用于显示 Token 有效期；不给也能正常部署</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>❌ 不需要勾（常见误配）</h2>
+      <div class="group">Account 分类</div>
+
+      <div class="row off">
+        <div class="cb"></div>
+        <div class="perm">Workers Scripts</div>
+        <div class="lv">Write / Read</div>
+        <div class="why">Pages 部署走 <code>/pages/projects/{n}/deployments</code> 上传内核，<b>不经过</b> Workers 脚本 API</div>
+      </div>
+
+      <div class="group">Zone 分类</div>
+
+      <div class="row off">
+        <div class="cb"></div>
+        <div class="perm">Zone</div>
+        <div class="lv">Read</div>
+        <div class="why">部署路径不调用任何 zone 级接口</div>
+      </div>
+
+      <div class="row off">
+        <div class="cb"></div>
+        <div class="perm">DNS</div>
+        <div class="lv">Write</div>
+        <div class="why">同账号自定义域名由 Cloudflare 自动建 DNS 记录</div>
+      </div>
+
+      <div class="row off">
+        <div class="cb"></div>
+        <div class="perm">Workers Routes</div>
+        <div class="lv">Write</div>
+        <div class="why">Pages 自定义域名不需要降级到 Route + CNAME</div>
+      </div>
+
+      <div class="callout" style="margin-top:16px">
+        <h3>⚠️ 不要用「Edit Cloudflare Workers」预设模板</h3>
+        <p>该模板只给 Workers Scripts / KV / Routes / Tail / R2 + Account Settings，<b>不含 <code>Pages Write</code></b> —— 用它部署会在创建 Pages 项目时报 <b>403</b>。</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:18px">
+    <h2>对应关系：每一项权限对应哪些接口</h2>
+    <table>
+      <thead>
+        <tr><th style="width:210px">调用的接口</th><th style="width:250px">需要的权限</th><th>用途</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>GET /accounts</code></td><td>Account Settings · Read</td><td>读取账号列表</td></tr>
+        <tr><td><code>…/storage/kv/namespaces…</code></td><td>Workers KV Storage · Write</td><td>建 KV、读写清单与 <code>CONFIG</code></td></tr>
+        <tr><td><code>…/pages/projects…</code></td><td>Pages · Write</td><td>建/删项目、传内核、绑 KV、配变量、绑域名</td></tr>
+        <tr><td><code>GET /accounts/{id}/tokens/verify</code></td><td>Account API Tokens · Read</td><td>显示 Token 有效期（可选）</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card" style="margin-top:18px">
+    <h2>操作步骤</h2>
+    <ol class="steps">
+      <li>打开 <b>Manage Account → API Tokens → Create Token</b> → <b>Create Custom Token</b></li>
+      <li>Token 名称填 <code>CFPilot</code>，权限只勾上面「必需权限」那 3 项</li>
+      <li>Account Resources 选 <b>Include → 你的账号</b>（或 All accounts）</li>
+      <li>Zone Resources 留空（<b>不要</b>选任何 Specific zone）</li>
+      <li>IP 地址过滤留空，TTL 按需（留空 = 不过期）</li>
+      <li>创建后复制 Token，填进 CFPilot 的「Cloudflare 凭据」页</li>
+    </ol>
+    <p style="margin-top:12px; font-size:12.5px; color:var(--muted)">
+      验证权限（只读探测，不会改动账号）：<br />
+      <code style="display:inline-block;margin-top:6px;padding:6px 10px">npx -y cfpilot@latest token --check</code>
+    </p>
+  </div>
+
+  <p class="foot">依据：packages/cli/src/deploy/cf-api.ts 的实际调用面 + packages/desktop/internal/cfapi/cfapi.go（Go 版只调 Pages/KV/accounts，不调任何 zone 级接口）。</p>
+</div>
+</body>
+</html>

@@ -7,9 +7,9 @@
 
 · 采用双 pages 项目部署：控制面 pages (web管理面板) + 数据面（流量转发）；
 
-· 零外部依赖和引用，稳定无1101，支持在触发CF限制后更新部署；
+· 零外部依赖和引用，稳定无1101、无8000119，但也支持在触发限制后更新部署；
 
-· 解决 Cloudflare 转发项目优选困扰：**本地真连接优选完全杜绝延迟是** **`-1`**。
+· 解决优选 IP 困扰：**本地真连接优选完全杜绝延迟是** **`-1`**。
 
 ***
 
@@ -282,9 +282,6 @@ npx -y cfpilot@latest scan
 3. 设置采样数与是否跳过测速
 4. 扫描完成后选 `y` 自动回填，或选 `N` 复制结果手动粘贴
 
-> ⚠️ **跑之前必须关代理**。优选测的是「本机直连该 IP」的真实质量，
-> 流量被代理接管会导致所有 IP 成绩趋同、导入后大量 `-1`。
-
 回填后面板「节点来源 → 手动优选 IP」即可看到列表。
 
 ***
@@ -317,7 +314,7 @@ npx -y cfpilot@latest scan
 | **Account Settings Read**    | Read | 读取账号列表（`GET /accounts`）             |
 | **Workers KV Storage Write** | Edit | 建 KV、读写部署清单与 `CONFIG`               |
 | **Pages Write**              | Edit | 建/删 Pages 项目、上传内核、绑 KV、配环境变量、绑自定义域名 |
-| **Account API Tokens**       | Read | 可选，仅用于显示 Token 有效期；                 |
+| **Account API Tokens**       | Read | 可选，仅用于显示 Token 有效期                  |
 
 <details>
 <summary><b>📋 点开看「照着勾」的图解</b>（哪些必勾 / 哪些不用勾 / 操作步骤）</summary>

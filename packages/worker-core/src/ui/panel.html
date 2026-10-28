@@ -335,6 +335,25 @@
 
     <div class="card">
       <div class="card-head">
+        <h2><span class="dot"></span>自适应订阅地址（推荐）</h2>
+        <button class="ghost sm" data-goto="sub">更多订阅选项 →</button>
+      </div>
+      <p class="hint">
+        一个链接通吃：客户端会按自己的 User-Agent 自动拿到对应格式 ——
+        <b>v2rayN / v2rayNG / Shadowrocket / NekoBox</b> 拿 Base64 分享链接，
+        <b>Clash / Mihomo / Clash Verge</b> 拿 YAML，<b>Sing-box</b> 拿 JSON。
+        识别不出客户端类型时回落到 Base64（最通用）。
+      </p>
+      <div class="field" style="margin-bottom:0">
+        <div class="row nowrap">
+          <input class="mono" id="subAdaptive" readonly />
+          <button class="primary" data-copy="subAdaptive">复制订阅链接</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
         <h2><span class="dot"></span>当前活跃节点池分布</h2>
         <button class="ghost sm" data-goto="pool">管理节点来源 →</button>
       </div>
@@ -629,6 +648,7 @@
         <div class="field">
           <label>订阅分组显示名称</label>
           <input id="cfgSubName" placeholder="CFPilot" maxlength="64" />
+          <p class="hint" style="margin:6px 0 0">客户端导入后显示的卡片名。保存时会自动剔除引号、斜杠、竖线等会导致卡片名显示异常的字符。</p>
         </div>
       </div>
 
@@ -1206,12 +1226,16 @@
     var uuid = ($('cfgUuid').value || (state.config && state.config.uuid) || '').trim();
     if (!uuid) {
       var hint = '（正在等待系统初始化 UUID，请稍候或刷新页面）';
+      $('subAdaptive').value = hint;
       $('subBase64').value = hint;
       $('subClash').value = hint;
       $('subSingbox').value = hint;
       return;
     }
     var base = location.origin + '/sub/' + encodeURIComponent(uuid);
+    // 自适应地址：不带 target 参数，由服务端按 User-Agent 判定格式
+    // （见 worker-core 的 resolveFormatByUserAgent：Clash→YAML、Sing-box→JSON、其余→Base64）
+    $('subAdaptive').value = base;
     $('subBase64').value = base + '?target=base64';
     $('subClash').value = base + '?target=clash';
     $('subSingbox').value = base + '?target=singbox';

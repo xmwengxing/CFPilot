@@ -18,25 +18,45 @@ const generatedPath = resolve(pkgRoot, 'src/ui/panel.generated.ts')
 
 const source = readFileSync(htmlPath, 'utf8')
 
-// 1) 提取内联的 script / style，交给 esbuild 压缩
-let inlineJs = ''
-let inlineCss = ''
+// 1) 提取**每一段**内联 script / style，交给 esbuild 压缩
+//
+// ⚠️ 必须按「段」分别处理，不能只留最后一段。
+//
+// 早期实现用 `/<script>([\s\S]*?)<\/script>/g` 把所有 script 都替换成**同一个**
+// 占位符 `@@CFPILOT_JS@@`，而 `String.replace(字符串, ...)` **只替换第一个**：
+//   1. `inlineJs` 被最后一段覆盖 → 前一段的代码**整段丢失**；
+//   2. 第二个占位符原样留在 HTML 里 → 浏览器里是一个 SyntaxError 的死 `<script>`。
+//
+// 真实事故（2026-10-28 用户报「面板右上色盘点了不切亮色主题」）：
+// panel.html 里有两段 script（主题切换 + 主应用），主题那段被整段吃掉 ——
+// 桌面版（packages/ui）没有这个提取步骤，所以只有 Pages 面板坏。
+const jsBlocks = []
+const cssBlocks = []
 let html = source
   .replace(/<script>([\s\S]*?)<\/script>/g, (_match, code) => {
-    inlineJs = code
-    return '<script>@@CFPILOT_JS@@</script>'
+    jsBlocks.push(code)
+    return `<script>@@CFPILOT_JS_${jsBlocks.length - 1}@@</script>`
   })
   .replace(/<style>([\s\S]*?)<\/style>/g, (_match, code) => {
-    inlineCss = code
-    return '<style>@@CFPILOT_CSS@@</style>'
+    cssBlocks.push(code)
+    return `<style>@@CFPILOT_CSS_${cssBlocks.length - 1}@@</style>`
   })
 
-const minifiedJs = inlineJs
-  ? (await transform(inlineJs, { loader: 'js', minify: true, target: 'es2020' })).code
-  : ''
-const minifiedCss = inlineCss
-  ? (await transform(inlineCss, { loader: 'css', minify: true })).code
-  : ''
+/** 逐段压缩（空段保持为空，避免产出一个空 `<script></script>` 里的多余空白） */
+async function minifyAll(blocks, loader) {
+  const out = []
+  for (const code of blocks) {
+    out.push(
+      code.trim()
+        ? (await transform(code, { loader, minify: true, target: loader === 'js' ? 'es2020' : undefined })).code
+        : ''
+    )
+  }
+  return out
+}
+
+const minifiedScripts = await minifyAll(jsBlocks, 'js')
+const minifiedStyles = await minifyAll(cssBlocks, 'css')
 
 // 2) 去掉注释与多余空白，再把压缩后的片段放回原位
 //
@@ -45,14 +65,26 @@ const minifiedCss = inlineCss
 //   而字节不同 → gzip 输出不同 → 面板产物不同 → CI 的
 //   「构建产物与仓库一致」校验必然失败。
 //   统一成 LF 后，产物与检出方式、平台、zlib 版本都无关。
+//
+// ⚠️ 替换必须用**函数形式**：字符串形式会把 `$&` / `$1` 当成替换模式，
+//    而压缩后的 JS 里完全可能出现 `$`。
 html = html
   .replace(/\r\n/g, '\n')
-  .replace('@@CFPILOT_JS@@', () => minifiedJs)
-  .replace('@@CFPILOT_CSS@@', () => minifiedCss)
+  .replace(/@@CFPILOT_JS_(\d+)@@/g, (_m, i) => minifiedScripts[Number(i)] ?? '')
+  .replace(/@@CFPILOT_CSS_(\d+)@@/g, (_m, i) => minifiedStyles[Number(i)] ?? '')
   .replace(/<!--[\s\S]*?-->/g, '')
   .replace(/\n\s*/g, '\n')
   .replace(/\n{2,}/g, '\n')
   .trim()
+
+// 自检：占位符必须全部替换干净（漏一个就是死 <script> / 丢样式）
+const leftover = /@@CFPILOT_[A-Z]+(?:_\d+)?@@/.exec(html)
+if (leftover) {
+  throw new Error(`[gen-panel] 占位符未被替换：${leftover[0]}（script ${jsBlocks.length} 段 / style ${cssBlocks.length} 段）`)
+}
+if (jsBlocks.length === 0) {
+  throw new Error('[gen-panel] panel.html 里没有找到任何内联 <script>，面板将完全不可用')
+}
 
 // 3) gzip + Base64
 //

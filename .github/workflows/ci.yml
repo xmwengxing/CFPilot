@@ -41,10 +41,16 @@ jobs:
           npm run build -w @cfpilot/worker-core
           npm run build -w cfpilot
 
-          if git diff --exit-code packages/cli/assets/cfpilot-worker.js; then
-            echo "内置内核资产与最新构建一致 ✅"
-            exit 0
-          fi
+          # ⚠️ 必须校验**三个**资产，且 control/dataplane 是部署真正需要的。
+          #
+          # 曾经只校验 cfpilot-worker.js（合并版）——
+          # 而 Pages 双项目部署需要分别的 control.js / dataplane.js，
+          # 只校验合并版会漏掉「只同步了合并版」这个真实事故
+          # （npm 包缺少 control/dataplane → 部署报「产物为空，跳过部署」）。
+          #
+          # 资产名变更（cfpilot-worker.js → worker.js）也必须同步到这里，
+          # 否则 git diff 找不到文件 → 校验步骤直接失败。
+          ASSETS="control.js dataplane.js worker.js"
 
           # ── 不一致时的判定 ──
           #
@@ -54,25 +60,37 @@ jobs:
           #
           # 所以只把「**忽略版本串后仍有差异**」判定为真正的不一致
           # （那才说明源码改了但忘了同步资产）。
-          echo "检测到差异，正在排除 BUILD_VERSION 的影响…"
+          for f in $ASSETS; do
+            P="packages/cli/assets/$f"
 
-          # 把两边的版本串都替换成占位符再比
-          cp packages/cli/assets/cfpilot-worker.js /tmp/committed.js
-          # 提交版：替换掉形如 "xxxxxxxx-xxxxxxxx" 的版本串
-          sed -E 's/"[0-9a-f]{7,10}-[0-9a-f]{4,16}"/"<BUILD>"/g' /tmp/committed.js > /tmp/committed.norm.js
-          # 当前构建版
-          sed -E 's/"[0-9a-f]{7,10}-[0-9a-f]{4,16}"/"<BUILD>"/g' \
-            packages/cli/assets/cfpilot-worker.js > /tmp/fresh.norm.js
+            if [ ! -f "$P" ]; then
+              echo "::error::缺少内核资产 $P"
+              echo "修复：本地执行 npm run build -w @cfpilot/worker-core && npm run build -w cfpilot 后提交"
+              exit 1
+            fi
 
-          if diff -q /tmp/committed.norm.js /tmp/fresh.norm.js > /dev/null; then
-            echo "✅ 除版本串外完全一致（版本串含 git hash，CI 上必然不同，属正常）"
-            exit 0
-          fi
+            if git diff --exit-code -- "$P" > /dev/null; then
+              echo "✅ $f 与最新构建一致"
+              continue
+            fi
 
-          echo "::error::内置内核资产与源码不一致（排除版本串后仍有差异）"
-          diff -u /tmp/committed.norm.js /tmp/fresh.norm.js | head -60
-          echo ""
-          echo "修复：本地执行 npm run build -w @cfpilot/worker-core && npm run build -w cfpilot 后提交"
+            echo "检测到 $f 有差异，正在排除 BUILD_VERSION 的影响…"
+            # 把两边的版本串都替换成占位符再比
+            sed -E 's/"[0-9a-f]{7,10}-[0-9a-f]{4,16}"/"<BUILD>"/g' "$P" > /tmp/committed.norm.js
+            sed -E 's/"[0-9a-f]{7,10}-[0-9a-f]{4,16}"/"<BUILD>"/g' \
+              "packages/worker-core/dist/$f" > /tmp/fresh.norm.js
+
+            if diff -q /tmp/committed.norm.js /tmp/fresh.norm.js > /dev/null; then
+              echo "✅ $f 除版本串外完全一致（版本串含 git hash，CI 上必然不同，属正常）"
+              continue
+            fi
+
+            echo "::error::内置内核资产 $f 与源码不一致（排除版本串后仍有差异）"
+            diff -u /tmp/committed.norm.js /tmp/fresh.norm.js | head -60
+            echo ""
+            echo "修复：本地执行 npm run build -w @cfpilot/worker-core && npm run build -w cfpilot 后提交"
+            exit 1
+          done
       - name: 上传内核产物
         uses: actions/upload-artifact@v4
         with:

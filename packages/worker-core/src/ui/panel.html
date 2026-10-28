@@ -370,7 +370,9 @@
       <h2><span class="dot"></span>节点池来源编排</h2>
       <p class="hint">
         三种节点来源支持自由组合，系统按 <b>官方优选 IP → 优选域名 → 手动与本地优选 IP</b> 顺序合并去重。
-        若三项均未勾选，系统将自动生成 <b>20 个官方优选 IP + 10 个优选域名</b> 作为兜底，确保订阅始终可用。
+        若三项均未勾选，系统将自动生成 <b>20 个官方优选 IP + 10 个优选域名</b> 作为兜底，确保订阅始终可用。<br>
+        另有一种<b>独立来源</b>：<b>远程第三方优选订阅源</b>（TXT 列表 / CSV 测速表）——
+        在「出站与高级」页配置，<b>不受本页三个勾选项影响</b>，配了就生效。
       </p>
 
       <!-- 来源 1：官方优选 -->
@@ -800,15 +802,22 @@
 
     <div class="card">
       <h2><span class="dot"></span>远程第三方优选订阅源（可选扩展）</h2>
-      <p class="hint">支持挂载外部维护的优选 IP 列表接口，系统将在合并完手动池后按条件过滤并追加至订阅末尾。</p>
+      <p class="hint">
+        挂载外部维护的优选节点来源，订阅生成时会自动拉取并**独立成池**追加进去。<br>
+        <b>TXT 列表</b>：每行一个 <code>IP:端口</code> 或 <code>IP:端口#备注</code>，按行解析。<br>
+        <b>CSV 测速表</b>：CloudflareSpeedTest 导出的 <code>result.csv</code>，
+        额外受下方的「最低准入下行速度 / 最高准入延迟」过滤（<b>仅对 CSV 生效</b>）。<br>
+        ⚠️ 远程池<b>不受</b>「节点来源」页那三个勾选项影响 —— 配了就生效。
+        拉取失败会在「节点来源 → 实时下发节点预览」里报出来。
+      </p>
       <div class="grid">
         <div class="field"><label>远程 TXT 列表地址（ADDAPI，每行一个 https URL）</label><textarea id="cfgAddApi" class="mono" placeholder="https://example.com/ips.txt"></textarea></div>
         <div class="field"><label>远程 CSV 测速表地址（ADDCSV，每行一个 URL）</label><textarea id="cfgAddCsv" class="mono" placeholder="https://example.com/result.csv"></textarea></div>
       </div>
       <div class="grid-3">
-        <div class="field"><label>最低准入下行速度 DLS（MB/s，0 = 不限）</label><input id="cfgDls" type="number" min="0" step="1" /></div>
-        <div class="field"><label>最高准入延迟 MAX_LATENCY（ms，0 = 不限）</label><input id="cfgMaxLatency" type="number" min="0" step="1" /></div>
-        <div class="field"><label>远程节点提取上限（0 = 不限）</label><input id="cfgMaxNodes" type="number" min="0" step="1" /></div>
+        <div class="field"><label>最低准入下行速度 DLS（MB/s，0 = 不限，仅对 CSV 生效）</label><input id="cfgDls" type="number" min="0" step="1" /></div>
+        <div class="field"><label>最高准入延迟 MAX_LATENCY（ms，0 = 不限，仅对 CSV 生效）</label><input id="cfgMaxLatency" type="number" min="0" step="1" /></div>
+        <div class="field"><label>订阅节点总数上限（0 = 不限）</label><input id="cfgMaxNodes" type="number" min="0" step="1" /></div>
       </div>
       <div class="row end"><button class="primary" id="btnSaveRemote">保存远程订阅源配置</button></div>
     </div>

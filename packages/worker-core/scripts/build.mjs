@@ -10,7 +10,7 @@
 //
 // ⚠️ 数据面在打出后还会经 `scripts/obfuscate.mjs` 做**静态脱敏**：
 // 2026-10-27 实测，含明文特征的数据面代码第 2 次上传 100% 触发 8000119（零流量也触发），
-// 脱敏后 8/8 部署全过（证据与实验矩阵见 `docs/8000119-Gemini方案可行性评估.md` §7）。
+// 脱敏后 8/8 部署全过（完整实验矩阵见 `docs/self-developed-dataplane-design.md`）。
 // 控制面不脱敏：实测原地重部署无限制。
 import { build } from 'esbuild'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'

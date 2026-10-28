@@ -10,13 +10,12 @@
  *   - **首包数据缓存**：竞速期间客户端已发的数据不能丢
  *   - **可诊断性**：出站失败必须能看出原因，不能吞异常
  *
- * ## 相对归档版本（archive/self-developed-dataplane）的关键修正
+ * ## 出站选路的三个关键点
  *
- * 归档版本失败在出站选路，本版本修正了三点：
  *   1. **优选 IP 里 Cloudflare 网段的会被降权**（Worker 连不回 CF 自家 Anycast 入口，
  *      实测 1.1.1.1 / cloudflare.com / 104.16.0.1 一律被拒，第三方 IP 的 443 完全可用）
- *   2. **同区域过滤不再误杀代理**（归档版写成 `p.kind === 'direct'`，
- *      把 SOCKS5 / HTTP 代理全滤掉了）
+ *   2. **同区域过滤不能误杀代理**（`p.kind === 'direct'` 只匹配 ProxyIP，
+ *      不能拿它去过滤 SOCKS5 / HTTP 代理）
  *   3. **失败分级上报**（`onFailure`），不再把一切失败都表现为「目标不可达」
  *
  * 实测与设计详见 docs/self-developed-dataplane-design.md。

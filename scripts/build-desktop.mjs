@@ -38,6 +38,29 @@ const assetsDir = join(desktopDir, 'internal', 'server', 'assets')
 const webuiDir = join(desktopDir, 'webui')
 const outDir = join(desktopDir, 'dist')
 
+// ---- Windows 资源工具的版本（go-winres）----
+//
+// go-winres 的版本**必须 pin，不要改成 @latest，也不要省略版本号**。
+//
+// 为什么必须 pin：
+//   - CI（release-desktop.yml）用 `go install github.com/tc-hib/go-winres@<版本>` 装它，
+//     本脚本的回退用 `go run github.com/tc-hib/go-winres@<版本>`。
+//     两处版本必须一致，否则「本地编出来的 exe」与「CI 编出来的 exe」
+//     资源写法可能不同，出问题极难复现。
+//   - 用 @latest 会让构建行为随上游发版漂移：某天上游改了 syso 格式或
+//     `simply` 的参数，CI 会突然挂在一个和本次改动毫无关系的步骤上。
+//
+// 为什么是 v0.3.3：
+//   - 上游当前**最新 release**（2024-04-11 发布，之后未再发新版本）；
+//   - 也是本机已安装、模块缓存里验证过 `simply` 能正常出 syso 的版本。
+const WINRES_VERSION = 'v0.3.3'
+const WINRES_MODULE = `github.com/tc-hib/go-winres@${WINRES_VERSION}`
+
+// go-winres 产出的资源文件名（--out 只给前缀，后缀由工具按架构补）
+const WINRES_OUT = 'rsrc'
+// go build 交叉编译 windows/amd64 时自动拾取的就是这个文件
+const WINRES_SYSO = join(desktopDir, 'cmd', 'cfpilot', `${WINRES_OUT}_windows_amd64.syso`)
+
 const version = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')).version
 console.log(`[desktop] 构建 CFPilot Desktop v${version}`)
 
@@ -120,11 +143,31 @@ const targets = [
   { goos: 'linux', goarch: 'arm64', out: `cfpilot-${version}-linux-arm64`, extra: [] },
 ]
 
-// 允许用环境变量限制目标（CI 分平台构建时用）
-const only = (process.env.CFPILOT_DESKTOP_TARGETS || '').trim()
-const picked = only
-  ? targets.filter((t) => only.split(',').includes(`${t.goos}/${t.goarch}`) || only.split(',').includes(t.goos))
+// 允许限制构建目标（只编一部分平台时用）。
+//
+// 两种写法等价，都保留：
+//   node scripts/build-desktop.mjs --only windows
+//   node scripts/build-desktop.mjs --only windows,linux/amd64
+//   CFPILOT_DESKTOP_TARGETS=windows node scripts/build-desktop.mjs   ← 环境变量（旧用法，保留兼容）
+const onlyFlagIdx = process.argv.indexOf('--only')
+let only = (process.env.CFPILOT_DESKTOP_TARGETS || '').trim()
+if (onlyFlagIdx !== -1) {
+  only = (process.argv[onlyFlagIdx + 1] || '').trim()
+  if (!only) {
+    console.error('[desktop] --only 需要一个值，例如：--only windows')
+    process.exit(1)
+  }
+}
+const wanted = only ? only.split(',').map((s) => s.trim()).filter(Boolean) : []
+const picked = wanted.length
+  ? targets.filter((t) => wanted.includes(`${t.goos}/${t.goarch}`) || wanted.includes(t.goos))
   : targets
+if (picked.length === 0) {
+  console.error(`[desktop] 构建目标没有匹配到任何平台：${only}`)
+  console.error(`[desktop] 可用目标：${targets.map((t) => `${t.goos}/${t.goarch}`).join(', ')}`)
+  process.exit(1)
+}
+console.log(`[desktop] 构建目标：${picked.map((t) => `${t.goos}/${t.goarch}`).join(', ')}`)
 
 // ---- 2. 生成图标与 Windows 资源 ----
 //
@@ -143,37 +186,9 @@ execFileSync(process.execPath, [join(repoRoot, 'scripts', 'gen-desktop-icons.mjs
   stdio: 'inherit',
 })
 
-// go-winres 只对 Windows 目标有意义；没装就跳过（不阻断 Linux 构建）
+// go-winres 只对 Windows 目标有意义；纯 Linux 构建不经过这里（Linux 不需要 .syso）
 if (picked.some((t) => t.goos === 'windows')) {
-  const winres = findWinres()
-  if (winres) {
-    console.log('[desktop] 生成 Windows 资源（图标 + 版本信息）…')
-    // ⚠️ 输出目录必须是**Go 包目录**（cmd/cfpilot/），
-    // go build 只会自动拾取「当前编译包」里的 .syso。
-    // 放到 build/ 之类的地方会被静默忽略 —— 表现为 exe 有图标却
-    // 没有版本信息（实测踩过），很难看出是 syso 没被链接。
-    const pkgDir = join(desktopDir, 'cmd', 'cfpilot')
-    execFileSync(
-      winres,
-      [
-        'simply',
-        '--icon', 'app.ico',
-        '--product-name', 'CFPilot',
-        '--file-description', 'CFPilot 部署与维护工具',
-        '--copyright', 'Copyright © CFPilot Contributors',
-        '--original-filename', 'cfpilot.exe',
-        '--file-version', version,
-        '--product-version', version,
-        '--manifest', 'gui',
-        '--out', join(pkgDir, 'rsrc'),
-      ],
-      { cwd: join(desktopDir, 'build'), stdio: 'inherit' }
-    )
-    console.log('[desktop] ✅ cmd/cfpilot/rsrc_windows_amd64.syso（exe 将带图标与版本属性）')
-  } else {
-    console.warn('[desktop] ⚠ 未找到 go-winres，exe 将没有图标与版本属性')
-    console.warn('[desktop]   安装：go install github.com/tc-hib/go-winres@latest')
-  }
+  generateWindowsRes()
 }
 
 // ---- 3. 交叉编译 ----
@@ -183,10 +198,123 @@ mkdirSync(outDir, { recursive: true })
 const ldflags = (extra) => ['-s', '-w', `-X main.Version=${version}`, ...extra].join(' ')
 
 /**
- * 查找 go-winres 可执行文件。
+ * 生成 Windows 资源（exe 图标 + 版本属性）→ cmd/cfpilot/rsrc_windows_*.syso
  *
- * 依次找：GOPATH/bin → PATH → 常见安装位置。
- * 找不到返回 null（构建降级为「无图标」，不阻断）。
+ * ⚠️ 这是「仓库下载的 exe 没图标」那次故障（2026-10-29）的修复点，改之前先读：
+ *
+ * 旧实现的降级是**静默**的：findWinres() 找不到就 console.warn 一句然后继续编译。
+ * 而 release-desktop.yml 从来没装过 go-winres —— 于是 CI 发布的每个 exe
+ * 都「没图标、没版本属性」，本地却因为装过 go-winres 而完全正常。
+ * 「CI 与本地环境不一致」被静默降级掩盖，等用户下载后才发现。
+ *
+ * 现在的策略（按顺序尝试，任一成功即继续）：
+ *   1. 本机已安装的 go-winres（$GOPATH/bin → PATH）
+ *   2. `go run github.com/tc-hib/go-winres@<pin 版本>` —— 只要机器上有 Go 就能用，
+ *      不需要提前安装（首次会编译一次，约 20 秒）
+ *   3. 两者都不可用 → **windows 目标直接报错终止**，绝不产出无图标的 exe
+ *
+ * 纯 Linux 构建不会进入本函数，行为完全不变。
+ */
+function generateWindowsRes() {
+  console.log('[desktop] 生成 Windows 资源（图标 + 版本信息）…')
+
+  // ⚠️ 输出目录必须是**Go 包目录**（cmd/cfpilot/）：
+  // go build 只自动拾取「当前编译包」里的 .syso，放到 build/ 之类的地方
+  // 会被静默忽略 —— 表现为 exe 有图标却没有版本信息（实测踩过）。
+  const pkgDir = join(desktopDir, 'cmd', 'cfpilot')
+
+  // 先删旧的 .syso：否则「本次其实没生成成功」会被上一次的残留文件掩盖，
+  // 下面的存在性校验就成了假通过（本地反复构建时尤其容易踩）。
+  for (const f of [`${WINRES_OUT}_windows_amd64.syso`, `${WINRES_OUT}_windows_386.syso`]) {
+    rmSync(join(pkgDir, f), { force: true })
+  }
+
+  const args = [
+    'simply',
+    '--icon', 'app.ico',
+    '--product-name', 'CFPilot',
+    '--file-description', 'CFPilot 部署与维护工具',
+    '--copyright', 'Copyright © CFPilot Contributors',
+    '--original-filename', 'cfpilot.exe',
+    '--file-version', version,
+    '--product-version', version,
+    '--manifest', 'gui',
+    '--out', join(pkgDir, WINRES_OUT),
+  ]
+  // 工作目录是 desktop/build：app.ico 由 gen-desktop-icons.mjs 生成在这里
+  const cwd = join(desktopDir, 'build')
+
+  const local = findWinres()
+  if (local) {
+    console.log(`[desktop] 使用本机 go-winres：${local}`)
+    try {
+      execFileSync(local, args, { cwd, stdio: 'inherit' })
+      assertWinresSyso()
+      return
+    } catch (e) {
+      // 本地这份可能是坏的（残留的旧二进制 / 权限问题）——继续走 go run 回退
+      console.warn(`[desktop] ⚠ 本机 go-winres 执行失败（${e.status ?? e.code ?? e.message}），改用 go run 回退`)
+    }
+  } else {
+    console.warn('[desktop] 未找到本机 go-winres（$GOPATH/bin 或 PATH），改用 go run 回退')
+  }
+
+  // 回退：只要装了 Go 就能跑，不需要预装 go-winres。
+  // CI 里正常会先 `go install ...@<pin>` 命中上面的分支，这里是双保险。
+  if (!hasGo()) {
+    failWinres('本机没有 go-winres 可执行文件，也没有可用的 go 命令')
+  }
+  console.log(`[desktop] 回退 go run ${WINRES_MODULE}（首次会先编译工具，约需 20 秒）…`)
+  try {
+    execFileSync('go', ['run', WINRES_MODULE, ...args], { cwd, stdio: 'inherit' })
+  } catch (e) {
+    failWinres(`go run ${WINRES_MODULE} 执行失败（${e.status ?? e.code ?? e.message}）`)
+  }
+  assertWinresSyso()
+}
+
+/** 校验 syso 真的生成了；没有就终止（绝不静默降级） */
+function assertWinresSyso() {
+  if (!existsSync(WINRES_SYSO)) {
+    failWinres(`go-winres 已执行，但没有生成 ${WINRES_SYSO}`)
+  }
+  const kb = (statSync(WINRES_SYSO).size / 1024).toFixed(1)
+  console.log(`[desktop] ✅ cmd/cfpilot/rsrc_windows_amd64.syso (${kb} KB，exe 将带图标与版本属性)`)
+}
+
+/**
+ * Windows 资源生成彻底失败：**必须终止构建**。
+ *
+ * 为什么不能再像旧版那样只 warn 一句继续：
+ * 那样编出来的 exe 没有图标、没有版本属性，而 CI 会把它当成正式产物发布 ——
+ * 用户下载后才发现「仓库里的 exe 没图标」。宁可在发版前失败。
+ */
+function failWinres(reason) {
+  console.error('')
+  console.error('[desktop] ❌ 无法生成 Windows 资源（exe 图标 + 版本属性）')
+  console.error(`[desktop]   原因：${reason}`)
+  console.error('[desktop]   继续编译只会产出一个没有图标、没有版本属性的 exe，')
+  console.error('[desktop]   而这个 exe 就是 CI 发布给用户的产物 —— 不再静默降级。')
+  console.error(`[desktop]   修复：go install ${WINRES_MODULE}`)
+  console.error('')
+  process.exit(1)
+}
+
+/** 本机是否有可用的 go 命令（回退方案依赖它） */
+function hasGo() {
+  try {
+    execFileSync('go', ['version'], { stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 查找本机已安装的 go-winres 可执行文件。
+ *
+ * 依次找：GOPATH/bin → PATH。
+ * 找不到返回 null，由调用方决定回退（go run）还是失败。
  */
 function findWinres() {
   const exe = process.platform === 'win32' ? 'go-winres.exe' : 'go-winres'

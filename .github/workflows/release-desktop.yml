@@ -78,8 +78,89 @@ jobs:
         working-directory: packages/desktop
         run: go vet ./...
 
+      - name: 安装 go-winres（生成 exe 图标与版本属性）
+        # ⚠️ 2026-10-29 事故：这里以前**没有安装 go-winres**。
+        # build-desktop.mjs 的 findWinres() 找不到就只 warn 一句然后继续编译，
+        # 于是 CI 发布的每个 windows exe 都「没有图标、没有版本属性」，
+        # 而本地因为装过 go-winres 一切正常 —— 用户报「仓库下载的 exe 没图标」。
+        #
+        # 版本必须与 scripts/build-desktop.mjs 里的 WINRES_VERSION 保持一致
+        # （v0.3.3：上游当前最新 release）。两处 pin 同一个版本，
+        # CI 与本地打出来的 exe 资源才可比；用 @latest 会让行为随上游发版漂移。
+        #
+        # 装了之后 build-desktop.mjs 会命中「本机 go-winres」分支，
+        # 不必每次 `go run`（那要现场编译工具，约多花 20 秒）。
+        run: |
+          go install github.com/tc-hib/go-winres@v0.3.3
+          # setup-go 不保证把 $GOPATH/bin 放进 PATH（build-desktop.mjs 内部
+          # 也会兜底找 $GOPATH/bin，这里显式加上更直观、也方便手动调试）
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          # 装不上就当场失败，别留到构建阶段才暴露
+          "$(go env GOPATH)/bin/go-winres" --help > /dev/null
+          echo "go-winres 已安装：$(go env GOPATH)/bin/go-winres"
+
       - name: 交叉编译三平台产物
         run: node scripts/build-desktop.mjs
+
+      - name: 校验 windows 产物已内嵌图标（硬校验，防静默回归）
+        # 只做一件事：**证明要发布的 exe 里真的有图标资源**。
+        #
+        # 2026-10-29 的故障是「CI 没装 go-winres → 静默跳过 → 用户下载的 exe 没图标」，
+        # 这种问题从「构建成功」完全看不出来，所以必须直接检查产物本身。
+        #
+        # 两层校验：
+        #   1) rsrc_windows_amd64.syso 必须存在且非空 —— go build 靠它自动拾取资源；
+        #   2) exe 的 PE 资源目录里必须真的有 RT_GROUP_ICON(14)。
+        #      第 2 层才是终点：syso 生成了但因放错目录没被链接，
+        #      同样会得到没图标的 exe（历史上就踩过这个坑）。
+        run: |
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          SYSO="packages/desktop/cmd/cfpilot/rsrc_windows_amd64.syso"
+          EXE="packages/desktop/dist/cfpilot-${V}-windows-amd64.exe"
+
+          echo "== 1/2 资源文件 =="
+          if [ ! -s "$SYSO" ]; then
+            echo "::error::缺少 $SYSO —— windows exe 会没有图标与版本属性（go-winres 没执行成功）"
+            exit 1
+          fi
+          ls -l "$SYSO"
+
+          echo "== 2/2 exe 资源目录里必须有 RT_GROUP_ICON(14) =="
+          node -e '
+            const fs = require("node:fs");
+            const file = process.argv[1];
+            const b = fs.readFileSync(file);
+            if (b[0] !== 0x4d || b[1] !== 0x5a) { console.error("::error::不是 MZ/PE 文件"); process.exit(1); }
+            const pe = b.readUInt32LE(0x3c);
+            if (b.toString("latin1", pe, pe + 4) !== "PE\u0000\u0000") { console.error("::error::PE 签名不对"); process.exit(1); }
+            const opt = pe + 24;
+            const magic = b.readUInt16LE(opt);
+            const ddOff = magic === 0x10b ? 96 : 112;
+            const resRva = b.readUInt32LE(opt + ddOff + 2 * 8);
+            if (resRva === 0) { console.error(`::error::${file} 没有资源节 —— 图标与版本属性都没链进去`); process.exit(1); }
+            const nsec = b.readUInt16LE(pe + 6);
+            const sec = opt + b.readUInt16LE(pe + 20);
+            let base = -1;
+            for (let i = 0; i < nsec; i++) {
+              const s = sec + i * 40, va = b.readUInt32LE(s + 12);
+              const span = Math.max(b.readUInt32LE(s + 8), b.readUInt32LE(s + 16));
+              if (resRva >= va && resRva < va + span) { base = resRva - va + b.readUInt32LE(s + 20); break; }
+            }
+            if (base < 0) { console.error("::error::资源 RVA 无法映射到任何节"); process.exit(1); }
+            const n = b.readUInt16LE(base + 12) + b.readUInt16LE(base + 14);
+            const types = [];
+            for (let i = 0; i < n; i++) {
+              const e = base + 16 + i * 8;
+              const nameField = b.readUInt32LE(e), offField = b.readUInt32LE(e + 4);
+              if (nameField & 0x80000000) continue;
+              if (!(offField & 0x80000000)) continue;
+              types.push(nameField & 0xffff);
+            }
+            console.log("资源类型 id：", types.join(", ") || "(空)");
+            if (!types.includes(14)) { console.error("::error::exe 里没有 RT_GROUP_ICON(14) —— 图标没链进去"); process.exit(1); }
+            console.log(`✅ ${file} 含 RT_GROUP_ICON（exe 有图标）`);
+          ' "$EXE"
 
       - name: 准备内核资产（供远程获取）
         # ⚠️ 部署用的内核代码必须能**独立于应用版本**更新：

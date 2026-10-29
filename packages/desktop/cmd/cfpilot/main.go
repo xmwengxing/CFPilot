@@ -249,30 +249,42 @@ func main() {
 		}()
 	})
 
-	// 一键优选 IP：后台跑优选 + 回填，完成后弹气泡通知。
+	// 一键优选 IP：托盘子菜单里每个已保存账号一项，点哪个就用哪个账号跑
+	// （用它自己的 Token / KV 清单 / 面板密码，回填也回到它自己的面板）。
 	//
-	// 失败也会弹 —— 静默失败最让人困惑（「我点了，怎么没反应」）。
-	app.SetQuickScanHandler(func() {
-		go func() {
-			// 扫描 + 回填可能要几分钟，给足超时
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-			defer cancel()
+	// 进度与结果**全部由托盘呈现**：
+	//   - 运行中实时改父项标题（「一键优选：扫描 45/1500 · 3%」）+ 托盘图标 tooltip；
+	//   - 开始 / 25% / 50% / 75% / 完成 各弹一条文本气泡。
+	//
+	// ⚠️ 气泡没法显示进度条：Windows 的 Shell_NotifyIcon 气泡只有文本字段，
+	// Win32 也没有给「绿色单文件 + 无主窗口」的托盘程序加任务栏进度条的通道。
+	// 完整结论与替代方案见 internal/tray/tray.go 的 SetQuickScanProgress 注释。
+	app.SetQuickScanHandler(func(profileID string) {
+		// 托盘在独立 goroutine 里调这里，所以可以直接同步跑。
+		// 扫描 + 回填可能要几分钟，给足超时。
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
 
-			res := srv.RunQuickScan(ctx)
-			if res.OK {
-				notify.ShowViaShell(notify.Message{
-					Title: "CFPilot 优选完成",
-					Body:  res.Message,
-				})
-				log.Printf("[cfpilot] 一键优选完成：%s", res.Message)
-			} else {
-				notify.ShowViaShell(notify.Message{
-					Title: "CFPilot 优选失败",
-					Body:  res.Error + "\n（详情见界面「日志」页）",
-				})
-				log.Printf("[cfpilot] 一键优选失败：%s", res.Error)
-			}
-		}()
+		// ⚠️ 按 ID 精确取账号；取不到就报错，**不能回落到活跃账号** ——
+		// 那会把结果回填到另一个账号的面板（串号）。
+		profile, err := srv.QuickScanProfile(profileID)
+		if err != nil || profile == nil {
+			app.FinishQuickScan(server.QuickScanResult{
+				OK:    false,
+				Error: "找不到该账号（可能已在界面里删除），请刷新托盘菜单后重试",
+			})
+			return
+		}
+
+		res := srv.RunQuickScanFor(ctx, profile, app.SetQuickScanProgress)
+		// 无论成功失败都要恢复菜单（标题 / 账号项可点状态）
+		app.FinishQuickScan(res)
+
+		if res.OK {
+			log.Printf("[cfpilot] 一键优选完成（账号 %s）：%s", profileID, res.Message)
+			return
+		}
+		log.Printf("[cfpilot] 一键优选失败（账号 %s）：%s", profileID, res.Error)
 	})
 
 	// 平时自动检查：启动 20 秒后查一次，之后每小时一次。

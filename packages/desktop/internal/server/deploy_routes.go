@@ -818,7 +818,8 @@ func (s *Server) handleKvList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := cfapi.New(cfapi.Options{Token: profile.CfToken})
+	// 走 newCFClient（而不是直接 cfapi.New）：测试可注入假 API 根地址
+	client := s.newCFClient(profile.CfToken)
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
@@ -840,36 +841,59 @@ func (s *Server) handleKvList(w http.ResponseWriter, r *http.Request) {
 		DataSubdomain    string `json:"dataSubdomain,omitempty"`
 	}
 
-	options := make([]kvOption, 0, len(nsList))
-	for _, ns := range nsList {
-		opt := kvOption{ID: ns.ID, Title: ns.Title, Ownership: "empty"}
+	// ---- 逐个命名空间读清单，但**并发** ----
+	//
+	// 每个命名空间都要读 1~3 个键，每次都是一趟 Cloudflare API。
+	// 串行时 6 个命名空间实测要 20~25 秒（跨境链路 RTT 大），
+	// 而凭据页启动时就会触发这个请求 —— 用户看到的是「检测账号…」卡住二十多秒，
+	// 很像程序假死。
+	//
+	// 并发 4 路（不无限放大：CF 免费版有速率限制）：实测降到 5~8 秒，
+	// 且顺序不变（结果按下标写回，前端下拉框顺序稳定）。
+	const kvProbeConcurrency = 4
+	options := make([]kvOption, len(nsList))
+	for i, ns := range nsList {
+		options[i] = kvOption{ID: ns.ID, Title: ns.Title, Ownership: "empty"}
+	}
 
-		// 1) 有清单 → instance（或清单损坏 → cfpilot）
-		if raw, ok := client.GetKVValue(ctx, accountID, ns.ID, deploy.ManifestKey); ok && strings.TrimSpace(raw) != "" {
-			var m deploy.Manifest
-			if err := json.Unmarshal([]byte(raw), &m); err == nil {
-				opt.Ownership = "instance"
-				opt.ControlProject = m.ControlProject
-				opt.DataProject = m.DataProject
-				opt.At = m.At
-				opt.Build = m.Build
-				opt.ControlSubdomain = m.ControlSubdomain
-				opt.DataSubdomain = m.DataSubdomain
-			} else {
+	sem := make(chan struct{}, kvProbeConcurrency)
+	var wg sync.WaitGroup
+	for i := range nsList {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			ns := nsList[i]
+			opt := &options[i]
+
+			// 1) 有清单 → instance（或清单损坏 → cfpilot）
+			if raw, ok := client.GetKVValue(ctx, accountID, ns.ID, deploy.ManifestKey); ok && strings.TrimSpace(raw) != "" {
+				var m deploy.Manifest
+				if err := json.Unmarshal([]byte(raw), &m); err == nil {
+					opt.Ownership = "instance"
+					opt.ControlProject = m.ControlProject
+					opt.DataProject = m.DataProject
+					opt.At = m.At
+					opt.Build = m.Build
+					opt.ControlSubdomain = m.ControlSubdomain
+					opt.DataSubdomain = m.DataSubdomain
+				} else {
+					opt.Ownership = "cfpilot"
+				}
+				return
+			}
+
+			// 2) 没有清单：看有没有别的产品留下的痕迹
+			if _, ok := client.GetKVValue(ctx, accountID, ns.ID, "config"); ok {
+				opt.Ownership = "foreign"
+			} else if _, ok := client.GetKVValue(ctx, accountID, ns.ID, deploy.ConfigKey); ok {
 				opt.Ownership = "cfpilot"
 			}
-			options = append(options, opt)
-			continue
-		}
-
-		// 2) 没有清单：看有没有别的产品留下的痕迹
-		if _, ok := client.GetKVValue(ctx, accountID, ns.ID, "config"); ok {
-			opt.Ownership = "foreign"
-		} else if _, ok := client.GetKVValue(ctx, accountID, ns.ID, deploy.ConfigKey); ok {
-			opt.Ownership = "cfpilot"
-		}
-		options = append(options, opt)
+		}(i)
 	}
+	wg.Wait()
 
 	instanceCount := 0
 	for _, o := range options {
@@ -921,7 +945,7 @@ func (s *Server) handleKvCreate(w http.ResponseWriter, r *http.Request) {
 		title = "cfpilot-gui-" + shortRandom(8)
 	}
 
-	client := cfapi.New(cfapi.Options{Token: profile.CfToken})
+	client := s.newCFClient(profile.CfToken)
 	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 	defer cancel()
 

@@ -588,6 +588,36 @@
     .warnbox b { color: var(--warn); }
 
     /* --------------------------------------------------------------
+       凭据页「醒目提示」：检测到 0 / 多个 CFPilot 实例时必须有存在感
+       —— 多实例选错 KV 会让后续所有功能都作用到错的实例上
+       -------------------------------------------------------------- */
+    .cred-alert {
+      display: flex; gap: 10px; align-items: flex-start;
+      margin-top: 12px; padding: 14px 16px;
+      border-radius: var(--radius-md);
+      border: 1px solid transparent;
+      font-size: 13px; font-weight: 600; line-height: 1.8;
+    }
+    .cred-alert[hidden] { display: none; }
+    .cred-alert .ico { flex: 0 0 auto; font-size: 17px; line-height: 1.35; }
+    .cred-alert .msg { flex: 1; min-width: 0; }
+    .cred-alert .msg code {
+      font-weight: 500; font-size: 11.5px;
+      background: rgba(0, 0, 0, 0.18); border-color: transparent;
+    }
+    .cred-alert.danger { background: var(--err-bg); border-color: rgba(239, 68, 68, 0.45); color: var(--err); }
+    .cred-alert.warn { background: var(--warn-bg); border-color: rgba(245, 158, 11, 0.45); color: var(--warn); }
+    .cred-alert.ok { background: var(--ok-bg); border-color: rgba(16, 185, 129, 0.45); color: var(--ok); }
+    body.light .cred-alert .msg code { background: rgba(0, 0, 0, 0.06); }
+
+    /* 检测结果区块：与「检测账号」同卡片，用分隔线隔开 */
+    .det-box {
+      margin-top: 14px; padding-top: 12px;
+      border-top: 1px dashed var(--border);
+    }
+    .det-box .kv-row { margin-bottom: 6px; }
+
+    /* --------------------------------------------------------------
        终端块 / 键值行 / 表格 / 进度条
        -------------------------------------------------------------- */
     code {
@@ -756,7 +786,7 @@
 
         <!-- ============ 凭据 ============ -->
         <section class="page active" id="page-cred">
-          <!-- 账户配置：Token 与账户一体，切换/新建都在这里 -->
+          <!-- 账户配置：Token / 账号 / KV 一体，检测账号与检测结果同卡片（置于页顶） -->
           <div class="card">
             <h2><span class="dot"></span>👤 账户配置 <span class="badge info" id="profileBadge">0 个</span></h2>
             <p class="desc">
@@ -767,9 +797,12 @@
 
             <div class="field">
               <label>当前使用</label>
-              <select id="profileSelect">
-                <option value="">— 还没有账户配置 —</option>
-              </select>
+              <div class="row">
+                <select id="profileSelect">
+                  <option value="">— 还没有账户配置 —</option>
+                </select>
+                <button class="btn btn-danger" id="btnProfileDelete">删除本地账号/凭据</button>
+              </div>
               <p class="tip" id="profileHint">
                 选择「＋ 新建账户」并填入 Token 即可添加第二个账号；选择已有账户则显示该账号信息。
               </p>
@@ -783,10 +816,41 @@
               </div>
               <p class="tip">
                 没有令牌？<a href="#" data-url="https://dash.cloudflare.com/profile/api-tokens">点此创建</a>。
-                需要的权限见下方说明。<br>
-                出于安全考虑不回显明文，如需修改请粘贴新 Token 后点击「修改并保存」。
+                需要的权限见页面下方说明。
               </p>
             </div>
+
+            <div class="btn-row">
+              <button class="btn btn-primary" id="btnDetect">检测账号</button>
+            </div>
+
+            <div class="det-box">
+              <div class="kv-row"><span class="k">目标账号</span><span class="v" id="detAccount">—</span></div>
+              <p class="tip" id="detHint">选择账户后会自动检测。检测到已部署实例会自动选中对应的 KV。</p>
+              <!-- 醒目提示：未检测到实例 / 检测到多个实例（选错 KV 会让所有功能作用到错的实例上） -->
+              <div class="cred-alert" id="credAlert" hidden>
+                <span class="ico"></span><span class="msg"></span>
+              </div>
+            </div>
+
+            <div class="field" style="margin-top:14px">
+              <label>本次部署使用的 KV</label>
+              <div class="row">
+                <select id="kvSelect">
+                  <option value="">— 请先检测账号 —</option>
+                </select>
+                <button class="btn btn-ghost" id="btnKvRefresh">刷新 KV 列表</button>
+              </div>
+              <p class="tip" id="kvHint">
+                一个 KV 命名空间仅对应一对 CFPilot 部署实例（数据面 + 控制面）。
+                选中后立即生效，无需额外保存。
+              </p>
+            </div>
+          </div>
+
+          <!-- 其他：面板密码与手动指定 KV（低频操作，单独收在一起） -->
+          <div class="card">
+            <h2><span class="dot"></span>🧩 其他</h2>
 
             <div class="field">
               <label>面板密码</label>
@@ -808,41 +872,8 @@
               </p>
             </div>
 
-            <div class="btn-row">
-              <button class="btn btn-primary" id="btnDetect">检测账号</button>
-              <button class="btn btn-danger" id="btnProfileDelete">删除本地账户/凭据</button>
-            </div>
-            <p class="tip" style="margin-top:8px">
-              「删除本地账户/凭据」仅删除本机保存的配置，
-              <b>不会影响 Cloudflare 上已部署的项目</b>，也不影响订阅地址。
-            </p>
-          </div>
-
-          <div class="card">
-            <h2><span class="dot"></span>📡 检测结果</h2>
-            <div class="kv-row"><span class="k">目标账号</span><span class="v" id="detAccount">—</span></div>
-            <p class="tip" id="detHint">选择账户后会自动检测。检测到已部署实例会提示选择对应的 KV。</p>
-          </div>
-
-          <div class="card">
-            <h2><span class="dot"></span>🗄️ KV 命名空间</h2>
-            <p class="desc">
-              一个 KV 命名空间仅对应一对 CFPilot 部署实例（数据面 + 控制面）。
-            </p>
-
             <div class="field">
-              <label>本次部署使用的 KV</label>
-              <select id="kvSelect">
-                <option value="">— 请先检测账号 —</option>
-              </select>
-              <p class="tip" id="kvHint">
-                点击「刷新 KV 列表」查看账号下的命名空间。带 ● 的是本工具部署的实例，
-                带 ○ 的是空命名空间或已被占用。
-              </p>
-            </div>
-
-            <div class="field">
-              <label>或手动指定 KV ID</label>
+              <label>手动指定 KV ID</label>
               <div class="row">
                 <input type="text" id="kvManual" placeholder="粘贴 KV 命名空间 ID" />
                 <button class="btn btn-ghost" id="btnKvManual" style="flex:0 0 auto">使用此 ID</button>
@@ -850,11 +881,6 @@
               <p class="tip">
                 从其它机器迁移、或 KV 列表中未显示时，可直接粘贴 ID。
               </p>
-            </div>
-
-            <div class="btn-row">
-              <button class="btn btn-ghost" id="btnKvRefresh">刷新 KV 列表</button>
-              <button class="btn btn-ghost" id="btnKvSave">保存此选择</button>
             </div>
               <!--
                 已移除「新建 KV」按钮
@@ -865,9 +891,6 @@
                 现在改为：全新部署时如果没有可用 KV，**自动建一个**。
                 用户不需要多操作一步，也不会误建多余的 KV。
               -->
-            <p class="tip" style="margin-top:8px">
-              选中后点击「保存此选择」会被记住；不保存则每次部署都使用下拉框中的当前项。
-            </p>
           </div>
 
           <div class="card">
@@ -1044,29 +1067,6 @@
 
         <!-- ============ 优选 ============ -->
         <section class="page" id="page-scan">
-          <!--
-            一键优选并回填
-
-            与托盘菜单里的「一键优选 IP」走**同一个后端接口**
-            （POST /api/scan/quick）：后台跑完整优选 + 回填面板，完成后弹系统通知。
-
-            为什么放在优选页最上面：用户本来就在这一页，
-            手动优选要自己填域名/路径，一键优选不需要 —— 它用已部署实例的配置。
-          -->
-          <div class="card accent">
-            <h2><span class="dot"></span>⚡ 一键优选并回填</h2>
-            <p class="desc">
-              后台执行一次完整的真连接优选，并把结果<b>直接写回面板</b>的「手动优选 IP」。
-              与托盘菜单中的「一键优选 IP」为同一后端接口，完成后会弹出系统通知。
-            </p>
-            <div class="btn-row">
-              <button class="btn btn-primary" id="btnQuickScan">一键优选并回填</button>
-            </div>
-            <p class="tip" id="quickScanHint" style="margin-top:10px">
-              耗时与手动优选相同（通常数分钟），期间界面可正常使用。
-            </p>
-          </div>
-
           <div class="card">
             <h2><span class="dot"></span>⚡ 本地真连接优选</h2>
             <p class="desc">
@@ -1271,7 +1271,7 @@
               · <b>api.cloudflare.com</b> —— 部署必需，令牌仅用于该请求的 Authorization 头<br>
               · <b>你自己的域名</b> —— 优选阶段的 101 握手校验<br>
               · 你主动点击的官方链接 —— 以系统浏览器打开<br><br>
-              不存在「把令牌发到第三方」的路径。可随时点击「删除本地账户/凭据」清除。
+              不存在「把令牌发到第三方」的路径。可随时点击「删除本地账号/凭据」清除。
             </div>
           </div>
 

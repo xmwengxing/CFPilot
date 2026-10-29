@@ -97,7 +97,7 @@ export const IPV4_CIDR_WEIGHTS: Readonly<Record<string, number>> = {
   '104.16.0.0/13': 0.9, // 复测 7/12（旧表按 8/12 给 1.0）
   '104.24.0.0/14': 0.95, // 复测 11/12，最好的一段（旧表 0.9）
   '188.114.96.0/20': 0.75, // 复测 9/12（旧表 0.3 —— 被低估 3 倍）
-  '172.64.0.0/13': 0.4, // 复测 5/12（旧表 0.1 —— 被低估 5 倍）
+  '172.64.0.0/13': 0.55, // 复测 5/12；2026-10-29 用户侧实测该段出过 9.3 MB/s(NRT)，不宜压太低
   '103.21.244.0/22': 0.35, // 复测 4/12
   '103.31.4.0/22': 0.3, // 复测 3/12
   '190.93.240.0/20': 0.25, // 复测 2/12
@@ -202,6 +202,8 @@ export const BUILTIN_IPV6_CIDRS: string[] = [
 ]
 
 export interface IpRangeOptions {
+  /** 中性采样：忽略权重，按网段大小等比采样（只保留权重 0 的不可达段） */
+  neutral?: boolean
   /** 采样上限（0 = 不限） */
   sample?: number
   /** 随机种子，保证同一台机器上结果可复现 */
@@ -431,6 +433,7 @@ function splitByWeight(cidr: ParsedCidr): ParsedCidr[] {
  * 否则 `162.158.0.0/15` 这种跨权重区的网段会让细粒度权重失效。
  */
 export function expandCidrs(cidrs: string[], options: IpRangeOptions = {}): string[] {
+  const neutral = options.neutral === true
   const sample = options.sample ?? 20000
   const random = makeRandom(options.seed ?? 0x5eed)
   const parsedRaw = cidrs.map(parseCidr).filter((c): c is ParsedCidr => c !== null)
@@ -474,7 +477,9 @@ export function expandCidrs(cidrs: string[], options: IpRangeOptions = {}): stri
     // IPv6 候选主要供客户端侧使用）。
     const effectiveSize = (c: ParsedCidr): bigint => {
       if (c.family !== 4) return c.size
-      const weight = cidrWeight(c.cidr)
+      const raw = cidrWeight(c.cidr)
+      // 中性采样：权重表只用来区分「完全不可达（0）」与「其它（1）」
+      const weight = neutral ? (raw > 0 ? 1 : 0) : raw
       if (weight <= 0) return 0n // 权重 0 的网段直接排除
       const scaled = Number(c.size) * weight
       return scaled >= 1 ? BigInt(Math.floor(scaled)) : 0n
@@ -497,7 +502,7 @@ export function expandCidrs(cidrs: string[], options: IpRangeOptions = {}): stri
     // 与 1.0 权重相同的保底数（真机：162.159 拿到 64 个，与 104.16 一样多），
     // 加权就白做了。缩放后保底 1 个（低权重网段至少留个探针）。
     const minForCidr = (c: ParsedCidr): number => {
-      if (c.family !== 4) return minPerCidr
+      if (c.family !== 4 || neutral) return minPerCidr
       const w = cidrWeight(c.cidr)
       if (w >= 1) return minPerCidr
       return Math.max(1, Math.round(minPerCidr * w))

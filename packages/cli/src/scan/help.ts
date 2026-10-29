@@ -81,6 +81,8 @@ scan 选项:
   --speed-limit <n>      进入测速的候选数，默认 30
   --speed-bytes <n>      测速字节数，默认 5242880
   --timeout <ms>         阶段一超时，默认 1200
+  --neutral-sampling     中性采样：忽略网段权重、按网段大小等比抽取
+                         （选国家筛选时会自动启用；只保留 TCP 层不可达的网段）
   --speed-repeat <n>     每个候选重复测速次数，默认 1（>1 时取中位数并显示 ±抖动）
   --uuid <uuid>          真实隧道校验用的 VLESS UUID（给了才会跑阶段二点五）
   --trojan-password <pw> 真实隧道校验用的 Trojan 口令（与 --uuid 二选一）

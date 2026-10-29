@@ -20,9 +20,9 @@ func TestCIDRWeightExact(t *testing.T) {
 		cidr string
 		want float64
 	}{
-		{"104.16.0.0/13", 1.0},
-		{"104.24.0.0/14", 0.9},
-		{"172.64.0.0/13", 0.1},
+		{"104.16.0.0/13", 0.9},
+		{"104.24.0.0/14", 0.95},
+		{"172.64.0.0/13", 0.55},
 		// 实测 0/12 的网段必须权重 0（完全不采样）
 		{"173.245.48.0/20", 0},
 		{"103.22.200.0/22", 0},
@@ -75,8 +75,8 @@ func TestCIDRWeightLongestPrefix(t *testing.T) {
 	}
 
 	// 162.158.x.x 属于 /15 与 /16 两个 0.2 的网段，结果仍是 0.2
-	if got := CIDRWeight("162.158.5.0/24"); got != 0.2 {
-		t.Errorf("162.158.5.0/24 应为 0.2，实际 %v", got)
+	if got := CIDRWeight("162.158.5.0/24"); got != 0.3 {
+		t.Errorf("162.158.5.0/24 应为 0.3，实际 %v", got)
 	}
 }
 
@@ -306,6 +306,33 @@ func TestParseCandidateListEmpty(t *testing.T) {
 	for _, in := range []string{"", "\n\n\n", "   \n  \n"} {
 		if got := ParseCandidateList(in); len(got) != 0 {
 			t.Errorf("空输入应返回空列表，实际 %v", got)
+		}
+	}
+}
+
+// TestNeutralSampling 守护「中性采样」：忽略权重，只保留不可达段为 0。
+func TestNeutralSampling(t *testing.T) {
+	// 中性采样下 172.64 与 104.16 都是 /13，候选数应接近；
+	// 加权采样下 104.16（0.9）应明显多于 172.64（0.55）。
+	count := func(list []string, prefix string) int {
+		n := 0
+		for _, ip := range list {
+			if strings.HasPrefix(ip, prefix) {
+				n++
+			}
+		}
+		return n
+	}
+	weighted := SampleCandidates(SampleOptions{Count: 400, Seed: 7})
+	neutral := SampleCandidates(SampleOptions{Count: 400, Seed: 7, Neutral: true})
+	if count(neutral, "172.64.") <= count(weighted, "172.64.") {
+		t.Errorf("中性采样应让 172.64 拿到更多候选：加权=%d 中性=%d",
+			count(weighted, "172.64."), count(neutral, "172.64."))
+	}
+	// 不可达段仍然要排除
+	for _, ip := range neutral {
+		if strings.HasPrefix(ip, "198.41.") || strings.HasPrefix(ip, "131.0.72.") {
+			t.Fatalf("中性采样不应包含不可达网段：%s", ip)
 		}
 	}
 }

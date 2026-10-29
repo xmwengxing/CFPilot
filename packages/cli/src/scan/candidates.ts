@@ -55,6 +55,8 @@ export interface CandidateOptions {
    * 传了就固定，相同种子结果可复现（排查问题 / 对比报告时用）。
    */
   seed?: number
+  /** 中性采样：忽略权重（只保留权重 0 的不可达段） */
+  neutral?: boolean
   /** 地址族，默认 both */
   family?: IpFamily
 }
@@ -119,14 +121,15 @@ export async function resolveCandidates(opts: CandidateOptions = {}): Promise<st
   const sample = opts.sample ?? DEFAULT_CANDIDATE_SAMPLE
   const seed = opts.seed ?? randomSeed()
   const family = opts.family ?? 'both'
+  const neutral = opts.neutral === true
 
   const customCidrs = normalizeCidrInput(opts.cidr)
   if (customCidrs.length > 0) {
-    return expandCidrs(filterByFamily(customCidrs, family), { sample, seed })
+    return expandCidrs(filterByFamily(customCidrs, family), { sample, seed, neutral })
   }
 
   const cidrs = await loadCloudflareCidrs(family)
-  return expandCidrs(cidrs, { sample, seed })
+  return expandCidrs(cidrs, { sample, seed, neutral })
 }
 
 /** 动态随机种子：让每次运行的采样子集都不同 */

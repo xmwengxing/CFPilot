@@ -12,7 +12,7 @@ import type { UserConfig } from '../types'
 import { ByteStream } from './stream'
 import { parseVless, VLESS_COMMAND_TCP } from './vless'
 import type { DialResult, ProxyEndpoint } from '../outbound/dial'
-import { relay } from '../budget'
+import { relay, TrafficMeter } from '../budget'
 
 import { dial } from '../outbound/dial'
 
@@ -145,12 +145,10 @@ export async function handleXhttp(
   // ⚠️ `closeTarget: false` —— 关闭 socket 的写流等于关闭整个 TCP 连接，
   // 目标站会收到 RST 而来不及把响应发回来。
   // 对比：WebSocket 入站路径只 releaseLock 不 close，是正常的。
-  void relay(parsed.payload, dialResult.writable, undefined, false).catch(() => {
-    /* 客户端取消 / 出站已关闭：写入失败属预期，不构成未处理异常 */
-  })
+  //
+  // 实际发起放在下方（响应流建完之后）—— 上行计量器需要那里的作用域。
   // 下行：出站 → 响应体，由下方 combined 流**直接**从 dialResult.readable 拉取。
-  // 此前还经过一层 TransformStream + relay 中转，同一份下行在 Worker 内存里
-  // 被搬运两次（性能方案 三.3）；去掉后少一次拷贝与一对流控制器。
+  // 中间不再套一层 TransformStream：同一份下行少一次拷贝与一对流控制器。
 
   // VLESS 响应头：版本(1) + Addons 长度(1) + Addons（原样回显请求里的 Addons）。
   // Xray 客户端要求先读到这个头才认为入站已建立，缺失时会把后续下行数据当作协议错误丢弃。
@@ -183,8 +181,61 @@ export async function handleXhttp(
    */
   let cancelled = false
 
+  /**
+   * 单连接流量计量（上下行合计，0 = 不限制）。
+   *
+   * 与 WebSocket 入站同一口径，配置项同为 `dataBudgetMB`。
+   * 数据面没有任何 CPU 预算约束（`CpuBudget` 只管控制面），
+   * 一条超大流量连接能把账号当日配额吃穿，超限主动断流让客户端重连。
+   */
+  const traffic = new TrafficMeter((config.dataBudgetMB || 0) * 1024 * 1024)
+
+  /** 响应流控制器（流量熔断时用它正常收尾） */
+  let bodyController: ReadableStreamDefaultController<Uint8Array> | null = null
+
+  /**
+   * 流量熔断：关闭出站 Socket + 结束响应流。
+   *
+   * 用 `close()` 而不是 `error()`：客户端会把异常断流当成目标站报错并停止重试，
+   * 而这里我们是主动结束，正常 EOF 才是「可重连」的信号。
+   */
+  const cutByTraffic = (): void => {
+    if (cancelled) return
+    cancelled = true
+    const reason = `单连接流量超过 ${config.dataBudgetMB}MB 上限`
+    recordXhttpDiagnostics(
+      `${parsed.header.hostname}:${parsed.header.port}`,
+      { kind: 'budget', message: reason, candidate: 'traffic' },
+      reason
+    )
+    if (dialResult.close) {
+      try {
+        void dialResult.close()
+      } catch {
+        /* 已关闭 */
+      }
+    }
+    try {
+      bodyController?.close()
+    } catch {
+      /* 已关闭 */
+    }
+  }
+
+  /** 上行计量：超限即熔断（返回 true 让 relay 停止中继） */
+  const onUpstreamChunk = (bytes: number): boolean => {
+    if (!traffic.add(bytes)) return false
+    cutByTraffic()
+    return true
+  }
+
+  void relay(parsed.payload, dialResult.writable, undefined, false, onUpstreamChunk).catch(() => {
+    /* 客户端取消 / 出站已关闭：写入失败属预期，不构成未处理异常 */
+  })
+
   const combined = new ReadableStream<Uint8Array>({
     start(controller) {
+      bodyController = controller
       // 只入队响应头（2 字节），立即结束 start
       controller.enqueue(header)
       headerSent = true
@@ -196,10 +247,27 @@ export async function handleXhttp(
         const { done, value } = await downReader.read()
         if (cancelled) return
         if (done) {
+          // 下行结束 = 连接结束：必须关闭出站 Socket。
+          // 只 close 响应流的话 TCP 连接仍然开着，一直占着
+          // 「单请求 6 条并发出站」里的一个槽位（同 isolate 的其它请求更容易撞上限）。
+          if (dialResult.close) {
+            try {
+              void dialResult.close()
+            } catch {
+              /* 已关闭 */
+            }
+          }
           controller.close()
           return
         }
-        if (value && value.byteLength > 0) controller.enqueue(value)
+        if (value && value.byteLength > 0) {
+          // 流量熔断：超限的那块不再下发，直接收尾
+          if (traffic.add(value.byteLength)) {
+            cutByTraffic()
+            return
+          }
+          controller.enqueue(value)
+        }
       } catch (err) {
         if (cancelled) return
         // 之前这里 controller.close() —— 客户端会把「异常截断」当成正常 EOF，

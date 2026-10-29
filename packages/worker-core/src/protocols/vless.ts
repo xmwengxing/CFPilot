@@ -34,7 +34,8 @@ export interface VlessResult {
   payload: ReadableStream<Uint8Array>
 }
 
-const HEX = '0123456789abcdef'
+/** 复用的解码器：每条连接都要解一次域名，避免每次构造新实例 */
+const TEXT_DECODER = new TextDecoder()
 
 /** UUID 字符串 → 16 字节 */
 export function uuidToBytes(uuid: string): Uint8Array | null {
@@ -42,12 +43,6 @@ export function uuidToBytes(uuid: string): Uint8Array | null {
   if (!/^[0-9a-f]{32}$/.test(clean)) return null
   const out = new Uint8Array(16)
   for (let i = 0; i < 16; i++) out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16)
-  return out
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-  let out = ''
-  for (const b of bytes) out += HEX[b >> 4]! + HEX[b & 15]!
   return out
 }
 
@@ -63,7 +58,12 @@ export async function parseVless(
 
   const expected = uuidToBytes(expectedUuid)
   if (!expected) return null
-  if (bytesToHex(uuidBytes) !== bytesToHex(expected)) return null
+  // 逐字节比较：UUID 校验在每一条连接的握手路径上。
+  // 早期用「转成 32 字符十六进制再比较字符串」，一次校验要多分配两个字符串，
+  // 对只需要知道「相等与否」的校验毫无意义。
+  for (let i = 0; i < 16; i++) {
+    if (uuidBytes[i] !== expected[i]) return null
+  }
 
   const addonsLenByte = await stream.readExactly(1)
   if (!addonsLenByte) return null
@@ -135,7 +135,7 @@ export function parseVlessBuffer(bytes: Uint8Array, expectedUuid: string): Vless
     const len = bytes[offset]!
     offset += 1
     if (bytes.byteLength < offset + len) return null
-    hostname = new TextDecoder().decode(bytes.subarray(offset, offset + len))
+    hostname = TEXT_DECODER.decode(bytes.subarray(offset, offset + len))
     offset += len
   } else if (addressType === 3) {
     if (bytes.byteLength < offset + 16) return null

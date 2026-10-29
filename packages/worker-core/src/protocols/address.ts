@@ -19,6 +19,9 @@ export interface TargetAddress {
   addressType: AddressType
 }
 
+/** 复用的解码器：每个入站连接都要解一次域名，避免每次构造新实例 */
+const TEXT_DECODER = new TextDecoder()
+
 const IPV4_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/
 const DOMAIN_RE = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/
 
@@ -154,7 +157,7 @@ export function readAddress(
     if (offset + 2 > bytes.length) return null
     const len = bytes[offset + 1]!
     if (offset + 2 + len > bytes.length) return null
-    const hostname = new TextDecoder().decode(bytes.subarray(offset + 2, offset + 2 + len))
+    const hostname = TEXT_DECODER.decode(bytes.subarray(offset + 2, offset + 2 + len))
     return { hostname, next: offset + 2 + len }
   }
 

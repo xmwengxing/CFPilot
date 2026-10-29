@@ -45,6 +45,7 @@ const config: UserConfig = {
   proxyMode: 'only',
   nat64: '',
   concurrentDial: true,
+  dataBudgetMB: 0,
   resolvePreferred: true,
   relayPool: '',
   useBuiltinRelay: true,

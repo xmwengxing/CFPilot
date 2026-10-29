@@ -26,6 +26,7 @@ import { parseVlessBuffer, VLESS_COMMAND_UDP } from '../protocols/vless'
 import { parseTrojanBuffer, TROJAN_COMMAND_UDP } from '../protocols/trojan'
 import { concatBytes } from '../protocols/stream'
 import { dial, type DialResult } from '../outbound/dial'
+import { TrafficMeter } from '../budget'
 import { classifyDialFailure, explainDialFailure, type DialFailure } from '../outbound/route'
 import { collectRelayEndpoints, type RelayEndpoint } from '../outbound/relay'
 
@@ -52,9 +53,9 @@ const DIAL_TIMEOUT_MS = 5000
  * 即：TCP 握手成功、协议响应头 `[0,0]` 已回，但目标站一个字节都不回。
  * 客户端侧表现为「连着但永远等不到响应」，超时后 -1。
  *
- * 通用解法（参考 `connecttoPry()`）：**直连成功后若下行无数据，
- * 自动重拨到反代入口**（第三方服务器按 SNI 转发，出口不是 Cloudflare，
- * 因而不受该限制）。用 NAT64 前缀可达到同样目的。
+ * 通用解法：**直连成功后若下行无数据，自动重拨到反代入口**
+ * （第三方服务器按 SNI 转发，出口不是 Cloudflare，因而不受该限制）。
+ * 用 NAT64 前缀可达到同样目的。
  *
  * 因此这里做同一件事：建连后 `DOWNLINK_STALL_MS` 内没收到任何下行字节，
  * 就关闭当前出站、改连反代入口重试一次。
@@ -394,15 +395,40 @@ export async function handleWebSocket(
     retainedBytes = 0
   }
 
+  /**
+   * 下行泵的「代号」。
+   *
+   * 反代重拨会启动**第二条**下行泵，而旧泵不会立即结束 ——
+   * 它还在旧的 socket 上 `await reader.read()`。旧泵退出时绝不能
+   * 替整个会话收尸（那样刚切到的新通路会被一并关掉），
+   * 也不能清掉新泵的静默检测定时器（两者共用 `stallTimer`）。
+   * 因此每个泵带一个递增代号，只有**当前代号**有权结束会话、清理共享定时器。
+   */
+  let pumpGeneration = 0
+
+  /**
+   * 让当前下行泵失效（它退出时不再拥有「结束会话」的权力）。
+   *
+   * ⚠️ 反代重拨**必须**先调它、再关闭旧出站：
+   * 关闭旧 socket 会让旧泵的 `read()` 立即失败，若它此时仍是「当前代」，
+   * 就会按「下行结束」给整个会话收尸 ——
+   * 真机实测（静默窗口降到 300ms 的插桩构建）：重拨刚发起就被自己关掉，
+   * close 1000 + 0 字节，重拨永远不可能成功。
+   */
+  const retirePump = (): void => {
+    pumpGeneration += 1
+  }
+
   /** 下行：出站 → 客户端 */
   const pumpDown = async (): Promise<void> => {
     if (!dialed) return
+    const generation = ++pumpGeneration
     const reader = dialed.readable.getReader()
     downReader = reader
     // 建连后启动静默检测：目标是「TCP 通了但收不到数据」的假活场景
     if (stallTimer) clearTimeout(stallTimer)
-    stallTimer = setTimeout(() => {
-      stallTimer = null
+    const stall = setTimeout(() => {
+      if (stallTimer === stall) stallTimer = null
       if (downlinkBytes > 0) return
       // 一个字节都没收到 —— 这条出站是假活，换反代入口重拨
       recordDiagnostics(
@@ -412,6 +438,7 @@ export async function handleWebSocket(
       )
       void redialViaRelay()
     }, DOWNLINK_STALL_MS)
+    stallTimer = stall
 
     try {
       for (;;) {
@@ -421,6 +448,11 @@ export async function handleWebSocket(
           const firstByte = downlinkBytes === 0
           downlinkBytes += value.byteLength
           if (firstByte) clearRetained() // 通路确认，释放重放留存
+          // 流量熔断：超限立即结束，不再把这块数据发给客户端
+          if (traffic.add(value.byteLength)) {
+            cutByTraffic()
+            return
+          }
           send(value)
         }
       }
@@ -432,17 +464,39 @@ export async function handleWebSocket(
       } catch {
         /* 已释放 */
       }
-      if (stallTimer) {
-        clearTimeout(stallTimer)
-        stallTimer = null
-      }
+      // 只清自己的定时器：共享变量此时可能已经属于新的下行泵
+      clearTimeout(stall)
+      if (stallTimer === stall) stallTimer = null
       if (downReader === reader) downReader = null
-      closeWith(1000, 'done')
+      // 只有当前代的下行泵有权结束会话（旧泵在重拨后退出属于正常现象）；
+      // 已经因流量熔断 / 客户端断开关闭过时也不再重复关。
+      if (generation === pumpGeneration && !closed) closeWith(1000, 'done')
     }
   }
 
   /** 已收到的下行字节数（用于静默检测） */
   let downlinkBytes = 0
+
+  /**
+   * 单连接流量计量（上下行合计）。
+   *
+   * 上限来自配置 `dataBudgetMB`，**0 表示不限制**（默认，行为与未引入时一致）。
+   * 数据面本身不会被「跑太久」杀掉，但每条中继连接都在持续消耗 CPU 配额，
+   * 单条超大流量连接能把账号当日额度吃穿，之后所有请求一起 503。
+   * 超限时主动断连让客户端重连，比整账号被限流划算。
+   */
+  const traffic = new TrafficMeter((config.dataBudgetMB || 0) * 1024 * 1024)
+
+  /** 流量超限：记诊断 + 关闭连接（1009 = 消息过大，客户端会重连） */
+  const cutByTraffic = (): void => {
+    const reason = `单连接流量超过 ${config.dataBudgetMB}MB 上限`
+    recordDiagnostics(
+      target ? `${target.hostname}:${target.port}` : '未建立出站',
+      [],
+      reason
+    )
+    closeWith(1009, reason)
+  }
 
   /** 上行：客户端 → 出站 */
   const pumpUp = async (bytes: Uint8Array): Promise<void> => {
@@ -452,6 +506,30 @@ export async function handleWebSocket(
     } catch {
       cleanup()
     }
+  }
+
+  /**
+   * 把「拨号 / 反代重拨期间」暂存的上行补写到**当前**出站。
+   *
+   * ## 为什么必须有
+   *
+   * `writer` 在反代重拨时会被置空，客户端在此期间继续发的帧只能落进 `buffer`
+   * （message 处理器里 `if (!writer)` 那一支）。重拨成功后若不补写，
+   * 这些字节会**永远留在 buffer 里**：出站再也收不到它们，
+   * 客户端等不到响应，表现为「切换反代之后隧道静默挂起，直到超时变 -1」。
+   *
+   * `establish()` 里只在首次建连后补写过一次，重拨路径不走那里，
+   * 因此需要这个独立入口。
+   *
+   * 补写前先 `retain` —— 新通路同样可能是假活（见 `retained` 注释），
+   * 重放数据必须完整，不能只重放首次建连前的那些。
+   */
+  const flushPendingUplink = async (): Promise<void> => {
+    if (!writer || buffer.byteLength === 0) return
+    const pending = buffer
+    buffer = new Uint8Array(0)
+    retain(pending)
+    await pumpUp(pending)
   }
 
   /** 解析协议头 */
@@ -708,12 +786,24 @@ export async function handleWebSocket(
 
     for (const endpoint of fresh.slice(0, MAX_RELAY_REDIAL)) {
       triedRelays.add(`${endpoint.ip}:${endpoint.port}`)
-      // 关掉假活的旧出站（只 close writable，不动客户端 WS）
+      // 关掉假活的旧出站（不动客户端 WS）。
+      //
+      // ⚠️ 必须用 `DialResult.close()`（`socket.close()`）而不是 `writable.close()`：
+      // 后者的写端此时被 reader/writer 锁着，调用会直接抛错并被吞掉，
+      // 旧连接实际上根本没关 —— 一直占着「单请求 6 条并发出站」里的一个槽位。
+      // 旧连接关闭后它那条下行泵会退出，代号已经过期，不会连带关掉会话。
+      //
+      // ⚠️ 顺序不能反：必须**先** retired 旧泵，再关闭旧 socket。
+      // 反过来就是真机实测到的「重拨刚发起就把会话关掉」（0 字节 + close 1000）。
+      retirePump()
       if (dialed) {
-        try {
-          void dialed.writable.close()
-        } catch {
-          /* 已关闭 */
+        const previous = dialed
+        if (previous.close) {
+          try {
+            void previous.close()
+          } catch {
+            /* 已关闭 */
+          }
         }
       }
       writer = null
@@ -753,6 +843,10 @@ export async function handleWebSocket(
           await writer.write(replay)
         }
 
+        // 重拨期间客户端继续发的帧暂存在 buffer 里 —— 这里补写，
+        // 否则它们会一直留在 buffer 中等待一个永远不会到来的 establish。
+        await flushPendingUplink()
+
         recordDiagnostics(
           `${targetInfo.hostname}:${targetInfo.port}`,
           [],
@@ -781,6 +875,12 @@ export async function handleWebSocket(
       const bytes =
         typeof data === 'string' ? new TextEncoder().encode(data) : new Uint8Array(data as ArrayBuffer)
       if (bytes.byteLength === 0) return
+
+      // 数据面流量熔断：上下行都计量，超限即断（0 = 不限制）
+      if (traffic.add(bytes.byteLength)) {
+        cutByTraffic()
+        return
+      }
 
       if (!established) {
         buffer = concatBytes(buffer, bytes)

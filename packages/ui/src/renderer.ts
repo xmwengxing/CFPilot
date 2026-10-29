@@ -181,20 +181,16 @@
     $('panelPassword').value = ''
     if (state.accountId) currentAccountId = state.accountId
 
-    // 自动刷新 KV 列表
+    // ⚠️ 这里**不再**顺手拉 KV 列表。
     //
-    // 系统也知道账号 ID，没理由还让用户点一次。
-    // 这里只在「本地缓存为空」时触发，避免每次刷新都打 API。
-    if (kvOptions.length === 0 && currentAccountId) {
-      try {
-        const opts = await window.cfpilot.listKvOptions(currentAccountId)
-        kvOptions = opts.options
-        renderKvOptions(state.kvNamespaceId || undefined)
-        log(`共 ${kvOptions.length} 个命名空间`, 'ok')
-      } catch {
-        /* 拉取失败不阻断，用户仍可手动点「刷新 KV 列表」 */
-      }
-    }
+    // 早前在「刷新凭据状态」里也拉一次，而启动流程紧接着还会跑
+    // detectAccountAndGuide()（它自己要 loadKvOptions）。
+    // 结果是同一个 KV 列表被打两遍：每拉一次都要按命名空间逐个读部署清单，
+    // 6 个命名空间就是十几个 Cloudflare API 请求 ——
+    // 在跨境链路上等于把「检测要多久」直接翻倍，还多一倍失败概率
+    // （实测第二次撞上 tls: unrecognized name 就直接把整次检测判成失败）。
+    //
+    // 现在 KV 列表只由 detectAccountAndGuide / loadKvOptions 的单一入口拉取。
 
     // 自动选中当前账户保存的 KV
     //
@@ -222,7 +218,7 @@
     if (kvOptions.length === 0) {
       const opt = document.createElement('option')
       opt.value = ''
-      opt.textContent = currentAccountId ? '（没有可用的 KV，点「新建 KV」）' : '— 请先检测账号 —'
+      opt.textContent = currentAccountId ? '（该账号下还没有 KV）' : '— 请先检测账号 —'
       select.appendChild(opt)
       return
     }
@@ -256,21 +252,20 @@
     const deployKv = $text('deployKv')
     if (!item) {
       hint.textContent = currentAccountId
-        ? '请选择一个命名空间，或点「新建 KV」为本次部署单独建一个。'
+        ? '请选择一个命名空间（全新部署时会自动创建 KV）。'
         : '点「刷新 KV 列表」查看账号下有哪些命名空间。'
       deployKv.textContent = '—'
       return
     }
     if (item.ownership === 'instance') {
       hint.textContent =
-        `这是本工具部署的实例：控制面 ${item.controlProject} / 数据面 ${item.dataProject}，` +
-        `部署于 ${item.at}。选它 = 更新这个实例（UUID 与 WS 路径不变）。`
+        `控制面 ${item.controlProject} / 数据面 ${item.dataProject}，部署于 ${item.at}。`
       deployKv.textContent = `${item.title}（${item.id}）`
     } else if (item.ownership === 'foreign') {
       hint.textContent =
         '此命名空间已被其他项目占用，不能用于 CFPilot。' +
         'CFPilot 的数据面已完全自研，两者不再共用同一 KV' +
-        '（会共享配额、混淆配置、让排查变难）。请点上方「新建 KV」单独建一个。'
+        '（会共享配额、混淆配置、让排查变难）。请到「部署」页新建一个实例。'
       deployKv.textContent = `${item.title}（${item.id}）— 不可用`
     } else if (item.ownership === 'cfpilot') {
       hint.textContent =
@@ -424,6 +419,7 @@
     $text('detAccount').textContent = '—'
     $('cfToken').value = ''
     $('panelPassword').value = ''
+    clearCredAlert()
 
     // 部署页的 5 个框：跨账户残留会造成凭据泄漏，必须一起清
     clearDeployFormFields()
@@ -525,14 +521,49 @@
   }
 
   /**
-   * 检测账号并给出「下一步该做什么」的引导。
+   * 在凭据页显示一条**醒目**提示。
    *
-   * 用户要求：
-   *   - 检测到已有 CFPilot 实例 → 提示去下方 KV 里选本次要用的那个，再点「保存此选择」
-   *   - 没检测到 → 提示在下方新建 KV 并保存
+   * ## 为什么必须醒目
+   *
+   * 用户一个 Cloudflare 账号下可能存在**多个** CFPilot 实例（多个 KV）。
+   * 一旦选错 KV，后续「部署 / 优选 / 回填 / 订阅」会全部作用到**别的实例**上，
+   * 而且不会有任何报错 —— 只会在很久以后表现为「面板数据不对」「回填没生效」。
+   * 所以「没检测到实例」和「检测到多个实例」这两种情况必须一眼看见。
+   */
+  function showCredAlert(kind: 'ok' | 'warn' | 'danger', html: string): void {
+    const box = document.getElementById('credAlert')
+    if (!box) return
+    const icon = document.createElement('span')
+    icon.className = 'ico'
+    icon.textContent = kind === 'ok' ? '✅' : kind === 'warn' ? '⚠️' : '⛔'
+    // ⚠️ 类名不能叫 body —— 全局 .body 是应用布局的 flex 列，会把提示文字拆成一行一个
+    const body = document.createElement('span')
+    body.className = 'msg'
+    body.innerHTML = html
+    box.className = 'cred-alert ' + kind
+    box.replaceChildren(icon, body)
+    box.hidden = false
+  }
+
+  /** 清掉醒目提示（切换账户 / 重新检测时） */
+  function clearCredAlert(): void {
+    const box = document.getElementById('credAlert')
+    if (!box) return
+    box.hidden = true
+    box.replaceChildren()
+  }
+
+  /**
+   * 检测账号，并按「该账号下 CFPilot 实例的个数」自动决定 KV 选择。
+   *
+   * 规则（用户 2026-10-29 要求）：
+   *   - **0 个实例** → 醒目提示「未检查到CFPilot 实例，请到「部署」页全新部署」
+   *   - **1 个实例** → 自动选中并保存（唯一实例不用问，少一步操作）
+   *   - **≥2 个实例** → 醒目提示「请在下方选择 KV」（绝不替用户猜）
    */
   async function detectAccountAndGuide(): Promise<void> {
     if (!hasActiveToken()) return
+    clearCredAlert()
     log('检测账号…')
     try {
       const result = await window.cfpilot.detectAccount()
@@ -540,6 +571,10 @@
         result.accountName ? result.accountName + '（' + result.accountId + '）' : '—'
       if (!result.accountId) {
         $text('detHint').textContent = '没能读到账号，请检查 Token 权限是否正确。'
+        showCredAlert(
+          'danger',
+          '没能读到账号：请确认 Token 带有 <code>Account / Account Settings / Read</code> 权限。'
+        )
         return
       }
       currentAccountId = result.accountId
@@ -556,25 +591,60 @@
 
       // 读 KV 列表，并判断有没有已部署的 CFPilot 实例
       await loadKvOptions()
-
-      const instances = kvOptions.filter((o) => o.ownership === 'instance')
-      const hint = $text('detHint')
-      if (instances.length > 0) {
-        hint.innerHTML =
-          `检测到 <b>${instances.length}</b> 个已部署的 CFPilot 实例：` +
-          instances.map((i) => `<code>${escapeHtml(i.title)}</code>`).join('、') +
-          '。<br>请在下方「本次部署使用的 KV」里选择要维护的那个，再点「保存此选择」。'
-        log(`检测到 ${instances.length} 个已部署实例，请到下方选择本次使用的 KV`, 'ok')
-      } else {
-        hint.innerHTML =
-          '这个账号下<b>还没有部署过 CFPilot</b>。<br>' +
-          '请在下方点「新建 KV（部署新实例）」，建好后点「保存此选择」，再去「一键部署」页部署。'
-        log('该账号下没有已部署实例，请到下方新建 KV', 'warn')
-      }
+      await autoPickKvByInstances()
     } catch (err) {
       log('检测账号失败：' + (err instanceof Error ? err.message : String(err)), 'err')
       $text('detHint').textContent = '检测失败，请检查网络与 Token。'
+      showCredAlert('danger', '检测失败：请检查网络与 Token。')
     }
+  }
+
+  /**
+   * 按「实例个数」自动选中 KV 并给出醒目提示。
+   *
+   * 单独抽出来是因为两条路径都要走它：
+   *   1. 点「检测账号」
+   *   2. 「当前使用」切到另一个已保存 Token 的账户
+   */
+  async function autoPickKvByInstances(): Promise<void> {
+    const instances = kvOptions.filter((o) => o.ownership === 'instance')
+    const hint = $text('detHint')
+
+    if (instances.length === 0) {
+      hint.textContent = '这个账号下还没有部署过 CFPilot，去「部署」页部署一次即可。'
+      showCredAlert('danger', '未检查到CFPilot 实例，请到「部署」页全新部署。')
+      log('该账号下没有已部署实例，请到「部署」页全新部署', 'warn')
+      return
+    }
+
+    if (instances.length === 1) {
+      const only = instances[0]
+      $sel('kvSelect').value = only.id
+      updateKvHint()
+      try {
+        // 选中即保存：唯一实例没有歧义，不该再让用户点一次「保存」
+        await window.cfpilot.saveCredentials({ kvNamespaceId: only.id })
+      } catch {
+        /* 保存失败不阻断：下拉框当前值仍会用于本次部署 */
+      }
+      hint.textContent = '已自动选中该账号下唯一的 CFPilot 实例。'
+      showCredAlert(
+        'ok',
+        '已自动选中唯一的 CFPilot 实例 <code>' + escapeHtml(only.title) + '</code>，KV 已保存。'
+      )
+      log('检测到 1 个实例，已自动选中并保存 KV：' + only.title, 'ok')
+      return
+    }
+
+    // ≥2 个：绝不替用户选 —— 选错会让所有功能作用到错的实例上
+    hint.textContent = '检测到多个 CFPilot 实例，请从下方选择本次使用的 KV。'
+    showCredAlert(
+      'danger',
+      '检测到 <b>' + instances.length + '</b> 个 CFPilot 实例，请在下方选择 KV：<br>' +
+        instances.map((i) => '<code>' + escapeHtml(i.title) + '</code>').join('、') +
+        '<br>选错 KV 会让后续部署 / 优选 / 回填全部作用到别的实例上。'
+    )
+    log('检测到 ' + instances.length + ' 个实例，请手动选择本次使用的 KV', 'warn')
   }
 
   /** 当前是否已有可用 Token（激活账户已配置） */
@@ -624,40 +694,27 @@
       await detectAccountAndGuide()
     })
 
+    // 检测账号：**只绑一次**
+    //
+    // ⚠️ 这里曾经绑了两个监听（一个判断 Token、一个负责建 profile 与探测），
+    // 点一次会跑两遍：两次 detectAccount + 两次 loadKvOptions，
+    // 多实例场景下两次「自动选中」互相打架。现在合成为一个幂等流程。
     document.getElementById('btnDetect')!.addEventListener('click', async () => {
-      if (!hasActiveToken() && !$('cfToken').value.trim()) {
+      const hasToken = hasActiveToken() || Boolean($('cfToken').value.trim())
+      if (!hasToken) {
         log('请先填写 API Token 并保存', 'warn')
+        showCredAlert('warn', '请先在上方填写 Cloudflare API Token 并点「添加并保存」。')
         return
       }
-      await detectAccountAndGuide()
-    })
 
-
-    document.getElementById('btnDetect')!.addEventListener('click', async () => {
-      // 没有激活的账户配置时先建一份，避免「检测了但没地方存」
+      // 没有账户配置时先建一份，避免「检测了但没地方存」
       if (profiles.length === 0) {
         log('还没有账户配置，先新建一份…')
         await window.cfpilot.createProfile()
         await refreshProfiles()
       }
 
-      log('检测账号…')
-      const result = await window.cfpilot.detectAccount()
-      $text('detAccount').textContent =
-        result.accountName ? result.accountName + '（' + result.accountId + '）' : '—'
-      if (result.accountId) {
-        currentAccountId = result.accountId
-        // 把账号名写回当前 profile —— 下拉框就能显示「主账号（xxx）」而不只是「新账户」
-        const active = profiles.find((p) => p.active)
-        if (active) {
-          await window.cfpilot.updateProfile(active.id, {
-            accountId: result.accountId,
-            accountName: result.accountName,
-          })
-          await refreshProfiles()
-        }
-        await loadKvOptions()
-      }
+      await detectAccountAndGuide()
     })
 
     document.getElementById('btnKvRefresh')!.addEventListener('click', async () => {
@@ -672,17 +729,10 @@
       await loadKvOptions()
     })
 
-    document.getElementById('btnKvSave')!.addEventListener('click', async () => {
-      const id = $sel('kvSelect').value
-      if (!id) { log('请先选择一个 KV 命名空间', 'warn'); return }
-      await window.cfpilot.saveCredentials({ kvNamespaceId: id })
-      log('已保存本次选择的 KV', 'ok')
-    })
-
     // KV 下拉框改变时**自动保存**
     //
-    // 用户既然在这个下拉框里选了，意图已经明确。
-    // 现在选完立刻落盘，那个按钮可以不用点（保留是为了兼容旧习惯）。
+    // 用户既然在这个下拉框里选了，意图已经明确 —— 选完立刻落盘。
+    // 独立的「保存」按钮已移除（用户 2026-10-29 要求：选中账户与 KV 后自动保存）。
     $('kvSelect').addEventListener('change', async () => {
       updateKvHint()
       const id = $sel('kvSelect').value
@@ -722,7 +772,6 @@
       'btnScan',
       'btnDetect',
       'btnKvRefresh',
-      'btnKvSave',
       'btnKvManual',
       'btnAutoDetect',
     ]) {
@@ -1245,9 +1294,6 @@
   /** 已知的日志文件路径（「打开日志文件所在文件夹」要用） */
   let logsFilePath = ''
 
-  /** 一键优选是否正在运行（防止重复点击） */
-  let quickScanRunning = false
-
   /**
    * 读取并渲染日志页的内容。
    *
@@ -1344,75 +1390,6 @@
         log('已在文件管理器中打开日志目录', 'ok')
       } catch (err) {
         log('打开日志目录失败：' + (err instanceof Error ? err.message : String(err)), 'err')
-      }
-    })
-  }
-
-  /* ------------------------------------------------------------------ */
-  /* 一键优选并回填                                                      */
-  /* ------------------------------------------------------------------ */
-
-  /**
-   * 设置一键优选的状态提示。
-   *
-   * 用 badge 区分成功/失败/进行中 —— 与界面其它状态提示的观感一致。
-   */
-  function setQuickScanHint(kind: 'idle' | 'busy' | 'ok' | 'err', text: string): void {
-    const hint = document.getElementById('quickScanHint')
-    if (!hint) return
-    if (kind === 'idle') {
-      hint.textContent = text
-      return
-    }
-    const badge = kind === 'ok' ? 'ok' : kind === 'err' ? 'err' : 'info'
-    const mark = kind === 'ok' ? '✅' : kind === 'err' ? '❌' : '⏳'
-    hint.innerHTML =
-      '<span class="badge ' + badge + '" style="margin-left:0">' + mark + '</span> ' +
-      escapeHtml(text)
-  }
-
-  /**
-   * 绑定「一键优选并回填」按钮。
-   *
-   * 与托盘菜单里的「一键优选 IP」是**同一个后端接口**（POST /api/scan/quick）：
-   * 后台跑完整优选并回填面板，完成后由后端弹系统通知。
-   */
-  function bindQuickScan(): void {
-    const btn = document.getElementById('btnQuickScan') as HTMLButtonElement | null
-    if (!btn) return
-
-    btn.addEventListener('click', async () => {
-      // 用独立标志位而不是只看 btn.disabled ——
-      // setBusy() 会批量改按钮的 disabled，可能把这里的禁用状态冲掉。
-      if (quickScanRunning) return
-      quickScanRunning = true
-      btn.disabled = true
-      btn.textContent = '优选中…'
-      setQuickScanHint('busy', '正在后台优选并回填，通常要几分钟…')
-      log('开始一键优选（后台运行，完成后会有系统通知）')
-
-      try {
-        const result = await window.cfpilot.quickScan()
-        if (result && result.ok) {
-          const msg = result.message ||
-            ('优选成功，共 ' + (result.count ?? 0) + ' 个优选 IP 已填入面板')
-          setQuickScanHint('ok', msg)
-          log('✅ ' + msg, 'ok')
-          // 优选过程会写日志 → 顺手把日志页刷新一次
-          await loadLogs()
-        } else {
-          const msg = (result && result.error) || '未知错误'
-          setQuickScanHint('err', msg)
-          log('一键优选失败：' + msg, 'err')
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        setQuickScanHint('err', msg)
-        log('一键优选异常：' + msg, 'err')
-      } finally {
-        quickScanRunning = false
-        btn.disabled = false
-        btn.textContent = '一键优选并回填'
       }
     })
   }
@@ -1908,8 +1885,7 @@
     bindDeploy()
     bindScan()
     bindLogs()
-    bindQuickScan()
-    bindUpdater()
+      bindUpdater()
     bindPush()
 
     // 切到「日志」页时自动加载一次。
@@ -1950,5 +1926,18 @@
 
     log('CFPilot GUI 已就绪')
     log('凭据只保存在本机，不会上传')
+
+    // 启动时「当前使用」已有选中账户 → 自动检测实例并按个数自动选 KV
+    //
+    // 用户要求（2026-10-29）：点「检测账号」或者在「当前使用」里选中账户时，
+    // 都要自动探测有没有 CFPilot 实例，唯一实例直接选中并保存。
+    // 这一条不能 await —— 它要打 Cloudflare API，慢的时候会拖住界面首屏。
+    void (async () => {
+      try {
+        if (hasActiveToken()) await detectAccountAndGuide()
+      } catch {
+        /* 启动期检测失败不影响其它功能，用户可手点「检测账号」重试 */
+      }
+    })()
   })
 })()

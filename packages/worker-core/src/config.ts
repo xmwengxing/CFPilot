@@ -212,7 +212,7 @@ export async function loadConfig(store: Store, env: Env): Promise<UserConfig> {
   // 生产上未绑定 KV 时 `createStore` 每个请求都 `new MemoryStore()`，
   // 「生成并写回」等于每个请求/每个隔离体都得到不同的随机 UUID ——
   // 客户端按面板显示的 UUID 连接会随机失败，且完全无从排查
-  // （Gemini 性能方案 一.3，2026-10-27 代码核实确认）。
+  // （2026-10-27 实测核实）。
   // 未配置时保持空值 fail-closed：所有实例行为一致（一律拒绝认证，
   // 含 Trojan 空口令防护），面板显示空 UUID 提示用户补配置。
   const canPersist = store instanceof KvStore

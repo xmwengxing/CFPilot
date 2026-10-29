@@ -53,7 +53,7 @@ describe('mergeConfig', () => {
 
 describe('loadConfig', () => {
   it('非持久存储不自动生成凭据：保持空值 fail-closed（多实例行为一致）', async () => {
-    // 回归背景（2026-10-27 核实，Gemini 性能方案 一.3）：
+    // 回归背景（2026-10-27 实测核实）：
     // 生产上未绑定 KV 时 createStore 每个请求都 new MemoryStore()，
     // 「生成并写回」等于每个请求一个不同的随机 UUID —— 客户端按面板
     // 显示的 UUID 连接会随机失败。现只在持久化（KV）存储上自动生成；

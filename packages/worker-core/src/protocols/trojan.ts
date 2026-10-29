@@ -30,9 +30,13 @@ export interface TrojanResult {
   payload: ReadableStream<Uint8Array>
 }
 
+/** 复用的编解码器：握手路径上每条连接都要用到，避免每次构造新实例 */
+const TEXT_ENCODER = new TextEncoder()
+const TEXT_DECODER = new TextDecoder()
+
 /** 计算 Trojan 口令校验值 */
 export function trojanPasswordHash(password: string): string {
-  return sha224Hex(new TextEncoder().encode(password))
+  return sha224Hex(TEXT_ENCODER.encode(password))
 }
 
 function isCrLf(bytes: Uint8Array): boolean {
@@ -49,7 +53,7 @@ export async function parseTrojan(
 
   // 客户端发送的是 56 个 ASCII 十六进制字符，直接按文本比较
   const provided = hashBytes
-    ? new TextDecoder().decode(hashBytes).trim().toLowerCase()
+    ? TEXT_DECODER.decode(hashBytes).trim().toLowerCase()
     : ''
 
   if (provided === expectedHash) {
@@ -59,7 +63,7 @@ export async function parseTrojan(
     if (!crlf1 || !isCrLf(crlf1)) return null
   } else {
     // 容错：部分客户端直接发送明文口令（口令 + CRLF）
-    const pwBytes = new TextEncoder().encode(expectedPassword)
+    const pwBytes = TEXT_ENCODER.encode(expectedPassword)
     if (pwBytes.length === 0 || pwBytes.length > 56) return null
     const peek = await stream.peekExactly(pwBytes.length + 2)
     if (!peek) return null
@@ -114,7 +118,7 @@ export function parseTrojanBuffer(
   // 不拦的话未配置口令的部署等于**开放代理**（谁都能把流量送出去）。
   if (!expectedPassword) return null
   const expectedHash = trojanPasswordHash(expectedPassword)
-  const provided = new TextDecoder().decode(bytes.subarray(0, 56)).trim().toLowerCase()
+  const provided = TEXT_DECODER.decode(bytes.subarray(0, 56)).trim().toLowerCase()
   if (provided !== expectedHash) return null
   if (bytes[56] !== 0x0d || bytes[57] !== 0x0a) return null
   let offset = 58
@@ -134,7 +138,7 @@ export function parseTrojanBuffer(
     const len = bytes[offset]!
     offset += 1
     if (bytes.byteLength < offset + len) return null
-    hostname = new TextDecoder().decode(bytes.subarray(offset, offset + len))
+    hostname = TEXT_DECODER.decode(bytes.subarray(offset, offset + len))
     offset += len
   } else if (addressType === 4) {
     if (bytes.byteLength < offset + 16) return null

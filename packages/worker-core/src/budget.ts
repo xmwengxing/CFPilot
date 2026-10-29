@@ -73,6 +73,53 @@ export class CpuBudget {
 export const DEFAULT_CPU_BUDGET_MS = 8
 
 /**
+ * 单条连接的流量计量器（数据面硬熔断用）。
+ *
+ * ## 为什么需要
+ *
+ * `CpuBudget` 只管**控制面**的同步计算（订阅生成 / CSV 解析），
+ * 数据面完全不受约束：一条中继连接可以持续转发任意大小的流量。
+ * 免费套餐下的 CPU 配额是账号级的，单条超大流量连接能把当天的额度吃穿，
+ * 之后所有请求一起 503 —— 而且没有任何一条错误指向「是这条连接害的」。
+ *
+ * ## 语义边界
+ *
+ * - 上限为 **0 表示不限制**（默认），行为与引入该功能之前完全一致；
+ * - 计量的是**单条连接**的累计字节（上行 + 下行），不是 per-request 总量；
+ * - 超限后由调用方主动结束连接（`close` / `error`），不是在这里抛异常 ——
+ *   数据面没有可以捕获异常的调用栈，异常只会变成未处理拒绝。
+ */
+export class TrafficMeter {
+  private total = 0
+
+  /**
+   * @param limitBytes 上限字节数；<= 0 表示不限制
+   */
+  constructor(private readonly limitBytes: number) {}
+
+  /** 是否设置了上限 */
+  get enabled(): boolean {
+    return this.limitBytes > 0
+  }
+
+  /** 已计量字节数 */
+  get bytes(): number {
+    return this.total
+  }
+
+  /**
+   * 记录一块流量。
+   *
+   * @returns true 表示**本次记录后已超限**，调用方应立即结束连接
+   */
+  add(bytes: number): boolean {
+    if (this.limitBytes <= 0 || bytes <= 0) return false
+    this.total += bytes
+    return this.total > this.limitBytes
+  }
+}
+
+/**
  * 双向字节流中继。
  * 任一端结束或出错时关闭另一端；超过 CPU 预算时优雅收尾而不是硬崩。
  */
@@ -91,7 +138,14 @@ export async function relay(
    * 对普通 TransformStream（如 HTTP 响应体）保持默认 true 即可 ——
    * 那正是「流结束」的语义。
    */
-  closeTarget = true
+  closeTarget = true,
+  /**
+   * 每块字节的回调；返回 true 表示要求**立即中止**（数据面流量熔断）。
+   *
+   * 中止只是停止中继，**不由这里关闭目标** —— 关闭动作留给调用方，
+   * 因为「目标」可能是 socket 写流（不该 close，见 `closeTarget` 的说明）。
+   */
+  onChunk?: (bytes: number) => boolean
 ): Promise<void> {
   const reader = a.getReader()
   const writer = b.getWriter()
@@ -101,6 +155,7 @@ export async function relay(
       const { done, value } = await reader.read()
       if (done) break
       if (!value || value.byteLength === 0) continue
+      if (onChunk?.(value.byteLength)) break
       await writer.write(value)
     }
   } catch {

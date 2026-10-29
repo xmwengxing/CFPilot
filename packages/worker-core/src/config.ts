@@ -50,6 +50,7 @@ export const DEFAULT_CONFIG: UserConfig = {
   proxyMode: 'only' as ProxyMode,
   nat64: '',
   concurrentDial: true,
+  dataBudgetMB: 0,
   resolvePreferred: true,
   relayPool: '',
   useBuiltinRelay: true,
@@ -136,6 +137,7 @@ export function configFromEnv(env: Env): UserConfig {
     proxyMode: normalizeProxyMode(text(env.PROXY_MODE, '')),
     nat64: text(env.NAT64, ''),
     concurrentDial: bool(env.TCP_CONCURRENT_DIAL, true),
+    dataBudgetMB: num(env.DATA_BUDGET_MB, DEFAULT_CONFIG.dataBudgetMB),
     resolvePreferred: bool(env.RESOLVE_PREFERRED, DEFAULT_CONFIG.resolvePreferred),
     relayPool: text(env.RELAY_POOL, ''),
     useBuiltinRelay: bool(env.USE_BUILTIN_RELAY, DEFAULT_CONFIG.useBuiltinRelay),
@@ -162,7 +164,14 @@ export function mergeConfig(base: UserConfig, override: Partial<UserConfig>): Us
   const merged: UserConfig = { ...base }
   for (const [key, value] of Object.entries(override)) {
     if (value === undefined || value === null) continue
-    if (key === 'dls' || key === 'maxLatency' || key === 'maxNodes' || key === 'officialCount' || key === 'domainCount') {
+    if (
+      key === 'dls' ||
+      key === 'maxLatency' ||
+      key === 'maxNodes' ||
+      key === 'officialCount' ||
+      key === 'domainCount' ||
+      key === 'dataBudgetMB'
+    ) {
       ;(merged as unknown as Record<string, number>)[key] = num(value, 0)
     } else if (
       key === 'concurrentDial' ||

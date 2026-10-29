@@ -44,6 +44,7 @@ function makeConfig(over: Partial<UserConfig> = {}): UserConfig {
     proxyMode: 'only',
     nat64: '',
     concurrentDial: true,
+    dataBudgetMB: 0,
     relayPool: '',
     useBuiltinRelay: false,
     resolvePreferred: false,

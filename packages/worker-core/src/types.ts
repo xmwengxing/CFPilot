@@ -58,6 +58,8 @@ export interface Env {
   MAX_LATENCY?: string
   /** 并发竞速拨号 */
   TCP_CONCURRENT_DIAL?: string
+  /** 数据面单连接流量上限（MB，0 或留空 = 不限制） */
+  DATA_BUDGET_MB?: string
   /** 出站前是否自动 DoH 解析目标域名以获得优选 IP 候选 */
   RESOLVE_PREFERRED?: string
   /** 自定义反代入口池（每行一条） */
@@ -146,6 +148,19 @@ export interface UserConfig {
   nat64: string
   /** 是否开启并发竞速拨号 */
   concurrentDial: boolean
+  /**
+   * 数据面**单条连接**的流里上限（MB，上下行合计）。
+   *
+   * `0`（默认）表示不限制，行为与未引入该配置时完全一致。
+   *
+   * 为什么需要：控制面的进度预算（`CpuBudget`）只约束订阅生成这类同步计算，
+   * 数据面中继连接完全不受约束。一条超大流量连接会持续吃掉账号级 CPU 配额，
+   * 额度耗尽后**所有**请求一起 503，而日志里看不出是哪条连接造成的。
+   *
+   * 设置后超限会主动断开该连接（WebSocket 1009 / XHTTP 正常收尾），
+   * 客户端会重连：牺牲单条大流量会话，保住整个部署可用。
+   */
+  dataBudgetMB: number
   /**
    * 自定义反代入口池（每行一条，支持 `IP` / `IP:端口` / `域名`）。
    *

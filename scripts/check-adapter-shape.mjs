@@ -55,6 +55,11 @@ const CONTRACTS = [
     why: '界面 `list = await api.listScanCountries()` 后直接 list.length',
   },
   {
+    name: 'listScanCountryGroups',
+    kind: 'passthrough',
+    why: '界面读分组机房码（亚洲组/美国组按钮），后端给 {groups} 时只取 groups，异常时返回 {}',
+  },
+  {
     name: 'updateProfile',
     kind: 'wrap',
     fields: ['ok', 'error'],

@@ -280,6 +280,13 @@ interface Window {
     /** 优选器支持的国家列表（与面板 / 命令行版同源） */
     listScanCountries(): Promise<Array<{ code: string; name: string }>>
     /**
+     * 机房国家的分组筛选：分组名 → 该组的机房三字码。
+     *
+     * 「亚洲组 / 美国组」按钮按码选中多选框里对应项；
+     * 机房表只在后端维护一份，这里拿不到时返回 `{}`（按钮置灰）。
+     */
+    listScanCountryGroups(): Promise<Record<string, string[]>>
+    /**
      * 读取本机日志文件（末尾若干行）。
      *
      * @param tail 取末尾多少行（默认 500，后端上限 5000）

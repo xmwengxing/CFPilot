@@ -42,6 +42,51 @@ var countryColos = map[string][]string{
 	"MX": {"MEX"},
 }
 
+// regionGroups 分组关键字 → 该组包含的国家代码。
+//
+// 与 CLI 版 packages/cli/src/scan/countries.ts 的 REGION_GROUPS 同步：
+// 分组存国家码，机房码由 countryColos 展开，避免两处各写一份机房表。
+//
+// 亚洲组按地理口径取「亚洲国家」（东亚 / 东南亚 / 南亚 / 西亚），
+// 不含大洋洲（AU / NZ），也不含横跨欧亚、机房在欧洲一侧的 TR / RU。
+var regionGroups = map[string][]string{
+	"ASIA": {"HK", "TW", "JP", "KR", "SG", "MY", "TH", "VN", "ID", "PH", "IN", "AE", "IL"},
+	"US":   {"US"},
+}
+
+// regionGroupOrder 分组输出顺序（与界面按钮一致：亚洲组在前）。
+var regionGroupOrder = []string{"ASIA", "US"}
+
+// RegionGroupColos 返回分组名 → 该组的全部机房三字码（按 countryColos 定义顺序）。
+//
+// 界面的「亚洲组 / 美国组」按钮拿它选中对应的机房码；
+// 分组名未知时返回空（界面据此把按钮置灰，而不是乱选）。
+func RegionGroupColos(name string) []string {
+	countries, ok := regionGroups[strings.ToUpper(strings.TrimSpace(name))]
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, 16)
+	seen := make(map[string]bool, 16)
+	for _, country := range countries {
+		for _, colo := range countryColos[country] {
+			if seen[colo] {
+				continue
+			}
+			seen[colo] = true
+			out = append(out, colo)
+		}
+	}
+	return out
+}
+
+// RegionGroupNames 返回全部分组名（按界面按钮的顺序）。
+func RegionGroupNames() []string {
+	out := make([]string, len(regionGroupOrder))
+	copy(out, regionGroupOrder)
+	return out
+}
+
 // coloToCountry 机房三字码 → 国家代码（模块加载时构建一次）。
 var coloToCountry = func() map[string]string {
 	out := make(map[string]string)
@@ -95,18 +140,28 @@ func sortStrings(s []string) {
 // 两边语义不同会导致同一份脚本在 CLI 与桌面版上结果不一致，
 // 违反 AGENTS.md §2.2「行为必须一致」的要求。
 //
-// 所以这里**两种都接受**：
-//   - 输入国家代码 → 展开成该国的全部机房
-//   - 输入机房代码 → 直接匹配该机房
+// 所以这里**三种都接受**：
+//   - 分组关键字（ASIA / US）→ 展开成该组全部国家 → 再展开成机房
+//   - 国家代码 → 展开成该国的全部机房
+//   - 机房代码 → 直接匹配该机房
 //
 // 这样既不破坏界面现有的行为，也让 Go 版与 CLI 语义一致。
 //
-// 对应 CLI 版 packages/cli/src/scan/countries.ts。
+// 对应 CLI 版 packages/cli/src/scan/countries.ts 的 normalizeCountryFilter。
 func ExpandCountryFilter(input []string) map[string]bool {
 	out := make(map[string]bool, len(input))
 	for _, raw := range input {
 		code := strings.ToUpper(strings.TrimSpace(raw))
 		if code == "" {
+			continue
+		}
+		if members, ok := regionGroups[code]; ok {
+			// 分组 → 组内国家 → 机房（组内只含国家码，不会递归）
+			for _, country := range members {
+				for _, c := range countryColos[country] {
+					out[c] = true
+				}
+			}
 			continue
 		}
 		if colos, ok := countryColos[code]; ok {

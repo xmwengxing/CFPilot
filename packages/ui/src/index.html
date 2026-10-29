@@ -1106,9 +1106,16 @@
                 <select id="optCountries" multiple size="6">
                   <option value="">（正在加载国家列表…）</option>
                 </select>
+                <div class="row" style="margin-top:6px">
+                  <button class="btn btn-ghost" id="btnCountryClear" style="flex:1 1 auto">取消选择</button>
+                  <button class="btn btn-ghost" id="btnCountryAsia" style="flex:1 1 auto" disabled>亚洲组</button>
+                  <button class="btn btn-ghost" id="btnCountryUS" style="flex:1 1 auto" disabled>美国组</button>
+                </div>
                 <p class="tip">
                   · 按住 <code>Ctrl</code> / <code>Shift</code> 多选或取消，
                   <b>不选则按采样数跑全量测试</b><br>
+                  · 快捷筛选：<b>取消选择</b> = 全部；
+                  <b>亚洲组</b> / <b>美国组</b> 可以同时选中（点一下是选中，不替换已有选择）<br>
                   · 若结果未出现候选国家，请增加<b>「候选采样数」</b>
                 </p>
               </div>

@@ -155,3 +155,43 @@ describe('POST /api/v1/preferred-ips（回填）', () => {
     expect(res!.status).toBe(401)
   })
 })
+
+// ---------------------------------------------------------------------------
+// KV 写配额保护（2026-10-29）
+//
+// 免费版 KV 每天只有 1000 次写/删除。「一键优选」可能一天跑好几次
+// （托盘菜单 + 手册 + 多实例），同一批结果重复 put 纯属浪费配额；
+// 配额耗尽后「保存配置 / 回填」会直接 500。
+// ---------------------------------------------------------------------------
+
+describe('回填写入去重（保护 KV 写配额）', () => {
+  it('内容没变时不重复写', async () => {
+    const puts: string[] = []
+    const originalPut = store.put.bind(store)
+    store.put = async (key: string, value: string) => {
+      puts.push(key)
+      return originalPut(key, value)
+    }
+
+    await push(['9.9.9.9:443'])
+    const firstWrites = puts.filter((k) => k === 'LOCAL_PREFERRED_IPS').length
+    expect(firstWrites).toBe(1)
+
+    // 同样的结果再回填一次：不应再产生写
+    await push(['9.9.9.9:443'])
+    const secondWrites = puts.filter((k) => k === 'LOCAL_PREFERRED_IPS').length
+    expect(secondWrites).toBe(1)
+  })
+
+  it('内容变了才写', async () => {
+    const puts: string[] = []
+    const originalPut = store.put.bind(store)
+    store.put = async (key: string, value: string) => {
+      puts.push(key)
+      return originalPut(key, value)
+    }
+    await push(['9.9.9.9:443'])
+    await push(['8.8.8.8:443'])
+    expect(puts.filter((k) => k === 'LOCAL_PREFERRED_IPS').length).toBe(2)
+  })
+})

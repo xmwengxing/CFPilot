@@ -121,6 +121,66 @@ function setupDial() {
   return { written, writer }
 }
 
+describe('XHTTP 生命周期', () => {
+  it('请求体停在半截协议头 → 到截止时间返回 400（不再挂到运行时超时）', async () => {
+    setupDial()
+    vi.useFakeTimers()
+    try {
+      // 只给半截 VLESS 头（版本 + UUID 前几字节），后面永远不来
+      const half = Buffer.from(buildVlessRequest().subarray(0, 8))
+      const request = new Request('https://worker.test/xhttp', {
+        method: 'POST',
+        body: half,
+      })
+
+      const pending = handleXhttp(request, baseConfig, [])
+      await vi.advanceTimersByTimeAsync(2500)
+      const response = await pending
+
+      expect(response.status).toBe(400)
+      // 半截头不应该建立任何出站连接
+      expect(dialMock).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('出站全部失败 → 502 受控响应，而不是抛给外层 500', async () => {
+    dialMock.mockReset()
+    dialMock.mockRejectedValue(new Error('所有候选都失败'))
+    const request = new Request('https://worker.test/xhttp', {
+      method: 'POST',
+      body: Buffer.from(buildVlessRequest()),
+    })
+
+    const response = await handleXhttp(request, baseConfig, [])
+    expect(response.status).toBe(502)
+    expect(await response.text()).toContain('出站不可用')
+  })
+
+  it('客户端取消请求 → 关闭底层出站 Socket', async () => {
+    const close = vi.fn()
+    const readable = new ReadableStream<Uint8Array>({ start() {} })
+    dialMock.mockReset()
+    dialMock.mockResolvedValue({
+      readable,
+      writable: new WritableStream<Uint8Array>({ write() {} }),
+      via: 'direct',
+      endpoint: 'example.com:443',
+      close,
+    })
+    const request = new Request('https://worker.test/xhttp', {
+      method: 'POST',
+      body: Buffer.from(buildVlessRequest()),
+    })
+
+    const response = await handleXhttp(request, baseConfig, [])
+    expect(response.status).toBe(200)
+    await response.body!.cancel('客户端断开')
+    expect(close).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('XHTTP stream-one', () => {
   it('响应体首字节是 VLESS 协议响应头', async () => {
     setupDial()

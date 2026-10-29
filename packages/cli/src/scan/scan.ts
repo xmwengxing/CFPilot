@@ -42,6 +42,7 @@ import * as net from 'node:net'
 import {
   probeWs101,
   probeWsPing,
+  verifyTunnel,
   probeTlsHandshake,
   measureProbeThroughput,
   measureThroughput,
@@ -117,6 +118,16 @@ export interface ScanOptions {
   verifyPayload?: boolean
   /** probe 模式的测速路径（默认 /__edge_probe） */
   probePath?: string
+  /** 测速重复次数（>1 时取中位数并给出抖动） */
+  speedRepeat?: number
+  /** 是否额外校验真实 wsPath 的 101（默认 true，路径与探针路径相同时自动跳过） */
+  verifyWsPath?: boolean
+  /** 真实隧道校验用：VLESS UUID / Trojan 口令（任选其一，缺省则跳过该阶段） */
+  uuid?: string
+  trojanPassword?: string
+  /** 真实隧道校验要访问的目标（默认 baidu.com:80） */
+  verifyTargetHost?: string
+  verifyTargetPort?: number
   /** 测速方式：probe = 目标项目探针端点；url = 公开测速地址。默认 probe */
   speedMode?: 'probe' | 'url'
   /** url 模式的测速地址（不含协议也行，如 speed.cloudflare.com/__down?bytes=104857600） */
@@ -510,6 +521,8 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
    *
    * 阈值取 speedLimit * 1.5，留出余量应对后续测速淘汰。
    */
+  // 真实 wsPath 校验失败的计数（进入结果 stats）
+  let pathFailures = 0
   const earlyExitTarget = hasCountryFilter ? Math.ceil(speedLimit * 1.5) : Infinity
   let matchedCount = 0
   let stoppedEarly = false
@@ -523,6 +536,14 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
       const result: WsProbeResult = await withRetry(retries, () =>
         probeFn(item.ip, options.port, options.host, probeTimeoutMs, probePath)
       )
+      // 额外校验**真实 wsPath** 的 101：阶段二默认打的是探针路径，
+      // 路径配错时探针能过、客户端却全 -1。不额外花时间的场景（路径相同）自动跳过。
+      let pathOk: boolean | undefined
+      if (result.ok && explicitWsPath && explicitWsPath !== probePath && options.verifyWsPath !== false) {
+        const pathProbe = await probeWs101(item.ip, options.port, options.host, probeTimeoutMs, explicitWsPath)
+        pathOk = pathProbe.ok
+        if (!pathOk) pathFailures++
+      }
       probeDone++
       if (result.pongVerified) verifiedCount++
       // 统计命中目标国家的数量（早期退出判据）
@@ -542,7 +563,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
           ? `101+PING 校验 ${probeDone}/${stage1.length}${result.ok ? ` ✓ ${result.colo}` : result.pongVerified === false ? ' ✗ 无响应' : ''}`
           : `101 校验 ${probeDone}/${stage1.length}${result.ok ? ` ✓ ${result.colo}` : ''}`,
       })
-      return { ...item, probe: result }
+      return { ...item, probe: result, pathOk }
     },
     () => {
       if (matchedCount >= earlyExitTarget) {
@@ -555,9 +576,47 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
 
   // 严格模式下，只保留**通过内容校验**的候选。
   // 非严格模式（第三方项目）退化为只看 101。
-  const wsOk = strictProbe
+  const wsOk = (strictProbe
     ? probeResults.filter((r) => r.probe.ok && r.probe.pongVerified === true)
     : probeResults.filter((r) => r.probe.ok)
+  ).filter((r) => (r as { pathOk?: boolean }).pathOk !== false)
+
+  // ---- 阶段二点五：真实隧道校验（可选）----
+  //
+  // 阶段二只证明「这个 IP 能把请求送到我们的数据面」；它证明不了
+  // 真实 wsPath / 认证配置 / 数据面出站是否真的可用 —— 这三类都会表现为
+  // 「优选结果正常、导入客户端全是 -1」。
+  // 只有显式给了 uuid / trojanPassword 时才跑（需要真实凭据）。
+  let tunnelOk = wsOk
+  let tunnelFailed = 0
+  const tunnelCredential = options.uuid || options.trojanPassword
+  if (tunnelCredential && options.wsPath) {
+    const candidates = wsOk.slice(0, speedLimit)
+    const verified = await pool(candidates, 4, async (item) => {
+      const result = await verifyTunnel({
+        ip: item.ip,
+        port: options.port,
+        host: options.host,
+        wsPath: options.wsPath!,
+        uuid: options.uuid,
+        trojanPassword: options.trojanPassword,
+        targetHost: options.verifyTargetHost,
+        targetPort: options.verifyTargetPort,
+      })
+      if (!result.ok) tunnelFailed++
+      report({
+        type: 'progress',
+        stage: 2,
+        done: candidates.length,
+        total: candidates.length,
+        message: `真实隧道校验 ${result.ok ? '✓' : '✗ ' + (result.error ?? '')}`,
+      })
+      return { item, ok: result.ok }
+    })
+    const passed = new Set(verified.filter((v) => v.ok).map((v) => v.item.ip))
+    tunnelOk = wsOk.filter((item) => passed.has(item.ip))
+    if (tunnelOk.length === 0) tunnelOk = wsOk // 全失败时退回阶段二结果，避免直接空结果
+  }
 
   // ---- 国家 / 地区过滤（可选，作用于已识别机房的候选）----
   //
@@ -611,6 +670,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
     tls: TlsProbeResult
     probe: WsProbeResult
     speed?: number
+    jitter?: number
   }>
 
   const speedMode = options.speedMode ?? 'probe'
@@ -624,53 +684,72 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
     const requestPath = withBytes(parsedUrl, options.speedBytes ?? 104857600)
     let speedDone = 0
     speedResults = await pool(stage2, speedConcurrency, async (item) => {
-      const result = await measureThroughput({
-        ip: item.ip,
-        port: options.port,
-        sniHost: parsedUrl.host,
-        requestHost: parsedUrl.host,
-        path: requestPath,
-        connections: options.speedConnections ?? 8,
-        durationMs: options.speedDurationMs ?? 6000,
-        timeoutMs: options.speedTimeoutMs ?? 20000,
-      })
+        const repeat = Math.max(1, options.speedRepeat ?? 1)
+        const samples: number[] = []
+        for (let r = 0; r < repeat; r++) {
+          const one = await measureThroughput({
+            ip: item.ip,
+            port: options.port,
+            sniHost: parsedUrl.host,
+            requestHost: parsedUrl.host,
+            path: requestPath,
+            connections: options.speedConnections ?? 8,
+            durationMs: options.speedDurationMs ?? 6000,
+            timeoutMs: options.speedTimeoutMs ?? 20000,
+          })
+          if (one.ok) samples.push(one.steadyMBps)
+        }
+        samples.sort((a, b) => a - b)
+        const median = samples.length === 0 ? 0 : samples[Math.floor(samples.length / 2)]!
+        const jitter = samples.length < 2 ? 0 : samples[samples.length - 1]! - samples[0]!
+      const result = { ok: samples.length > 0, steadyMBps: median }
       speedDone++
       report({
         type: 'progress',
         stage: 3,
         done: speedDone,
         total: stage2.length,
-        message: `测速 ${speedDone}/${stage2.length} [${item.probe.colo || 'UNK'}] ${result.steadyMBps.toFixed(1)} MB/s`,
+        message: `测速 ${speedDone}/${stage2.length} [${item.probe.colo || 'UNK'}] ${result.steadyMBps.toFixed(1)} MB/s${jitter > 0 ? ` ±${jitter.toFixed(1)}` : ''}`,
       })
-      return { ...item, speed: result.ok ? result.steadyMBps : 0 }
+      return { ...item, speed: result.ok ? result.steadyMBps : 0, jitter }
     })
   } else {
     report({ type: 'stage', stage: 3, name: '真实下行速度测试（项目探针端点 · 多流稳态）', total: stage2.length })
     let speedDone = 0
     speedResults = await pool(stage2, speedConcurrency, async (item) => {
-      const result = await measureProbeThroughput({
-        ip: item.ip,
-        port: options.port,
-        host: options.host,
-        bytes: speedBytes,
-        path: strictProbePath,
-        connections: options.speedConnections ?? 8,
-        durationMs: options.speedDurationMs ?? 6000,
-        timeoutMs: speedTimeoutMs,
-      })
+        const repeat = Math.max(1, options.speedRepeat ?? 1)
+        const samples: number[] = []
+        for (let r = 0; r < repeat; r++) {
+          const one = await measureProbeThroughput({
+            ip: item.ip,
+            port: options.port,
+            host: options.host,
+            bytes: speedBytes,
+            path: strictProbePath,
+            connections: options.speedConnections ?? 8,
+            durationMs: options.speedDurationMs ?? 6000,
+            timeoutMs: speedTimeoutMs,
+            token: options.uuid,
+          })
+          if (one.ok) samples.push(one.steadyMBps)
+        }
+        samples.sort((a, b) => a - b)
+        const median = samples.length === 0 ? 0 : samples[Math.floor(samples.length / 2)]!
+        const jitter = samples.length < 2 ? 0 : samples[samples.length - 1]! - samples[0]!
+      const result = { ok: samples.length > 0, steadyMBps: median }
       speedDone++
       report({
         type: 'progress',
         stage: 3,
         done: speedDone,
         total: stage2.length,
-        message: `测速 ${speedDone}/${stage2.length} [${item.probe.colo || 'UNK'}] ${result.steadyMBps.toFixed(1)} MB/s`,
+        message: `测速 ${speedDone}/${stage2.length} [${item.probe.colo || 'UNK'}] ${result.steadyMBps.toFixed(1)} MB/s${jitter > 0 ? ` ±${jitter.toFixed(1)}` : ''}`,
       })
       return { ...item, speed: result.ok ? result.steadyMBps : 0 }
     })
   }
 
-  const entries: ScanEntry[] = speedResults
+  const ranked: ScanEntry[] = speedResults
     .filter((r) => (options.skipSpeed ? true : Boolean(r.speed && r.speed > 0)))
     .map((r) => ({
       ip: r.ip,
@@ -679,13 +758,23 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
       latency: r.latency,
       tlsMs: r.tls.tlsMs,
       speed: r.speed ? Number(r.speed.toFixed(2)) : 0,
+      speedJitter: r.jitter ? Number(r.jitter.toFixed(2)) : 0,
     }))
     .sort((a, b) =>
       options.skipSpeed
         ? a.tlsMs - b.tlsMs || a.latency - b.latency
         : b.speed - a.speed || a.tlsMs - b.tlsMs || a.latency - b.latency
     )
-    .slice(0, top)
+
+  // 取前 N 时**按 /16 轮流取**，而不是直接切前 N 名。
+  //
+  // 为什么：Cloudflare 的好 IP 会集中在少数 /16（实测 104.16–104.19 就占了大半），
+  // 直接取前 N 名经常得到「同一个 /16 的 N 个 IP」。这些 IP 走的是同一段路由、
+  // 同一个入口，一旦那段拥塞或被 QoS，整批节点同时劣化 —— 用户手上没有备选。
+  //
+  // 轮流取（每轮从每个 /16 取当前最好的一条）既保住了速度排序，又保证
+  // 最终列表覆盖多个网段；同段内部仍然按速度排。
+  const entries = pickWithDiversity(ranked, top)
 
   for (const entry of entries) {
     report({ type: 'result', entry })
@@ -746,4 +835,43 @@ export function formatEntries(entries: ScanEntry[]): string[] {
   return entries.map(
     (e) => `${formatHost(e.ip)}:${e.port}#${e.colo}_${e.latency}_${e.speed}`
   )
+}
+
+/**
+ * 按 /16 轮流取前 N 条，保证结果覆盖多个网段。
+ *
+ * 例：三个 /16 的候选按速度排好后，顺序为
+ *   A1(104.16) B1(104.17) C1(104.18) A2 B2 C2 …
+ * 而不是 A1 A2 A3 B1 B2 C1。
+ *
+ * 不到 N 条时有多少给多少；只有一个网段时行为与直接截取完全一致。
+ */
+export function pickWithDiversity<T extends { ip: string }>(ranked: readonly T[], top: number): T[] {
+  if (top <= 0) return []
+  // 按 /16 分桶（保持桶内速度顺序）
+  const buckets = new Map<string, T[]>()
+  for (const item of ranked) {
+    const parts = item.ip.split('.')
+    const key = parts.length >= 2 ? `${parts[0]}.${parts[1]}` : item.ip
+    const list = buckets.get(key)
+    if (list) list.push(item)
+    else buckets.set(key, [item])
+  }
+  if (buckets.size <= 1) return ranked.slice(0, top)
+
+  const groups = [...buckets.values()]
+  const out: T[] = []
+  for (let round = 0; out.length < top; round++) {
+    let pickedAny = false
+    for (const group of groups) {
+      if (out.length >= top) break
+      const item = group[round]
+      if (item) {
+        out.push(item)
+        pickedAny = true
+      }
+    }
+    if (!pickedAny) break
+  }
+  return out
 }

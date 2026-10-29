@@ -408,6 +408,13 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
     // 用 3 条会系统性低估 2~4 倍。默认 8 条，贴近浏览器/客户端的真实多连接行为。
     speedConnections: flagNumber(args, 'speed-conns', 8),
     speedDurationMs: flagNumber(args, 'speed-duration', 6000),
+    // 真实隧道校验（可选）：给了凭据才会跑
+    uuid: flagString(args, 'uuid'),
+    trojanPassword: flagString(args, 'trojan-password'),
+    verifyTargetHost: flagString(args, 'verify-target'),
+    verifyTargetPort: flagNumber(args, 'verify-target-port', 80),
+    speedRepeat: flagNumber(args, 'speed-repeat', 1),
+    verifyWsPath: args.flags['no-verify-ws-path'] === undefined,
     top,
     onProgress: (event) => printProgress(event, quiet),
   })

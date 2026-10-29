@@ -431,9 +431,7 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 			})
 		}
 		sort.Slice(entries, func(i, j int) bool { return entries[i].Latency < entries[j].Latency })
-		if len(entries) > opt.Top {
-			entries = entries[:opt.Top]
-		}
+		entries = PickWithDiversity(entries, opt.Top)
 		stats["speedOk"] = len(entries)
 		stats["skippedSpeed"] = 1
 		return &Summary{Entries: entries, Stats: stats}, nil
@@ -499,9 +497,8 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 		}
 		return entries[i].Latency < entries[j].Latency
 	})
-	if len(entries) > opt.Top {
-		entries = entries[:opt.Top]
-	}
+	// 取前 N 时按 /16 轮流取（对照 CLI 的 pickWithDiversity）
+	entries = PickWithDiversity(entries, opt.Top)
 
 	stats["speedOk"] = len(speedResults)
 	stats["final"] = len(entries)
@@ -725,4 +722,64 @@ func isTimeoutError(errMsg string) bool {
 		strings.Contains(lower, "timeout") ||
 		strings.Contains(lower, "timed out") ||
 		strings.Contains(lower, "etimedout")
+}
+
+// PickWithDiversity 按 /16 轮流取前 top 条，保证结果覆盖多个网段。
+//
+// ## 为什么（对照 CLI packages/cli/src/scan/scan.ts 的 pickWithDiversity）
+//
+// Cloudflare 的好 IP 高度集中在少数 /16（实测 104.16–104.19 占了大半）。
+// 直接切前 N 名经常得到「同一个 /16 的 N 个 IP」：它们走同一段路由、同一个入口，
+// 一旦那段拥塞或被 QoS，整批节点同时劣化，用户手上没有备选。
+//
+// 轮流取（每轮从每个 /16 取当前最好的一条）既保住速度排序，又保证网段覆盖；
+// 桶内仍保持传入顺序（即速度降序）。只有一个网段时与直接截取完全一致。
+func PickWithDiversity(entries []Entry, top int) []Entry {
+	if top <= 0 {
+		return nil
+	}
+	if len(entries) <= top {
+		return entries
+	}
+
+	order := make([]string, 0, len(entries))
+	buckets := make(map[string][]Entry, len(entries))
+	for _, e := range entries {
+		key := ipv4Prefix16(e.IP)
+		if _, ok := buckets[key]; !ok {
+			order = append(order, key)
+		}
+		buckets[key] = append(buckets[key], e)
+	}
+	if len(order) <= 1 {
+		return entries[:top]
+	}
+
+	out := make([]Entry, 0, top)
+	for round := 0; len(out) < top; round++ {
+		picked := false
+		for _, key := range order {
+			if len(out) >= top {
+				break
+			}
+			if round < len(buckets[key]) {
+				out = append(out, buckets[key][round])
+				picked = true
+			}
+		}
+		if !picked {
+			break
+		}
+	}
+	return out
+}
+
+// ipv4Prefix16 取 IPv4 的前两段作为分桶键（如 104.16）。
+// IPv6 或格式异常时退回整串（等价于不参与多样性分桶）。
+func ipv4Prefix16(ip string) string {
+	parts := strings.Split(ip, ".")
+	if len(parts) != 4 {
+		return ip
+	}
+	return parts[0] + "." + parts[1]
 }

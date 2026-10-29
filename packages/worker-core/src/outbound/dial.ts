@@ -139,6 +139,24 @@ export interface DialResult {
   via: 'direct' | 'nat64' | 'socks5' | 'http' | 'https'
   /** 实际连接到的落地地址（代理场景为代理地址） */
   endpoint: string
+  /**
+   * 关闭底层 TCP Socket（可读 + 可写一起关）。
+   *
+   * ## 为什么需要它
+   *
+   * Cloudflare 的 `connect()` 返回的 Socket 提供 `close()`，语义是**同时**关闭
+   * 可读与可写两端，并立即释放这条 TCP 连接占用的并发槽位（单请求上限 6 条）。
+   * 而 `writable.close()` 只是「关闭写端」——在 Workers 上确实会连带关闭连接，
+   * 但**不会中断另一头已经挂起的 reader.read()**：
+   * 客户端提前断开、上游异常、假活重拨这些场景下，读任务会一直等到运行时/超时才回收。
+   *
+   * 因此把原始 Socket 的关闭能力（而不是只把 readable / writable 两个流）交给上层，
+   * 由统一的生命周期清理函数调用一次。代理路径（socks5 / http / https）同样
+   * 持有底层 socket，一并透出。
+   *
+   * 可选：测试桩与部分降级路径可能没有真实 Socket。
+   */
+  close?: () => void | Promise<void>
 }
 
 const DEFAULT_TIMEOUT_MS = 8000
@@ -265,6 +283,13 @@ async function dialDirect(options: DialOptions): Promise<DialResult> {
       writable: socket.writable,
       via: 'direct',
       endpoint: `${options.hostname}:${options.port}`,
+      close: () => {
+        try {
+          void socket.close()
+        } catch {
+          /* 已关闭 */
+        }
+      },
     }
   } catch (err) {
     if (options.nat64 && isIpv4(options.hostname)) {
@@ -276,6 +301,13 @@ async function dialDirect(options: DialOptions): Promise<DialResult> {
           writable: socket.writable,
           via: 'nat64',
           endpoint: `${synthesized}:${options.port}`,
+      close: () => {
+        try {
+          void socket.close()
+        } catch {
+          /* 已关闭 */
+        }
+      },
         }
       }
     }
@@ -299,6 +331,13 @@ async function dialViaProxy(
       writable: socket.writable,
       via: 'direct',
       endpoint: `${proxy.host}:${proxy.port}`,
+      close: () => {
+        try {
+          void socket.close()
+        } catch {
+          /* 已关闭 */
+        }
+      },
     }
   }
 
@@ -344,6 +383,13 @@ async function dialViaProxy(
         writable: socket.writable,
         via: proxy.kind,
         endpoint: `${proxy.host}:${proxy.port}`,
+      close: () => {
+        try {
+          void socket.close()
+        } catch {
+          /* 已关闭 */
+        }
+      },
       }
     }
     const readable = await socks5Connect(socket.readable, socket.writable, options.hostname, options.port, {
@@ -355,6 +401,13 @@ async function dialViaProxy(
       writable: socket.writable,
       via: 'socks5',
       endpoint: `${proxy.host}:${proxy.port}`,
+      close: () => {
+        try {
+          void socket.close()
+        } catch {
+          /* 已关闭 */
+        }
+      },
     }
   } catch (err) {
     try {

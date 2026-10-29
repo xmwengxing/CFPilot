@@ -660,3 +660,46 @@ func TestSpeedDefaults(t *testing.T) {
 		t.Errorf("显式参数被默认值覆盖了：%+v", custom)
 	}
 }
+
+// TestPickWithDiversity 守护「按 /16 轮流取」的排序策略（对照 CLI 的 pickWithDiversity）。
+//
+// 背景：Cloudflare 好 IP 集中在少数 /16，直接取前 N 名会得到同段的一堆 IP，
+// 那段路由一劣化整批节点同时失效。轮流取能保住网段覆盖。
+func TestPickWithDiversity(t *testing.T) {
+	e := func(ip string, speed float64) Entry { return Entry{IP: ip, Speed: speed} }
+
+	t.Run("多个 /16 轮流取", func(t *testing.T) {
+		ranked := []Entry{
+			e("104.16.0.1", 9), e("104.16.0.2", 8), e("104.16.0.3", 7),
+			e("172.66.0.1", 6), e("172.66.0.2", 5), e("188.114.1.1", 4),
+		}
+		got := PickWithDiversity(ranked, 4)
+		want := []string{"104.16.0.1", "172.66.0.1", "188.114.1.1", "104.16.0.2"}
+		if len(got) != len(want) {
+			t.Fatalf("数量 = %d，期望 %d", len(got), len(want))
+		}
+		for i := range want {
+			if got[i].IP != want[i] {
+				t.Errorf("第 %d 项 = %s，期望 %s", i, got[i].IP, want[i])
+			}
+		}
+	})
+
+	t.Run("单个网段退化为直接截取", func(t *testing.T) {
+		ranked := []Entry{e("104.16.0.1", 9), e("104.16.0.2", 8), e("104.16.0.3", 7)}
+		got := PickWithDiversity(ranked, 2)
+		if len(got) != 2 || got[0].IP != "104.16.0.1" || got[1].IP != "104.16.0.2" {
+			t.Fatalf("结果不符：%+v", got)
+		}
+	})
+
+	t.Run("候选不足与 top<=0", func(t *testing.T) {
+		ranked := []Entry{e("104.16.0.1", 9), e("172.66.0.1", 8)}
+		if got := PickWithDiversity(ranked, 8); len(got) != 2 {
+			t.Errorf("候选不足时应全给，实际 %d", len(got))
+		}
+		if got := PickWithDiversity(ranked, 0); got != nil {
+			t.Errorf("top<=0 应返回 nil，实际 %+v", got)
+		}
+	})
+}

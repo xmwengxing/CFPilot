@@ -81,6 +81,11 @@ scan 选项:
   --speed-limit <n>      进入测速的候选数，默认 30
   --speed-bytes <n>      测速字节数，默认 5242880
   --timeout <ms>         阶段一超时，默认 1200
+  --speed-repeat <n>     每个候选重复测速次数，默认 1（>1 时取中位数并显示 ±抖动）
+  --uuid <uuid>          真实隧道校验用的 VLESS UUID（给了才会跑阶段二点五）
+  --trojan-password <pw> 真实隧道校验用的 Trojan 口令（与 --uuid 二选一）
+  --verify-target <host> 隧道校验访问的目标域名，默认 baidu.com
+  --no-verify-ws-path    跳过「真实 WS 路径 101」这项额外校验
   --seed <n>             采样随机种子。默认每次随机 —— 保证每次探索不同的 IP 子集
                           （写死种子会让每次跑都测同一批 IP，抽到劣质段就永远测不出好 IP）
                           显式指定则固定、结果可复现（排查 / 对比时用）

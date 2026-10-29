@@ -10,18 +10,36 @@
  */
 import { randomHex } from './util'
 
-const MAX_PROBE_BYTES = 15 * 1024 * 1024
+/** 匿名请求的测速上限（2026-10-29：15MB → 8MB，缩小被刷流量的暴露面） */
+const MAX_PROBE_BYTES = 8 * 1024 * 1024
+/** 带鉴权令牌时允许的上限（本地优选的 `--speed-bytes` 可以调到更大） */
+const MAX_PROBE_BYTES_TRUSTED = 15 * 1024 * 1024
 const DEFAULT_PROBE_BYTES = 2 * 1024 * 1024
 
 /**
- * 测速用的 64KB 填充块（模块级常量，只初始化一次）。
+ * 测速用的 64KB 数据块（模块级常量，只初始化一次）。
  *
- * 内容无关紧要（全是 'a'），关键是**永不修改** —— 所有并发测速连接共享同一份内存，
- * 用 `subarray()` 切出各自需要的长度。
+ * ## 为什么不是「填满 'a'」
+ *
+ * 早前这里 `buf.fill(0x61)` —— 64KB 全是重复字符，**压缩比可以到 1000:1**。
+ * 虽然响应头里已经写了 `Content-Encoding: identity`，但一旦经过某个会自行压缩的
+ * 中间层（或将来有人去掉那个头），测出来的「吞吐」就会变成压缩管道速度，
+ * 和真实代理流量（TLS 密文，基本不可压缩）完全不是一回事。
+ *
+ * 现在用**确定性伪随机块**：不可压缩、每次构建内容一致（便于对照复现），
+ * 且只在模块加载时算一次 —— 并发测速时所有连接共享同一份内存，
+ * 用 `subarray()` 切出各自需要的长度，零额外 CPU。
  */
 const PROBE_CHUNK: Uint8Array = (() => {
   const buf = new Uint8Array(64 * 1024)
-  buf.fill(0x61)
+  // xorshift32：确定性、无依赖、比 Math.random 快，且分布足够「不可压缩」
+  let x = 0x9e3779b9
+  for (let i = 0; i < buf.length; i++) {
+    x ^= x << 13
+    x ^= x >>> 17
+    x ^= x << 5
+    buf[i] = x & 0xff
+  }
   return buf
 })()
 
@@ -56,8 +74,11 @@ export async function handleEdgeProbe(request: Request): Promise<Response> {
 
   // 2) 真实域名下的流式下行测速
   const requested = Number.parseInt(url.searchParams.get('bytes') ?? '', 10)
+  // ⚠️ 令牌鉴权不在这里做：探针是数据面热路径，校验 uuid 要么读 KV（每次一次读），
+  // 要么依赖 env（KV 配置时不存在）。故本轮只收紧上限 —— 见 MAX_PROBE_BYTES 注释。
+  const maxBytes = MAX_PROBE_BYTES
   const bytes = Number.isFinite(requested) && requested > 0
-    ? Math.min(requested, MAX_PROBE_BYTES)
+    ? Math.min(requested, maxBytes)
     : DEFAULT_PROBE_BYTES
 
   // 测速块**模块级常量**：只初始化一次。

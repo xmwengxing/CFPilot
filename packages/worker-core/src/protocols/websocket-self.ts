@@ -146,7 +146,21 @@ export function recentDiagnostics(): Array<{
 }
 
 /** 首包等待窗口：客户端可能在 101 之后才发首个数据帧 */
-const FIRST_PACKET_TIMEOUT_MS = 80
+/**
+ * 握手截止时间：**首个字节到达**后，必须在这段时间内凑齐完整可认证的协议头。
+ *
+ * ## 为什么必须有
+ *
+ * 早前对「协议头不完整 / 认证失败」的处理是静默 return ——
+ * 连接既不关闭也不报错，一直占用着 isolate 的 WebSocket 与出站资源，
+ * 直到运行时自己超时。错误 UUID / 错误口令的客户端、
+ * 或者扫描器故意发半个头，都会命中这条路。
+ *
+ * 2 秒的依据：真实客户端（Xray / v2rayN / Clash / sing-box）都是
+ * 建立 WS 后**立即**发送完整协议头，实测 < 100ms；
+ * 给 2 秒足够覆盖慢网与分帧，又不至于让异常连接长期占用资源。
+ */
+const HANDSHAKE_DEADLINE_MS = 2000
 
 interface WsTarget {
   command: number
@@ -230,7 +244,14 @@ export async function handleWebSocket(
   let established = false
   let dialed: DialResult | null = null
   let writer: WritableStreamDefaultWriter<Uint8Array> | null = null
-  let firstPacketTimer: ReturnType<typeof setTimeout> | null = null
+  /** 握手截止定时器（**唯一一个**：绝不在每帧里新建） */
+  let handshakeTimer: ReturnType<typeof setTimeout> | null = null
+  /** 下行 reader（清理时需要 cancel，否则读任务挂到运行时超时） */
+  let downReader: ReadableStreamDefaultReader<Uint8Array> | null = null
+  /** 是否已经进入关闭流程（closeWith 置位，用于让时间线后续步骤短路） */
+  let closed = false
+  /** 清理是否已执行过（幂等：客户端断开 / 读错误 / 拨号超时都可能抢先触发） */
+  let cleanupDone = false
   /**
    * 当前会话的目标站信息。
    *
@@ -269,28 +290,62 @@ export async function handleWebSocket(
    * 这个差异只在真机上暴露，很容易误判成「出站一直没结束」。
    */
   const closeWith = (code: number, reason: string): void => {
+    closed = true
     try {
       server.close(code, truncateCloseReason(reason))
     } catch {
       /* 已关闭 */
     }
+    cleanup()
   }
 
+  /**
+   * 统一清理：**幂等**，无论谁先触发（客户端断开 / 读错误 / 拨号超时 / 正常结束）
+   * 都只真正执行一次。
+   *
+   * 四件事缺一不可：
+   *  1. 清定时器（握手截止 / 下行静默）；
+   *  2. 取消下行 reader —— 只 close writable 的话，挂起的 `reader.read()`
+   *     要等运行时超时才回收；
+   *  3. 关闭底层 Socket —— 优先用 `DialResult.close()`（`socket.close()` 同时关读写两端，
+   *     立即释放 Workers 的并发连接槽位），没有则退回 `writable.close()`；
+   *  4. 释放重放留存缓冲。
+   */
   const cleanup = (): void => {
+    if (cleanupDone) return
+    cleanupDone = true
     clearRetained()
-    if (firstPacketTimer) {
-      clearTimeout(firstPacketTimer)
-      firstPacketTimer = null
+    if (handshakeTimer) {
+      clearTimeout(handshakeTimer)
+      handshakeTimer = null
     }
     if (stallTimer) {
       clearTimeout(stallTimer)
       stallTimer = null
     }
-    if (dialed) {
+    if (downReader) {
+      const reader = downReader
+      downReader = null
       try {
-        void dialed.writable.close()
+        void reader.cancel()
       } catch {
-        /* 已关闭 */
+        /* 已释放 */
+      }
+    }
+    if (dialed) {
+      const close = dialed.close
+      if (close) {
+        try {
+          void close()
+        } catch {
+          /* 已关闭 */
+        }
+      } else {
+        try {
+          void dialed.writable.close()
+        } catch {
+          /* 已关闭 */
+        }
       }
     }
   }
@@ -343,6 +398,7 @@ export async function handleWebSocket(
   const pumpDown = async (): Promise<void> => {
     if (!dialed) return
     const reader = dialed.readable.getReader()
+    downReader = reader
     // 建连后启动静默检测：目标是「TCP 通了但收不到数据」的假活场景
     if (stallTimer) clearTimeout(stallTimer)
     stallTimer = setTimeout(() => {
@@ -380,6 +436,7 @@ export async function handleWebSocket(
         clearTimeout(stallTimer)
         stallTimer = null
       }
+      if (downReader === reader) downReader = null
       closeWith(1000, 'done')
     }
   }
@@ -439,22 +496,48 @@ export async function handleWebSocket(
    * 改成先回响应头后，客户端立即判定「入站已建立」，
    * 出站失败则用 WS close code 1011 + 具体原因告知（分级诊断不受影响）。
    */
-  const establish = async (isRetry: boolean): Promise<void> => {
+  const clearHandshakeTimer = (): void => {
+    if (handshakeTimer) {
+      clearTimeout(handshakeTimer)
+      handshakeTimer = null
+    }
+  }
+
+  /**
+   * 握手截止到点：再解析一次（截止前可能刚好凑齐），仍失败就**关闭连接**。
+   *
+   * 关闭是关键 —— 早前这里只是 return，于是「协议头不完整 / 认证失败」的
+   * 连接既不报错也不释放，一直挂着占资源。
+   */
+  const onHandshakeDeadline = async (): Promise<void> => {
+    if (closed || established) return
+    if (parseTarget(buffer)) {
+      await establish()
+      return
+    }
+    closeWith(
+      1008,
+      buffer.byteLength === 0 ? '握手超时：未收到协议头' : '握手超时：协议头不完整或认证失败'
+    )
+  }
+
+  const establish = async (): Promise<void> => {
+    if (closed || established) return
     const parsed = parseTarget(buffer)
     if (!parsed) {
-      // 数据还不够：等一小会儿再看一次（客户端可能分帧发送）
-      if (!isRetry) {
-        firstPacketTimer = setTimeout(() => {
-          firstPacketTimer = null
-          void establish(true).catch((err) => closeWith(1011, String(err)))
-        }, FIRST_PACKET_TIMEOUT_MS)
+      // 数据还不够（客户端可能分帧发送）：登记**唯一一个**截止定时器。
+      //
+      // ⚠️ 不能每帧都 setTimeout：旧定时器不会被清掉，会累积出多个
+      // 并发的 establish/onHandshakeDeadline，最终互相踩状态。
+      if (buffer.byteLength > 0 && !handshakeTimer) {
+        handshakeTimer = setTimeout(() => {
+          handshakeTimer = null
+          void onHandshakeDeadline().catch((err) => closeWith(1011, String(err)))
+        }, HANDSHAKE_DEADLINE_MS)
       }
       return
     }
-    if (firstPacketTimer) {
-      clearTimeout(firstPacketTimer)
-      firstPacketTimer = null
-    }
+    clearHandshakeTimer()
     if (established) return
     established = true
     // 同步到外层作用域：反代重拨（redialViaRelay）需要它做诊断记录
@@ -549,7 +632,11 @@ export async function handleWebSocket(
     // buffer 里可能不只有首帧的负载——拨号期间到达的后续帧也会暂存进
     // buffer（见 message 处理器里 `if (!writer)` 分支），
     // 因此这里必须整段补写，而不是只写第一帧。
-    const payload = buffer.byteLength > parsed.headerLength ? buffer.slice(parsed.headerLength) : new Uint8Array(0)
+    // 用 subarray 而不是 slice：这里只是给「协议头之后的负载」一个视图，
+    // 复制一遍纯属浪费（大首包 / TLS ClientHello 有几 KB）。
+    // 视图指向的 buffer 紧接着会被置空，retain 留存的是视图本身，重放时会真正复制。
+    const payload =
+      buffer.byteLength > parsed.headerLength ? buffer.subarray(parsed.headerLength) : new Uint8Array(0)
     if (payload.byteLength > 0) {
       // 先留存再写：直连可能假活，首字节确认前上行必须可重放
       retain(payload)
@@ -701,7 +788,7 @@ export async function handleWebSocket(
           closeWith(1009, '握手头超过 64KB')
           return
         }
-        await establish(false)
+        await establish()
         return
       }
       // ⚠️ 拨号期间（established 已置位但 writer 未就绪）到达的数据**不能丢**：
@@ -736,7 +823,7 @@ export async function handleWebSocket(
   // 0-RTT：early data 里可能已是完整协议头，主动触发 establish ——
   // 客户端在收到下行前不会再发帧，不主动触发会白等到超时。
   if (buffer.byteLength > 0) {
-    void establish(false).catch((err) => closeWith(1011, String(err)))
+    void establish().catch((err) => closeWith(1011, String(err)))
   }
 
   // Node（vitest）的 Response 不接受 101 状态码，只有 workerd 支持；

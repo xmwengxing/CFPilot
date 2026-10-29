@@ -16,6 +16,36 @@ import { relay } from '../budget'
 
 import { dial } from '../outbound/dial'
 
+/**
+ * XHTTP 请求头读取截止时间。
+ *
+ * ## 为什么要
+ *
+ * `parseVless` 从请求体里按需读取，**本身没有超时**：
+ * 客户端把 POST body 停在不完整的 VLESS 头上（或扫描器直接发个半截 body），
+ * 这个请求就会一直挂到运行时超时才回收 —— 期间占着一个 isolate 与一条子请求。
+ *
+ * 2 秒与 WebSocket 入站的握手截止时间保持一致（真实客户端都是立即发完整头）。
+ */
+const HEADER_DEADLINE_MS = 2000
+
+/** 给一个 Promise 加截止时间；超时返回 `null` */
+function withDeadline<T>(task: Promise<T>, ms: number): Promise<T | null> {
+  return new Promise<T | null>((resolve) => {
+    const timer = setTimeout(() => resolve(null), ms)
+    task.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      () => {
+        clearTimeout(timer)
+        resolve(null)
+      }
+    )
+  })
+}
+
 export interface XhttpResult {
   response: Response
   dialResult: DialResult
@@ -51,15 +81,23 @@ export async function handleXhttp(
   }
 
   const stream = new ByteStream(body)
-  const parsed = await parseVless(stream, config.uuid)
+  const parsed = await withDeadline(parseVless(stream, config.uuid), HEADER_DEADLINE_MS)
   if (!parsed) {
+    // 超时或解析失败：把请求体取消掉，别让底层流一直挂着
+    try {
+      void body.cancel().catch(() => {})
+    } catch {
+      /* 已关闭 */
+    }
     return new Response('VLESS 头解析失败', { status: 400 })
   }
   if (parsed.header.command !== VLESS_COMMAND_TCP) {
     return new Response('XHTTP 暂不支持 UDP', { status: 400 })
   }
 
-  const dialResult = await dial({
+  let dialResult: DialResult
+  try {
+    dialResult = await dial({
     hostname: parsed.header.hostname,
     port: parsed.header.port,
     proxies,
@@ -85,14 +123,31 @@ export async function handleXhttp(
         `XHTTP 出站失败（${failure.candidate}）：${failure.message}`
       )
     },
-  })
+    })
+  } catch (err) {
+    // 出站失败此前会抛到最外层、变成无信息的 500。
+    // 这里转成受控响应（不暴露目标地址），并记进诊断端点。
+    recordXhttpDiagnostics(
+      `${parsed.header.hostname}:${parsed.header.port}`,
+      { kind: 'dial', message: String(err), candidate: 'all' },
+      `XHTTP 出站全部失败：${String(err)}`
+    )
+    try {
+      void body.cancel().catch(() => {})
+    } catch {
+      /* 已关闭 */
+    }
+    return new Response('出站不可用', { status: 502 })
+  }
 
   // 上行：请求体剩余部分 → 出站
   //
   // ⚠️ `closeTarget: false` —— 关闭 socket 的写流等于关闭整个 TCP 连接，
   // 目标站会收到 RST 而来不及把响应发回来。
   // 对比：WebSocket 入站路径只 releaseLock 不 close，是正常的。
-  void relay(parsed.payload, dialResult.writable, undefined, false)
+  void relay(parsed.payload, dialResult.writable, undefined, false).catch(() => {
+    /* 客户端取消 / 出站已关闭：写入失败属预期，不构成未处理异常 */
+  })
   // 下行：出站 → 响应体，由下方 combined 流**直接**从 dialResult.readable 拉取。
   // 此前还经过一层 TransformStream + relay 中转，同一份下行在 Worker 内存里
   // 被搬运两次（性能方案 三.3）；去掉后少一次拷贝与一对流控制器。
@@ -119,6 +174,14 @@ export async function handleXhttp(
   // 后续下行数据在 `pull` 里按需读取。
   let headerSent = false
   let downReader: ReadableStreamDefaultReader<Uint8Array> | null = null
+  /**
+   * 客户端是否已经取消。
+   *
+   * pull 是异步的：cancel 之后仍可能有 pending 的 read() 返回/抛错，
+   * 那时再去碰 controller 会抛 `ERR_INVALID_STATE`（流已关闭）——
+   * 表现为「测试全绿但进程报未处理异常」，真机上则是日志噪音。
+   */
+  let cancelled = false
 
   const combined = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -127,25 +190,52 @@ export async function handleXhttp(
       headerSent = true
     },
     async pull(controller) {
-      if (!headerSent) return
+      if (cancelled || !headerSent) return
       if (!downReader) downReader = dialResult.readable.getReader()
       try {
         const { done, value } = await downReader.read()
+        if (cancelled) return
         if (done) {
           controller.close()
           return
         }
         if (value && value.byteLength > 0) controller.enqueue(value)
-      } catch {
+      } catch (err) {
+        if (cancelled) return
+        // 之前这里 controller.close() —— 客户端会把「异常截断」当成正常 EOF，
+        // 既不能重试也无法区分。现在把错误传给流，同时保留 Socket 关闭。
+        if (dialResult.close) {
+          try {
+            void dialResult.close()
+          } catch {
+            /* 已关闭 */
+          }
+        }
         try {
-          controller.close()
+          controller.error(err)
         } catch {
           /* 已关闭 */
         }
       }
     },
     cancel(reason) {
-      void dialResult.readable.cancel(reason)
+      cancelled = true
+      // 客户端断开（Xray 取消请求）时：取消下行读取，并**关闭底层 Socket**。
+      //
+      // 只 cancel readable 的话，TCP 连接仍然开着 —— 在 Workers 上它会一直占着
+      // 「单请求 6 条并发出站」里的一个槽位，同 isolate 的其它请求更容易撞上限。
+      try {
+        void dialResult.readable.cancel(reason)
+      } catch {
+        /* 已取消 */
+      }
+      if (dialResult.close) {
+        try {
+          void dialResult.close()
+        } catch {
+          /* 已关闭 */
+        }
+      }
     },
   })
 

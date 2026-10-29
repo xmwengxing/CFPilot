@@ -873,6 +873,8 @@ export function measureThroughput(options: ThroughputOptions): Promise<Throughpu
 
 /** 探针端点测速参数 */
 export interface ProbeThroughputOptions {
+  /** 探针鉴权令牌（= uuid 或其前 8 位）：仅用于大体积下载 */
+  token?: string
   ip: string
   port: number
   /** 数据面域名（同时作为 TLS SNI 与 Host） */
@@ -931,5 +933,134 @@ export async function measureProbeThroughput(
     // /__edge_probe 的独有标记：少了它就不是「我们自己的探针端点」
     requiredHeader: 'x-probe-bytes',
     minBytes: 32 * 1024,
+  })
+}
+
+/** `verifyTunnel` 的参数 */
+export interface TunnelVerifyOptions {
+  ip: string
+  port: number
+  host: string
+  wsPath: string
+  uuid?: string
+  trojanPassword?: string
+  targetHost?: string
+  targetPort?: number
+  timeoutMs?: number
+}
+
+/** `verifyTunnel` 的结果 */
+export interface TunnelVerifyResult {
+  ok: boolean
+  stage?: 'handshake' | 'protocol' | 'data'
+  latencyMs: number
+  firstBytes?: string
+  error?: string
+}
+
+/** 构造 VLESS 隧道首包（协议头 + HTTP 请求） */
+export function buildVlessTunnelPayload(uuid: string, targetHost: string, targetPort: number, request: string): Buffer | null {
+  const clean = uuid.replace(/-/g, '')
+  if (!/^[0-9a-fA-F]{32}$/.test(clean)) return null
+  const hostBuf = Buffer.from(targetHost, 'utf8')
+  return Buffer.concat([
+    Buffer.from([0x00]),
+    Buffer.from(clean, 'hex'),
+    Buffer.from([0x00, 0x01, (targetPort >> 8) & 0xff, targetPort & 0xff, 0x02, hostBuf.length]),
+    hostBuf,
+    Buffer.from(request, 'utf8'),
+  ])
+}
+
+/** 构造 Trojan 隧道首包（sha224 口令 + CRLF + CONNECT + 域名 + 端口 + CRLF + 请求） */
+export function buildTrojanTunnelPayload(password: string, targetHost: string, targetPort: number, request: string): Buffer {
+  const digest = crypto.createHash('sha224').update(password).digest('hex')
+  const hostBuf = Buffer.from(targetHost, 'utf8')
+  return Buffer.concat([
+    Buffer.from(digest + '\r\n', 'ascii'),
+    Buffer.from([0x01, 0x03, hostBuf.length]),
+    hostBuf,
+    Buffer.from([(targetPort >> 8) & 0xff, targetPort & 0xff]),
+    Buffer.from('\r\n', 'ascii'),
+    Buffer.from(request, 'utf8'),
+  ])
+}
+
+/** 建连用的 HTTP 请求头 */
+function tunnelUpgradeRequest(host: string, wsPath: string, key: string): string {
+  return ['GET ' + wsPath + ' HTTP/1.1', 'Host: ' + host, 'Upgrade: websocket', 'Connection: Upgrade', 'Sec-WebSocket-Key: ' + key, 'Sec-WebSocket-Version: 13', 'User-Agent: ' + USER_AGENT, '', ''].join('\r\n')
+}
+
+/** 要访问的目标站请求（随便取个能回数据的路径即可） */
+function tunnelTargetRequest(targetHost: string): string {
+  return 'GET / HTTP/1.1\r\nHost: ' + targetHost + '\r\nUser-Agent: ' + USER_AGENT + '\r\nConnection: close\r\n\r\n'
+}
+
+export function verifyTunnel(options: TunnelVerifyOptions): Promise<TunnelVerifyResult> {
+  const { ip, port, host, wsPath, uuid, trojanPassword, targetHost = 'baidu.com', targetPort = 80, timeoutMs = 8000 } = options
+  const payload = uuid
+    ? buildVlessTunnelPayload(uuid, targetHost, targetPort, tunnelTargetRequest(targetHost))
+    : trojanPassword
+      ? buildTrojanTunnelPayload(trojanPassword, targetHost, targetPort, tunnelTargetRequest(targetHost))
+      : null
+  if (!payload) return Promise.resolve({ ok: false, stage: 'protocol', latencyMs: 0, error: '缺少 uuid / trojanPassword' })
+  return new Promise((resolve) => {
+    const started = Date.now()
+    const key = crypto.randomBytes(16).toString('base64')
+    let settled = false
+    let handshakeDone = false
+    let buf: Buffer = Buffer.alloc(0)
+    const finish = (r: Omit<TunnelVerifyResult, 'latencyMs'>): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      try { socket.destroy() } catch { /* 已销毁 */ }
+      resolve({ ...r, latencyMs: Date.now() - started })
+    }
+    const socket = tls.connect({ host: ip, port, servername: host, rejectUnauthorized: false, ALPNProtocols: ['http/1.1'] }, () => {
+      socket.write(tunnelUpgradeRequest(host, wsPath, key))
+    })
+    const timer = setTimeout(() => {
+      finish({ ok: false, stage: handshakeDone ? 'data' : 'handshake', error: handshakeDone ? '协议已发出但没有回包' : 'WS 握手超时' })
+    }, timeoutMs)
+    socket.on('error', (err: Error) => finish({ ok: false, stage: handshakeDone ? 'data' : 'handshake', error: err.message }))
+    socket.setTimeout(timeoutMs, () => finish({ ok: false, stage: handshakeDone ? 'data' : 'handshake', error: '连接超时' }))
+    socket.on('data', (chunk: Buffer) => {
+      buf = Buffer.concat([buf, chunk])
+      if (!handshakeDone) {
+        const lineEnd = buf.indexOf('\r\n\r\n')
+        if (lineEnd < 0) {
+          if (buf.length > 8192) finish({ ok: false, stage: 'handshake', error: '响应头异常' })
+          return
+        }
+        const head = buf.slice(0, lineEnd).toString('latin1')
+        const status = Number((/^HTTP\/1\.[01]\s+(\d{3})/.exec(head.split('\r\n')[0] ?? '') ?? [])[1] ?? 0)
+        buf = buf.subarray(lineEnd + 4)
+        if (status !== 101) {
+          finish({ ok: false, stage: 'handshake', error: 'HTTP ' + status })
+          return
+        }
+        handshakeDone = true
+        socket.write(encodeWsFrame(payload, 0x02))
+      }
+      for (;;) {
+        const decoded = decodeWsFrame(buf)
+        if (!decoded) break
+        buf = decoded.rest
+        const { opcode, payload: data } = decoded.frame
+        if (opcode === 8) {
+          const code = data.length >= 2 ? data.readUInt16BE(0) : 1005
+          finish({ ok: false, stage: 'protocol', error: 'WS 关闭（code ' + code + '）' })
+          return
+        }
+        if ((opcode === 1 || opcode === 2) && data.length > 0) {
+          const body = uuid && data.length >= 2 && data[0] === 0x00 && data[1] === 0x00 ? data.subarray(2) : data
+          if (body.length > 0) {
+            finish({ ok: true, firstBytes: body.subarray(0, 16).toString('latin1') })
+            return
+          }
+        }
+      }
+    })
   })
 }

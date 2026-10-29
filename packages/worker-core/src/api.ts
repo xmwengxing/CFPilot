@@ -142,7 +142,14 @@ export async function handleApi(
       .map((line) => line.trim())
       .filter((line) => line.length > 0)
       .join('\n')
-    await store.put(LOCAL_IPS_KEY, cleaned)
+    // ⚠️ 先读再比，内容没变就不写。
+    //
+    // KV 免费版配额是 **1000 次写/天**，而「一键优选」可能一天跑好几次
+    // （托盘菜单、手册扫描、多实例）。同一批结果重复 put 纯属浪费配额，
+    // 写配额耗尽后「保存配置 / 回填」会直接 500。
+    const previous = await store.get(LOCAL_IPS_KEY)
+    const changed = previous !== cleaned
+    if (changed) await store.put(LOCAL_IPS_KEY, cleaned)
 
     // 覆盖：清空面板手填的「手动优选 IP」，让订阅里只有本次回填的结果
     let clearedManual = false
@@ -248,7 +255,8 @@ export async function handleApi(
     if (cleaned) {
       await store.put(LOCAL_IPS_KEY, cleaned)
     } else {
-      await store.delete(LOCAL_IPS_KEY)
+      // delete 同样占一次写配额：本来就没有才跳过
+      if ((await store.get(LOCAL_IPS_KEY)) !== null) await store.delete(LOCAL_IPS_KEY)
     }
     return json({ ok: true, count: cleaned ? cleaned.split('\n').length : 0 })
   }

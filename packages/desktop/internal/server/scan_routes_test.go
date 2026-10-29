@@ -132,6 +132,43 @@ func TestScanCountries(t *testing.T) {
 	}
 }
 
+// 分组（亚洲组 / 美国组）要随地区列表一起返回，否则界面按钮一直置灰。
+func TestScanCountryGroups(t *testing.T) {
+	s, base := newTestServer(t)
+	cookie := loginCookie(t, s, base)
+
+	code, body := getJSON(t, base+"/api/scan/countries", cookie)
+	if code != http.StatusOK {
+		t.Fatalf("应 200，实际 %d", code)
+	}
+	groups, ok := body["groups"].(map[string]any)
+	if !ok {
+		t.Fatalf("应有 groups 字段，实际 %v", body)
+	}
+
+	asia, ok := groups["ASIA"].([]any)
+	if !ok || len(asia) == 0 {
+		t.Fatalf("亚洲组应有机房列表，实际 %v", groups["ASIA"])
+	}
+	asiaSet := map[string]bool{}
+	for _, item := range asia {
+		asiaSet[str(item)] = true
+	}
+	for _, want := range []string{"HKG", "NRT", "SIN"} {
+		if !asiaSet[want] {
+			t.Errorf("亚洲组缺少机房 %s", want)
+		}
+	}
+	if asiaSet["LAX"] || asiaSet["SYD"] {
+		t.Error("亚洲组不应包含美国 / 澳洲机房")
+	}
+
+	us, ok := groups["US"].([]any)
+	if !ok || len(us) == 0 {
+		t.Fatalf("美国组应有机房列表，实际 %v", groups["US"])
+	}
+}
+
 // 环境检测：没代理时应给出「可信」的结论。
 func TestScanEnvCheck(t *testing.T) {
 	s, base := newTestServer(t)

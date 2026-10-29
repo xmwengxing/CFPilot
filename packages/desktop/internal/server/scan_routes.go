@@ -716,13 +716,19 @@ func orDash(s string) string {
 	return s
 }
 
-// handleScanCountries 返回支持的地区列表。
+// handleScanCountries 返回支持的地区列表与分组。
 //
 // 数据来源：Cloudflare 的常用机房代码。
-// 与 Electron 版的 countries.ts 保持一致。
+// groups 是「亚洲组 / 美国组」按钮用的机房码集合（由 scan 包的分组表展开），
+// 界面只负责按码选中，不自己维护第二份机房表。
 func (s *Server) handleScanCountries(w http.ResponseWriter, r *http.Request) {
+	groups := make(map[string][]string, 4)
+	for _, name := range scan.RegionGroupNames() {
+		groups[name] = scan.RegionGroupColos(name)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"countries": supportedCountries,
+		"groups":    groups,
 	})
 }
 

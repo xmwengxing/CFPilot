@@ -47,6 +47,7 @@ const contracts = [
   ['detectScanPath', 'path', '界面读 result.path'],
   ['checkEnvironment', 'clean', '界面判 result.clean'],
   ['checkEnvironment', 'findings', '界面读 result.findings'],
+  ['listScanCountryGroups', 'groups', '界面读分组机房码（亚洲组/美国组按钮）'],
 
   // ---- 会话（2026-10-26 的另一个严重故障）----
   ['__session', null, 'adapter 必须调用 /__session 建立会话'],

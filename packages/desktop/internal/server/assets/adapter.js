@@ -609,6 +609,25 @@
         })
     },
 
+    listScanCountryGroups: function () {
+      // 后端返回 { countries: [...], groups: { ASIA: [机房码], US: [机房码] } }。
+      // 这里只取 groups：界面的「亚洲组 / 美国组」按钮按机房码选中，
+      // 机房表只在后端维护一份。
+      // 结构不符时返回 {} —— 界面据此把分组按钮置灰，手动多选不受影响。
+      return get('/api/scan/countries')
+        .then(function (r) {
+          var g = (r && r.groups) || {}
+          var out = {}
+          Object.keys(g).forEach(function (k) {
+            if (Array.isArray(g[k])) out[k] = g[k]
+          })
+          return out
+        })
+        .catch(function () {
+          return {}
+        })
+    },
+
     checkEnvironment: function () {
       // ⚠️ 界面判断的是 `result.clean`（布尔），后端返回的是
       // { findings: [{kind, message, level}] } —— 缺 clean 字段，

@@ -1033,6 +1033,59 @@
     }
   }
 
+  /**
+   * 「机房国家」栏的三个筛选器：取消选择 / 亚洲组 / 美国组。
+   *
+   * 分组的机房码由后端给出（`listScanCountryGroups`），
+   * 界面不维护第二份机房表 —— 两份表一漂移，按钮就会选中不存在的机房。
+   * 拿不到分组（旧外壳 / 后端异常）时两个分组按钮保持置灰，手动多选照常。
+   *
+   * 两个分组是**叠加**选中：点「亚洲组」再点「美国组」= 两组都选上，
+   * 与逐个按住 Ctrl 多选等价。
+   */
+  async function initCountryFilters(): Promise<void> {
+    const sel = $sel('optCountries')
+    const clearBtn = document.getElementById('btnCountryClear')
+    const groupBtns: Array<{ el: HTMLElement | null; key: string; label: string }> = [
+      { el: document.getElementById('btnCountryAsia'), key: 'ASIA', label: '亚洲组' },
+      { el: document.getElementById('btnCountryUS'), key: 'US', label: '美国组' },
+    ]
+
+    // 取消选择：清空即「不选 = 全量」
+    clearBtn?.addEventListener('click', () => {
+      for (const opt of Array.from(sel.options)) opt.selected = false
+      log('已取消机房国家选择（不选 = 全量测试）')
+    })
+
+    let groups: Record<string, string[]> = {}
+    try {
+      groups = (await window.cfpilot.listScanCountryGroups()) || {}
+    } catch {
+      groups = {}
+    }
+
+    for (const g of groupBtns) {
+      const codes = groups[g.key] ?? []
+      if (!g.el || codes.length === 0) continue
+      g.el.removeAttribute('disabled')
+      g.el.addEventListener('click', () => {
+        const wanted = new Set(codes)
+        let hit = 0
+        for (const opt of Array.from(sel.options)) {
+          if (wanted.has(opt.value)) {
+            opt.selected = true
+            hit++
+          }
+        }
+        if (hit === 0) {
+          log('国家列表不可用，无法按分组选择', 'warn')
+          return
+        }
+        log(`已选中${g.label} ${hit} 个机房（可与另一组同时选）`, 'ok')
+      })
+    }
+  }
+
   function renderScanResult(payload: {
     entries: Array<{ ip: string; port: number; colo: string; latency: number; tlsMs: number; speed: number }>
     copyable: string
@@ -1923,6 +1976,8 @@
     })
     // 国家列表：不 await，避免拖慢界面；失败也不影响其它功能
     void runStep('国家列表', fillCountryOptions)
+    // 分组筛选按钮（取消选择 / 亚洲组 / 美国组）：与国家列表各自独立
+    void runStep('国家分组筛选', initCountryFilters)
 
     log('CFPilot GUI 已就绪')
     log('凭据只保存在本机，不会上传')

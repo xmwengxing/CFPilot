@@ -85,6 +85,40 @@ export const COUNTRY_NAMES: Record<string, string> = {
   MX: '墨西哥',
 }
 
+/**
+ * 区域分组：界面上的「亚洲组 / 美国组」按钮与 CLI 菜单、`--countries` 分组关键字共用。
+ *
+ * 分组是**国家代码的集合**，不是机房码集合 —— 机房码由 COUNTRY_COLOS 展开，
+ * 避免两处各写一份机房表。
+ *
+ * 与 Go 版 `packages/desktop/internal/scan/countries.go` 的 `regionGroups` 保持同源，
+ * 修改规则同 COUNTRY_COLOS：**两边必须同时改**。
+ *
+ * ## 亚洲组包含哪些国家
+ *
+ * 按地理口径取「亚洲国家」：东亚 / 东南亚 / 南亚 / 西亚（阿联酋、以色列）。
+ * 不含大洋洲（AU / NZ），也不含横跨欧亚、机房落在欧洲一侧的
+ * TR（伊斯坦布尔）与 RU（莫斯科）。
+ */
+export const REGION_GROUPS: Record<string, readonly string[]> = {
+  ASIA: ['HK', 'TW', 'JP', 'KR', 'SG', 'MY', 'TH', 'VN', 'ID', 'PH', 'IN', 'AE', 'IL'],
+  US: ['US'],
+}
+
+/** 分组关键字 → 中文名（菜单与界面文案共用） */
+export const REGION_GROUP_NAMES: Record<string, string> = {
+  ASIA: '亚洲组',
+  US: '美国组',
+}
+
+/** 是否是分组关键字（不是国家代码） */
+export function isRegionGroup(code: string): boolean {
+  const key = String(code ?? '').trim().toUpperCase()
+  if (!Object.prototype.hasOwnProperty.call(REGION_GROUPS, key)) return false
+  // US 既是分组名也是国家码：展开结果与它自身一致，仍按分组处理
+  return true
+}
+
 /** 机房三字码 → 国家代码（模块加载时构建一次） */
 const coloToCountry = new Map<string, string>()
 for (const [country, colos] of Object.entries(COUNTRY_COLOS)) {
@@ -104,14 +138,28 @@ export function isKnownCountry(code: string): boolean {
 /** 全部受支持的国家代码（按定义顺序） */
 export const SUPPORTED_COUNTRIES: readonly string[] = Object.keys(COUNTRY_COLOS)
 
-/** 把用户输入的国家列表规范化：大写、去重、只保留受支持的代码 */
+/**
+ * 把用户输入的国家列表规范化：大写、去重、只保留受支持的代码。
+ *
+ * 分组关键字（`ASIA` / `US`）在这里展开成该组的全部国家代码，
+ * 所以下游拿到的永远是国家码，不需要再认识分组。
+ * 同时写分组和组内国家（如 `ASIA,HK`）会自动去重。
+ */
 export function normalizeCountryFilter(input: readonly string[] | undefined): string[] {
   if (!Array.isArray(input)) return []
   const out: string[] = []
+  const push = (code: string): void => {
+    if (code && !out.includes(code)) out.push(code)
+  }
   for (const raw of input) {
     const code = String(raw ?? '').trim().toUpperCase()
-    if (!code || out.includes(code)) continue
-    if (isKnownCountry(code)) out.push(code)
+    if (!code) continue
+    // 分组关键字 → 展开成组内国家（组内只含国家码，不会递归）
+    if (isRegionGroup(code)) {
+      for (const member of REGION_GROUPS[code] ?? []) push(String(member).toUpperCase())
+      continue
+    }
+    if (isKnownCountry(code)) push(code)
   }
   return out
 }

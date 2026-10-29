@@ -6,7 +6,7 @@ import type { ParsedArgs } from '../shared/args'
 import { c, box, status } from './ui'
 import { ask, confirm, multiSelect, select } from './prompt'
 import { loadConfig, saveConfig, resolveToken } from './store'
-import { SUPPORTED_COUNTRIES } from '../scan/countries'
+import { SUPPORTED_COUNTRIES, REGION_GROUPS, REGION_GROUP_NAMES } from '../scan/countries'
 import { CloudflareClient } from '../deploy/cf-api'
 import { findAccountByKv } from '../deploy/account-resolve'
 import { listCfPilotNamespaces } from '../deploy/pages-deploy'
@@ -136,11 +136,27 @@ export async function menuScan(): Promise<void> {
   const wantFilter = await confirm('要按机房地区筛选吗？（不筛选跑全量）', false)
   let countries: string[] = []
   if (wantFilter) {
+    // 与桌面版「机房国家」栏的三个筛选器一一对应：
+    // 取消选择 / 亚洲组 / 美国组。分组只当关键字往下传，
+    // 在 normalizeCountryFilter 里展开成国家码，保证与 `--countries` 行为一致。
+    const CLEAR = '__CLEAR__'
+    const GROUP = 'GROUP:'
     const picked = await multiSelect(
       '选择地区（空格切换，Enter 确认）',
-      SUPPORTED_COUNTRIES.map((code) => ({ label: code, value: code }))
+      [
+        { label: '取消选择（不选 = 全部）', value: CLEAR },
+        ...Object.entries(REGION_GROUP_NAMES).map(([key, name]) => ({
+          label: name,
+          hint: `展开为 ${REGION_GROUPS[key]?.length ?? 0} 个国家`,
+          value: GROUP + key,
+        })),
+        ...SUPPORTED_COUNTRIES.map((code) => ({ label: code, value: code })),
+      ]
     )
-    countries = picked
+    // 「取消选择」与其它项互斥：选了它就是不筛选
+    countries = picked.includes(CLEAR)
+      ? []
+      : picked.map((v) => (v.startsWith(GROUP) ? v.slice(GROUP.length) : v))
   }
 
   const sampleStr = await ask('采样数量', { fallback: '6556' })

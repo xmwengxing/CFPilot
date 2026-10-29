@@ -131,7 +131,7 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 		if sample <= 0 {
 			sample = 500
 		}
-		candidates = scan.SampleCandidates(scan.SampleOptions{Count: sample})
+		candidates = scan.SampleCandidates(scan.SampleOptions{Count: sample, Neutral: len(req.Countries) > 0})
 	}
 	if len(candidates) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "未能生成候选 IP"})

@@ -71,6 +71,9 @@ async function resolveCandidatesFromArgs(args: ParsedArgs): Promise<string[]> {
   }
 
   return resolveCandidates({
+    // 选国家时**自动中性采样**：采样发生在阶段一之前、那时还不知道机房，
+    // 若某国家的 IP 集中在低权重网段，候选会被压少 → 可能「扫了几千个还是找不到 HKG/NRT」。
+    neutral: args.flags['neutral-sampling'] !== undefined || flagList(args, 'countries').length > 0,
     sample: flagNumber(args, 'sample', 6556),
     cidr: flagList(args, 'cidr'),
     // ⚠️ 不传 seed = 每次随机（默认）。只有用户显式给了 --seed 才固定，

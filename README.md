@@ -411,7 +411,6 @@ WebSocket close frame 装不下这些（且超长会被边缘静默丢弃），�
 
 ```text
 CFPilot/
-├── AGENTS.md              # 开发规范（本地文件，不入库）
 ├── CFPilot-control.zip    # 控制面 pages 包
 ├── CFPilot-dataplane.zip  # 数据面 pages 包
 └── packages/

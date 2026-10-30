@@ -29,7 +29,14 @@ jobs:
     # Linux runner 更快也更便宜，且能顺手在容器里实跑 Linux 产物。
     runs-on: ubuntu-latest
     steps:
+      # ⚠️ 必须完整检出（fetch-depth: 0），否则两个回退来源都是坏的：
+      #   1. `git tag -l --format='%(contents:body)'` 拿不到 tag 对象，
+      #      浅克隆下 tag 退化成轻量引用，%(contents) 返回的是**提交说明**，
+      #      于是 Release 正文变成了最近一次 commit 的正文（2026-10-30 实际发生）；
+      #   2. 自动变更列表用 `git log PREV..HEAD`，浅克隆只有 1 个提交。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:

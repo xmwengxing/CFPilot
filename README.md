@@ -139,10 +139,11 @@ cfpilot config      # 配置管理
 | 平台          | 文件                                       |
 | ----------- | ---------------------------------------- |
 | Windows x64 | `cfpilot-<版本>-windows-amd64.exe`（8.3 MB） |
-| Linux x64   | `cfpilot-<版本>-linux-amd64`（先 `chmod +x`） |
+| Linux x64   | `cfpilot-<版本>-linux-amd64`               |
 | Linux arm64 | `cfpilot-<版本>-linux-arm64`               |
 
 运行后托盘出现图标，系统浏览器自动打开管理界面。
+Linux 下载后要先 `chmod +x`，操作流程见下面的 [Linux 版](#linux-版)。
 
 <img src="docs/images/go-credentials.png" alt="CFPilot Go 版凭据页：自动检测账号并自动选中唯一的 CFPilot 实例" width="720">
 
@@ -175,7 +176,52 @@ cfpilot config      # 配置管理
 - 右键托盘可查看服务状态、复制地址、修改端口、启停服务、快捷一键优选 IP
 
 - 常用参数：`--no-browser`（不自动开浏览器）、`--no-tray`（无桌面环境）、
-  `--console`（日志写文件）、`--check`（只自检）
+  `--console`（日志同时打终端）、`--check`（只自检）
+
+### Linux 版
+
+Linux 版**不是另一套代码**：与 Windows 共用同一份 Go 源码和同一份界面（界面构建后 `go:embed` 进二进制），
+仅三处按平台分支——打开浏览器（`xdg-open`）、桌面通知（`notify-send`，未安装时只写日志）、
+托盘（D-Bus StatusNotifierItem，纯 Go 实现）。因此**不需要 GTK / libappindicator，也不需要 Node.js**，
+`CGO_ENABLED=0` 静态编译，x64 与 arm64 各一份单文件产物。
+
+放置路径随意（程序不依赖当前工作目录，内核已内嵌，不需要在同目录放任何文件），但**必须加执行位、建议从终端启动**：
+
+```bash
+# 1. 放到固定位置（示例：家目录下的 Applications）
+mkdir -p ~/Applications
+mv ~/Downloads/cfpilot-<版本>-linux-amd64 ~/Applications/cfpilot
+
+# 2. 浏览器下载的文件默认没有执行位
+chmod +x ~/Applications/cfpilot
+
+# 3. 从终端启动（首次运行别双击，见下方说明）
+~/Applications/cfpilot
+```
+
+启动后托盘出现图标，浏览器自动打开 `http://127.0.0.1:19726/?t=<一次性令牌>`。
+`t` 只在本次启动有效，重启会换新的；退出用托盘菜单「退出 CFPilot」。
+
+> 许多文件管理器在双击二进制时会把它当文本打开，或直接拒绝执行（取决于桌面设置），
+> 所以首次运行请用终端。日志默认只写 `~/.cfpilot-gui/cfpilot.log`，
+> 想在终端里同时看启动信息就加 `--console`（例如 `~/Applications/cfpilot --console`）。
+
+**托盘需要一个 StatusNotifierItem 宿主**：KDE / XFCE / Cinnamon / MATE 原生支持；
+GNOME 默认不支持（Ubuntu 自带的 AppIndicator 扩展默认启用，所以 Ubuntu 一般可见）。
+如果启动后**没有图标**，说明当前桌面没有宿主，改用前台模式即可——服务与界面完全一致，只是没有托盘菜单：
+
+```bash
+~/Applications/cfpilot --no-tray                            # 前台跑服务，Ctrl+C 退出
+~/Applications/cfpilot --no-tray --no-browser --console      # SSH / 纯命令行：不弹浏览器，日志同时打终端
+~/Applications/cfpilot --check                              # 只自检：配置目录 / 端口占用 / 版本
+```
+
+| 项目      | Linux 下的位置与行为                                                |
+| ------- | ------------------------------------------------------------ |
+| 配置与凭据   | `~/.cfpilot-gui/`（`secrets.json` 权限 `0600`、目录 `0700`），格式与 Windows 完全相同 |
+| 日志      | `~/.cfpilot-gui/cfpilot.log`（自动滚动）；加 `--console` 时同步打终端         |
+| 应用内更新   | 只**下载**到 `~/.cfpilot-gui/updates/`；替换需手动：退出程序 → `chmod +x` 新文件 → 覆盖旧文件 |
+| 卸载      | 删除二进制 + `~/.cfpilot-gui/` 目录即可，不写注册表 / 系统目录                      |
 
 ### 托盘菜单
 
@@ -378,6 +424,11 @@ ECH 把 TLS ClientHello 里的真实 SNI 加密，隐藏你访问的是哪个域
 检查这几项：① 代理地址是否可公网访问（`127.0.0.1` / `192.168.x` 这类地址数据面连不到）；
 ② 代理是否支持 TLS 1.3（HTTPS 代理需要）；③ 代理服务器是否有 **IPv4** 公网地址
 （数据面的出站只支持 IPv4）。
+
+**Q：Linux 版双击没反应 / 没有托盘图标？**
+浏览器下载的文件默认没有执行位，先 `chmod +x`，再从终端启动（双击常被文件管理器当成文本打开）。
+没有图标说明当前桌面缺 StatusNotifierItem 宿主（GNOME 默认如此），改用 `--no-tray` 前台运行即可，
+服务与界面一致，只是少了托盘菜单；纯命令行 / SSH 环境也用它。
 
 **Q：面板打不开 / 404？**
 面板路径是部署时随机生成的，向导终端里打印过。忘了可以用

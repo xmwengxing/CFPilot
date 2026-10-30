@@ -252,14 +252,18 @@ func TestNormalizePagesHost(t *testing.T) {
 	}
 }
 
-// formatCopyable 输出格式要与 Electron 版一致（用户会跨版本复制）。
+// formatCopyable 输出格式要与 CLI 版一致（用户会跨版本复制）。
+//
+// 备注 = 机房码 + 城市中文名（`#HKG香港`）：备注会进订阅节点名，
+// 客户端里直接显示城市，比裸三字码直观；未知机房只留机房码。
 func TestFormatCopyable(t *testing.T) {
 	entries := []scan.Entry{
 		{IP: "104.16.1.1", Port: 443, Colo: "HKG"},
 		{IP: "104.17.2.2", Port: 2053, Colo: ""},
+		{IP: "104.18.3.3", Port: 443, Colo: "ZZZ"},
 	}
 	got := formatCopyable(entries)
-	want := "104.16.1.1:443#HKG\n104.17.2.2:2053#CF\n"
+	want := "104.16.1.1:443#HKG香港\n104.17.2.2:2053#CF\n104.18.3.3:443#ZZZ\n"
 	if got != want {
 		t.Errorf("输出格式不对：\n期望 %q\n实际 %q", want, got)
 	}

@@ -247,15 +247,25 @@ export async function handleApi(
     const changed = previous !== cleaned
     if (changed) await store.put(LOCAL_IPS_KEY, cleaned)
 
-    // 覆盖：清空面板手填的「手动优选 IP」，让订阅里只有本次回填的结果
+    // 覆盖：清空面板手填的「手动优选 IP」，让订阅里只有本次回填的结果；
+    // 同时**自动启用「手动指定 IP」来源**（poolManual）——
+    // 否则用户没勾选该来源时，回填的 IP 不会进订阅，看起来「回填没生效」。
+    const patch: Partial<typeof config> = {}
+    if ((config.add ?? '').trim() !== '') patch.add = ''
+    if (!config.poolManual) patch.poolManual = true
     let clearedManual = false
-    if ((config.add ?? '').trim() !== '') {
-      await saveConfig(store, mergeConfig(config, { add: '' }))
+    if (Object.keys(patch).length > 0) {
+      await saveConfig(store, mergeConfig(config, patch))
       ctx.onConfigChanged()
-      clearedManual = true
+      clearedManual = patch.add !== undefined
     }
 
-    return json({ ok: true, count: list.length, clearedManual })
+    return json({
+      ok: true,
+      count: list.length,
+      clearedManual,
+      enabledManual: patch.poolManual === true,
+    })
   }
 
   // ---- 以下接口需要面板会话 ----

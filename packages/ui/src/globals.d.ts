@@ -417,7 +417,16 @@ interface Window {
 }
 
 interface CFPilotScanResult {
-  entries: Array<{ ip: string; port: number; colo: string; latency: number; tlsMs: number; speed: number }>
+  entries: Array<{
+    ip: string
+    port: number
+    colo: string
+    /** 机房城市中文名（如「新加坡」） */
+    city?: string
+    latency: number
+    tlsMs: number
+    speed: number
+  }>
   copyable: string
   stats: Record<string, number>
   skippedSpeed?: boolean
@@ -440,6 +449,8 @@ interface ScanHistoryEntry {
   ip: string
   port: number
   colo: string
+  /** 机房城市中文名（如「新加坡」），用于展示与复制备注 */
+  city?: string
   latency: number
   tlsMs: number
   speed: number

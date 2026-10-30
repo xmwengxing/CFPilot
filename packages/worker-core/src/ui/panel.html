@@ -663,9 +663,9 @@
           <input id="cfgSubDomain" class="mono" placeholder="留空则默认使用当前数据面域名" />
         </div>
         <div class="field">
-          <label>订阅分组显示名称</label>
+          <label>clash订阅名</label>
           <input id="cfgSubName" placeholder="CFPilot" maxlength="64" />
-          <p class="hint" style="margin:6px 0 0">客户端导入后显示的卡片名。保存时会自动剔除引号、斜杠、竖线等会导致卡片名显示异常的字符。</p>
+          <p class="hint" style="margin:6px 0 0">clash客户端导入后显示的卡片名。</p>
         </div>
       </div>
 
@@ -743,11 +743,11 @@
 
       <div class="grid">
         <div class="field">
-          <label>SOCKS5 出站代理（支持 user:pass@host:port）</label>
+          <label>SOCKS5 出站代理</label>
           <input id="cfgSocks5" class="mono" placeholder="user:pass@1.2.3.4:1080" />
         </div>
         <div class="field">
-          <label>HTTP / HTTPS 出站代理（支持 https:// 与 #sni=）</label>
+          <label>HTTP / HTTPS 出站代理</label>
           <input id="cfgHttpProxy" class="mono" placeholder="https://user:pass@proxy.example.com:8443#sni=proxy.example.com" />
         </div>
         <div class="field">
@@ -755,7 +755,7 @@
           <textarea id="cfgProxyIp" class="mono" placeholder="1.2.3.4:443"></textarea>
         </div>
         <div class="field">
-          <label>自定义反代入口池（RELAY_POOL，每行 IP / IP:端口 / 域名）</label>
+          <label>自定义反代入口池</label>
           <textarea id="cfgRelayPool" class="mono" placeholder="1.2.3.4:443&#10;relay.example.com:443"></textarea>
         </div>
         <div class="field">
@@ -856,8 +856,8 @@
         <div class="field"><label>远程 CSV 测速表地址（ADDCSV，每行一个 URL）</label><textarea id="cfgAddCsv" class="mono" placeholder="https://example.com/result.csv"></textarea></div>
       </div>
       <div class="grid-3">
-        <div class="field"><label>最低准入下行速度 DLS（MB/s，0 = 不限，仅对 CSV 生效）</label><input id="cfgDls" type="number" min="0" step="1" /></div>
-        <div class="field"><label>最高准入延迟 MAX_LATENCY（ms，0 = 不限，仅对 CSV 生效）</label><input id="cfgMaxLatency" type="number" min="0" step="1" /></div>
+        <div class="field"><label>最低准入下行速度 DLS（MB/s，0 = 不限，仅 CSV 生效）</label><input id="cfgDls" type="number" min="0" step="1" /></div>
+        <div class="field"><label>最高准入延迟 MAX_LATENCY（ms，0 = 不限，仅 CSV 生效）</label><input id="cfgMaxLatency" type="number" min="0" step="1" /></div>
         <div class="field"><label>订阅节点总数上限（0 = 不限）</label><input id="cfgMaxNodes" type="number" min="0" step="1" /></div>
       </div>
       <div class="row end"><button class="primary" id="btnSaveRemote">保存远程订阅源配置</button></div>

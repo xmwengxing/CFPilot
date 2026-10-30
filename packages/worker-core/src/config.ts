@@ -39,7 +39,7 @@ export const DEFAULT_CONFIG: UserConfig = {
   officialCount: 20,
   poolDomain: true,
   domainCount: 10,
-  poolManual: false,
+  poolManual: true,
   poolCountries: '',
   dls: 0,
   maxLatency: 0,

@@ -185,7 +185,7 @@ Linux 版**不是另一套代码**：与 Windows 共用同一份 Go 源码和同
 托盘（D-Bus StatusNotifierItem，纯 Go 实现）。因此**不需要 GTK / libappindicator，也不需要 Node.js**，
 `CGO_ENABLED=0` 静态编译，x64 与 arm64 各一份单文件产物。
 
-放置路径随意（程序不依赖当前工作目录，内核已内嵌，不需要在同目录放任何文件），但**必须加执行位、建议从终端启动**：
+放置路径随意（程序不依赖当前工作目录，内嵌内核也不会去读旁边目录），但**必须加执行位、建议从终端启动**：
 
 ```bash
 # 1. 放到固定位置（示例：家目录下的 Applications）
@@ -202,9 +202,8 @@ chmod +x ~/Applications/cfpilot
 启动后托盘出现图标，浏览器自动打开 `http://127.0.0.1:19726/?t=<一次性令牌>`。
 `t` 只在本次启动有效，重启会换新的；退出用托盘菜单「退出 CFPilot」。
 
-> 许多文件管理器在双击二进制时会把它当文本打开，或直接拒绝执行（取决于桌面设置），
-> 所以首次运行请用终端。日志默认只写 `~/.cfpilot-gui/cfpilot.log`，
-> 想在终端里同时看启动信息就加 `--console`（例如 `~/Applications/cfpilot --console`）。
+> 许多文件管理器会双击二进制时把它当文本打开、或直接拒绝执行（取决于桌面设置），
+> 所以首次运行请用终端；启动日志也会直接打在终端里，便于确认端口与地址。
 
 **托盘需要一个 StatusNotifierItem 宿主**：KDE / XFCE / Cinnamon / MATE 原生支持；
 GNOME 默认不支持（Ubuntu 自带的 AppIndicator 扩展默认启用，所以 Ubuntu 一般可见）。
@@ -216,12 +215,12 @@ GNOME 默认不支持（Ubuntu 自带的 AppIndicator 扩展默认启用，所�
 ~/Applications/cfpilot --check                              # 只自检：配置目录 / 端口占用 / 版本
 ```
 
-| 项目      | Linux 下的位置与行为                                                |
-| ------- | ------------------------------------------------------------ |
-| 配置与凭据   | `~/.cfpilot-gui/`（`secrets.json` 权限 `0600`、目录 `0700`），格式与 Windows 完全相同 |
-| 日志      | `~/.cfpilot-gui/cfpilot.log`（自动滚动）；加 `--console` 时同步打终端         |
-| 应用内更新   | 只**下载**到 `~/.cfpilot-gui/updates/`；替换需手动：退出程序 → `chmod +x` 新文件 → 覆盖旧文件 |
-| 卸载      | 删除二进制 + `~/.cfpilot-gui/` 目录即可，不写注册表 / 系统目录                      |
+| 项目    | Linux 下的位置与行为                                                          |
+| ----- | ---------------------------------------------------------------------- |
+| 配置与凭据 | `~/.cfpilot-gui/`（`secrets.json` 权限 `0600`、目录 `0700`），格式与 Windows 完全相同 |
+| 日志    | `~/.cfpilot-gui/cfpilot.log`（自动滚动）；加 `--console` 时同步打终端                |
+| 应用内更新 | 只**下载**到 `~/.cfpilot-gui/updates/`；替换需手动：退出程序 → `chmod +x` 新文件 → 覆盖旧文件 |
+| 卸载    | 删除二进制 + `~/.cfpilot-gui/` 目录即可，不写注册表 / 系统目录                            |
 
 ### 托盘菜单
 

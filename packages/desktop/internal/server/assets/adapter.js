@@ -666,6 +666,61 @@
       return post('/api/scan/quick')
     },
 
+    /* ---------------- 优选历史与复测（Go 版新增） ---------------- */
+
+    /**
+     * 读取本机保存的优选历史（最新在前）。
+     *
+     * 优选成功由**后端**自动留底（本地优选 / 一键优选都会写），
+     * 界面只读不写 —— 避免双写竞态。
+     */
+    getScanHistory: function () {
+      return get('/api/scan/history')
+        .then(function (r) {
+          return {
+            ok: !!(r && r.ok),
+            sessions: (r && r.sessions) || [],
+            error: (r && r.error) || '',
+          }
+        })
+        .catch(function (err) {
+          return {
+            ok: false,
+            sessions: [],
+            error: err && err.message ? err.message : String(err),
+          }
+        })
+    },
+
+    /** 删除一条优选历史会话 */
+    deleteScanHistory: function (id) {
+      return call('DELETE', '/api/scan/history?id=' + encodeURIComponent(id || ''))
+    },
+
+    /**
+     * 对选中的 IP 跑分层可用性复测（TCP → TLS → WS101，可选测速）。
+     *
+     * ⚠️ host / wsPath / probePath 必须用**历史会话里保存的参数**，
+     * 不是当前表单的值 —— 否则改过表单后复测会打到错误的域名上。
+     * 传 sessionId 时复测结论会写回该历史会话的条目。
+     */
+    reTestIps: function (params) {
+      return post('/api/scan/re-test', {
+        sessionId: (params && params.sessionId) || '',
+        host: (params && params.host) || '',
+        wsPath: (params && params.wsPath) || '',
+        probePath: (params && params.probePath) || '',
+        withSpeed: !!(params && params.withSpeed),
+        targets: (params && params.targets) || [],
+      }).then(function (r) {
+        return {
+          ok: !!(r && r.ok),
+          results: (r && r.results) || [],
+          error: (r && r.error) || '',
+        }
+      })
+    },
+
     /* ---------------- 日志 ---------------- */
 
     /**

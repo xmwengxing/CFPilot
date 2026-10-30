@@ -141,6 +141,9 @@ func New(dir string) *Store {
 	return &Store{Dir: dir}
 }
 
+// DirPath 返回配置目录路径（供同目录的其它本地文件使用，如优选历史）。
+func (s *Store) DirPath() string { return s.Dir }
+
 // DefaultDir 返回默认配置目录（与 Electron 版一致）。
 func DefaultDir() string {
 	home, err := os.UserHomeDir()

@@ -136,11 +136,11 @@ cfpilot config      # 配置管理
 
 到 [Releases](https://github.com/xmwengxing/CFPilot/releases) 下载对应平台文件：
 
-| 平台          | 文件                                       |
-| ----------- | ---------------------------------------- |
-| Windows x64 | `cfpilot-<版本>-windows-amd64.exe`（8.3 MB） |
-| Linux x64   | `cfpilot-<版本>-linux-amd64`               |
-| Linux arm64 | `cfpilot-<版本>-linux-arm64`               |
+| 平台          | 文件                               |
+| ----------- | -------------------------------- |
+| Windows x64 | `cfpilot-<版本>-windows-amd64.exe` |
+| Linux x64   | `cfpilot-<版本>-linux-amd64`       |
+| Linux arm64 | `cfpilot-<版本>-linux-arm64`       |
 
 运行后托盘出现图标，系统浏览器自动打开管理界面。
 Linux 下载后要先 `chmod +x`，操作流程见下面的 [Linux 版](#linux-版)。
@@ -488,8 +488,8 @@ WebSocket close frame 装不下这些（且超长会被边缘静默丢弃），�
 | DoH 优选解析 | 可开关                                |
 | 反代入口     | 用户可自配 + 内置表                        |
 | 故障诊断     | 失败分级 + `GET /__diag` 查看完整原因        |
-| 单 IP 诊断   | `cfpilot test` 逐阶段定位卡在哪一步        |
-| 配置备份     | 脱敏导出 / 差异预览后导入                 |
+| 单 IP 诊断  | `cfpilot test` 逐阶段定位卡在哪一步          |
+| 配置备份     | 脱敏导出 / 差异预览后导入                     |
 
 ### 仓库结构
 
@@ -597,12 +597,12 @@ cfpilot test --host <数据面域名> --ip <IP>
 
 ## 客户端兼容性
 
-| 客户端 / 内核 | VLESS-WS | Trojan-WS | VLESS-XHTTP | ECH |
-|---|---|---|---|---|
-| Xray-core | 支持 | 支持 | 支持（需较新版本） | 支持（需较新版本） |
-| sing-box | 支持 | 支持 | **不支持** | 支持（1.12+） |
-| mihomo / Clash.Meta | 支持 | 支持 | **不支持** | 支持（`ech-opts`） |
-| v2rayN / v2rayNG / Shadowrocket | 支持 | 支持 | 不支持 | 不支持 |
+| 客户端 / 内核                        | VLESS-WS | Trojan-WS | VLESS-XHTTP | ECH            |
+| ------------------------------- | -------- | --------- | ----------- | -------------- |
+| Xray-core                       | 支持       | 支持        | 支持（需较新版本）   | 支持（需较新版本）      |
+| sing-box                        | 支持       | 支持        | **不支持**     | 支持（1.12+）      |
+| mihomo / Clash.Meta             | 支持       | 支持        | **不支持**     | 支持（`ech-opts`） |
+| v2rayN / v2rayNG / Shadowrocket | 支持       | 支持        | 不支持         | 不支持            |
 
 XHTTP 是 Xray 的专有传输，sing-box 与 mihomo 没有这个传输类型 —— 订阅生成时
 已**硬过滤**，不会把它们塞进去（否则整个订阅加载失败，而不是少一个节点）。

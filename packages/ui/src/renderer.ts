@@ -1639,6 +1639,342 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* 优选历史（留底 / 多选复制 / 二次复测）                                */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * 全部历史会话（最新在前）。
+   *
+   * 数据由**后端**在每次优选成功后自动留底（本地优选 / 一键优选都写），
+   * 界面只读不写 —— 单一事实来源，避免双写竞态。
+   */
+  let historySessions: ScanHistorySession[] = []
+
+  /**
+   * 当前展开的会话 id（手风琴式：同一时刻只展开一个）。
+   *
+   * 为什么只允许展开一个：复测要用**该次会话保存的域名 / WS 路径**，
+   * 跨会话勾选可能来自不同域名，混在一起复测会打到错误的 SNI 上。
+   */
+  let historyExpandedId = ''
+
+  /** 展开会话内勾选的 IP（键 = ip:port） */
+  let historyChecked = new Set<string>()
+
+  function historyKey(ip: string, port: number): string {
+    return ip + ':' + port
+  }
+
+  /** 读取历史并重绘（页面加载 / 优选完成 / 删除后都会调） */
+  async function loadScanHistory(): Promise<void> {
+    const listEl = document.getElementById('historyList')
+    if (!listEl) return
+    try {
+      const res = await window.cfpilot.getScanHistory()
+      if (!res || !res.ok) {
+        listEl.textContent = '读取历史失败：' + ((res && res.error) || '未知错误')
+        return
+      }
+      historySessions = res.sessions ?? []
+      // 展开中的会话可能已被删除 / 裁剪出容量，此时收起
+      if (historyExpandedId && !historySessions.some((s) => s.id === historyExpandedId)) {
+        historyExpandedId = ''
+        historyChecked.clear()
+      }
+      renderScanHistory()
+    } catch (err) {
+      listEl.textContent = '读取历史失败：' + (err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  /** ISO 时间 → 本地可读（MM-DD HH:mm），解析失败原样返回 */
+  function fmtHistoryTime(iso: string): string {
+    try {
+      const d = new Date(iso)
+      if (isNaN(d.getTime())) return iso
+      const pad = (n: number) => String(n).padStart(2, '0')
+      return (
+        pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+        ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes())
+      )
+    } catch {
+      return iso
+    }
+  }
+
+  const HISTORY_SOURCE_LABEL: Record<string, string> = {
+    local: '本地优选',
+    quick: '一键优选',
+  }
+
+  function renderScanHistory(): void {
+    const listEl = document.getElementById('historyList')
+    if (!listEl) return
+    listEl.innerHTML = ''
+
+    if (historySessions.length === 0) {
+      const p = document.createElement('p')
+      p.className = 'history-empty'
+      p.textContent = '还没有优选历史。跑一次优选（本地优选或一键优选）后会自动留底。'
+      listEl.appendChild(p)
+      updateHistoryButtons()
+      return
+    }
+
+    for (const sess of historySessions) {
+      const item = document.createElement('div')
+      item.className = 'history-item'
+
+      // ---- 会话头（点击展开 / 收起）----
+      const head = document.createElement('div')
+      head.className = 'history-head'
+
+      const arrow = document.createElement('span')
+      arrow.className = 'arrow'
+      arrow.textContent = historyExpandedId === sess.id ? '▾' : '▸'
+      head.appendChild(arrow)
+
+      const at = document.createElement('span')
+      at.className = 'h-at'
+      at.textContent = fmtHistoryTime(sess.at)
+      at.title = sess.at
+      head.appendChild(at)
+
+      const meta = document.createElement('span')
+      meta.className = 'h-meta'
+      const src = HISTORY_SOURCE_LABEL[sess.source] || sess.source
+      meta.textContent =
+        src + ' · ' + sess.host + ' · ' + sess.entries.length + ' 个 IP' +
+        (sess.skipSpeed ? ' · 未测速' : '')
+      head.appendChild(meta)
+
+      // 删除按钮（阻止冒泡，不触发展开）
+      const del = document.createElement('button')
+      del.className = 'h-del'
+      del.textContent = '删除'
+      del.title = '删除这条历史'
+      del.addEventListener('click', async (ev) => {
+        ev.stopPropagation()
+        try {
+          await window.cfpilot.deleteScanHistory(sess.id)
+          log('已删除历史记录', 'ok')
+        } catch (err) {
+          log('删除失败：' + (err instanceof Error ? err.message : String(err)), 'err')
+        }
+        await loadScanHistory()
+      })
+      head.appendChild(del)
+
+      head.addEventListener('click', () => {
+        // 切换展开时清空勾选：勾选集只对展开的会话有意义
+        historyExpandedId = historyExpandedId === sess.id ? '' : sess.id
+        historyChecked.clear()
+        renderScanHistory()
+      })
+      item.appendChild(head)
+
+      // ---- 展开体：条目表（含勾选与最近复测状态）----
+      if (historyExpandedId === sess.id) {
+        const body = document.createElement('div')
+        body.className = 'history-body'
+        body.appendChild(buildHistoryTable(sess))
+        item.appendChild(body)
+      }
+
+      listEl.appendChild(item)
+    }
+    updateHistoryButtons()
+  }
+
+  /** 构建某次会话的条目表：勾选列 + 基本指标 + 最近复测状态列 */
+  function buildHistoryTable(sess: ScanHistorySession): HTMLTableElement {
+    const table = document.createElement('table')
+    const thead = document.createElement('thead')
+    const hrow = document.createElement('tr')
+
+    // 表头 checkbox = 本会话全选 / 全不选
+    const thCheck = document.createElement('th')
+    const selAll = document.createElement('input')
+    selAll.type = 'checkbox'
+    selAll.checked = sess.entries.length > 0 && historyChecked.size === sess.entries.length
+    selAll.addEventListener('change', () => {
+      if (selAll.checked) {
+        for (const e of sess.entries) historyChecked.add(historyKey(e.ip, e.port))
+      } else {
+        historyChecked.clear()
+      }
+      renderScanHistory()
+    })
+    thCheck.appendChild(selAll)
+    hrow.appendChild(thCheck)
+    for (const h of ['#', '地址', '机房', 'TLS(ms)', 'TCP(ms)', '下行(MB/s)', '最近复测']) {
+      const th = document.createElement('th')
+      th.textContent = h
+      hrow.appendChild(th)
+    }
+    thead.appendChild(hrow)
+    table.appendChild(thead)
+
+    const tbody = document.createElement('tbody')
+    sess.entries.forEach((e, i) => {
+      const tr = document.createElement('tr')
+
+      const tdCheck = document.createElement('td')
+      const cb = document.createElement('input')
+      cb.type = 'checkbox'
+      cb.checked = historyChecked.has(historyKey(e.ip, e.port))
+      cb.addEventListener('change', () => {
+        if (cb.checked) historyChecked.add(historyKey(e.ip, e.port))
+        else historyChecked.delete(historyKey(e.ip, e.port))
+        updateHistoryButtons()
+      })
+      tdCheck.appendChild(cb)
+      tr.appendChild(tdCheck)
+
+      // 跳过测速的会话速度本就是 0，显示 — 而不是 0
+      const speed = sess.skipSpeed ? '—' : String(e.speed)
+      const tls = e.tlsMs > 0 ? String(e.tlsMs) : '—'
+      const cells = [String(i + 1), e.ip + ':' + e.port, e.colo || '—', tls, String(e.latency), speed]
+      for (const c of cells) {
+        const td = document.createElement('td')
+        td.textContent = c
+        tr.appendChild(td)
+      }
+
+      // 最近复测状态列：✓ 可用 / ✗ 失败原因（悬停看时间）
+      const tdTest = document.createElement('td')
+      const lt = e.lastTest
+      if (!lt) {
+        tdTest.textContent = '—'
+        tdTest.style.color = 'var(--text-muted)'
+      } else if (lt.ok) {
+        tdTest.textContent =
+          '✓ 可用 ' + (lt.colo || '') + (lt.tlsMs > 0 ? ' · TLS ' + lt.tlsMs + 'ms' : '')
+        tdTest.style.color = 'var(--ok, #34d399)'
+        tdTest.title = '复测时间：' + fmtHistoryTime(lt.at)
+      } else {
+        tdTest.textContent = '✗ ' + (lt.error || '失败')
+        tdTest.style.color = 'var(--err, #f87171)'
+        tdTest.title = '复测时间：' + fmtHistoryTime(lt.at)
+      }
+      tr.appendChild(tdTest)
+
+      tbody.appendChild(tr)
+    })
+    table.appendChild(tbody)
+    return table
+  }
+
+  /** 展开会话里被勾选的条目 */
+  function selectedHistoryEntries(): ScanHistoryEntry[] {
+    const sess = historySessions.find((s) => s.id === historyExpandedId)
+    if (!sess) return []
+    return sess.entries.filter((e) => historyChecked.has(historyKey(e.ip, e.port)))
+  }
+
+  function updateHistoryButtons(): void {
+    const hasSel = selectedHistoryEntries().length > 0
+    const copyBtn = document.getElementById('btnHistoryCopy') as HTMLButtonElement | null
+    const reBtn = document.getElementById('btnHistoryRetest') as HTMLButtonElement | null
+    if (copyBtn) copyBtn.disabled = !hasSel
+    if (reBtn) reBtn.disabled = !hasSel
+  }
+
+  function bindHistory(): void {
+    const refresh = document.getElementById('btnHistoryRefresh') as HTMLButtonElement | null
+    refresh?.addEventListener('click', () => void loadScanHistory())
+
+    // 复制选中 IP：每行 IP:Port#机房，可直接粘回面板「手动优选 IP」
+    const copyBtn = document.getElementById('btnHistoryCopy') as HTMLButtonElement | null
+    copyBtn?.addEventListener('click', () => {
+      const sel = selectedHistoryEntries()
+      if (sel.length === 0) {
+        log('请先在历史里勾选 IP', 'warn')
+        return
+      }
+      const lines = sel.map((e) => e.ip + ':' + e.port + '#' + (e.colo || 'CF'))
+      copy(lines.join('\n'))
+      log('已复制 ' + sel.length + ' 个 IP（IP:Port#机房）', 'ok')
+    })
+
+    // 复测选中：分层校验（TCP → TLS → WS101，可选测速），结论写回历史
+    const reBtn = document.getElementById('btnHistoryRetest') as HTMLButtonElement | null
+    const hint = document.getElementById('historyHint')
+    reBtn?.addEventListener('click', async () => {
+      const sess = historySessions.find((s) => s.id === historyExpandedId)
+      if (!sess) {
+        log('请先展开一次历史记录', 'warn')
+        return
+      }
+      const sel = selectedHistoryEntries()
+      if (sel.length === 0) {
+        log('请先勾选要复测的 IP', 'warn')
+        return
+      }
+
+      const targets = sel.map((e) => ({ ip: e.ip, port: e.port }))
+      const withSpeed = $('optHistorySpeed').checked
+      if (reBtn) reBtn.disabled = true
+      if (hint) {
+        hint.textContent =
+          '正在复测 ' + targets.length + ' 个 IP…（每 IP 最多约 ' + (withSpeed ? '10' : '6') + ' 秒）'
+      }
+      try {
+        const res = await window.cfpilot.reTestIps({
+          sessionId: sess.id,
+          // ⚠️ 必须用历史会话保存的参数，不是当前表单 ——
+          // 否则改过表单后复测会打到错误的域名 / 路径上。
+          host: sess.host,
+          wsPath: sess.wsPath,
+          probePath: sess.probePath,
+          withSpeed,
+          targets,
+        })
+        if (!res || !res.ok) {
+          const msg = (res && res.error) || '未知错误'
+          if (hint) hint.textContent = '复测失败：' + msg
+          log('复测失败：' + msg, 'err')
+          return
+        }
+        const results = res.results ?? []
+        // 把结论写进本地状态并重绘（后端也已写回历史文件）
+        for (const r of results) {
+          const e = sess.entries.find((x) => x.ip === r.ip && x.port === r.port)
+          if (e) {
+            e.lastTest = {
+              at: new Date().toISOString(),
+              tcpMs: r.tcpMs,
+              tlsMs: r.tlsMs,
+              wsOk: r.wsOk,
+              colo: r.colo,
+              speed: r.speed,
+              ok: r.ok,
+              error: r.error,
+            }
+          }
+        }
+        const okCount = results.filter((r) => r.ok).length
+        if (hint) hint.textContent = '✅ 复测完成：' + okCount + '/' + results.length + ' 可用。'
+        log(
+          '复测完成：' + okCount + '/' + results.length + ' 个 IP 可用',
+          okCount > 0 ? 'ok' : 'warn'
+        )
+        renderScanHistory()
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (hint) hint.textContent = '复测失败：' + msg
+        log('复测失败：' + msg, 'err')
+      } finally {
+        if (reBtn) reBtn.disabled = false
+        updateHistoryButtons()
+      }
+    })
+
+    // 切到优选页时拉一次（首次进入也加载）
+    void loadScanHistory()
+  }
+
+  /* ------------------------------------------------------------------ */
   /* 日志页                                                              */
   /* ------------------------------------------------------------------ */
 
@@ -2038,7 +2374,14 @@
       if (applyDeployStatus) applyDeployStatus(status as DeployStatusLike)
     })
 
-    window.cfpilot.onScanResult((payload) => renderScanResult(payload))
+    window.cfpilot.onScanResult((payload) => {
+      renderScanResult(payload)
+      // 优选成功后端已自动留底 —— 顺手刷新历史列表，
+      // 用户不用手动点「刷新」就能看到刚跑完的这批结果。
+      if (payload && payload.entries && payload.entries.length > 0) {
+        void loadScanHistory()
+      }
+    })
 
     window.cfpilot.onUpdateProgress((p) => {
       const wrap = document.getElementById('updateProgressWrap')
@@ -2335,6 +2678,7 @@
     bindDeploy()
     bindChain()
     bindScan()
+    bindHistory()
     bindLogs()
       bindUpdater()
     bindPush()

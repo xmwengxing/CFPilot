@@ -307,6 +307,32 @@ interface Window {
      */
     quickScan(): Promise<QuickScanResult>
     /**
+     * 读取本机保存的优选历史（最新在前）。
+     *
+     * 优选成功由后端自动留底（本地优选 / 一键优选都会写），界面只读。
+     */
+    getScanHistory(): Promise<{
+      ok: boolean
+      sessions: ScanHistorySession[]
+      error?: string
+    }>
+    /** 删除一条优选历史会话 */
+    deleteScanHistory(id: string): Promise<{ ok: boolean; error?: string }>
+    /**
+     * 对选中的 IP 跑分层可用性复测（TCP → TLS → WS101，可选测速）。
+     *
+     * host / wsPath / probePath 必须用历史会话里保存的参数；
+     * 传 sessionId 时复测结论会写回该历史会话的条目。
+     */
+    reTestIps(params: {
+      sessionId?: string
+      host: string
+      wsPath?: string
+      probePath?: string
+      withSpeed?: boolean
+      targets: Array<{ ip: string; port: number }>
+    }): Promise<{ ok: boolean; results?: ReTestIPResult[]; error?: string }>
+    /**
      * 在文件管理器中打开文件所在的文件夹。
      *
      * 日志页的「打开日志文件所在文件夹」用它 ——
@@ -395,4 +421,56 @@ interface CFPilotScanResult {
   copyable: string
   stats: Record<string, number>
   skippedSpeed?: boolean
+}
+
+/** 优选历史：某条 IP 的最近一次复测结论（可为空 = 从未复测） */
+interface ScanHistoryLastTest {
+  at: string
+  tcpMs: number
+  tlsMs: number
+  wsOk: boolean
+  colo: string
+  speed: number
+  ok: boolean
+  error?: string
+}
+
+/** 优选历史：单条结果 */
+interface ScanHistoryEntry {
+  ip: string
+  port: number
+  colo: string
+  latency: number
+  tlsMs: number
+  speed: number
+  lastTest?: ScanHistoryLastTest
+}
+
+/** 优选历史：一次优选会话的留底 */
+interface ScanHistorySession {
+  id: string
+  /** ISO 时间（UTC） */
+  at: string
+  host: string
+  wsPath: string
+  probePath: string
+  skipSpeed: boolean
+  /** "local"（本地真连接优选）| "quick"（一键优选） */
+  source: string
+  entries: ScanHistoryEntry[]
+}
+
+/** 单 IP 复测结果（分层：TCP → TLS → WS101，可选测速） */
+interface ReTestIPResult {
+  ip: string
+  port: number
+  tcpMs: number
+  tlsMs: number
+  wsOk: boolean
+  colo: string
+  speed: number
+  /** 三层全部通过 */
+  ok: boolean
+  /** 第一道失败层的原因 */
+  error?: string
 }

@@ -51,6 +51,9 @@ func (s *Server) registerScanRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/scan/push-results", s.guard(s.handleScanPushResults))
 	// 一键优选（托盘菜单与界面按钮共用）
 	mux.HandleFunc("/api/scan/quick", s.guard(s.handleScanQuick))
+	// 优选历史（读取 / 删除）与单 IP 复测
+	mux.HandleFunc("/api/scan/history", s.guard(s.handleScanHistory))
+	mux.HandleFunc("/api/scan/re-test", s.guard(s.handleScanReTest))
 }
 
 // scanRequest 是扫描请求体（字段与 Electron 版 ScanParams 对齐）。
@@ -293,6 +296,12 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 		} else if len(sum.Entries) > 0 {
 			s.doPanelCallback(ctx, host, sum.Entries, req.ScanToken)
 		}
+
+		// ---- 写入优选历史（成功即留底，前端只读不写）----
+		//
+		// 放在 publish 之前：界面收到 scan-result 后刷新历史列表时，
+		// 本次会议已经在文件里了。
+		s.saveScanHistory("local", host, opt.WSPath, opt.ProbePath, req.SkipSpeed, sum.Entries)
 
 		s.events.publish("scan-result", payload)
 	}()

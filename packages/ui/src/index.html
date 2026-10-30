@@ -783,6 +783,67 @@
       .card { padding: 16px; }
       .row { flex-wrap: wrap; }
     }
+
+    /* ==============================================================
+       优选历史（历史留底 / 多选复制 / 二次复测）
+       ============================================================== */
+    .history-item {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 8px;
+      overflow: hidden;
+      background: var(--bg-elevated);
+    }
+    .history-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .history-head:hover { background: var(--bg-hover); }
+    .history-head .arrow { color: var(--text-muted); font-size: 12px; width: 14px; }
+    .history-head .h-at { font-weight: 600; font-size: 13px; }
+    .history-head .h-meta {
+      color: var(--text-secondary);
+      font-size: 12px;
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .history-body { padding: 2px 12px 10px; }
+    .history-body table { margin-top: 6px; }
+    .history-empty { color: var(--text-muted); font-size: 13px; padding: 4px 2px; }
+    .h-del {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 13px;
+      padding: 2px 6px;
+    }
+    .h-del:hover { color: var(--err, #f87171); }
+
+    /* 优选流程说明（默认折叠的 details） */
+    details.flow-note {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 12px;
+      margin-top: 12px;
+      background: var(--bg-elevated);
+    }
+    details.flow-note summary {
+      cursor: pointer;
+      color: var(--text-secondary);
+      font-size: 13px;
+      font-weight: 600;
+      user-select: none;
+    }
+    details.flow-note summary:hover { color: var(--text-main); }
+    details.flow-note[open] summary { margin-bottom: 8px; }
+    details.flow-note .note { margin: 0; }
   </style>
 
   <script>
@@ -1339,15 +1400,35 @@
                      提前取的 10 分钟令牌很容易过期；而且用户也不需要
                      理解令牌这回事，按个按钮就行。
             -->
-            <div class="note">
-              <b>阶段二两层校验：</b><br>
-              · 第一层 WebSocket <b>101 握手</b> —— 排除 Enterprise 专属 IP、SNI 阻断；<br>
-              第二层 <b>响应体内容校验</b> —— 发 PING 验证数据面，拦截假活 IP<br>
-              · CFPilot → 走自有探针端点 → 自身路径测速；<br>
-              其它项目 → <b>公开测速地址</b>测速<br>
-              · 启用「跳过测速」时退化为纯延迟排序（速度列显示 —）<br>
-              · 结果输出在下方，可复制到 Web 面板的「手动优选 IP」框
-            </div>
+            <!--
+              优选流程说明：默认折叠（details 无 open），避免占用页面空间。
+              标题固定「优选IP流程说明」，需要时点开查看完整四阶段描述。
+            -->
+            <details class="flow-note">
+              <summary>优选IP流程说明</summary>
+              <div class="note">
+                <b>整体流程（四阶段，全部基于真连接校验，不采信单纯 TCP 延迟）：</b><br>
+                <b>阶段一 · TCP 握手初筛</b> —— 从 Cloudflare 网段按「实测可用率加权」采样候选，
+                测 TCP 握手延迟，剔除完全不通的 IP；<br>
+                <b>阶段一之二 · TLS 握手筛选</b> —— 用你的域名作 SNI 完成完整 TLS 握手，
+                淘汰「能建 TCP 但握手极慢 / 失败」的 IP
+                （这是优选 IP 导入客户端后延迟 -1 的主要根因）；<br>
+                <b>阶段二 · 两层校验</b> —— 第一层 WebSocket <b>101 协议升级</b>：
+                排除 Enterprise 专属 IP 与 SNI 阻断；
+                第二层 <b>响应体内容校验</b>：发 PING 验证数据面真实响应，
+                拦截「握手能过但实际不可用」的假活 IP；<br>
+                <b>阶段三 · 真实下行测速</b> —— 多连接 + 丢弃预热期，
+                按<b>稳态吞吐</b>排序（单窗口峰值会虚高，不作为排序依据）；<br><br>
+                <b>补充说明：</b><br>
+                · 最终结果按 <b>/16 网段轮流取优</b>，避免整批集中在一个网段、
+                一段路由拥塞就全军覆没；<br>
+                · CFPilot 实例走自有探针端点测速；其它项目回落<b>公开测速地址</b>；<br>
+                · 勾选「跳过测速」时退化为纯延迟排序（速度列显示 —）；<br>
+                · 机房国家筛选在阶段二之后生效（机房码只有 101 响应里才有）；<br>
+                · 每次优选成功自动留底到下方<b>「优选历史」</b>，可多选复制、二次复测可用性；<br>
+                · 结果输出在下方，可复制到 Web 面板的「手动优选 IP」框，或点「回填面板」直接写入。
+              </div>
+            </details>
 
             <div class="btn-row" style="margin-top:16px">
               <button class="btn btn-primary" id="btnScan">开始优选</button>
@@ -1395,6 +1476,38 @@
               <thead><tr><th>#</th><th>地址</th><th>机房</th><th>TLS握手(ms)</th><th>TCP(ms)</th><th>下行(MB/s)</th></tr></thead>
               <tbody></tbody>
             </table>
+          </div>
+
+          <!--
+            优选历史：每次优选成功由后端自动留底（本地优选 / 一键优选都写），
+            界面只读。展开某次会话后可勾选 IP：
+              · 复制选中 IP —— 生成 IP:Port#机房 列表，粘回面板「手动优选 IP」
+              · 复测选中   —— 分层校验 TCP → TLS → WS101（可选测速），
+                              结论写回历史条目，跨天对比可用性
+            复测用的是该次会话**保存的域名 / WS 路径**，不受当前表单影响。
+          -->
+          <div class="card">
+            <h2><span class="dot"></span>🕓 优选历史</h2>
+            <p class="desc">
+              每次优选成功自动留底（保留最近 <b>30</b> 次）。展开一次结果，
+              勾选任意 IP 即可<b>复制</b>或<b>二次复测可用性</b>。
+            </p>
+            <div id="historyList">
+              <p class="history-empty">加载中…</p>
+            </div>
+            <div class="btn-row" style="margin-top: 10px; align-items: center">
+              <button class="btn btn-ghost" id="btnHistoryCopy" disabled>复制选中 IP</button>
+              <button class="btn btn-primary" id="btnHistoryRetest" disabled>复测选中</button>
+              <button class="btn btn-ghost" id="btnHistoryRefresh">刷新</button>
+              <label style="display:inline-flex;align-items:center;gap:6px;margin-left:auto;color:var(--text-secondary);font-size:12.5px;cursor:pointer">
+                <input type="checkbox" id="optHistorySpeed" />
+                复测带测速（慢）
+              </label>
+            </div>
+            <p class="tip" id="historyHint" style="margin-top: 8px">
+              复测按「TCP → TLS → WS 101」分层报告，能看出是哪一层挂了；
+              勾选「带测速」会同时重新测下行速度（每 IP 约多花 4 秒）。
+            </p>
           </div>
         </section>
 

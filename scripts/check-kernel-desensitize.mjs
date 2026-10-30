@@ -18,7 +18,7 @@
 //   2. 源码里的第三方域名（优选域名库 / 反代入口表 / 测速 URL）不在产物里明文出现；
 //   3. 数据面无协议关键字明文（vless / trojan / xhttp / socks5 / websocket / cfpilot）；
 //   4. 控制面的面板 HTML（gzip+base64）**仍在**——它必须被跳过编码，否则体积超预算；
-//   5. 两个产物都在 80KB 预算内（AGENTS.md §1.4）。
+//   5. 两个产物都在体积预算内（AGENTS.md §1.4，当前 96KB）。
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
@@ -103,8 +103,13 @@ for (const artifact of ARTIFACTS) {
   }
 
   // 5) 体积预算
-  if (kb > 80) {
-    note(`${artifact.name}: ${kb.toFixed(1)} KB 超出 80KB 预算（AGENTS.md §1.4）`)
+  //
+  // 与 worker-core/scripts/build.mjs 的 SIZE_BUDGET_KB 保持一致（2026-10-30 由 80 调到 96）。
+  // 80KB 是早期自定的数，没有平台依据；而静态脱敏会把含中文的字面量整段 base64
+  // （产物里 260 个，体积 ×1.33），80KB 时控制面只剩 26 字节余量。
+  const SIZE_BUDGET_KB = 96
+  if (kb > SIZE_BUDGET_KB) {
+    note(`${artifact.name}: ${kb.toFixed(1)} KB 超出 ${SIZE_BUDGET_KB}KB 预算（AGENTS.md §1.4）`)
   }
 }
 

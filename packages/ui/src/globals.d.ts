@@ -340,6 +340,21 @@ interface Window {
     }>
     createKvNamespace(accountId: string, title?: string): Promise<{ id: string; title: string } | null>
     checkEnvironment(): Promise<{ clean: boolean; findings: string[] }>
+    /**
+     * 本地服务状态（桌面版自身的 HTTP 服务）。
+     *
+     * 用于「运行状态」卡片：端口、已运行时长、配置文件位置。
+     */
+    serviceStatus(): Promise<{
+      running: boolean
+      host: string
+      port: number
+      url: string
+      uptimeSeconds: number
+      keepInTray: boolean
+      settingsFile: string
+      pid: number
+    }>
     saveCredentials(input: {
       cfToken?: string
       accountId?: string

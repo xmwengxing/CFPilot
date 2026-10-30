@@ -993,6 +993,37 @@
 
         <!-- ============ 部署 ============ -->
         <section class="page" id="page-deploy">
+          <!--
+            运行状态卡
+
+            为什么不做「账号级用量监控」：
+            Pages 不向 Worker 暴露账号级计量，而 GraphQL 的字段随平台版本漂移、
+            且不支持内省（写死字段名迟早失效）。所以这里只展示**本地可确证**的运行信息，
+            平台侧请求量与配额以 Cloudflare 控制台为准，给一个直达入口。
+          -->
+          <div class="card">
+            <h2><span class="dot"></span>📈 运行状态</h2>
+            <p class="kv-row" style="margin:0 0 6px">
+              <span class="k">本地服务</span><span class="v" id="rtLocal">—</span>
+            </p>
+            <p class="kv-row" style="margin:0 0 6px">
+              <span class="k">部署实例</span><span class="v" id="rtDeploy">—</span>
+            </p>
+            <p class="kv-row" style="margin:0 0 6px">
+              <span class="k">内核版本</span><span class="v" id="rtKernel">—</span>
+            </p>
+            <p class="kv-row" style="margin:0">
+              <span class="k">环境提示</span><span class="v" id="rtEnv">—</span>
+            </p>
+            <div class="btn-row" style="margin-top:12px">
+              <button class="btn btn-ghost" id="btnRtRefresh">刷新</button>
+              <button class="btn btn-ghost" id="btnRtAnalytics">打开 Cloudflare 控制台</button>
+            </div>
+            <p class="tip" style="margin-top:8px">
+              请求量、错误率与配额以 Cloudflare 控制台为准 —— Pages 不向 Worker 暴露账号级计量。
+            </p>
+          </div>
+
           <!-- 状态卡：先看「现在是什么情况」，再看怎么操作 -->
           <div class="card">
             <h2><span class="dot"></span>📌 当前部署状态</h2>

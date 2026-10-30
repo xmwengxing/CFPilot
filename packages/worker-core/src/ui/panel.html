@@ -862,6 +862,21 @@
       </div>
       <div class="row end"><button class="primary" id="btnSaveRemote">保存远程订阅源配置</button></div>
     </div>
+
+    <div class="card">
+      <h2><span class="dot"></span>配置备份与迁移</h2>
+      <p class="hint">导出的是<b>脱敏配置</b>：不含 UUID、Trojan 口令、入站路径、自定义域名，以及带口令的落地代理。导入前会先显示差异，确认后才写入。</p>
+      <div class="field">
+        <label>配置 JSON</label>
+        <textarea class="mono" id="cfgTransfer" rows="5" placeholder="点「导出当前配置」生成，或把备份粘贴到这里"></textarea>
+      </div>
+      <div class="row">
+        <button class="ghost" id="btnCfgExport">导出当前配置</button>
+        <button class="ghost" id="btnCfgPreview">预览导入差异</button>
+        <button class="primary" id="btnCfgApply">应用导入</button>
+      </div>
+      <p class="hint" id="cfgTransferHint"></p>
+    </div>
   </section>
 </div>
 
@@ -1267,6 +1282,35 @@
     $('overviewSummary').innerHTML = html;
     var local = state.status ? state.status.localIps : 0;
     $('localState').textContent = '本地真连接池：' + local + ' 条';
+  }
+
+  // === [Module 3c: 配置备份与迁移] ===
+  //
+  // 导出用白名单（后端负责），面板只负责展示与确认。
+  // 「未包含」的字段必须明确告诉用户 —— 否则他迁移后才发现连不上。
+  function parseTransferJson() {
+    var text = $('cfgTransfer').value.trim();
+    if (!text) { toast('请先导出，或把配置 JSON 粘贴到这里', true); return null; }
+    try {
+      var data = JSON.parse(text);
+      var cfg = (data && data.config) ? data.config : data;
+      if (!cfg || typeof cfg !== 'object') throw new Error('不是配置对象');
+      return cfg;
+    } catch (e) {
+      toast('配置 JSON 解析失败：' + (e && e.message ? e.message : String(e)), true);
+      return null;
+    }
+  }
+
+  function showTransferDiff(diff) {
+    if (!diff || diff.length === 0) {
+      $('cfgTransferHint').textContent = '没有差异，无需导入。';
+      return;
+    }
+    var html = diff.map(function (d) {
+      return '<div>' + esc(d.field) + '：' + esc(d.from) + ' → <b>' + esc(d.to) + '</b></div>';
+    }).join('');
+    $('cfgTransferHint').innerHTML = '将改动 ' + diff.length + ' 项：' + html;
   }
 
   // === [Module 3b: 订阅签名令牌] ===
@@ -1680,6 +1724,47 @@
     $('btnClearIps').addEventListener('click', function () {
       if (!confirm('确定要清空本地真连接优选池中的所有 IP 吗？')) return;
       api('/api/v1/ips', { method: 'DELETE' }).then(function () { loadAll(); toast('本地优选池已清空'); })
+        .catch(function (e) { toast(e.message, true); });
+    });
+
+    // ---- 配置备份与迁移 ----
+    $('btnCfgExport').addEventListener('click', function () {
+      api('/api/v1/config/export').then(function (r) {
+        $('cfgTransfer').value = JSON.stringify(
+          { schemaVersion: r.schemaVersion, exportedAt: r.exportedAt, config: r.config },
+          null,
+          2
+        );
+        var omitted = r.omitted || [];
+        $('cfgTransferHint').innerHTML = omitted.length
+          ? '已导出。以下内容<b>未包含</b>，迁移后需手工填写：' +
+            omitted.map(function (o) { return esc(o.field) + '（' + esc(o.reason) + '）'; }).join('、')
+          : '已导出（不含任何敏感字段）。';
+        toast('配置已导出到文本框');
+      }).catch(function (e) { toast(e.message, true); });
+    });
+
+    $('btnCfgPreview').addEventListener('click', function () {
+      var cfg = parseTransferJson();
+      if (!cfg) return;
+      api('/api/v1/config/import', { method: 'POST', body: JSON.stringify({ config: cfg, dryRun: true }) })
+        .then(function (r) { showTransferDiff(r.diff); })
+        .catch(function (e) { toast(e.message, true); });
+    });
+
+    $('btnCfgApply').addEventListener('click', function () {
+      var cfg = parseTransferJson();
+      if (!cfg) return;
+      if (!confirm('导入会覆盖下列配置项（凭据与入站路径不会被覆盖）。确定继续？')) return;
+      api('/api/v1/config/import', { method: 'POST', body: JSON.stringify({ config: cfg }) })
+        .then(function (r) {
+          if (r.config) {
+            state.config = r.config;
+            fillConfig(r.config);
+          }
+          showTransferDiff(r.diff);
+          toast('已导入 ' + (r.applied || 0) + ' 项配置');
+        })
         .catch(function (e) { toast(e.message, true); });
     });
 

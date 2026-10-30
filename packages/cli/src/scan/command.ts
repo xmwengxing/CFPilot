@@ -63,6 +63,16 @@ function normalizeWsPath(raw: string | undefined, fallback: string): string {
   return value
 }
 
+/**
+ * 采样种子。
+ *
+ * 不传 = 每次随机（默认）；显式给了 `--seed` 才固定。
+ * 固定后**同样的参数会得到同样的候选列表**，这是「可复现报告」的基础。
+ */
+function seedFromArgs(args: ParsedArgs): number | undefined {
+  return args.flags['seed'] !== undefined ? flagNumber(args, 'seed', 24301) : undefined
+}
+
 async function resolveCandidatesFromArgs(args: ParsedArgs): Promise<string[]> {
   const ipFile = flagString(args, 'ip-file')
   if (ipFile) {
@@ -78,7 +88,7 @@ async function resolveCandidatesFromArgs(args: ParsedArgs): Promise<string[]> {
     cidr: flagList(args, 'cidr'),
     // ⚠️ 不传 seed = 每次随机（默认）。只有用户显式给了 --seed 才固定，
     // 否则「每次跑都测同一批 IP」——那批落在劣质路由段上时永远测不出好 IP。
-    seed: args.flags['seed'] !== undefined ? flagNumber(args, 'seed', 24301) : undefined,
+    seed: seedFromArgs(args),
   })
 }
 
@@ -272,9 +282,12 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
   // 代理干扰检测：流量被代理接管时，测出来的是到代理的延迟而不是到目标 IP 的，
   // 结果会「看起来正常」但导入客户端后大量 -1，因此必须提前提醒。
   // 只提醒不阻断 —— 用户可能确实需要走代理（例如域名在本地被污染）。
-  if (!quiet) {
+  // quiet 时不打印，但 --json 报告里要带上 —— 排查时最需要的信息恰恰是这个
+  let envResult: Awaited<ReturnType<typeof detectProxyInterference>> | null = null
+  if (!quiet || asJson) {
     const env = await detectProxyInterference(host)
-    if (!env.clean) {
+    envResult = env
+    if (!quiet && !env.clean) {
       process.stdout.write('\n⚠️  检测到可能干扰优选的因素：\n')
       for (const f of env.findings) {
         process.stdout.write(`   ${f.message}\n`)
@@ -439,8 +452,39 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
   })
 
   if (asJson) {
+    // 可复现报告：参数 + 种子 + 环境 + 失败分布 + 结果
+    //
+    // 只有「结果」没有「怎么跑出来的」，用户提问题时还是得靠截图和口头描述。
+    // 这里把决定结果的全部输入都带上：同一个种子 + 同一组参数 = 同一份候选列表。
     process.stdout.write(
-      `${JSON.stringify({ entries: summary.entries, stats: summary.stats }, null, 2)}\n`
+      `${JSON.stringify(
+        {
+          generatedAt: new Date().toISOString(),
+          tool: 'cfpilot',
+          version: VERSION,
+          seed: seedFromArgs(args) ?? null,
+          params: {
+            host,
+            port,
+            wsPath,
+            probePath,
+            sample: flagNumber(args, 'sample', 6556),
+            top,
+            countries: summary.stats.countries,
+            speedMode,
+            speedLimit: flagNumber(args, 'speed-limit', 30),
+            speedBytes: flagNumber(args, 'speed-bytes', 5 * 1024 * 1024),
+            skipSpeed,
+            verifyPayload,
+            tunnelVerified: Boolean(flagString(args, 'uuid') || flagString(args, 'trojan-password')),
+          },
+          env: envResult,
+          stats: summary.stats,
+          entries: summary.entries,
+        },
+        null,
+        2
+      )}\n`
     )
   } else {
     printTable(summary.entries)

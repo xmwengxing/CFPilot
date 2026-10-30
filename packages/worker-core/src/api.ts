@@ -27,6 +27,8 @@ import {
 } from './config'
 import { collectNodes, parseLocalList } from './sub-engine'
 import { loadSubSecret, rotateSubSecret, signSubToken, verifySubToken } from './sub-token'
+import { describeFieldErrors, validateConfigPatch } from './config-validate'
+import { buildConfigExport, diffConfig, pickImportable } from './config-transfer'
 import { CF_IPV4_CIDRS, COUNTRY_NAMES, PREFERRED_DOMAINS, SUPPORTED_COUNTRIES, coloLabel } from './data/pools'
 import { randomHex } from './util'
 import { CpuBudget } from './budget'
@@ -302,10 +304,49 @@ export async function handleApi(
       return error('请求体解析失败', 400)
     }
     if (!body.config || typeof body.config !== 'object') return error('缺少配置对象', 400)
+    // 后端才是安全边界：前端校验只负责体验，任何值都能绕过前端直接打接口
+    const invalid = validateConfigPatch(body.config as Record<string, unknown>)
+    if (invalid.length > 0) return error(describeFieldErrors(invalid), 400)
     const merged = mergeConfig(config, body.config)
     await saveConfig(store, merged)
     ctx.onConfigChanged()
     return json({ ok: true, config: merged })
+  }
+
+  // ---- 配置导入导出（脱敏）----
+  //
+  // 导出用**白名单**：只有显式声明的字段才会出去，新增字段默认不导出。
+  // 同时返回 omitted 说明，让用户在导出那一刻就知道哪些要手工补。
+  if (path === '/config/export' && method === 'GET') {
+    return json({ ok: true, ...buildConfigExport(config) })
+  }
+
+  // 导入分两步：先 dryRun 拿差异，用户确认后再真正写入。
+  // 直接从别人那里拿一份配置覆盖，会静默改掉节点来源、代理模式这类不显眼但影响大的项。
+  if (path === '/config/import' && method === 'POST') {
+    let body: { config?: unknown; dryRun?: boolean }
+    try {
+      body = (await request.json()) as { config?: unknown; dryRun?: boolean }
+    } catch {
+      return error('请求体解析失败', 400)
+    }
+    if (!body.config || typeof body.config !== 'object') return error('缺少配置对象', 400)
+
+    const incoming = pickImportable(body.config as Record<string, unknown>)
+    if (Object.keys(incoming).length === 0) {
+      return error('没有可导入的字段（确认是本项目导出的配置文件？）', 400)
+    }
+    const invalid = validateConfigPatch(incoming)
+    if (invalid.length > 0) return error(describeFieldErrors(invalid), 400)
+
+    const diff = diffConfig(config, incoming)
+    if (body.dryRun) return json({ ok: true, dryRun: true, diff, count: diff.length })
+    if (diff.length === 0) return json({ ok: true, applied: 0, diff: [], config })
+
+    const merged = mergeConfig(config, incoming as Partial<UserConfig>)
+    await saveConfig(store, merged)
+    ctx.onConfigChanged()
+    return json({ ok: true, applied: diff.length, diff, config: merged })
   }
 
   if (path === '/ips' && method === 'GET') {

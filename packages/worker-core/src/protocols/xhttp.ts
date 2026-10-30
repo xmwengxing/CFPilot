@@ -92,6 +92,17 @@ export async function handleXhttp(
     return new Response('VLESS 头解析失败', { status: 400 })
   }
   if (parsed.header.command !== VLESS_COMMAND_TCP) {
+    // 必须显式取消剩余请求体。
+    //
+    // `parseVless()` 结尾调用了 `stream.release()`，把 body 的 reader 交到了
+    // `parsed.payload` 手上。直接 return 响应的话，没有任何一方去取消它：
+    // 客户端还在继续发字节，服务端不读，这条读取任务会一直挂到运行时超时。
+    // 扫描器发一个 UDP 命令 + 半截 body 就能持续占用资源。
+    //
+    // ⚠️ 不能写成 `body.cancel()` —— 原始流已被 getReader() 锁定，cancel 会抛错
+    // 并被吞掉（见 protocols/stream.ts 的注释）。必须取消 release() 出来的那个流：
+    // 它的 cancel 会转发给底层 reader。
+    await parsed.payload.cancel('unsupported UDP')
     return new Response('XHTTP 暂不支持 UDP', { status: 400 })
   }
 

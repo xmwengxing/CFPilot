@@ -17,6 +17,7 @@ Cloudflare Pages 代理部署与优选工具
   ${NAME}                     交互菜单（推荐首次使用）
   ${NAME} deploy [选项]       部署 Pages 双项目
   ${NAME} scan [选项]         本地真连接优选
+  ${NAME} test [选项]         测试单个 IP 的完整链路
   ${NAME} status              查看当前实例状态
   ${NAME} token [选项]        检查 API Token 权限
   ${NAME} vps [选项]          在自己的 VPS 上部署 SOCKS5 落地代理
@@ -28,6 +29,7 @@ Cloudflare Pages 代理部署与优选工具
   ${NAME}                                  # 进菜单，按提示操作
   ${NAME} deploy --token <TOKEN>           # 直接部署
   ${NAME} scan --host <数据面域名>          # 直接优选
+  ${NAME} test --host x --ip 104.16.1.1     # 只测一个 IP
   ${NAME} scan --host x --panel y --panel-password z   # 优选并回填
 
 文档: https://github.com/xmwengxing/CFPilot
@@ -68,6 +70,11 @@ async function main(): Promise<void> {
     case 'scan': {
       const { runScanCommand } = await import('./scan/command')
       await runScanCommand(args)
+      return
+    }
+    case 'test': {
+      const { runTestCommand } = await import('./scan/single-command')
+      await runTestCommand(args)
       return
     }
     case 'status': {

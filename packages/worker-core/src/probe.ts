@@ -99,6 +99,50 @@ const PROBE_CHUNK: Uint8Array = (() => {
   return buf
 })()
 
+/** 探测连接的空闲上限（ms） */
+const PROBE_IDLE_MS = 5000
+
+/**
+ * 给一条已 accept 的探测连接装「空闲截止」。
+ *
+ * ## 为什么必须有
+ *
+ * 探针端点按铁律**不能加鉴权**（本地优选器要能匿名用）。于是任何人只要完成
+ * 101 握手、之后一个字节都不发，这条连接就会一直挂着 —— 而 Workers 单请求的
+ * 并发连接是有上限的，等于给了一个零成本的资源占用入口。
+ *
+ * ## 为什么导出
+ *
+ * 真实 WebSocketPair 在 vitest 里造不出来，所以把「到点关闭 + 可取消」这段
+ * 纯逻辑单独抽出来测，而不是去 mock 整个 WS 栈。
+ */
+export function armProbeIdleClose(
+  close: (code: number, reason: string) => void,
+  ms: number = PROBE_IDLE_MS
+): { cancel: () => void } {
+  let settled = false
+  const timer = setTimeout(() => {
+    if (settled) return
+    settled = true
+    try {
+      close(1000, 'Probe idle timeout')
+    } catch {
+      /* 已关闭 */
+    }
+  }, ms)
+  // Workers 的 setTimeout 返回数字，Node 返回对象；有 unref 就放掉，
+  // 避免这个定时器把事件循环（本地调试时的 workerd / Node）多留几秒。
+  const handle = timer as unknown as { unref?: () => void }
+  if (typeof handle?.unref === 'function') handle.unref()
+  return {
+    cancel: () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+    },
+  }
+}
+
 export async function handleEdgeProbe(request: Request): Promise<Response> {
   const url = new URL(request.url)
 
@@ -108,9 +152,14 @@ export async function handleEdgeProbe(request: Request): Promise<Response> {
     const pair = new WebSocketPair()
     const [client, server] = Object.values(pair) as unknown as [WebSocket, WebSocket]
     server.accept()
+
+    // 空闲截止：只握手不发 PING 的连接在 5 秒后关闭（见 armProbeIdleClose 注释）
+    const idle = armProbeIdleClose((code, reason) => server.close(code, reason))
+
     server.addEventListener('message', (event: MessageEvent) => {
       const data = typeof event.data === 'string' ? event.data : ''
       if (data === 'PING' || data === 'ping') {
+        idle.cancel()
         server.send(
           JSON.stringify({
             pong: true,
@@ -123,8 +172,19 @@ export async function handleEdgeProbe(request: Request): Promise<Response> {
         } catch {
           /* 已关闭 */
         }
+        return
+      }
+      // 非预期消息：不认识的协议没必要继续占着连接
+      idle.cancel()
+      try {
+        server.close(1000, 'Probe aborted')
+      } catch {
+        /* 已关闭 */
       }
     })
+    // 客户端主动断开 / 出错时清定时器，否则 isolate 里会堆积
+    server.addEventListener('close', () => idle.cancel())
+    server.addEventListener('error', () => idle.cancel())
     return new Response(null, { status: 101, webSocket: client })
   }
 

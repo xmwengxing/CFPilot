@@ -75,6 +75,11 @@ function diagThrottled(now: number): boolean {
  */
 function diagAuthorized(request: Request, url: URL, uuid: string): boolean {
   if (!uuid) return false
+  // ⚠️ `?token=` 查询参数**已废弃**，保留只是为了兼容旧的排障命令。
+  //
+  // 令牌走 URL 会进浏览器历史、Referer 与边缘日志 —— 比放在请求头里风险大得多。
+  // 新用法一律走请求头（README 里的示例已经是 `x-cfpilot-token`）。
+  // 下个大版本会删掉这条分支。
   const token = (
     request.headers.get('x-cfpilot-token') ??
     url.searchParams.get('token') ??

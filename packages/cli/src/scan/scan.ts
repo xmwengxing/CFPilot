@@ -159,6 +159,43 @@ export type ScanEvent =
   | { type: 'done'; count: number }
   | { type: 'error'; message: string }
 
+/**
+ * 把失败原因归类。
+ *
+ * ## 为什么要分类而不是只报计数
+ *
+ * 「101 阶段失败 812 个」没有信息量；「其中 700 个是 HTTP 403、90 个超时、
+ * 22 个连接被重置」才能直接指向原因（403 多半是路径/鉴权不对，超时是 IP 不可用）。
+ *
+ * 归类只做粗粒度匹配：目标是**可读的分布**，不是精确的错误码体系。
+ */
+export function classifyFailure(error: string | undefined): string {
+  const text = String(error ?? '').trim()
+  if (!text) return '未知原因'
+  if (/timeout|timed out|超时|ETIMEDOUT/i.test(text)) return '超时'
+  if (/ECONNREFUSED|connection refused|连接被拒/i.test(text)) return '连接被拒'
+  if (/ENETUNREACH|EHOSTUNREACH|unreachable/i.test(text)) return '网络不可达'
+  if (/ECONNRESET|socket hang up|连接重置/i.test(text)) return '连接重置'
+  if (/certificate|CERT_|SELF_SIGNED|证书/i.test(text)) return '证书问题'
+  if (/ALPN/i.test(text)) return 'ALPN 协商失败'
+  if (/HTTP\s*\d{3}/i.test(text)) {
+    const code = /HTTP\s*(\d{3})/i.exec(text)?.[1]
+    return code ? `HTTP ${code}` : 'HTTP 状态异常'
+  }
+  if (/PONG|pong/i.test(text)) return '内容校验不通过'
+  if (/ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(text)) return '域名解析失败'
+  return '其他'
+}
+
+/** 失败原因计数（阶段 → 原因 → 次数） */
+export type FailureBreakdown = Record<string, Record<string, number>>
+
+function countFailure(into: FailureBreakdown, stage: string, error: string | undefined): void {
+  const bucket = (into[stage] ??= {})
+  const key = classifyFailure(error)
+  bucket[key] = (bucket[key] ?? 0) + 1
+}
+
 export interface ScanEntry {
   ip: string
   port: number
@@ -189,6 +226,13 @@ export interface ScanSummary {
     countryFilterRelaxed?: boolean
     /** 因已攒够目标国家节点而提前结束阶段二 */
     stoppedEarly?: boolean
+    /**
+     * 各阶段的失败原因分布。
+     *
+     * 只报总数没有用（「101 失败 812 个」指不出原因），分类后能直接看出
+     * 是路径不对（403 多）、IP 不可用（超时多）还是别的问题。
+     */
+    failures?: FailureBreakdown
   }
 }
 
@@ -484,7 +528,12 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
     return { ...item, tls: probe }
   })
 
+  const failures: FailureBreakdown = {}
   const tlsOk = tlsResults.filter((r) => r.tls.tlsMs > 0)
+  for (const item of tlsResults) {
+    if (item.tls.tlsMs > 0) continue
+    countFailure(failures, 'tls', item.tls.error)
+  }
 
   // 主排序键：TLS 握手耗时（升序）；次键：TCP 延迟
   const stage1 = tlsOk
@@ -594,6 +643,10 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
     ? probeResults.filter((r) => r.probe.ok && r.probe.pongVerified === true)
     : probeResults.filter((r) => r.probe.ok)
   ).filter((r) => (r as { pathOk?: boolean }).pathOk !== false)
+  for (const item of probeResults) {
+    if (item.probe.ok) continue
+    countFailure(failures, 'ws101', item.probe.error)
+  }
 
   // ---- 阶段二点五：真实隧道校验（可选）----
   //
@@ -848,6 +901,8 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
       countryFilterRelaxed,
       /** 因已攒够目标国家节点而提前结束阶段二 */
       stoppedEarly,
+      /** 各阶段失败原因分布 */
+      failures,
     },
   }
   report({ type: 'done', count: entries.length })

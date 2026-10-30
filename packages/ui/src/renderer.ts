@@ -444,6 +444,84 @@
   }
 
   /** 绑定账户管理相关事件 */
+  /**
+   * 运行状态卡片
+   *
+   * 展示**本地可确证**的信息：本地服务、部署实例、内核版本、环境提示。
+   *
+   * 为什么不做「账号级用量监控」：Pages 不向 Worker 暴露账号级计量；
+   * GraphQL 的字段随平台版本漂移且不支持内省，写死字段名迟早失效。
+   * 所以平台侧请求量与配额交给控制台，这里给一个直达入口。
+   */
+  function fmtUptime(seconds: number): string {
+    if (!seconds || seconds < 0) return '—'
+    const d = Math.floor(seconds / 86400)
+    const h = Math.floor((seconds % 86400) / 3600)
+    const m = Math.floor((seconds % 3600) / 60)
+    if (d > 0) return d + ' 天 ' + h + ' 小时'
+    if (h > 0) return h + ' 小时 ' + m + ' 分'
+    return m + ' 分钟'
+  }
+
+  async function loadRuntimeStatus(): Promise<void> {
+    try {
+      const st = await window.cfpilot.serviceStatus()
+      $text('rtLocal').textContent =
+        '运行中 · 端口 ' + st.port + ' · 已运行 ' + fmtUptime(st.uptimeSeconds)
+    } catch {
+      $text('rtLocal').textContent = '读取失败'
+    }
+    try {
+      const dep = await window.cfpilot.checkDeployed()
+      $text('rtDeploy').textContent = dep.hasDeploy
+        ? (dep.controlProject || '?') + ' / ' + (dep.dataProject || '?')
+        : '尚未部署'
+      // 用 state 而不是版本号：build 是内容指纹（hash-hash），对用户没有意义
+      const stateText: Record<string, string> = {
+        latest: '已是最新',
+        outdated: '线上版本较旧，可更新',
+        blocked: '部署被平台标记，需处理',
+        none: '尚未部署',
+      }
+      $text('rtKernel').textContent = stateText[dep.state] || dep.state || '—'
+    } catch {
+      $text('rtDeploy').textContent = '读取失败'
+      $text('rtKernel').textContent = '—'
+    }
+    try {
+      const env = await window.cfpilot.checkEnvironment()
+      $text('rtEnv').textContent = env.clean
+        ? '未发现干扰因素'
+        : (env.findings || []).length + ' 项提示'
+    } catch {
+      $text('rtEnv').textContent = '读取失败'
+    }
+  }
+
+  function bindRuntime(): void {
+    const refresh = document.getElementById('btnRtRefresh')
+    if (refresh) {
+      refresh.addEventListener('click', () => {
+        void loadRuntimeStatus()
+      })
+    }
+    const analytics = document.getElementById('btnRtAnalytics')
+    if (analytics) {
+      analytics.addEventListener('click', () => {
+        void window.cfpilot
+          .detectAccount()
+          .then((acc) => {
+            const url = acc && acc.accountId
+              ? 'https://dash.cloudflare.com/?account=' + acc.accountId
+              : 'https://dash.cloudflare.com/'
+            return window.cfpilot.openExternal(url)
+          })
+          .catch(() => window.cfpilot.openExternal('https://dash.cloudflare.com/'))
+      })
+    }
+    void loadRuntimeStatus()
+  }
+
   function bindProfiles(): void {
     $sel('profileSelect').addEventListener('change', async () => {
       // 选「新建」：不落盘、不切换，只是进入新建模式
@@ -2252,6 +2330,7 @@
     }
 
     bindProfiles()
+    bindRuntime()
     bindCredentials()
     bindDeploy()
     bindChain()

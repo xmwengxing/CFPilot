@@ -9,7 +9,9 @@ import {
   clearSessionCookie,
   issueOneTimeToken,
   sessionCookie,
-  verifyPassword,
+  discardPlaintextPassword,
+  upgradePasswordHash,
+  verifyPasswordDetailed,
   verifyScanToken,
   verifySession,
   type AuthContext,
@@ -31,6 +33,70 @@ import { BUILD_VERSION, PKG_VERSION } from './version'
 import { normalizeNodeDomain } from './routes/shared'
 
 export const API_PREFIX = '/api/v1'
+
+/**
+ * 登录失败限速（isolate 级，尽力而为）。
+ *
+ * ## 为什么需要
+ *
+ * 面板路径是随机生成的，但一旦泄露（截图、日志、订阅链接），
+ * 密码就成了唯一屏障。没有限速时攻击者可以无限次 POST /login 爆破。
+ *
+ * ## 为什么不用 KV
+ *
+ * KV 写配额是硬约束（免费版 1000 次/天，AGENTS §1.30）——
+ * 每次登录失败写一次 KV，等于给攻击者一个「一键耗尽配额」的按钮。
+ * 因此只用 isolate 内存：全局不精确，但足够把在线爆破从「无限次」压到「
+ * 每 isolate 每分钟 5 次」，而正常用户完全无感。
+ */
+const LOGIN_MAX_FAILURES = 5
+const LOGIN_WINDOW_MS = 60_000
+/** 上限：防止伪造来源 IP 把 Map 撑爆 */
+const LOGIN_MAX_TRACKED = 500
+
+interface LoginFailure {
+  count: number
+  resetAt: number
+}
+
+const LOGIN_FAILURES = new Map<string, LoginFailure>()
+
+/** 取来源 IP（Cloudflare 提供 CF-Connecting-IP；本地调试回落 XFF） */
+function clientIp(request: Request): string {
+  return (
+    request.headers.get('CF-Connecting-IP') ??
+    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
+    'unknown'
+  )
+}
+
+/** 当前是否已被限速；顺带清理过期条目 */
+function loginThrottled(ip: string, now: number): boolean {
+  const entry = LOGIN_FAILURES.get(ip)
+  if (!entry) return false
+  if (now >= entry.resetAt) {
+    LOGIN_FAILURES.delete(ip)
+    return false
+  }
+  return entry.count >= LOGIN_MAX_FAILURES
+}
+
+/** 记录一次失败 */
+function recordLoginFailure(ip: string, now: number): void {
+  const entry = LOGIN_FAILURES.get(ip)
+  if (!entry || now >= entry.resetAt) {
+    if (LOGIN_FAILURES.size >= LOGIN_MAX_TRACKED) {
+      for (const [key, value] of LOGIN_FAILURES) {
+        if (now >= value.resetAt) LOGIN_FAILURES.delete(key)
+      }
+      // 清完仍满：直接清空（宁可短暂放宽，也不让 Map 无限增长）
+      if (LOGIN_FAILURES.size >= LOGIN_MAX_TRACKED) LOGIN_FAILURES.clear()
+    }
+    LOGIN_FAILURES.set(ip, { count: 1, resetAt: now + LOGIN_WINDOW_MS })
+    return
+  }
+  entry.count += 1
+}
 
 function json(data: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(data), {
@@ -96,8 +162,35 @@ export async function handleApi(
       return error('请求体解析失败', 400)
     }
     if (!password) return error('请输入密码', 400)
-    const ok = await verifyPassword(auth, password)
-    if (!ok) return error('密码错误', 401)
+    const ip = clientIp(request)
+    const now = Date.now()
+    if (loginThrottled(ip, now)) {
+      return new Response(
+        JSON.stringify({ ok: false, error: '尝试过于频繁，请稍后再试' }),
+        {
+          status: 429,
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'no-store',
+            'Retry-After': String(Math.ceil(LOGIN_WINDOW_MS / 1000)),
+          },
+        }
+      )
+    }
+    const result = await verifyPasswordDetailed(auth, password)
+    if (!result.ok) {
+      recordLoginFailure(ip, now)
+      return error('密码错误', 401)
+    }
+    LOGIN_FAILURES.delete(ip)
+    // 旧格式（单次 SHA-256）验证通过后静默升级为 PBKDF2。
+    // 失败不影响本次登录 —— 只是下次还要再算一次旧哈希。
+    if (result.legacy) {
+      await upgradePasswordHash(store, password).catch(() => undefined)
+    }
+    // 自动生成的密码明文只保留到「第一次登录成功」为止。
+    // 部署向导注入 PANEL_PASSWORD 的实例根本没有这个键（内部先 get 再决定是否删）。
+    await discardPlaintextPassword(store).catch(() => undefined)
     const token = await createSession(store)
     return json({ ok: true }, 200, { 'Set-Cookie': sessionCookie(token) })
   }

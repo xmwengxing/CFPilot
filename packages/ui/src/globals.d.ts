@@ -277,13 +277,20 @@ interface Window {
       expiresIn?: number
       error?: string
     }>
-    /** 优选器支持的国家列表（与面板 / 命令行版同源） */
-    listScanCountries(): Promise<Array<{ code: string; name: string }>>
     /**
-     * 机房国家的分组筛选：分组名 → 该组的机房三字码。
+     * 优选器支持的国家目录（与 CLI / 面板同源）。
      *
-     * 「亚洲组 / 美国组」按钮按码选中多选框里对应项；
-     * 机房表只在后端维护一份，这里拿不到时返回 `{}`（按钮置灰）。
+     * `code` 是**国家码**（HK / JP / US），不是机房三字码；
+     * 机房码放在 `colos` 里，只用于展示与搜索命中。
+     */
+    listScanCountries(): Promise<
+      Array<{ code: string; name: string; group: string; colos: string[] }>
+    >
+    /**
+     * 机房国家的分组筛选：分组名 → 该组的**国家码**。
+     *
+     * 界面把分组当关键字传给扫描器，展开由后端负责；
+     * 表只在后端维护一份，这里拿不到时返回 `{}`。
      */
     listScanCountryGroups(): Promise<Record<string, string[]>>
     /**

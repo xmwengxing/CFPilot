@@ -716,15 +716,18 @@ func orDash(s string) string {
 	return s
 }
 
-// handleScanCountries 返回支持的地区列表与分组。
+// handleScanCountries 返回支持的国家目录与分组。
 //
-// 数据来源：Cloudflare 的常用机房代码。
-// groups 是「亚洲组 / 美国组」按钮用的机房码集合（由 scan 包的分组表展开），
-// 界面只负责按码选中，不自己维护第二份机房表。
+// 统一用**国家码**（HK / JP / US）作为界面与接口的选择单位：
+// 机房码（HKG / NRT）是实现细节，一个国家可以有多个机房。
+// `colos` 只用于界面上的辅助显示与搜索。
+//
+// groups 是「亚洲组 / 美国组」的国家集合；界面把分组当关键字传给扫描器，
+// 后端负责展开成国家码 → 机房码，界面不维护第二份表。
 func (s *Server) handleScanCountries(w http.ResponseWriter, r *http.Request) {
 	groups := make(map[string][]string, 4)
 	for _, name := range scan.RegionGroupNames() {
-		groups[name] = scan.RegionGroupColos(name)
+		groups[name] = scan.RegionGroupCountries(name)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"countries": supportedCountries,
@@ -839,24 +842,25 @@ func isPortOpen(host string, port int, timeout time.Duration) bool {
 	return true
 }
 
-// supportedCountries 是支持的地区列表（机房代码 → 中文名）。
+// supportedCountries 是支持的国家列表（国家码 → 中文名 + 大洲 + 机房码）。
 //
 // ⚠️ 数据来源必须是 scan 包里的映射（与 CLI 版 countries.ts 同源），
 // 不要在这里另写一份 —— 两份表会漂移。
 var supportedCountries = buildSupportedCountries()
 
-// buildSupportedCountries 从 scan 包的「国家 → 机房」映射生成界面列表。
+// buildSupportedCountries 从 scan 包的映射生成界面列表。
 //
-// 输出顺序：按国家代码字典序，同一国家的机房按映射里的顺序。
-func buildSupportedCountries() []map[string]string {
-	out := make([]map[string]string, 0, 64)
+// 输出顺序按国家代码字典序（scan.SupportedCountries 保证稳定），
+// 每个国家带上大洲分组与机房码：界面按大洲分节展示，搜索命中机房码。
+func buildSupportedCountries() []map[string]any {
+	out := make([]map[string]any, 0, 40)
 	for _, country := range scan.SupportedCountries() {
-		for _, colo := range scan.CountryColosOf(country) {
-			out = append(out, map[string]string{
-				"code": colo,
-				"name": scan.ColoNameOf(colo),
-			})
-		}
+		out = append(out, map[string]any{
+			"code":  country,
+			"name":  scan.CountryNameOf(country),
+			"group": scan.ContinentOf(country),
+			"colos": scan.CountryColosOf(country),
+		})
 	}
 	return out
 }

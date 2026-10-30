@@ -87,6 +87,20 @@ func RegionGroupNames() []string {
 	return out
 }
 
+// RegionGroupCountries 返回分组包含的国家代码（界面弹窗按国家勾选时用）。
+//
+// 分组内部只存国家码，机房码由 CountryColosOf 展开 ——
+// 与 RegionGroupColos 是同一份数据的两个视图。
+func RegionGroupCountries(name string) []string {
+	countries, ok := regionGroups[strings.ToUpper(strings.TrimSpace(name))]
+	if !ok {
+		return nil
+	}
+	out := make([]string, len(countries))
+	copy(out, countries)
+	return out
+}
+
 // coloToCountry 机房三字码 → 国家代码（模块加载时构建一次）。
 var coloToCountry = func() map[string]string {
 	out := make(map[string]string)
@@ -202,6 +216,34 @@ func CountryColosOf(country string) []string {
 // CountryNameOf 返回国家中文名；未知返回空串。
 func CountryNameOf(country string) string {
 	return countryNames[strings.ToUpper(strings.TrimSpace(country))]
+}
+
+// countryContinent 国家代码 → 大洲分组（界面国家弹窗的分节标题）。
+//
+// 与 regionGroups 的分工：
+//   - regionGroups 只有「亚洲组 / 美国组」两个**筛选快捷方式**；
+//   - countryContinent 覆盖**全部**受支持国家，只用于展示分组。
+//
+// 两者不能合并：筛选组的「美国组」只含 US，而展示分组里 US 与 CA/BR 同属美洲。
+var countryContinent = map[string]string{
+	"HK": "ASIA", "TW": "ASIA", "JP": "ASIA", "KR": "ASIA", "SG": "ASIA",
+	"MY": "ASIA", "TH": "ASIA", "VN": "ASIA", "ID": "ASIA", "PH": "ASIA",
+	"IN": "ASIA", "AE": "ASIA", "IL": "ASIA",
+	"US": "AMERICAS", "CA": "AMERICAS", "BR": "AMERICAS", "AR": "AMERICAS",
+	"CL": "AMERICAS", "MX": "AMERICAS",
+	"GB": "EUROPE", "DE": "EUROPE", "FR": "EUROPE", "NL": "EUROPE",
+	"IT": "EUROPE", "ES": "EUROPE", "SE": "EUROPE", "CH": "EUROPE",
+	"AT": "EUROPE", "PL": "EUROPE", "RU": "EUROPE", "TR": "EUROPE",
+	"AU": "OCEANIA", "NZ": "OCEANIA",
+	"ZA": "AFRICA",
+}
+
+// ContinentOf 返回国家所属大洲分组；未知返回 OTHER。
+func ContinentOf(country string) string {
+	if group, ok := countryContinent[strings.ToUpper(strings.TrimSpace(country))]; ok {
+		return group
+	}
+	return "OTHER"
 }
 
 // coloNames 机房三字码 → 中文名。

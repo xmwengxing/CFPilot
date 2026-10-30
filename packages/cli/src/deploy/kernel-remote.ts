@@ -26,8 +26,23 @@
  * 查不到远程 / 下载失败 / GitHub 不可达，都是**正常情况**（离线、限流、
  * 仓库还没发新版），一律回退到**本地内置产物**继续部署，
  * 只在返回值里把 `source` 标成「内置 x.y.z」，让调用方能提示用户。
+ *
+ * ## 完整性校验（供应链）
+ *
+ * 远程产物最终会被上传到**用户的 Cloudflare 账号**里运行，
+ * 所以「下载成功」不等于「可以部署」：
+ *
+ *   1. Release 里同时发布 `cfpilot-kernel-SHA256SUMS`；
+ *   2. 本模块从**官方 GitHub 地址**（不走镜像）取这份清单；
+ *   3. 下载产物（允许走镜像）后必须与清单逐字节匹配；
+ *   4. 缓存命中也要重新算摘要 —— 缓存文件同样可能被篡改或写坏；
+ *   5. 清单取不到 / 摘要不匹配 → **拒绝远程内核**，回退本地内置产物。
+ *
+ * ⚠️ 为什么不从镜像取清单：镜像若能替换产物，就能一并替换清单，
+ * 校验形同虚设。宁可回退内置（安全但旧），也不把未校验的代码部署出去。
  */
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -44,6 +59,8 @@ import {
 export const CONTROL_ASSET_NAME = 'cfpilot-kernel-control.js'
 /** 数据面内核产物在 Release 里的附件名。 */
 export const DATA_ASSET_NAME = 'cfpilot-kernel-dataplane.js'
+/** 内核产物摘要清单在 Release 里的附件名（sha256sum 格式）。 */
+export const CHECKSUMS_ASSET_NAME = 'cfpilot-kernel-SHA256SUMS'
 
 /** GitHub 仓库。 */
 const REPO = 'xmwengxing/CFPilot'
@@ -82,6 +99,8 @@ export interface RemoteKernelInfo {
   controlUrl: string
   /** 数据面产物下载地址 */
   dataUrl: string
+  /** 摘要清单地址（空串 = 该发行版没有清单，下载后无法校验） */
+  checksumsUrl: string
 }
 
 /** 实际用于部署的内核。 */
@@ -162,11 +181,12 @@ export async function fetchRemoteKernelInfo(
   for (const item of sorted) {
     const controlUrl = findAssetUrl(item.release.assets ?? [], CONTROL_ASSET_NAME)
     const dataUrl = findAssetUrl(item.release.assets ?? [], DATA_ASSET_NAME)
+    const checksumsUrl = findAssetUrl(item.release.assets ?? [], CHECKSUMS_ASSET_NAME)
     if (!controlUrl || !dataUrl) {
       // 这个发行版没带完整的内核资产，跳过
       continue
     }
-    return { version: item.version, controlUrl, dataUrl }
+    return { version: item.version, controlUrl, dataUrl, checksumsUrl }
   }
   return null
 }
@@ -223,6 +243,10 @@ async function fetchReleasesWithFallback(timeoutMs: number): Promise<GitHubRelea
     assets: [
       { name: CONTROL_ASSET_NAME, browser_download_url: controlUrl },
       { name: DATA_ASSET_NAME, browser_download_url: dataUrl },
+      {
+        name: CHECKSUMS_ASSET_NAME,
+        browser_download_url: `${RELEASES_WEB}/latest/download/${CHECKSUMS_ASSET_NAME}`,
+      },
     ],
   }
   return [pseudo]
@@ -230,8 +254,10 @@ async function fetchReleasesWithFallback(timeoutMs: number): Promise<GitHubRelea
 
 /** 在附件列表里找指定名字的资产下载地址。 */
 function findAssetUrl(assets: GitHubAsset[], name: string): string {
+  // 附件名比较统一忽略大小写（摘要清单的名字里带大写 SHA256）
+  const want = name.trim().toLowerCase()
   for (const asset of assets) {
-    if (asset.name.trim().toLowerCase() === name) return asset.browser_download_url
+    if (asset.name.trim().toLowerCase() === want) return asset.browser_download_url
   }
   return ''
 }
@@ -266,12 +292,21 @@ function isGitHubRelease(value: unknown): value is GitHubRelease {
  *
  * 带 20 秒超时与 10MB 大小上限（防止下到 HTML 错误页或垃圾数据）。
  */
-async function downloadAsset(url: string, timeoutMs: number): Promise<string> {
+async function downloadAsset(
+  url: string,
+  timeoutMs: number,
+  options: { allowMirrors?: boolean } = {}
+): Promise<string> {
   if (!url.trim()) throw new Error('下载地址为空')
 
   // 直连 + 各镜像（国内直连 GitHub 经常超时）
+  //
+  // ⚠️ 校验清单**不能**走镜像：镜像若能替换产物，就能一并替换清单，
+  // 校验形同虚设（见文件头「完整性校验」）。
+  const sources =
+    options.allowMirrors === false ? [{ name: 'GitHub', url }] : downloadSources(url)
   const errors: string[] = []
-  for (const source of downloadSources(url)) {
+  for (const source of sources) {
     try {
       const response = await fetch(source.url, {
         headers: { 'User-Agent': 'CFPilot-CLI' },
@@ -338,6 +373,77 @@ async function readBodyWithLimit(response: Response): Promise<string> {
   }
   out += decoder.decode()
   return out
+}
+
+/** 产物名 → Release 附件名（缓存里存的是短名） */
+const ASSET_BY_SHORT_NAME: Record<string, string> = {
+  'control.js': CONTROL_ASSET_NAME,
+  'dataplane.js': DATA_ASSET_NAME,
+}
+
+/** 计算字符串的 SHA-256（小写十六进制） */
+function sha256Hex(content: string): string {
+  return createHash('sha256').update(content, 'utf8').digest('hex')
+}
+
+/**
+ * 解析 sha256sum 格式的清单。
+ *
+ * 接受：
+ *   <64 位十六进制>␣␣<文件名>
+ *   <64 位十六进制>␣*<文件名>   （二进制模式标记）
+ *   # 开头的注释与空行
+ *
+ * 其他行直接忽略 —— 清单是机器生成的，格式不对的行不该阻断正常条目。
+ */
+function parseChecksums(text: string): Map<string, string> {
+  const out = new Map<string, string>()
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (!line || line.startsWith('#')) continue
+    const match = /^([0-9a-fA-F]{64})\s+\*?(.+)$/.exec(line)
+    if (!match) continue
+    out.set(match[2]!.trim().toLowerCase(), match[1]!.toLowerCase())
+  }
+  return out
+}
+
+/**
+ * 从官方地址取校验清单（**不走镜像**）。
+ *
+ * 取不到 / 缺条目都抛错 —— 调用方据此回退本地内置内核。
+ */
+async function downloadChecksums(
+  info: RemoteKernelInfo,
+  timeoutMs: number
+): Promise<{ text: string; map: Map<string, string> }> {
+  if (!info.checksumsUrl.trim()) {
+    throw new Error(
+      `Release ${info.version} 未发布 ${CHECKSUMS_ASSET_NAME}，无法校验内核完整性`
+    )
+  }
+  const text = await downloadAsset(info.checksumsUrl, timeoutMs, { allowMirrors: false })
+  const map = parseChecksums(text)
+  for (const name of [CONTROL_ASSET_NAME, DATA_ASSET_NAME]) {
+    if (!map.has(name.toLowerCase())) {
+      throw new Error(`内核校验清单缺少 ${name} 的摘要`)
+    }
+  }
+  return { text, map }
+}
+
+/** 校验一份产物；不匹配时抛错（附期望值 / 实际值的前缀，便于排查） */
+function verifyAsset(shortName: string, content: string, map: Map<string, string>): void {
+  const assetName = ASSET_BY_SHORT_NAME[shortName]
+  if (!assetName) throw new Error(`未知内核产物：${shortName}`)
+  const expected = map.get(assetName.toLowerCase())
+  if (!expected) throw new Error(`校验清单缺少 ${assetName} 的摘要`)
+  const actual = sha256Hex(content)
+  if (actual !== expected) {
+    throw new Error(
+      `内核产物 ${assetName} 摘要不匹配（期望 ${expected.slice(0, 12)}…，实际 ${actual.slice(0, 12)}…）—— 已拒绝使用`
+    )
+  }
 }
 
 /** 缓存根目录。 */
@@ -469,7 +575,7 @@ export async function loadKernelBundle(
         control: bundle.control,
         data: bundle.data,
         version: remote.version,
-        source: `远程 ${remote.version}`,
+        source: `远程 ${remote.version}（已校验）`,
       }
     } catch (err) {
       // 远程下载失败 → 落回本地内置（不抛错：离线是正常情况）
@@ -500,21 +606,55 @@ async function fetchRemoteKernel(
   const dir = cacheDir(info.version)
   const controlPath = join(dir, 'control.js')
   const dataPath = join(dir, 'dataplane.js')
+  const sumsPath = join(dir, 'SHA256SUMS')
 
-  // ---- 1. 命中缓存就不下载 ----
-  const cachedControl = await readCached(controlPath)
-  const cachedData = await readCached(dataPath)
-  if (cachedControl && cachedData) {
-    return { control: cachedControl, data: cachedData }
+  // ---- 1. 先取（或复用）校验清单 ----
+  //
+  // 缓存目录里的 SHA256SUMS 是上一次从**官方地址**取回的，可以复用；
+  // 没有就重新取。清单本身也参与缓存，避免每次部署都多一次网络请求。
+  let sumsText = await readCached(sumsPath)
+  let sums = sumsText ? parseChecksums(sumsText) : null
+  const sumsComplete =
+    sums !== null &&
+    sums.has(CONTROL_ASSET_NAME.toLowerCase()) &&
+    sums.has(DATA_ASSET_NAME.toLowerCase())
+  if (!sums || !sumsComplete) {
+    const fetched = await downloadChecksums(info, timeoutMs)
+    sumsText = fetched.text
+    sums = fetched.map
   }
 
-  // ---- 2. 下载 ----
-  const control = cachedControl ?? (await downloadAsset(info.controlUrl, timeoutMs))
-  const data = cachedData ?? (await downloadAsset(info.dataUrl, timeoutMs))
+  // ---- 2. 缓存命中也要校验（缓存文件同样会被篡改或写坏）----
+  let control = await readCached(controlPath)
+  let data = await readCached(dataPath)
+  if (control) {
+    try {
+      verifyAsset('control.js', control, sums)
+    } catch {
+      control = null
+      await unlink(controlPath).catch(() => undefined)
+    }
+  }
+  if (data) {
+    try {
+      verifyAsset('dataplane.js', data, sums)
+    } catch {
+      data = null
+      await unlink(dataPath).catch(() => undefined)
+    }
+  }
+  if (control && data) return { control, data }
+
+  // ---- 3. 下载（允许镜像）并逐个校验 ----
+  control ??= await downloadAsset(info.controlUrl, timeoutMs)
+  verifyAsset('control.js', control, sums)
+  data ??= await downloadAsset(info.dataUrl, timeoutMs)
+  verifyAsset('dataplane.js', data, sums)
   if (!control.trim()) throw new Error('下载到的控制面产物为空')
   if (!data.trim()) throw new Error('下载到的数据面产物为空')
 
-  // ---- 3. 落缓存（失败不影响本次使用，只是下次要重新下载）----
+  // ---- 4. 落缓存（失败不影响本次使用，只是下次要重新下载）----
+  await writeCached(sumsPath, sumsText!).catch(() => undefined)
   await writeCached(controlPath, control).catch(() => undefined)
   await writeCached(dataPath, data).catch(() => undefined)
 

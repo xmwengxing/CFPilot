@@ -256,8 +256,12 @@ async function pool<T, R>(
  * 固定并发在这类环境里会直接崩掉。这里改成**按批评估、自动升降**：
  *
  *   每批 200 个候选跑完后看成功率：
- *     < 40%  → 并发减半（下限 8）
+ *     < 40%  → 并发减半（下限 min(8, 请求值)）
  *     > 85%  → 并发翻倍（上限 = 请求值）
+ *
+ * ⚠️ 下限必须受请求值约束：写死 8 会让「用户指定并发 2 / 4 / 6」的
+ * 低并发配置在成功率变差时反而**升到 8** —— 与用户设置相反，
+ * 在被限速的网络上会把结果弄得更差。
  *
  * 网络好时自动升回高并发（速度不损失），
  * 网络被限速/被 TUN 干扰时自动退到能跑通的并发度（结果不空）。
@@ -265,7 +269,7 @@ async function pool<T, R>(
  * ⚠️ 与 Go 版 packages/desktop/internal/scan/scan.go 的自适应池语义一致
  * （AGENTS.md §2.2：两端行为必须一致）。
  */
-async function poolAdaptive<T, R extends { ok: boolean }>(
+export async function poolAdaptive<T, R extends { ok: boolean }>(
   items: T[],
   concurrency: number,
   worker: (item: T, index: number) => Promise<R>,
@@ -273,6 +277,8 @@ async function poolAdaptive<T, R extends { ok: boolean }>(
 ): Promise<R[]> {
   const out: R[] = []
   const maxConcurrency = Math.max(1, concurrency)
+  // 下限也只能到请求值：用户设 2 时下限不能是 8
+  const minConcurrency = Math.min(8, maxConcurrency)
   let current = maxConcurrency
 
   for (let start = 0; start < items.length; start += batchSize) {
@@ -284,7 +290,7 @@ async function poolAdaptive<T, R extends { ok: boolean }>(
     const okCount = results.reduce((n, r) => n + (r.ok ? 1 : 0), 0)
     const rate = results.length > 0 ? okCount / results.length : 1
     if (rate < 0.4) {
-      current = Math.max(8, Math.floor(current / 2))
+      current = Math.max(minConcurrency, Math.min(maxConcurrency, Math.floor(current / 2)))
     } else if (rate > 0.85) {
       current = Math.min(maxConcurrency, current * 2)
     }

@@ -16,7 +16,7 @@
 //
 // ⚠️ 第三方镜像**可能失效或篡改内容**，因此：
 //   - 只在直连失败时才用；
-//   - 用完不做签名校验（本项目没签名），但会在日志里明确提示走的是镜像；
+//   - 无论走直连还是镜像，都要比对**官方摘要清单**（见 verify.go）；
 //   - **必须校验 content-length**：镜像截断是常见故障，
 //     半截文件如果被当成完整包，用户装上去就是坏的。
 package update
@@ -332,6 +332,21 @@ func Download(
 		return "", fmt.Errorf("无法创建下载目录：%w", err)
 	}
 
+	// 下载前先取**官方**摘要清单：拿不到就不下载（fail-closed）。
+	//
+	// 顺序很重要 —— 先校验后下载，才不会出现「已经跑了 300MB 才发现没法校验」。
+	// 清单的地址由下载 URL 里的 tag 推导，不信任调用方另传的字段。
+	assetName := assetNameFromURL(url)
+	tag := releaseTagFromURL(url)
+	sums, err := fetchDesktopChecksums(ctx, tag)
+	if err != nil {
+		return "", err
+	}
+	expected, ok := sums[strings.ToLower(assetName)]
+	if !ok {
+		return "", fmt.Errorf("摘要清单里没有 %s，已拒绍下载未校验的安装包", assetName)
+	}
+
 	// 候选源：直连 + 各镜像
 	sources := []struct {
 		Name string
@@ -351,7 +366,14 @@ func Download(
 
 		err := downloadOne(ctx, src.URL, targetPath, src.Name, attempt, onProgress)
 		if err == nil {
-			onLog(fmt.Sprintf("下载完成（%s）", src.Name), "ok")
+			// 镜像能替换文件：**每个源**下载完都要重新比对官方摘要。
+			if vErr := verifyFileSHA256(targetPath, expected); vErr != nil {
+				cleanup(targetPath)
+				errors = append(errors, fmt.Sprintf("%s: %v", src.Name, vErr))
+				onLog(fmt.Sprintf("%s 下发的文件校验失败：%v", src.Name, vErr), "warn")
+				continue
+			}
+			onLog(fmt.Sprintf("下载完成（%s，已校验 SHA-256）", src.Name), "ok")
 			return targetPath, nil
 		}
 		errors = append(errors, fmt.Sprintf("%s: %v", src.Name, err))

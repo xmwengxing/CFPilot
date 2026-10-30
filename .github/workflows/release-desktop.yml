@@ -171,9 +171,15 @@ jobs:
           mkdir -p packages/desktop/kernel-assets
           cp packages/worker-core/dist/control.js   packages/desktop/kernel-assets/cfpilot-kernel-control.js
           cp packages/worker-core/dist/dataplane.js packages/desktop/kernel-assets/cfpilot-kernel-dataplane.js
+          # ⚠️ 同时发布**摘要清单**：CLI 与桌面版只从官方地址取它，
+          # 再逐个校验下载到的内核产物 —— 镜像被替换 / 文件被篡改时
+          # 必须能拒绝部署，而不是把未知代码推进用户的 Cloudflare 账号。
+          # 格式：sha256sum 标准输出（<hex>  <文件名>），两端解析器都按此实现。
+          ( cd packages/desktop/kernel-assets && sha256sum cfpilot-kernel-control.js cfpilot-kernel-dataplane.js > cfpilot-kernel-SHA256SUMS )
           # 同时发布手动部署用的 zip（Pages 上传格式）
           node scripts/make-pages-zip.mjs
           ls -la packages/desktop/kernel-assets/
+          cat packages/desktop/kernel-assets/cfpilot-kernel-SHA256SUMS
 
       - name: 实跑 Linux 产物（冒烟测试）
         # 交叉编译出的二进制只保证「能生成」，不保证「能运行」。
@@ -183,6 +189,21 @@ jobs:
           chmod +x "$BIN"
           "$BIN" --version
           "$BIN" --check
+
+      - name: 生成桌面版摘要清单
+        # 应用内更新会从**官方地址**取这份清单，逐个校验下载到的安装包。
+        # 镜像只用于搬运文件，清单不经镜像 —— 否则镜像可以同时替换两者。
+        # 文件名必须与上传后的资产名一致（应用按 URL 最后一段查表）。
+        run: |
+          set -e
+          cd packages/desktop/dist
+          : > cfpilot-desktop-SHA256SUMS
+          for f in cfpilot-*; do
+            [ "$f" = "cfpilot-desktop-SHA256SUMS" ] && continue
+            sha256sum "$f" >> cfpilot-desktop-SHA256SUMS
+          done
+          sort -k2 cfpilot-desktop-SHA256SUMS -o cfpilot-desktop-SHA256SUMS
+          cat cfpilot-desktop-SHA256SUMS
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4

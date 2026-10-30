@@ -527,8 +527,11 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 // 这里改成**按批评估、自动升降**：
 //
 //	每批 200 个候选跑完后看成功率：
-//	  < 40%  → 并发减半（下限 8）
+//	  < 40%  → 并发减半（下限 min(8, 请求值)）
 //	  > 85%  → 并发翻倍（上限 = 请求值）
+//
+// ⚠️ 下限必须受请求值约束：写死 8 会让「用户指定并发 2 / 4 / 6」的
+// 低并发配置在成功率变差时反而**升到 8** —— 与用户设置相反。
 //
 // 网络好时自动升回高并发（速度不损失），
 // 网络被限速/被 TUN 干扰时自动退到能跑通的并发度（结果不空）。
@@ -549,6 +552,11 @@ func forEachIPAdaptive[In any, Out any](
 	maxConcurrency := concurrency
 	if maxConcurrency < 1 {
 		maxConcurrency = 1
+	}
+	// 下限也只能到请求值：用户设 2 时下限不能是 8
+	minConcurrency := 8
+	if minConcurrency > maxConcurrency {
+		minConcurrency = maxConcurrency
 	}
 	current := maxConcurrency
 
@@ -593,8 +601,11 @@ func forEachIPAdaptive[In any, Out any](
 		}
 		if rate < 0.4 {
 			current = current / 2
-			if current < 8 {
-				current = 8
+			if current < minConcurrency {
+				current = minConcurrency
+			}
+			if current > maxConcurrency {
+				current = maxConcurrency
 			}
 		} else if rate > 0.85 {
 			current = current * 2

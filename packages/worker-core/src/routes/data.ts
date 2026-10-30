@@ -18,6 +18,7 @@ import { handleWebSocket } from '../protocols/websocket-self'
 import { handleXhttp } from '../protocols/xhttp'
 import { parseProxyPool, type ProxyEndpoint } from '../outbound/proxy-pool'
 import { VERSION_PATH, versionResponse, BUILD_VERSION } from '../version'
+import { timingSafeEqual } from '../util'
 import { loadDataPlaneConfig } from './control'
 
 /** 汇总出站代理池 */
@@ -34,10 +35,40 @@ export function collectProxies(config: UserConfig): ProxyEndpoint[] {
 }
 
 /**
+ * 诊断令牌的失败计数器（isolate 级，防在线枚举）。
+ *
+ * ## 为什么只认完整 UUID
+ *
+ * 早期还接受「UUID 前 8 位」当短令牌 —— 那是 **32 bit 搜空间**，
+ * 每秒几十次请求就能在可接受时间内枚举出来，而 `/__diag` 会吐出
+ * 用户最近访问的目标域名与失败原因（隐私数据）。
+ * 现在只认完整 UUID（128 bit），并用 `timingSafeEqual` 比较。
+ *
+ * ## 为什么要限速
+ *
+ * 完整 UUID 不可枚举，但限速能挡住「拿着泄露的前缀/近似值狂刷」
+ * 与日志噪音。同样只用 isolate 内存（写 KV 会被攻击者当成耗尽配额的手段）。
+ */
+const DIAG_WINDOW_MS = 60_000
+const DIAG_MAX_FAILURES = 10
+let diagFailures = 0
+let diagWindowResetAt = 0
+
+/** 当前是否处于限速窗口 */
+function diagThrottled(now: number): boolean {
+  if (now >= diagWindowResetAt) {
+    diagFailures = 0
+    diagWindowResetAt = now + DIAG_WINDOW_MS
+    return false
+  }
+  return diagFailures >= DIAG_MAX_FAILURES
+}
+
+/**
  * 校验 `/__diag` 的访问令牌。
  *
- * 允许两种形式：完整 UUID，或 UUID 前 8 位（用户在面板 / 工单里通常只贴短令牌）。
- * 也接受 `x-cfpilot-token` 请求头 —— 便于脚本调用时不把凭据留在 URL 里。
+ * 接受 `x-cfpilot-token` 请求头（推荐，不会留在 URL / 日志里），
+ * 也兼容 `?token=` 查询参数（旧命令与浏览器直接打开）。
  *
  * ⚠️ 未配置 UUID 时一律拒绝（fail-closed）：一个还没配好的部署
  * 绝不能因为「uuid 为空」而把诊断内容公开给所有人。
@@ -45,12 +76,22 @@ export function collectProxies(config: UserConfig): ProxyEndpoint[] {
 function diagAuthorized(request: Request, url: URL, uuid: string): boolean {
   if (!uuid) return false
   const token = (
-    url.searchParams.get('token') ??
     request.headers.get('x-cfpilot-token') ??
+    url.searchParams.get('token') ??
     ''
   ).trim()
   if (!token) return false
-  return token === uuid || token === uuid.slice(0, 8)
+  const now = Date.now()
+  if (timingSafeEqual(token, uuid)) {
+    diagFailures = 0
+    return true
+  }
+  if (now >= diagWindowResetAt) {
+    diagWindowResetAt = now + DIAG_WINDOW_MS
+    diagFailures = 0
+  }
+  diagFailures += 1
+  return false
 }
 
 /**
@@ -129,6 +170,18 @@ export async function routeDataPlane(
   // 是不可接受的 —— 该校验需要 `config.uuid`，因此只能放在配置加载之后
   // （`/region` 那种不碰 KV 的纯机房诊断才允许放在配置加载之前）。
   if (url.pathname === '/__diag') {
+    if (diagThrottled(Date.now())) {
+      // 超出失败预算：明确回 429，而不是伪装成静态页 ——
+      // 否则脚本调用方会把「被限速」误读成「端点不存在」。
+      return new Response(JSON.stringify({ ok: false, error: 'token attempts throttled' }, null, 2), {
+        status: 429,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'Retry-After': String(Math.ceil(DIAG_WINDOW_MS / 1000)),
+        },
+      })
+    }
     if (!diagAuthorized(request, url, config.uuid)) return null
     const { recentDiagnostics } = await import('../protocols/websocket-self')
     const { recentXhttpDiagnostics } = await import('../protocols/xhttp')
@@ -146,7 +199,14 @@ export async function routeDataPlane(
         null,
         2
       ),
-      { status: 200, headers: { 'Content-Type': 'application/json; charset=utf-8' } }
+      {
+        status: 200,
+        // 诊断内容包含用户访问过的目标域名 —— 绝不进任何缓存
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+        },
+      }
     )
   }
 

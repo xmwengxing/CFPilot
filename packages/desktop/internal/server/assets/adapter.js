@@ -566,60 +566,41 @@
     },
 
     listScanCountries: function () {
-      // 后端返回 { countries: [{code,name}, ...] }。
-      // 这里做两件事保证界面不空：
-      //   1. 结构不符时返回内置兜底列表（界面至少有东西可选）
-      //   2. 保证每项都有 code / name（缺 name 时用 code 顶上）
-      var FALLBACK = [
-        ['HKG', '香港'], ['TPE', '台北'], ['NRT', '东京'], ['KIX', '大阪'],
-        ['ICN', '首尔'], ['SIN', '新加坡'], ['BKK', '曼谷'], ['KUL', '吉隆坡'],
-        ['MNL', '马尼拉'], ['SGN', '胡志明'], ['BOM', '孟买'],
-        ['SYD', '悉尼'], ['MEL', '墨尔本'], ['AKL', '奥克兰'],
-        ['LAX', '洛杉矶'], ['SJC', '圣何塞'], ['SEA', '西雅图'],
-        ['DFW', '达拉斯'], ['ORD', '芝加哥'], ['IAD', '华盛顿'], ['EWR', '纽瓦克'],
-        ['YYZ', '多伦多'], ['LHR', '伦敦'], ['MAN', '曼彻斯特'],
-        ['AMS', '阿姆斯特丹'], ['FRA', '法兰克福'], ['CDG', '巴黎'],
-        ['MAD', '马德里'], ['MXP', '米兰'], ['ARN', '斯德哥尔摩'],
-        ['WAW', '华沙'], ['IST', '伊斯坦布尔'], ['DXB', '迪拜'],
-        ['TLV', '特拉维夫'], ['JNB', '约翰内斯堡'], ['GRU', '圣保罗'],
-        ['EZE', '布宜诺斯艾利斯'], ['MEX', '墨西哥城'],
-      ]
+      // 后端返回 { countries: [{code,name,group,colos}, ...] }，
+      // `code` 是**国家码**（HK / JP / US），机房码放在 colos 里。
+      //
+      // 这里不再内置兜底表：界面只靠快捷分组（ASIA / US 关键字）
+      // 也能完成筛选，内置一份国家表只会与后端漂移。
       return get('/api/scan/countries')
         .then(function (r) {
           var list = (r && r.countries) || []
-          if (!Array.isArray(list) || list.length === 0) {
-            return FALLBACK.map(function (p) {
-              return { code: p[0], name: p[1] }
-            })
-          }
+          if (!Array.isArray(list)) return []
           return list.map(function (c) {
             return {
               code: String((c && c.code) || ''),
               name: String((c && c.name) || (c && c.code) || ''),
+              group: String((c && c.group) || 'OTHER'),
+              colos: Array.isArray(c && c.colos) ? c.colos.map(String) : [],
             }
           }).filter(function (c) {
             return c.code !== ''
           })
         })
         .catch(function () {
-          // 接口挂了也要让界面能用
-          return FALLBACK.map(function (p) {
-            return { code: p[0], name: p[1] }
-          })
+          return []
         })
     },
 
     listScanCountryGroups: function () {
-      // 后端返回 { countries: [...], groups: { ASIA: [机房码], US: [机房码] } }。
-      // 这里只取 groups：界面的「亚洲组 / 美国组」按钮按机房码选中，
-      // 机房表只在后端维护一份。
-      // 结构不符时返回 {} —— 界面据此把分组按钮置灰，手动多选不受影响。
+      // 后端返回 { groups: { ASIA: [国家码], US: [国家码] } }。
+      // 分组表只在后端维护一份；拿不到时返回 {} ——
+      // 快捷分组的 ASIA / US 关键字仍然可用（后端自己会展开）。
       return get('/api/scan/countries')
         .then(function (r) {
           var g = (r && r.groups) || {}
           var out = {}
           Object.keys(g).forEach(function (k) {
-            if (Array.isArray(g[k])) out[k] = g[k]
+            if (Array.isArray(g[k])) out[k] = g[k].map(String)
           })
           return out
         })

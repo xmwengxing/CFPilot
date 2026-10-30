@@ -12,6 +12,7 @@ package kernel
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -30,6 +31,11 @@ const (
 	fakeControlJS = "const BUILD_VERSION = \"aaa1111-bbbb2222\";\n// fake control\n"
 	fakeDataJS    = "const BUILD_VERSION = \"aaa1111-bbbb2222\";\n// fake data\n"
 )
+
+// checksumsFor 按 sha256sum 格式拼出两个产物的摘要清单。
+func checksumsFor(control, data []byte) string {
+	return fmt.Sprintf("%x  %s\n%x  %s\n", sha256.Sum256(control), ControlAssetName, sha256.Sum256(data), DataAssetName)
+}
 
 // fakeGitHub 起一个假的 GitHub：
 //
@@ -56,11 +62,18 @@ func fakeGitHub(t *testing.T, build func(baseURL string) []map[string]any, asset
 		case strings.HasPrefix(r.URL.Path, "/asset/"):
 			name := strings.TrimPrefix(r.URL.Path, "/asset/")
 			body, ok := assets[name]
+			if !ok && name == ChecksumsAssetName {
+				// 没有显式提供清单时，按当前资产内容现场生成一份 sha256sum
+				body, ok = []byte(checksumsFor(assets[ControlAssetName], assets[DataAssetName])), true
+			}
 			if !ok {
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
-			atomic.AddInt64(&hits, 1)
+			// 清单不计入「产物下载次数」：断言关心的是产物本身有没有重复下载
+			if name != ChecksumsAssetName {
+				atomic.AddInt64(&hits, 1)
+			}
 			w.Header().Set("Content-Length", fmt.Sprint(len(body)))
 			_, _ = w.Write(body)
 		default:
@@ -93,6 +106,11 @@ func releaseJSON(tag, baseURL string, withKernel bool) map[string]any {
 				"name":                 DataAssetName,
 				"browser_download_url": baseURL + "/asset/" + DataAssetName,
 				"size":                 len(fakeDataJS),
+			},
+			map[string]any{
+				"name":                 ChecksumsAssetName,
+				"browser_download_url": baseURL + "/asset/" + ChecksumsAssetName,
+				"size":                 160,
 			})
 	}
 	return map[string]any{
@@ -403,9 +421,10 @@ func TestFetchRemoteKernelUsesCache(t *testing.T) {
 	})
 
 	info := &RemoteInfo{
-		Version:    "0.7.6",
-		ControlURL: srv.URL + "/asset/" + ControlAssetName,
-		DataURL:    srv.URL + "/asset/" + DataAssetName,
+		Version:      "0.7.6",
+		ControlURL:   srv.URL + "/asset/" + ControlAssetName,
+		DataURL:      srv.URL + "/asset/" + DataAssetName,
+		ChecksumsURL: srv.URL + "/asset/" + ChecksumsAssetName,
 	}
 
 	arts, err := FetchRemoteKernel(context.Background(), info)
@@ -458,9 +477,10 @@ func TestFetchRemoteKernelRejectsOversized(t *testing.T) {
 	})
 
 	info := &RemoteInfo{
-		Version:    "0.7.6",
-		ControlURL: srv.URL + "/asset/" + ControlAssetName,
-		DataURL:    srv.URL + "/asset/" + DataAssetName,
+		Version:      "0.7.6",
+		ControlURL:   srv.URL + "/asset/" + ControlAssetName,
+		DataURL:      srv.URL + "/asset/" + DataAssetName,
+		ChecksumsURL: srv.URL + "/asset/" + ChecksumsAssetName,
 	}
 	if _, err := FetchRemoteKernel(context.Background(), info); err == nil {
 		t.Error("超大的产物必须被拒绝")
@@ -477,12 +497,54 @@ func TestFetchRemoteKernelRejectsEmpty(t *testing.T) {
 		DataAssetName:    []byte(fakeDataJS),
 	})
 	info := &RemoteInfo{
+		Version:      "0.7.6",
+		ControlURL:   srv.URL + "/asset/" + ControlAssetName,
+		DataURL:      srv.URL + "/asset/" + DataAssetName,
+		ChecksumsURL: srv.URL + "/asset/" + ChecksumsAssetName,
+	}
+	if _, err := FetchRemoteKernel(context.Background(), info); err == nil {
+		t.Error("空产物必须被拒绝")
+	}
+}
+
+// 摘要不匹配时必须拒绝（镜像 / 中间人篡改产物的形态）。
+func TestFetchRemoteKernelRejectsTamperedAsset(t *testing.T) {
+	useCacheDir(t)
+	withoutMirrors(t)
+
+	srv, _ := fakeGitHub(t, nil, map[string][]byte{
+		ControlAssetName: []byte(fakeControlJS),
+		DataAssetName:    []byte(fakeDataJS),
+		// 清单描述的不是这两个产物
+		ChecksumsAssetName: []byte(checksumsFor([]byte("tampered-control"), []byte("tampered-data"))),
+	})
+	info := &RemoteInfo{
+		Version:      "0.7.6",
+		ControlURL:   srv.URL + "/asset/" + ControlAssetName,
+		DataURL:      srv.URL + "/asset/" + DataAssetName,
+		ChecksumsURL: srv.URL + "/asset/" + ChecksumsAssetName,
+	}
+	if _, err := FetchRemoteKernel(context.Background(), info); err == nil {
+		t.Fatal("摘要不匹配时必须拒绝远程内核")
+	}
+}
+
+// 没有校验清单时也必须拒绝（宁可用旧的内嵌内核，也不部署未知代码）。
+func TestFetchRemoteKernelRejectsMissingChecksums(t *testing.T) {
+	useCacheDir(t)
+	withoutMirrors(t)
+
+	srv, _ := fakeGitHub(t, nil, map[string][]byte{
+		ControlAssetName: []byte(fakeControlJS),
+		DataAssetName:    []byte(fakeDataJS),
+	})
+	info := &RemoteInfo{
 		Version:    "0.7.6",
 		ControlURL: srv.URL + "/asset/" + ControlAssetName,
 		DataURL:    srv.URL + "/asset/" + DataAssetName,
 	}
 	if _, err := FetchRemoteKernel(context.Background(), info); err == nil {
-		t.Error("空产物必须被拒绝")
+		t.Fatal("缺少校验清单时必须拒绝远程内核")
 	}
 }
 

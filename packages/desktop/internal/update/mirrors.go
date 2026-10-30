@@ -234,6 +234,8 @@ func fixedNameAssets() []Asset {
 	return []Asset{
 		{Name: "cfpilot-kernel-control.js", URL: base + "cfpilot-kernel-control.js"},
 		{Name: "cfpilot-kernel-dataplane.js", URL: base + "cfpilot-kernel-dataplane.js"},
+		// 校验清单：免 API 通道也要能拿到它，否则内核完整性无法验证
+		{Name: "cfpilot-kernel-SHA256SUMS", URL: base + "cfpilot-kernel-SHA256SUMS"},
 		{Name: "CFPilot-control.zip", URL: base + "CFPilot-control.zip"},
 		{Name: "CFPilot-dataplane.zip", URL: base + "CFPilot-dataplane.zip"},
 	}

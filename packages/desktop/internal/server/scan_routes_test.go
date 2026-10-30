@@ -122,12 +122,23 @@ func TestScanCountries(t *testing.T) {
 	for _, item := range list {
 		m, _ := item.(map[string]any)
 		if m != nil {
-			found[str(m["code"])] = true
+			code := str(m["code"])
+			found[code] = true
+			// 国家码必须是 2 位：机房码（HKG）是实现细节，不再作为选择单位
+			if len(code) != 2 {
+				t.Errorf("countries 应返回国家码，实际 %q", code)
+			}
+			if str(m["group"]) == "" || str(m["group"]) == "OTHER" {
+				t.Errorf("%s 缺少大洲分组", code)
+			}
+			if colos, ok := m["colos"].([]any); !ok || len(colos) == 0 {
+				t.Errorf("%s 缺少机房码列表", code)
+			}
 		}
 	}
-	for _, want := range []string{"HKG", "NRT", "SIN", "LAX", "FRA"} {
+	for _, want := range []string{"HK", "JP", "SG", "US", "DE"} {
 		if !found[want] {
-			t.Errorf("缺少常用机房 %s", want)
+			t.Errorf("缺少常用国家 %s", want)
 		}
 	}
 }
@@ -148,24 +159,24 @@ func TestScanCountryGroups(t *testing.T) {
 
 	asia, ok := groups["ASIA"].([]any)
 	if !ok || len(asia) == 0 {
-		t.Fatalf("亚洲组应有机房列表，实际 %v", groups["ASIA"])
+		t.Fatalf("亚洲组应有国家列表，实际 %v", groups["ASIA"])
 	}
 	asiaSet := map[string]bool{}
 	for _, item := range asia {
 		asiaSet[str(item)] = true
 	}
-	for _, want := range []string{"HKG", "NRT", "SIN"} {
+	for _, want := range []string{"HK", "JP", "SG"} {
 		if !asiaSet[want] {
-			t.Errorf("亚洲组缺少机房 %s", want)
+			t.Errorf("亚洲组缺少国家 %s", want)
 		}
 	}
-	if asiaSet["LAX"] || asiaSet["SYD"] {
-		t.Error("亚洲组不应包含美国 / 澳洲机房")
+	if asiaSet["US"] || asiaSet["AU"] {
+		t.Error("亚洲组不应包含美国 / 澳洲")
 	}
 
 	us, ok := groups["US"].([]any)
-	if !ok || len(us) == 0 {
-		t.Fatalf("美国组应有机房列表，实际 %v", groups["US"])
+	if !ok || len(us) != 1 || str(us[0]) != "US" {
+		t.Fatalf("美国组应只含 US，实际 %v", groups["US"])
 	}
 }
 

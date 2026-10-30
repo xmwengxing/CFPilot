@@ -11,6 +11,7 @@ package update
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -338,17 +339,58 @@ func TestCheckEmptyReleases(t *testing.T) {
 
 // ---------- 下载 ----------
 
+// 假 Release 的固定坐标。
+//
+// ⚠️ 下载现在会先从 `ReleasesWebBase` 取 `cfpilot-desktop-SHA256SUMS`
+// 并校验产物摘要，所以下载测试不能再拿一个裸 URL 当资产地址 ——
+// 必须是 `<base>/releases/download/<tag>/<asset>` 的真实形态。
+const (
+	fixtureTag   = "v9.9.9"
+	fixtureAsset = "cfpilot-9.9.9-windows-amd64.exe"
+)
+
+// newReleaseServer 起一台假 Release 服务器：同时提供资产与官方摘要清单。
+//
+// assetHandler 为 nil 时返回 payload；清单始终按 payload 的 SHA-256 生成。
+// `ReleasesWebBase` 会被指向这台服务器，测试结束后自动还原。
+func newReleaseServer(t *testing.T, payload []byte, assetHandler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	sum := sha256.Sum256(payload)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/download/" + fixtureTag + "/" + DesktopChecksumsAssetName:
+			fmt.Fprintf(w, "%x  %s\n", sum, fixtureAsset)
+		case "/releases/download/" + fixtureTag + "/" + fixtureAsset:
+			if assetHandler != nil {
+				assetHandler(w, r)
+				return
+			}
+			w.Header().Set("Content-Length", fmt.Sprint(len(payload)))
+			_, _ = w.Write(payload)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	old := ReleasesWebBase
+	ReleasesWebBase = srv.URL
+	t.Cleanup(func() { ReleasesWebBase = old })
+	return srv
+}
+
+// releaseAssetURL 拼出该假 Release 的资产地址。
+func releaseAssetURL(srv *httptest.Server) string {
+	return srv.URL + "/releases/download/" + fixtureTag + "/" + fixtureAsset
+}
+
 // 下载成功。
 func TestDownloadSuccess(t *testing.T) {
 	payload := []byte("fake binary content for testing")
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Length", fmt.Sprint(len(payload)))
-		_, _ = w.Write(payload)
-	}))
-	defer srv.Close()
+	srv := newReleaseServer(t, payload, nil)
 
 	target := filepath.Join(t.TempDir(), "update.bin")
-	got, err := Download(context.Background(), srv.URL, target, nil, nil)
+	got, err := Download(context.Background(), releaseAssetURL(srv), target, nil, nil)
 	if err != nil {
 		t.Fatalf("下载应成功：%v", err)
 	}
@@ -373,18 +415,17 @@ func TestDownloadDetectsTruncation(t *testing.T) {
 	Mirrors = nil
 	t.Cleanup(func() { Mirrors = oldMirrors })
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newReleaseServer(t, []byte(strings.Repeat("x", 100)), func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", "1000")
 		_, _ = w.Write([]byte(strings.Repeat("x", 100)))
 		// 故意少发，连接关闭
-	}))
-	defer srv.Close()
+	})
 
 	dir := t.TempDir()
 	target := filepath.Join(dir, "update.bin")
 
 	// 直连失败会继续试镜像（也会失败），最终报错
-	_, err := Download(context.Background(), srv.URL, target, nil, nil)
+	_, err := Download(context.Background(), releaseAssetURL(srv), target, nil, nil)
 	if err == nil {
 		t.Fatal("截断必须报错")
 	}
@@ -404,13 +445,12 @@ func TestDownloadEmptyContent(t *testing.T) {
 	Mirrors = nil
 	t.Cleanup(func() { Mirrors = oldMirrors })
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newReleaseServer(t, []byte(""), func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", "0")
-	}))
-	defer srv.Close()
+	})
 
 	target := filepath.Join(t.TempDir(), "update.bin")
-	_, err := Download(context.Background(), srv.URL, target, nil, nil)
+	_, err := Download(context.Background(), releaseAssetURL(srv), target, nil, nil)
 	if err == nil {
 		t.Fatal("空内容必须报错")
 	}
@@ -423,8 +463,10 @@ func TestDownloadEmptyContent(t *testing.T) {
 func TestDownloadFallsBackToMirror(t *testing.T) {
 	payload := []byte("mirror content")
 
-	// 直连地址故意不可用
-	direct := "http://127.0.0.1:1/nonexistent.bin"
+	// 直连地址故意不可用（但必须是 Release 形态：资产名要从 URL 推）
+	direct := "http://127.0.0.1:1/releases/download/" + fixtureTag + "/" + fixtureAsset
+	// 官方清单由假 Release 服务器提供（镜像不参与清单）
+	newReleaseServer(t, payload, nil)
 
 	// 镜像服务器：任何路径都返回内容
 	mirrorSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -469,8 +511,12 @@ func TestDownloadAllSourcesFail(t *testing.T) {
 	}
 	t.Cleanup(func() { Mirrors = oldMirrors })
 
+	// 清单要能拿到，否则在「所有源」之前就因无法校验而失败
+	newReleaseServer(t, []byte("x"), nil)
+
 	target := filepath.Join(t.TempDir(), "update.bin")
-	_, err := Download(context.Background(), "http://127.0.0.1:3/x", target, nil, nil)
+	direct := "http://127.0.0.1:3/releases/download/" + fixtureTag + "/" + fixtureAsset
+	_, err := Download(context.Background(), direct, target, nil, nil)
 	if err == nil {
 		t.Fatal("全失败应报错")
 	}
@@ -485,15 +531,11 @@ func TestDownloadAllSourcesFail(t *testing.T) {
 // 进度回调要被调用且数值递增。
 func TestDownloadReportsProgress(t *testing.T) {
 	payload := make([]byte, 256*1024)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Length", fmt.Sprint(len(payload)))
-		_, _ = w.Write(payload)
-	}))
-	defer srv.Close()
+	srv := newReleaseServer(t, payload, nil)
 
 	var events []Progress
 	target := filepath.Join(t.TempDir(), "update.bin")
-	if _, err := Download(context.Background(), srv.URL, target,
+	if _, err := Download(context.Background(), releaseAssetURL(srv), target,
 		func(p Progress) { events = append(events, p) }, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -520,14 +562,10 @@ func TestDownloadReportsProgress(t *testing.T) {
 // 下载目录不存在时要自动创建。
 func TestDownloadCreatesDir(t *testing.T) {
 	payload := []byte("data")
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Length", fmt.Sprint(len(payload)))
-		_, _ = w.Write(payload)
-	}))
-	defer srv.Close()
+	srv := newReleaseServer(t, payload, nil)
 
 	target := filepath.Join(t.TempDir(), "a", "b", "c", "update.bin")
-	if _, err := Download(context.Background(), srv.URL, target, nil, nil); err != nil {
+	if _, err := Download(context.Background(), releaseAssetURL(srv), target, nil, nil); err != nil {
 		t.Fatalf("应自动创建目录：%v", err)
 	}
 	if _, err := os.Stat(target); err != nil {

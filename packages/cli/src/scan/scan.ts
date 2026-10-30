@@ -50,7 +50,7 @@ import {
   type TlsProbeResult,
 } from './true-probe'
 import { parseSpeedUrl, withBytes, schemeForPort, DEFAULT_SPEED_URL } from './speed-url'
-import { countryOfColo, normalizeCountryFilter } from './countries'
+import { coloCity, countryOfColo, normalizeCountryFilter } from './countries'
 import { describeUnlock, probeUnlock } from './unlock'
 
 export interface ScanOptions {
@@ -929,12 +929,25 @@ export function formatHost(ip: string): string {
 }
 
 /**
+ * 可复制结果的备注：`SIN新加坡`（机房码 + 城市中文名）。
+ *
+ * 备注会进订阅节点名，客户端里直接显示城市，比裸三字码直观。
+ * 未知机房回落机房码本身；空机房用 CF 兜底。
+ */
+function copyTag(colo: string): string {
+  const code = (colo || '').toUpperCase().trim()
+  if (!code) return 'CF'
+  const city = coloCity(code)
+  return city ? code + city : code
+}
+
+/**
  * 可直接复制粘贴到同类项目「自定义 IP / 优选 IP」输入框的格式：
- *   `1.2.3.4:443#NRT`  一行一个
- *   `[2606:4700::1]:443#NRT`（IPv6 带方括号）
+ *   `1.2.3.4:443#NRT东京`  一行一个
+ *   `[2606:4700::1]:443#NRT东京`（IPv6 带方括号）
  */
 export function formatCopyable(entries: ScanEntry[]): string {
-  return entries.map((e) => `${formatHost(e.ip)}:${e.port}#${e.colo}`).join('\n')
+  return entries.map((e) => `${formatHost(e.ip)}:${e.port}#${copyTag(e.colo)}`).join('\n')
 }
 
 /** 转换为面板回填格式：IP:Port#机房_延迟_速度[_标签] */

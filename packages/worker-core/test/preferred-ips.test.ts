@@ -127,6 +127,38 @@ describe('POST /api/v1/preferred-ips（回填）', () => {
     expect(r.clearedManual).toBe(false)
   })
 
+  it('回填后自动启用「手动指定 IP」来源（poolManual）', async () => {
+    // 模拟用户关掉了该来源 —— 此时回填的 IP 不会进订阅，看起来「回填没生效」
+    config = mergeConfig(DEFAULT_CONFIG, { add: '', poolManual: false })
+    await store.put(CONFIG_KEY, JSON.stringify(config))
+
+    const res = await handleApi(
+      authReq('/preferred-ips', { ips: ['9.9.9.9:443#LAX'] }),
+      new URL('https://panel.example.com/api/v1/preferred-ips'),
+      ctx()
+    )
+    const json = (await res!.json()) as { ok: boolean; enabledManual?: boolean }
+    expect(json.ok).toBe(true)
+    expect(json.enabledManual).toBe(true)
+    const saved = JSON.parse((await store.get(CONFIG_KEY))!) as UserConfig
+    expect(saved.poolManual).toBe(true)
+  })
+
+  it('已启用时不再重复写配置（省 KV 配额）', async () => {
+    config = mergeConfig(DEFAULT_CONFIG, { add: '', poolManual: true })
+    await store.put(CONFIG_KEY, JSON.stringify(config))
+    const before = configChanged
+
+    const res = await handleApi(
+      authReq('/preferred-ips', { ips: ['9.9.9.9:443#LAX'] }),
+      new URL('https://panel.example.com/api/v1/preferred-ips'),
+      ctx()
+    )
+    const json = (await res!.json()) as { enabledManual?: boolean }
+    expect(json.enabledManual).toBe(false)
+    expect(configChanged).toBe(before)
+  })
+
   it('空列表也会清空手填池（清空语义）', async () => {
     await store.put(CONFIG_KEY, JSON.stringify(config))
     const r = await push([])

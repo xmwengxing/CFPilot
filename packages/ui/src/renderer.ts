@@ -1388,7 +1388,15 @@
   }
 
   function renderScanResult(payload: {
-    entries: Array<{ ip: string; port: number; colo: string; latency: number; tlsMs: number; speed: number }>
+    entries: Array<{
+      ip: string
+      port: number
+      colo: string
+      city?: string
+      latency: number
+      tlsMs: number
+      speed: number
+    }>
     copyable: string
     skippedSpeed?: boolean
   }): void {
@@ -1403,7 +1411,9 @@
       const speed = payload.skippedSpeed ? '—' : String(e.speed)
       // TLS 握手耗时是「导入后会不会 -1」的关键指标，放在最前面
       const tls = e.tlsMs > 0 ? String(e.tlsMs) : '—'
-      const cells = [String(i + 1), e.ip + ':' + e.port, e.colo, tls, String(e.latency), speed]
+      // 机房列显示「SIN新加坡」——与可复制结果的备注一致
+      const colo = e.colo ? e.colo + (e.city || '') : '—'
+      const cells = [String(i + 1), e.ip + ':' + e.port, colo, tls, String(e.latency), speed]
       for (const c of cells) {
         const td = document.createElement('td')
         td.textContent = c
@@ -1834,7 +1844,9 @@
       // 跳过测速的会话速度本就是 0，显示 — 而不是 0
       const speed = sess.skipSpeed ? '—' : String(e.speed)
       const tls = e.tlsMs > 0 ? String(e.tlsMs) : '—'
-      const cells = [String(i + 1), e.ip + ':' + e.port, e.colo || '—', tls, String(e.latency), speed]
+      // 机房列显示「SIN新加坡」——与可复制结果的备注一致
+      const colo = e.colo ? e.colo + (e.city || '') : '—'
+      const cells = [String(i + 1), e.ip + ':' + e.port, colo, tls, String(e.latency), speed]
       for (const c of cells) {
         const td = document.createElement('td')
         td.textContent = c
@@ -1892,7 +1904,7 @@
         log('请先在历史里勾选 IP', 'warn')
         return
       }
-      const lines = sel.map((e) => e.ip + ':' + e.port + '#' + (e.colo || 'CF'))
+      const lines = sel.map((e) => e.ip + ':' + e.port + '#' + (e.colo || 'CF') + (e.city || ''))
       copy(lines.join('\n'))
       log('已复制 ' + sel.length + ' 个 IP（IP:Port#机房）', 'ok')
     })

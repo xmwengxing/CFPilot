@@ -287,7 +287,7 @@ func (s *Server) RunQuickScanFor(ctx context.Context, profile *store.Profile, on
 
 	lines := make([]string, 0, len(summary.Entries))
 	for _, e := range summary.Entries {
-		lines = append(lines, fmt.Sprintf("%s:%d#%s", e.IP, e.Port, e.Colo))
+		lines = append(lines, fmt.Sprintf("%s:%d#%s", e.IP, e.Port, coloTag(e.Colo)))
 	}
 	pushRes := scan.PostResults(scanCtx, scan.DefaultCallbackURL(panelHost), tok.Token, lines, 20*time.Second)
 	if !pushRes.OK {

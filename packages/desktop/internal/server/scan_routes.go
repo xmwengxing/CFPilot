@@ -241,14 +241,15 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 		// 转成界面期望的形态
 		entries := make([]map[string]any, 0, len(sum.Entries))
 		for _, e := range sum.Entries {
-			entries = append(entries, map[string]any{
-				"ip":      e.IP,
-				"port":    e.Port,
-				"colo":    e.Colo,
-				"latency": e.Latency,
-				"tlsMs":   e.TLSMs,
-				"speed":   e.Speed,
-			})
+		entries = append(entries, map[string]any{
+			"ip":      e.IP,
+			"port":    e.Port,
+			"colo":    e.Colo,
+			"city":    scan.ColoNameOf(e.Colo),
+			"latency": e.Latency,
+			"tlsMs":   e.TLSMs,
+			"speed":   e.Speed,
+		})
 		}
 
 		payload := map[string]any{
@@ -701,11 +702,7 @@ func (s *Server) doPanelCallback(ctx context.Context, host string, entries []sca
 
 	lines := make([]string, 0, len(entries))
 	for _, e := range entries {
-		label := e.Colo
-		if label == "" {
-			label = "CF"
-		}
-		lines = append(lines, fmt.Sprintf("%s:%d#%s", scan.FormatHost(e.IP), e.Port, label))
+		lines = append(lines, fmt.Sprintf("%s:%d#%s", scan.FormatHost(e.IP), e.Port, coloTag(e.Colo)))
 	}
 
 	s.logLevel("正在回填到面板："+url, "info")
@@ -811,18 +808,29 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
+// coloTag 生成可复制结果的备注：`SIN新加坡`（机房码 + 城市中文名）。
+//
+// 备注会原样进订阅节点名（客户端显示 `SIN新加坡`），比裸三字码直观。
+// 未知机房回落国家名；都识别不到时只留机房码；空机房用 CF 兜底。
+func coloTag(colo string) string {
+	code := strings.ToUpper(strings.TrimSpace(colo))
+	if code == "" {
+		return "CF"
+	}
+	if city := scan.ColoNameOf(code); city != "" && city != code {
+		return code + city
+	}
+	return code
+}
+
 // formatCopyable 生成可直接粘贴进客户端的节点列表。
 //
-// 格式：`IP:Port#机房`，每行一个。
-// 与 Electron 版的 formatCopyable 输出一致 —— 用户会在两个版本间复制粘贴。
+// 格式：`IP:Port#机房城市`（如 `1.2.3.4:443#SIN新加坡`），每行一个。
+// 与 CLI 的 formatCopyable 输出一致 —— 用户会在两个版本间复制粘贴。
 func formatCopyable(entries []scan.Entry) string {
 	var sb strings.Builder
 	for _, e := range entries {
-		tag := e.Colo
-		if tag == "" {
-			tag = "CF"
-		}
-		fmt.Fprintf(&sb, "%s:%d#%s\n", scan.FormatHost(e.IP), e.Port, tag)
+		fmt.Fprintf(&sb, "%s:%d#%s\n", scan.FormatHost(e.IP), e.Port, coloTag(e.Colo))
 	}
 	return sb.String()
 }

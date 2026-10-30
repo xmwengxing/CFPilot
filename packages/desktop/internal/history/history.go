@@ -38,9 +38,11 @@ const (
 
 // Entry 是一条优选结果（与 scan.Entry 字段一致）。
 type Entry struct {
-	IP      string  `json:"ip"`
-	Port    int     `json:"port"`
-	Colo    string  `json:"colo"`
+	IP   string `json:"ip"`
+	Port int    `json:"port"`
+	Colo string `json:"colo"`
+	// City 是机房城市中文名（如「新加坡」），只用于展示与复制备注。
+	City    string  `json:"city,omitempty"`
 	Latency int64   `json:"latency"`
 	TLSMs   int64   `json:"tlsMs"`
 	Speed   float64 `json:"speed"`
@@ -80,6 +82,7 @@ func FromScanEntries(in []scan.Entry) []Entry {
 			IP:      e.IP,
 			Port:    e.Port,
 			Colo:    e.Colo,
+			City:    scan.ColoNameOf(e.Colo),
 			Latency: e.Latency,
 			TLSMs:   e.TLSMs,
 			Speed:   e.Speed,

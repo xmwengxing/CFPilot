@@ -70,4 +70,15 @@ for (const asset of ASSETS) {
   console.log(`[cfpilot] 已同步 ${asset.file} (${kb.toFixed(1)} KB) — ${asset.desc}`)
 }
 
+// VPS 落地代理脚本：`cfpilot vps` 要把它喂给远端 ssh。
+// 与内核产物不同，它是纯文本、体积几 KB，不参与 80KB 预算。
+const vpsScript = resolve(monorepo, 'scripts/vps/deploy-socks5.sh')
+if (existsSync(vpsScript)) {
+  const target = resolve(targetDir, 'vps-socks5.sh')
+  copyFileSync(vpsScript, target)
+  console.log(`[cfpilot] 已同步 vps-socks5.sh (${(statSync(target).size / 1024).toFixed(1)} KB) — VPS 落地代理脚本`)
+} else {
+  console.warn('[cfpilot] 未找到 scripts/vps/deploy-socks5.sh，cfpilot vps 将不可用')
+}
+
 console.log(`[cfpilot] 内核资产合计 ${total.toFixed(1)} KB → assets/`)

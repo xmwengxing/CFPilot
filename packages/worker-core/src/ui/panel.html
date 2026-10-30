@@ -601,6 +601,22 @@
       </div>
     </div>
 
+    <details class="fold" id="subTokenFold">
+      <summary>订阅链接安全（进阶）· 切换前请先读风险</summary>
+      <div class="fold-body">
+        <div class="warn err"><b>⚠ 切到「签名模式」后，经典链接（/sub/&lt;UUID&gt;）立即返回 403，每台设备都要重新导入；「轮换密钥」不可撤销。</b><br>正确顺序：① 签发 → ② 逐台导入验证 → ③ 再切模式。绝大多数用户不需要开启本功能。</div>
+        <div class="field">
+          <label>签名链接 <span class="muted" id="subTokenState"></span></label>
+          <div class="row nowrap"><input class="mono" id="subSigned" readonly placeholder="点「① 签发」生成" /><button class="ghost" data-copy="subSigned">复制</button></div>
+        </div>
+        <div class="row">
+          <button class="ghost" id="btnSignSub">① 签发</button>
+          <button class="danger" id="btnRotateSub">轮换密钥</button>
+          <button class="primary" id="btnToggleSubMode">② 切换模式</button>
+        </div>
+      </div>
+    </details>
+
     <div class="card">
       <h2><span class="dot"></span>订阅下发节点清单（前 100 条）</h2>
       <div class="table-wrap">
@@ -1053,7 +1069,8 @@
     api('/api/v1/config').then(function (r) {
       state.config = r.config;
       fillConfig(r.config);
-      refreshSubLinks();
+      // 先取令牌再拼链接：签名模式下身份段是令牌而不是 UUID
+      refreshSubToken();
     }).catch(function (e) { toast(e.message, true); });
 
     loadNodes();
@@ -1074,7 +1091,7 @@
     var items = [
       ['控制面域名（当前面板）', location.hostname],
       ['数据面域名（节点 SNI/Host）', s.nodeDomain || s.domain || location.hostname],
-      ['当前接入边缘机房', s.colo || 'UNK'],
+      ['当前接入边缘机房', s.coloLabel || s.colo || 'UNK'],
       ['本地真连接优选池', (s.localIps || 0) + ' 条'],
       ['系统内核版本', ver]
     ];
@@ -1213,14 +1230,14 @@
     var list = (r.nodes || []).slice(0, 100);
     var rows = list.map(function (n, i) {
       return '<tr><td>' + (i + 1) + '</td><td><span class="tag ' + esc(n.source) + '">' + esc(n.source) + '</span></td>' +
-        '<td class="mono">' + esc(n.ip) + ':' + n.port + '</td><td>' + esc(n.colo || '-') + '</td>' +
+        '<td class="mono">' + esc(n.ip) + ':' + n.port + '</td><td>' + esc(n.coloLabel || n.colo || '-') + '</td>' +
         '<td>' + (n.latency ? n.latency + ' ms' : '-') + '</td><td>' + (n.speed ? n.speed + ' MB/s' : '-') + '</td></tr>';
     }).join('');
     $('nodeTable').querySelector('tbody').innerHTML = rows || '<tr><td colspan="6" class="muted">当前暂无可用节点</td></tr>';
 
     var subRows = list.map(function (n, i) {
       return '<tr><td>' + (i + 1) + '</td><td><span class="tag ' + esc(n.source) + '">' + esc(n.source) + '</span></td>' +
-        '<td class="mono">' + esc(n.ip) + ':' + n.port + '</td><td>' + esc(n.colo || '-') + '</td></tr>';
+        '<td class="mono">' + esc(n.ip) + ':' + n.port + '</td><td>' + esc(n.coloLabel || n.colo || '-') + '</td></tr>';
     }).join('');
     $('subTable').querySelector('tbody').innerHTML = subRows || '<tr><td colspan="4" class="muted">当前暂无可用节点</td></tr>';
 
@@ -1252,9 +1269,54 @@
     $('localState').textContent = '本地真连接池：' + local + ' 条';
   }
 
+  // === [Module 3b: 订阅签名令牌] ===
+  // 三种链接（base64 / clash / singbox）的「身份段」随模式变化：
+  //   经典模式 → UUID；签名模式 → v1.<exp>.<nonce>.<sig>
+  // 所以刷新链接前必须先知道当前令牌，否则签名模式下会拼出必然 403 的旧链接。
+  var subTokenState = { token: '', mode: 'legacy', expiresAt: 0 };
+
+  function fmtExpire(ms) {
+    if (!ms) return '永久有效';
+    var d = new Date(ms);
+    var p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' 到期';
+  }
+
+  function renderSubTokenState() {
+    var signed = subTokenState.mode === 'signed';
+    $('subTokenState').textContent = signed
+      ? '（签名模式 · ' + fmtExpire(subTokenState.expiresAt) + '）'
+      : '（当前为经典模式，下方签名链接仅供切换前验证）';
+    var btn = $('btnToggleSubMode');
+    btn.textContent = signed ? '回退到经典链接' : '② 切换到签名模式';
+    btn.className = signed ? 'ghost' : 'primary';
+  }
+
+  function refreshSubToken() {
+    return api('/api/v1/sub-token').then(function (r) {
+      subTokenState = { token: r.token || '', mode: r.mode || 'legacy', expiresAt: r.expiresAt || 0 };
+      $('subSigned').value = r.link || '';
+      renderSubTokenState();
+      refreshSubLinks();
+    }).catch(function (e) { toast(e.message, true); });
+  }
+
   function refreshSubLinks() {
-    var uuid = ($('cfgUuid').value || (state.config && state.config.uuid) || '').trim();
-    if (!uuid) {
+    var cfg = state.config || {};
+    var signedMode = cfg.subToken === 'signed';
+    var token = subTokenState.token || '';
+    var uuid = ($('cfgUuid').value || cfg.uuid || '').trim();
+
+    if (signedMode && !token) {
+      var pending = '（正在签发签名链接，请稍候…）';
+      $('subAdaptive').value = pending;
+      $('subBase64').value = pending;
+      $('subClash').value = pending;
+      $('subSingbox').value = pending;
+      return;
+    }
+    var ident = signedMode ? token : uuid;
+    if (!ident) {
       var hint = '（正在等待系统初始化 UUID，请稍候或刷新页面）';
       $('subAdaptive').value = hint;
       $('subBase64').value = hint;
@@ -1262,7 +1324,7 @@
       $('subSingbox').value = hint;
       return;
     }
-    var base = location.origin + '/sub/' + encodeURIComponent(uuid);
+    var base = location.origin + '/sub/' + encodeURIComponent(ident);
     // 自适应地址：不带 target 参数，由服务端按 User-Agent 判定格式
     // （见 worker-core 的 resolveFormatByUserAgent：Clash→YAML、Sing-box→JSON、其余→Base64）
     $('subAdaptive').value = base;
@@ -1621,6 +1683,53 @@
         .catch(function (e) { toast(e.message, true); });
     });
 
+    // ---- 订阅链接安全（签名令牌）----
+    $('btnSignSub').addEventListener('click', function () {
+      refreshSubToken().then(function () {
+        toast('已签发新链接：先导入验证，确认能正常更新后再切换模式');
+      });
+    });
+
+    $('btnRotateSub').addEventListener('click', function () {
+      if (!confirm(
+        '轮换密钥会让【所有已签发】的订阅链接立即失效，且无法恢复。\n\n' +
+        '已经导入的客户端只是「更新订阅」失败，节点本身仍然可用；\n' +
+        '但你需要为每一台设备重新导入新链接。\n\n确定继续？'
+      )) return;
+      if (!confirm('最后确认：现在轮换密钥？（旧链接将立刻作废）')) return;
+      api('/api/v1/sub-token', { method: 'POST' }).then(function (r) {
+        subTokenState = { token: r.token || '', mode: r.mode || 'legacy', expiresAt: r.expiresAt || 0 };
+        $('subSigned').value = r.link || '';
+        renderSubTokenState();
+        refreshSubLinks();
+        toast('密钥已轮换，旧链接已全部失效');
+      }).catch(function (e) { toast(e.message, true); });
+    });
+
+    $('btnToggleSubMode').addEventListener('click', function () {
+      var signed = subTokenState.mode === 'signed';
+      if (!signed) {
+        if (!subTokenState.token) {
+          toast('请先点「① 签发新链接」，把新链接导入设备验证通过后再切换', true);
+          return;
+        }
+        if (!confirm(
+          '即将切换到「签名模式」。\n\n切换后：\n' +
+          '· 经典链接（/sub/<UUID>）立即返回 403\n' +
+          '· 每台设备都必须改用上面那条签名链接重新导入\n\n' +
+          '请确认你已经把签名链接导入并验证过。\n\n确定切换？'
+        )) return;
+        saveConfig({ subToken: 'signed' }, '已切换到签名模式').then(function () { refreshSubToken(); });
+      } else {
+        if (!confirm(
+          '即将回退到「经典模式」。\n\n回退后：\n' +
+          '· 经典链接（/sub/<UUID>）恢复可用\n' +
+          '· 签名链接仍然可用，但「泄露后一键作废」的能力随之失效\n\n确定回退？'
+        )) return;
+        saveConfig({ subToken: 'legacy' }, '已回退到经典模式').then(function () { refreshSubToken(); });
+      }
+    });
+
     function loadLocalIps() {
       api('/api/v1/ips').then(function (r) {
         var text = (r && r.raw) || '';
@@ -1670,7 +1779,7 @@
     });
     renderCmds();
 
-    $('btnRefreshSub').addEventListener('click', function () { refreshSubLinks(); loadNodes(); toast('订阅链接与节点已刷新'); });
+    $('btnRefreshSub').addEventListener('click', function () { refreshSubToken(); loadNodes(); toast('订阅链接与节点已刷新'); });
 
     Array.prototype.forEach.call(document.querySelectorAll('[data-copy]'), function (btn) {
       btn.addEventListener('click', function () { copy($(btn.getAttribute('data-copy')).value); });

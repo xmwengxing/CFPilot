@@ -69,6 +69,13 @@ export const DEFAULT_CONFIG: UserConfig = {
   tlsFragment: false,
   tlsFragmentSize: '10-20',
   tlsFragmentDelay: '10-20',
+  subToken: 'legacy',
+  subTokenTtlDays: 0,
+  unlockProbe: false,
+  udpDns: 'off',
+  // ⚠️ 必须是**非 Cloudflare** 的 DoH 端点：Worker 连回 CF 自家网段会被拒
+  // （TCP Loop detected，见 AGENTS 铁律 9）。
+  udpDnsEndpoint: 'https://dns.google/dns-query',
 }
 
 function num(value: unknown, fallback: number): number {
@@ -102,6 +109,16 @@ export function normalizeProxyMode(value: string): ProxyMode {
   const text = value.trim().toLowerCase()
   if (text === 'global' || text === 'fallback' || text === 'smart') return text
   return 'only'
+}
+
+/** 归一化订阅令牌模式；读不懂一律回落 `legacy`（最保守：不改变既有行为） */
+export function normalizeSubTokenMode(value: string): 'legacy' | 'signed' {
+  return value.trim().toLowerCase() === 'signed' ? 'signed' : 'legacy'
+}
+
+/** 归一化 UDP 处理模式；读不懂一律 `off`（保持历史行为：明确拒绝） */
+export function normalizeUdpDns(value: string): 'off' | 'doh' {
+  return value.trim().toLowerCase() === 'doh' ? 'doh' : 'off'
 }
 
 function text(value: unknown, fallback: string): string {
@@ -156,6 +173,11 @@ export function configFromEnv(env: Env): UserConfig {
     tlsFragment: false,
     tlsFragmentSize: DEFAULT_CONFIG.tlsFragmentSize,
     tlsFragmentDelay: DEFAULT_CONFIG.tlsFragmentDelay,
+    subToken: normalizeSubTokenMode(text(env.SUB_TOKEN_MODE, '')),
+    subTokenTtlDays: num(env.SUB_TOKEN_TTL_DAYS, DEFAULT_CONFIG.subTokenTtlDays),
+    unlockProbe: bool(env.UNLOCK_PROBE, DEFAULT_CONFIG.unlockProbe),
+    udpDns: normalizeUdpDns(text(env.UDP_DNS, '')),
+    udpDnsEndpoint: text(env.UDP_DNS_ENDPOINT, DEFAULT_CONFIG.udpDnsEndpoint),
   }
 }
 
@@ -170,7 +192,8 @@ export function mergeConfig(base: UserConfig, override: Partial<UserConfig>): Us
       key === 'maxNodes' ||
       key === 'officialCount' ||
       key === 'domainCount' ||
-      key === 'dataBudgetMB'
+      key === 'dataBudgetMB' ||
+      key === 'subTokenTtlDays'
     ) {
       ;(merged as unknown as Record<string, number>)[key] = num(value, 0)
     } else if (
@@ -183,7 +206,8 @@ export function mergeConfig(base: UserConfig, override: Partial<UserConfig>): Us
       key === 'ech' ||
       key === 'poolOfficial' ||
       key === 'poolDomain' ||
-      key === 'poolManual'
+      key === 'poolManual' ||
+      key === 'unlockProbe'
     ) {
       ;(merged as unknown as Record<string, boolean>)[key] = bool(value, false)
     } else if (key === 'subProtocol') {
@@ -192,6 +216,10 @@ export function mergeConfig(base: UserConfig, override: Partial<UserConfig>): Us
     } else if (key === 'subTransport') {
       const v = String(value)
       ;(merged as unknown as Record<string, string>)[key] = v === 'ws' || v === 'xhttp' || v === 'both' ? v : 'both'
+    } else if (key === 'subToken') {
+      ;(merged as unknown as Record<string, string>)[key] = normalizeSubTokenMode(String(value))
+    } else if (key === 'udpDns') {
+      ;(merged as unknown as Record<string, string>)[key] = normalizeUdpDns(String(value))
     } else {
       ;(merged as unknown as Record<string, string>)[key] = String(value)
     }

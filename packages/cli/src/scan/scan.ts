@@ -51,6 +51,7 @@ import {
 } from './true-probe'
 import { parseSpeedUrl, withBytes, schemeForPort, DEFAULT_SPEED_URL } from './speed-url'
 import { countryOfColo, normalizeCountryFilter } from './countries'
+import { describeUnlock, probeUnlock } from './unlock'
 
 export interface ScanOptions {
   /** Worker 域名（作为 SNI / Host） */
@@ -138,6 +139,13 @@ export interface ScanOptions {
   speedDurationMs?: number
   /** 跳过测速，只按延迟排序 */
   skipSpeed?: boolean
+  /**
+   * 是否做「出口体检」（调数据面 `/__unlock_probe`）。
+   *
+   * 按**机房去重**：同一机房的优选 IP 出口相同，只测一条代表。
+   * 需要同时提供 `uuid`（端点鉴权用完整 UUID）。
+   */
+  unlock?: boolean
   /** 最终返回条数 */
   top?: number
   /** 进度回调 */
@@ -782,6 +790,44 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   // 最终列表覆盖多个网段；同段内部仍然按速度排。
   const entries = pickWithDiversity(ranked, top)
 
+  // ---- 阶段四：出口体检（可选）----
+  //
+  // 按**机房去重**：结果由出口决定，出口由机房决定，同机房的所有 IP 完全一样。
+  // 50 条结果通常只落在 3~8 个机房上，所以这里最多打 8 次请求。
+  //
+  // 失败不阻断：体检只是附加信息，拿不到就留空标签。
+  if (options.unlock && options.uuid && entries.length > 0) {
+    const byColo = new Map<string, ScanEntry>()
+    for (const entry of entries) {
+      const key = entry.colo || 'UNK'
+      if (!byColo.has(key)) byColo.set(key, entry)
+    }
+    const reps = [...byColo.values()]
+    report({ type: 'stage', stage: 4, name: '出口体检（按机房去重）', total: reps.length })
+    let done = 0
+    await pool(reps, 2, async (rep) => {
+      const result = await probeUnlock({
+        ip: rep.ip,
+        port: options.port,
+        host: options.host,
+        token: options.uuid!,
+      })
+      done++
+      // ⚠️ 结果**不写进备注**：体检只能证明「站点可达」，不能证明「能播放/能登录」。
+      // 2026-10-30 线上实测：数据中心出口下 Netflix 片源页照样 200，播放却被拦。
+      // 把这种信号写成节点名里的 [NF]，就是在制造「看起来能用、实际不能用」的假象 ——
+      // 与这个项目「真连接」的立场相反。所以只在日志里报告，不改节点名。
+      report({
+        type: 'progress',
+        stage: 4,
+        done,
+        total: reps.length,
+        message: `${rep.colo || 'UNK'} ${describeUnlock(result)}`,
+      })
+      return result
+    })
+  }
+
   for (const entry of entries) {
     report({ type: 'result', entry })
   }
@@ -836,7 +882,7 @@ export function formatCopyable(entries: ScanEntry[]): string {
   return entries.map((e) => `${formatHost(e.ip)}:${e.port}#${e.colo}`).join('\n')
 }
 
-/** 转换为面板回填格式：IP:Port#机房_延迟_速度 */
+/** 转换为面板回填格式：IP:Port#机房_延迟_速度[_标签] */
 export function formatEntries(entries: ScanEntry[]): string[] {
   return entries.map(
     (e) => `${formatHost(e.ip)}:${e.port}#${e.colo}_${e.latency}_${e.speed}`

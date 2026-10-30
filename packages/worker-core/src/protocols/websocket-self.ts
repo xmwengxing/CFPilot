@@ -24,6 +24,7 @@ import type { UserConfig } from '../types'
 import type { ProxyEndpoint } from '../outbound/proxy-pool'
 import { parseVlessBuffer, VLESS_COMMAND_UDP } from '../protocols/vless'
 import { parseTrojanBuffer, TROJAN_COMMAND_UDP } from '../protocols/trojan'
+import { DnsUdpSession } from './udp-dns'
 import { concatBytes } from '../protocols/stream'
 import { dial, type DialResult } from '../outbound/dial'
 import { TrafficMeter } from '../budget'
@@ -278,6 +279,14 @@ export async function handleWebSocket(
    * （反代重拨发生在 `establish()` 之后，那里有自己的局部 target）。
    */
   let target: WsTarget | null = null
+
+  /**
+   * DNS-over-DoH 会话（仅 `udpDns === 'doh'` 且命令为 UDP/53 时存在）。
+   *
+   * 一旦置位，这条连接的上行字节**全部**交给它按长度前缀切帧，
+   * 不再走 `writer`（UDP 连接根本没有出站 socket）。
+   */
+  let udpSession: DnsUdpSession | null = null
 
   const send = (bytes: Uint8Array): void => {
     try {
@@ -654,10 +663,30 @@ export async function handleWebSocket(
     // 同步到外层作用域：反代重拨（redialViaRelay）需要它做诊断记录
     target = parsed
 
-    // UDP 暂不支持
+    // UDP：Workers 没有 UDP socket，只有 **DNS/53** 能靠 DoH 打通。
+    //
+    // 判定顺序很重要：
+    //   1. 开关打开 + VLESS + 端口 53 → 走 DoH（先回协议响应头，与 TCP 一致）
+    //   2. 其余一律明确拒绝，并在 reason 里写清「只支持 DNS」——
+    //      客户端把它显示在日志里，比一句「暂不支持」有用得多
     const udpCommand = mode === 'vless' ? VLESS_COMMAND_UDP : TROJAN_COMMAND_UDP
     if (parsed.command === udpCommand) {
-      closeWith(1002, 'UDP over WebSocket 暂不支持')
+      if (mode === 'vless' && config.udpDns === 'doh' && parsed.port === 53) {
+        sendResponseHeader(new Uint8Array(0))
+        udpSession = new DnsUdpSession({
+          endpoint: config.udpDnsEndpoint,
+          send,
+        })
+        const firstPayload = buffer.subarray(parsed.headerLength)
+        if (firstPayload.byteLength > 0) udpSession.push(firstPayload)
+        return
+      }
+      closeWith(
+        1002,
+        config.udpDns === 'doh'
+          ? 'UDP 仅支持 DNS（53 端口）'
+          : 'UDP 未启用（面板可开启 DNS over DoH）'
+      )
       return
     }
 
@@ -922,6 +951,11 @@ export async function handleWebSocket(
           return
         }
         await establish()
+        return
+      }
+      // DNS-over-DoH 会话：上行全部按长度前缀切帧，不走出站 socket
+      if (udpSession) {
+        udpSession.push(bytes)
         return
       }
       // ⚠️ 拨号期间（established 已置位但 writer 未就绪）到达的数据**不能丢**：

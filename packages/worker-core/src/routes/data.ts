@@ -210,6 +210,43 @@ export async function routeDataPlane(
     )
   }
 
+  // 出口体检端点（默认关闭）。
+  //
+  // ## 为什么要单独一个端点、而不是塞进 /__diag
+  //
+  // `/__diag` 是**被动**的：只回放最近失败记录，不产生任何出站请求。
+  // 体检是**主动**的：每次要打 5 个外部站点。混在一起会让「看一眼诊断」
+  // 变成「顺手发起 5 个外部请求」，既慢又容易被当成免费探测服务。
+  //
+  // ## 鉴权
+  //
+  // 与 `/__diag` 完全一致（完整 UUID + 失败限速），复用同一套计数器。
+  // 未配置 UUID 时 fail-closed（`diagAuthorized` 内部处理）。
+  //
+  // ## 结果按机房缓存
+  //
+  // 同一机房 10 分钟内只打一次外部请求（见 `unlock.ts` 的 CACHE_TTL_MS）——
+  // 扫描器会对结果里出现的每个机房各调一次，缓存把重复调用压成一次。
+  if (url.pathname === '/__unlock_probe') {
+    if (!config.unlockProbe) return null
+    if (diagThrottled(Date.now())) {
+      return new Response(JSON.stringify({ ok: false, error: 'token attempts throttled' }, null, 2), {
+        status: 429,
+        headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
+      })
+    }
+    if (!diagAuthorized(request, url, config.uuid)) return null
+    const { coloToCountry } = await import('../outbound/relay')
+    const { runUnlockProbe } = await import('../unlock')
+    const colo = (request as unknown as { cf?: { colo?: string } }).cf?.colo ?? ''
+    const region = colo ? coloToCountry(colo) : ''
+    const report = await runUnlockProbe(colo, region)
+    return new Response(JSON.stringify({ ok: true, ...report }, null, 2), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
+    })
+  }
+
   const upgrade = request.headers.get('Upgrade')?.toLowerCase()
 
   if (url.pathname === config.wsPath) {

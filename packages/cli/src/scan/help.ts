@@ -89,6 +89,9 @@ scan 选项:
   --uuid <uuid>          真实隧道校验用的 VLESS UUID（给了才会跑阶段二点五）
   --trojan-password <pw> 真实隧道校验用的 Trojan 口令（与 --uuid 二选一）
   --verify-target <host> 隧道校验访问的目标域名，默认 baidu.com
+  --unlock               出口体检：按机房去重，标注 [AI] / [NF]
+                         需要 --uuid（端点鉴权）与面板开启「出口体检」开关
+                         结果按机房缓存 10 分钟，同一机房只打一次外部请求
   --no-verify-ws-path    跳过「真实 WS 路径 101」这项额外校验
   --seed <n>             采样随机种子。默认每次随机 —— 保证每次探索不同的 IP 子集
                           （写死种子会让每次跑都测同一批 IP，抽到劣质段就永远测不出好 IP）

@@ -19,7 +19,7 @@ import {
   type ScanEntry,
   type ScanEvent,
 } from './scan'
-import { normalizeCountryFilter } from './countries'
+import { coloCity, normalizeCountryFilter } from './countries'
 import { formatEntries } from './scan'
 import { postResults, fetchScannerToken } from './callback'
 import { resolveCandidates } from './candidates'
@@ -120,6 +120,20 @@ function printTable(entries: ScanEntry[]): void {
     const speed = entry.speed.toFixed(1).padStart(9, ' ')
     process.stdout.write(`${rank}   ${address} ${colo} ${tls} ${latency}  ${speed}\n`)
   })
+
+  // 机房对照：三字码对普通用户没有意义，给一份「HKG=香港」的说明。
+  // 表里不直接写中文是为了保住列对齐（中文宽度与 ASCII 不一致）。
+  const seen: string[] = []
+  for (const entry of entries) {
+    const colo = entry.colo || 'UNK'
+    if (!seen.includes(colo)) seen.push(colo)
+  }
+  const named = seen.filter((c) => coloCity(c))
+  if (named.length > 0) {
+    process.stdout.write(
+      '\n机房对照：' + named.map((c) => `${c}=${coloCity(c)}`).join('  ') + '\n'
+    )
+  }
 }
 
 /**
@@ -417,6 +431,8 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
     verifyTargetHost: flagString(args, 'verify-target'),
     verifyTargetPort: flagNumber(args, 'verify-target-port', 80),
     speedRepeat: flagNumber(args, 'speed-repeat', 1),
+    // 出口体检（可选）：需要 --uuid 做端点鉴权，按机房去重调用
+    unlock: flagBool(args, 'unlock'),
     verifyWsPath: args.flags['no-verify-ws-path'] === undefined,
     top,
     onProgress: (event) => printProgress(event, quiet),

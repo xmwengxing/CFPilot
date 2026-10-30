@@ -314,6 +314,27 @@ interface Window {
      */
     revealFile(file: string): Promise<{ ok: boolean; path?: string; error?: string }>
     detectAccount(): Promise<{ accountId: string; accountName: string }>
+    /**
+     * 链式代理：把内嵌的部署脚本取回来（原文 + 手动执行的命令）。
+     *
+     * 用途是「先审计再执行」，以及 ssh 走不通时复制命令到终端手动跑 ——
+     * 终端里 ssh 才能正常提示输入密码，桌面进程没有终端。
+     */
+    chainScript(): Promise<{ script: string; command: string }>
+    /**
+     * 链式代理：通过本机 ssh 在远端 VPS 上执行部署脚本。
+     *
+     * 链路形态：客户端 → Worker（前置）→ 你的 VPS（落地）→ 目标站。
+     * 成功后返回的 output 里含一行 `socks5://用户:口令@IP:端口`，
+     * 粘进面板「出站与高级」的 SOCKS5 即可。
+     */
+    chainDeploy(params: { host: string; port: number }): Promise<{
+      ok: boolean
+      code: number
+      output: string
+      /** 失败时的人话提示（权限/解析/端口不通等） */
+      error?: string
+    }>
     listKvOptions(accountId: string): Promise<{
       options: CFPilotKvOption[]
     }>

@@ -17,7 +17,7 @@ import type { NodeEntry, NodeSource, SubFormat, UserConfig } from './types'
 import { isIpv4, isIpv6 } from './protocols/address'
 import { base64Encode } from './util'
 import { CpuBudget } from './budget'
-import { CF_IPV4_CIDRS, CURATED_OFFICIAL_IPS, PREFERRED_DOMAINS, countryOfColo, isKnownCountry } from './data/pools'
+import { CF_IPV4_CIDRS, CURATED_OFFICIAL_IPS, PREFERRED_DOMAINS, coloLabel, countryOfColo, isKnownCountry } from './data/pools'
 import { buildBuiltinRules, renderRouteSections } from './route-profile'
 
 export type { SubFormat }
@@ -102,27 +102,42 @@ function isHostname(host: string): boolean {
 }
 
 /** 解析扫描器备注：`SJC_12_35.5` → 机房 / 延迟 / 速度 */
+/**
+ * 解析扫描器备注：`机房_延迟_速度`，允许尾部再跟体检标签（`_AI` / `_NF` / `_AI+NF`）。
+ *
+ * ## 为什么要容忍尾部标签
+ *
+ * 备注的产出方是本地优选器（`formatEntries`）。加了「出口体检」之后，
+ * 同一个字段末尾会多出一段非数字标签。旧实现固定取「最后两段」当延迟与速度，
+ * 遇到 `HKG_120_5.2_AI` 就会把 `5.2` 当延迟、`AI` 当速度（NaN），
+ * 整条记录的延迟/速度全丢 —— 而且不会有任何报错。
+ *
+ * 现在改成**从尾部往前找最后两个连续数字**：标签自然被跳过，
+ * 旧的 `HKG_120_5.2`、更旧的 `HKG_120` 仍然解析出同样的结果。
+ */
 export function parseScannerRemark(remark: string): { colo: string; latency: number; speed: number } {
   const parts = remark.split(/[_-]/).filter(Boolean)
-  let colo = ''
-  let latency = 0
-  let speed = 0
-  if (parts.length >= 3) {
-    const latencyNum = Number(parts[parts.length - 2])
-    const speedNum = Number(parts[parts.length - 1])
-    if (Number.isFinite(latencyNum) && Number.isFinite(speedNum)) {
-      colo = parts.slice(0, parts.length - 2).join('_')
-      latency = latencyNum
-      speed = speedNum
-    }
-  } else if (parts.length === 2) {
-    const latencyNum = Number(parts[1])
-    if (Number.isFinite(latencyNum)) {
-      colo = parts[0] ?? ''
-      latency = latencyNum
+  const num = (text: string | undefined): number | null => {
+    if (text === undefined || text === '') return null
+    const n = Number(text)
+    return Number.isFinite(n) ? n : null
+  }
+
+  // 优先匹配「延迟 + 速度」这对连续数字（可能在尾部标签之前）
+  for (let i = parts.length - 1; i >= 1; i--) {
+    const latency = num(parts[i - 1])
+    const speed = num(parts[i])
+    if (latency !== null && speed !== null) {
+      return { colo: parts.slice(0, i - 1).join('_'), latency, speed }
     }
   }
-  return { colo, latency, speed }
+  // 退化：只有一个数字 = 延迟
+  const only = num(parts[parts.length - 1])
+  if (only !== null && parts.length >= 2) {
+    return { colo: parts.slice(0, -1).join('_'), latency: only, speed: 0 }
+  }
+  // 完全没有数字：不是扫描器写的备注（历史行为：返回空，而不是把整串当机房码）
+  return { colo: '', latency: 0, speed: 0 }
 }
 
 function toEntry(clean: CleanResult, source: NodeSource): NodeEntry {
@@ -1070,7 +1085,8 @@ function resolveGroups(ctx: RenderContext): PoolGroup[] {
 
 function nodeLabel(entry: NodeEntry, protocol: string, index: number, groupName = ''): string {
   const base = entry.remark && !/^[\d.]+$/.test(entry.remark) ? entry.remark : entry.ip
-  const colo = entry.colo && entry.colo !== base ? ` ${entry.colo}` : ''
+  // 机房显示成「香港 HKG」而不是裸三字码 —— 优选结果里最常被问的就是「这个 HKG 是哪」。
+  const colo = entry.colo && entry.colo !== base ? ` ${coloLabel(entry.colo)}` : ''
   const prefix = groupName ? `${groupName} ` : ''
   return `${prefix}${base}${colo} #${index + 1}${protocol === 'trojan' ? ' Trojan' : ''}`
 }
@@ -1440,6 +1456,26 @@ export function renderClash(ctx: RenderContext): string {
   return lines.join('\n')
 }
 
+/**
+ * sing-box 订阅里「国内直连」用的域名后缀。
+ *
+ * ## 为什么是内联清单，而不是 geosite 规则集
+ *
+ * sing-box 1.8 之后移除了内置 geosite，只能走 `route.rule_set` 的**远程**规则集 ——
+ * 那意味着订阅能否生效取决于第三方 CDN 是否可达，下载失败会让整份配置加载失败
+ * （用户侧表现为「导入订阅后 sing-box 直接起不来」）。
+ * 内联清单零下载、零依赖、不会因为外部资源失效而崩，代价只是覆盖面窄一些；
+ * 对「别把国内流量也绕一圈」这个目标已经够用。
+ *
+ * 要完整分流仍然走 Clash —— 那边有 GEOSITE/GEOIP（见 `route-profile.ts`）。
+ */
+const CN_DIRECT_SUFFIXES: readonly string[] = (
+  '.cn,qq.com,tencent.com,weixin.qq.com,baidu.com,bdstatic.com,bilibili.com,hdslb.com,' +
+  'taobao.com,tmall.com,jd.com,aliyun.com,alicdn.com,alipay.com,163.com,126.net,zhihu.com,' +
+  'weibo.com,sina.com.cn,youku.com,iqiyi.com,douyin.com,xiaohongshu.com,mi.com,huawei.com,' +
+  'csdn.net,gitee.com,cnblogs.com'
+).split(',')
+
 /** 生成 Sing-box JSON（1.12+ 结构），按来源分组 */
 export function renderSingbox(ctx: RenderContext): string {
   const outbounds: unknown[] = []
@@ -1527,12 +1563,21 @@ export function renderSingbox(ctx: RenderContext): string {
         { tag: 'dns-out', address: 'https://1.1.1.1/dns-query' },
         { tag: 'local', address: 'local' },
       ],
-      rules: [{ rule_set: [], server: 'dns-out' }],
+      // ⚠️ 这里原来是 `[{ rule_set: [], server: 'dns-out' }]` ——
+      // 一个引用了**空规则集**的规则。它要么匹配全部、要么匹配不到，
+      // 两种语义都不是我们想要的；而「全部走境外 DoH」会让国内域名解析到
+      // 海外 CDN 节点，直连反而更慢（用户侧表现为「分流了但没变快」）。
+      // 现在改成显式的「国内后缀走本地 DNS」，其余仍走 dns-out。
+      rules: [{ domain_suffix: CN_DIRECT_SUFFIXES, server: 'local' }],
     },
     inbounds: [{ type: 'mixed', tag: 'mixed-in', listen: '127.0.0.1', listen_port: 2080 }],
     outbounds,
     route: {
-      rules: [{ domain_suffix: ['.cn'], outbound: 'direct' }],
+      rules: [
+        // 局域网 / 内网地址永远不该进代理
+        { ip_is_private: true, outbound: 'direct' },
+        { domain_suffix: CN_DIRECT_SUFFIXES, outbound: 'direct' },
+      ],
       final: 'CFPilot',
       auto_detect_interface: true,
     },

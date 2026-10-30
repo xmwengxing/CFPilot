@@ -63,6 +63,11 @@ function makeConfig(over: Partial<UserConfig> = {}): UserConfig {
     tlsFragment: false,
     tlsFragmentSize: '10-20',
     tlsFragmentDelay: '10-20',
+    subToken: 'legacy',
+    subTokenTtlDays: 0,
+    unlockProbe: false,
+    udpDns: 'off',
+    udpDnsEndpoint: 'https://dns.google/dns-query',
     ...over,
   }
 }

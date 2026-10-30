@@ -991,99 +991,322 @@
   }
 
 
-  /** 读取国家多选框的选中值（空数组 = 不筛选，跑全量） */
-  function readOptCountries(): string[] {
-    const sel = $sel('optCountries')
-    const out: string[] = []
-    for (const opt of Array.from(sel.selectedOptions)) {
-      const value = opt.value.trim()
-      if (value) out.push(value)
-    }
-    return out
+  /** 优选页的国家目录项（后端 `/api/scan/countries` 返回） */
+  interface ScanCountry {
+    code: string
+    name: string
+    /** 大洲分组（ASIA / AMERICAS / EUROPE / OCEANIA / AFRICA / OTHER） */
+    group: string
+    /** 机房三字码 —— 仅用于辅助显示与搜索命中 */
+    colos: string[]
   }
 
+  /** 弹窗里的大洲分节（顺序即展示顺序） */
+  const COUNTRY_GROUPS: Array<{ key: string; label: string }> = [
+    { key: 'ASIA', label: '亚洲' },
+    { key: 'AMERICAS', label: '美洲' },
+    { key: 'EUROPE', label: '欧洲' },
+    { key: 'OCEANIA', label: '大洋洲' },
+    { key: 'AFRICA', label: '非洲' },
+    { key: 'OTHER', label: '其他' },
+  ]
+
+  /** 国家目录（后端唯一数据源；界面不维护第二份国家表） */
+  let scanCountries: ScanCountry[] = []
+  /** 分组名 → 国家码（ASIA / US，由后端给出） */
+  let scanCountryGroups: Record<string, string[]> = {}
+  /** 自定义选择的国家码（快捷分组不写这里） */
+  let customCountries: string[] = []
+  /** 弹窗内待确认的选择 */
+  let pendingCountries = new Set<string>()
+  /** 弹窗打开前 select 的值，取消时还原 */
+  let countrySelectBackup = ''
+
   /**
-   * 填充国家多选框。
+   * 读取当前的国家筛选。
    *
-   * 列表走 IPC 从 scanner-lib 取（与面板、命令行版同一张表）。
-   * 旧版 scanner-lib 没有该导出时返回空列表，此时禁用多选框并提示全量测试。
+   * 返回空数组 = 不筛选（全量）；快捷分组返回**分组关键字**（ASIA / US），
+   * 展开成国家码 / 机房码由后端负责 —— 界面不维护第二份表，
+   * 也不会出现「按钮选中的机房码后端不认识」这种漂移。
    */
-  async function fillCountryOptions(): Promise<void> {
-    const sel = $sel('optCountries')
-    sel.innerHTML = ''
-    let list: Array<{ code: string; name: string }> = []
-    try {
-      list = await window.cfpilot.listScanCountries()
-    } catch {
-      list = []
-    }
-    if (list.length === 0) {
-      const opt = document.createElement('option')
-      opt.value = ''
-      opt.textContent = '（国家列表不可用，将直接全量测试）'
-      sel.appendChild(opt)
-      sel.disabled = true
+  function readOptCountries(): string[] {
+    const value = ($sel('optCountryGroup').value || '').trim()
+    if (!value) return []
+    if (value === 'custom') return [...customCountries]
+    return [value]
+  }
+
+  /** 把当前选择（含分组）展开成国家码，供弹窗勾选状态使用 */
+  function currentSelectionCodes(): string[] {
+    const value = ($sel('optCountryGroup').value || '').trim()
+    if (!value) return []
+    if (value === 'custom') return [...customCountries]
+    return [...(scanCountryGroups[value] ?? [])]
+  }
+
+  /** 国家/机房是否匹配搜索词 */
+  function countryMatches(c: ScanCountry, keyword: string): boolean {
+    if (!keyword) return true
+    const k = keyword.toLowerCase()
+    return (
+      c.name.toLowerCase().includes(k) ||
+      c.code.toLowerCase().includes(k) ||
+      c.colos.some((x) => x.toLowerCase().includes(k))
+    )
+  }
+
+  function updateCountryCount(): void {
+    const el = document.getElementById('countryCount')
+    if (el) el.textContent = `已选 ${pendingCountries.size} 个国家`
+  }
+
+  /** 按当前搜索词重画国家列表（分节 + 复选框） */
+  function renderCountryList(keyword = ''): void {
+    const box = document.getElementById('countryList')
+    if (!box) return
+    box.innerHTML = ''
+
+    if (scanCountries.length === 0) {
+      const p = document.createElement('p')
+      p.className = 'country-empty'
+      p.textContent =
+        '国家列表不可用。快捷分组仍然可用；自定义选择需要后端接口正常。'
+      box.appendChild(p)
+      updateCountryCount()
       return
     }
-    for (const c of list) {
-      const opt = document.createElement('option')
-      opt.value = c.code
-      opt.textContent = `${c.name}（${c.code}）`
-      sel.appendChild(opt)
+
+    let shown = 0
+    for (const g of COUNTRY_GROUPS) {
+      const items = scanCountries.filter(
+        (c) => (c.group || 'OTHER') === g.key && countryMatches(c, keyword)
+      )
+      if (items.length === 0) continue
+
+      const section = document.createElement('section')
+      section.className = 'country-group'
+      const title = document.createElement('h4')
+      title.textContent = g.label
+      section.appendChild(title)
+
+      for (const c of items) {
+        const label = document.createElement('label')
+        label.className = 'country-item'
+
+        const cb = document.createElement('input')
+        cb.type = 'checkbox'
+        cb.value = c.code
+        cb.checked = pendingCountries.has(c.code)
+        cb.addEventListener('change', () => {
+          if (cb.checked) pendingCountries.add(c.code)
+          else pendingCountries.delete(c.code)
+          updateCountryCount()
+        })
+
+        const name = document.createElement('span')
+        name.textContent = c.name
+
+        const code = document.createElement('span')
+        code.className = 'code'
+        code.textContent = c.code
+
+        label.appendChild(cb)
+        label.appendChild(name)
+        label.appendChild(code)
+
+        if (c.colos.length > 0) {
+          const colos = document.createElement('span')
+          colos.className = 'colos'
+          colos.textContent = c.colos.join(' / ')
+          label.appendChild(colos)
+        }
+        section.appendChild(label)
+        shown++
+      }
+      box.appendChild(section)
+    }
+
+    if (shown === 0) {
+      const p = document.createElement('p')
+      p.className = 'country-empty'
+      p.textContent = '没有匹配的国家（试试国家名、两位国家码或三位机房码）'
+      box.appendChild(p)
+    }
+    updateCountryCount()
+  }
+
+  function openCountryModal(): void {
+    const sel = $sel('optCountryGroup')
+    // 从下拉里点「自定义」进来时，取消应回到「全部国家」而不是停在空的「自定义」
+    countrySelectBackup = sel.value === 'custom' ? (customCountries.length > 0 ? 'custom' : '') : sel.value
+    pendingCountries = new Set(currentSelectionCodes())
+
+    const search = $('countrySearch')
+    if (search) search.value = ''
+    renderCountryList('')
+
+    const mask = document.getElementById('countryModal')
+    if (mask) {
+      mask.hidden = false
+      window.setTimeout(() => search?.focus(), 0)
     }
   }
 
-  /**
-   * 「机房国家」栏的三个筛选器：取消选择 / 亚洲组 / 美国组。
-   *
-   * 分组的机房码由后端给出（`listScanCountryGroups`），
-   * 界面不维护第二份机房表 —— 两份表一漂移，按钮就会选中不存在的机房。
-   * 拿不到分组（旧外壳 / 后端异常）时两个分组按钮保持置灰，手动多选照常。
-   *
-   * 两个分组是**叠加**选中：点「亚洲组」再点「美国组」= 两组都选上，
-   * 与逐个按住 Ctrl 多选等价。
-   */
-  async function initCountryFilters(): Promise<void> {
-    const sel = $sel('optCountries')
-    const clearBtn = document.getElementById('btnCountryClear')
-    const groupBtns: Array<{ el: HTMLElement | null; key: string; label: string }> = [
-      { el: document.getElementById('btnCountryAsia'), key: 'ASIA', label: '亚洲组' },
-      { el: document.getElementById('btnCountryUS'), key: 'US', label: '美国组' },
-    ]
+  function closeCountryModal(): void {
+    const mask = document.getElementById('countryModal')
+    if (mask) mask.hidden = true
+  }
 
-    // 取消选择：清空即「不选 = 全量」
-    clearBtn?.addEventListener('click', () => {
-      for (const opt of Array.from(sel.options)) opt.selected = false
-      log('已取消机房国家选择（不选 = 全量测试）')
+  /** 取消：不改任何状态，下拉还原到打开前的值 */
+  function cancelCountryModal(): void {
+    const sel = $sel('optCountryGroup')
+    sel.value = countrySelectBackup
+    closeCountryModal()
+  }
+
+  /** 「自定义」选项按需创建：没有它时下拉里不应该出现这个空白项 */
+  function ensureCustomOption(label: string): HTMLOptionElement {
+    const sel = $sel('optCountryGroup')
+    let opt = document.getElementById('optCountryCustomOption') as HTMLOptionElement | null
+    if (!opt) {
+      opt = document.createElement('option')
+      opt.id = 'optCountryCustomOption'
+      opt.value = 'custom'
+      sel.appendChild(opt)
+    }
+    opt.textContent = label
+    return opt
+  }
+
+  /** 移除「自定义」选项（选择被改成全量 / 恰好等于某个分组时） */
+  function removeCustomOption(): void {
+    document.getElementById('optCountryCustomOption')?.remove()
+  }
+
+  /** 选中的国家集合恰好等于某个分组时，返回该分组名 */
+  function matchingGroup(codes: string[]): string {
+    if (codes.length === 0) return ''
+    const set = new Set(codes)
+    for (const key of ['ASIA', 'US']) {
+      const group = scanCountryGroups[key] ?? []
+      if (group.length === set.size && group.every((c) => set.has(c))) return key
+    }
+    return ''
+  }
+
+  /** 应用：写入自定义选择；能归结到分组或全量时就用对应的快捷项 */
+  function applyCountrySelection(): void {
+    const sel = $sel('optCountryGroup')
+    customCountries = [...pendingCountries]
+
+    if (customCountries.length === 0) {
+      // 空选择等价于「全部国家」，比留一个空的「自定义」直观
+      removeCustomOption()
+      sel.value = ''
+      log('国家筛选：全部国家')
+      closeCountryModal()
+      return
+    }
+
+    const group = matchingGroup(customCountries)
+    if (group) {
+      // 手选的结果恰好是整组（比如弹窗里点了「亚洲组」）——
+      // 直接落到快捷项上，用户下次打开也不会発现「自定义」里其实是个分组。
+      removeCustomOption()
+      sel.value = group
+      log(`国家筛选：${sel.selectedOptions[0]?.textContent ?? group}`)
+      closeCountryModal()
+      return
+    }
+
+    ensureCustomOption(`自定义（${customCountries.length} 个国家）`)
+    sel.value = 'custom'
+    log(`国家筛选：已选 ${customCountries.length} 个国家（${customCountries.join(', ')}）`, 'ok')
+    closeCountryModal()
+  }
+
+  /** 往弹窗的待选集合里加一组国家 */
+  function addPendingCountries(codes: string[]): void {
+    for (const code of codes) pendingCountries.add(code)
+    renderCountryList($('countrySearch').value.trim())
+  }
+
+  /**
+   * 国家选择器：主页面一个快捷分组下拉 + 一个「自定义配置」按钮。
+   *
+   * 之前是 6 行多选框，把整行拉得比旁边输入框高出一截；
+   * 现在列表收进弹窗（支持搜索 / 按大洲分节 / 全选 / 分组快选）。
+   *
+   * 后端不可用时（旧外壳 / 接口异常）不阻断优选：快捷分组只传关键字，
+   * 自定义列表为空，界面给一条 warn 日志。
+   */
+  async function initCountryControls(): Promise<void> {
+    try {
+      scanCountries = (await window.cfpilot.listScanCountries()) || []
+    } catch {
+      scanCountries = []
+    }
+    try {
+      scanCountryGroups = (await window.cfpilot.listScanCountryGroups()) || {}
+    } catch {
+      scanCountryGroups = {}
+    }
+
+    // 后端缺字段时补齐，避免所有国家堆进一个未命名分节
+    scanCountries = scanCountries.map((c) => ({
+      code: c.code,
+      name: c.name || c.code,
+      group: c.group || 'OTHER',
+      colos: Array.isArray(c.colos) ? c.colos : [],
+    }))
+    if (scanCountries.length === 0) {
+      log('国家列表不可用：快捷分组仍可用，自定义配置为空', 'warn')
+    }
+
+    const sel = $sel('optCountryGroup')
+    const mask = document.getElementById('countryModal')
+
+    sel.addEventListener('change', () => {
+      if (sel.value === 'custom') {
+        openCountryModal()
+        return
+      }
+      // 切换到全量 / 快捷分组后，上一次的自定义项不再入口，避免残留一个
+      // 「自定义（8 个国家）」却又不生效的选项。需要时再点「自定义配置」。
+      removeCustomOption()
+      log(`国家筛选：${sel.selectedOptions[0]?.textContent ?? '全部国家'}`)
+    })
+    document.getElementById('btnCountryCustom')?.addEventListener('click', openCountryModal)
+    document.getElementById('btnCountryModalClose')?.addEventListener('click', cancelCountryModal)
+    document.getElementById('btnCountryCancel')?.addEventListener('click', cancelCountryModal)
+    document.getElementById('btnCountryApply')?.addEventListener('click', applyCountrySelection)
+
+    document.getElementById('btnCountrySelectAll')?.addEventListener('click', () => {
+      pendingCountries = new Set(scanCountries.map((c) => c.code))
+      renderCountryList($('countrySearch').value.trim())
+    })
+    document.getElementById('btnCountrySelectNone')?.addEventListener('click', () => {
+      pendingCountries.clear()
+      renderCountryList($('countrySearch').value.trim())
+    })
+    document.getElementById('btnCountrySelectAsia')?.addEventListener('click', () => {
+      addPendingCountries(scanCountryGroups.ASIA ?? [])
+    })
+    document.getElementById('btnCountrySelectUS')?.addEventListener('click', () => {
+      addPendingCountries(scanCountryGroups.US ?? ['US'])
     })
 
-    let groups: Record<string, string[]> = {}
-    try {
-      groups = (await window.cfpilot.listScanCountryGroups()) || {}
-    } catch {
-      groups = {}
-    }
+    $('countrySearch').addEventListener('input', () => {
+      renderCountryList($('countrySearch').value.trim())
+    })
 
-    for (const g of groupBtns) {
-      const codes = groups[g.key] ?? []
-      if (!g.el || codes.length === 0) continue
-      g.el.removeAttribute('disabled')
-      g.el.addEventListener('click', () => {
-        const wanted = new Set(codes)
-        let hit = 0
-        for (const opt of Array.from(sel.options)) {
-          if (wanted.has(opt.value)) {
-            opt.selected = true
-            hit++
-          }
-        }
-        if (hit === 0) {
-          log('国家列表不可用，无法按分组选择', 'warn')
-          return
-        }
-        log(`已选中${g.label} ${hit} 个机房（可与另一组同时选）`, 'ok')
-      })
-    }
+    // 点击遮罩关闭（只认遮罩本身，避免点弹窗内容也关掉）
+    mask?.addEventListener('click', (e) => {
+      if (e.target === mask) cancelCountryModal()
+    })
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && mask && !mask.hidden) cancelCountryModal()
+    })
   }
 
   function renderScanResult(payload: {
@@ -1914,11 +2137,11 @@
      *     await refreshProfiles()
      *     await refreshCredState()
      *     renderKvOptions()
-     *     void fillCountryOptions()   ← 前面任何一步抛异常，这行永远不执行
+     *     void initCountryControls()   ← 前面任何一步抛异常，这行永远不执行
      *
      * 用户在 Go 版里遇到的现象是「机房国家列表一直停在『正在加载国家列表…』」，
-     * 但后端接口实测返回 39 个国家完全正常 ——
-     * 说明**初始化在某一步中断了**，后面的 fillCountryOptions 根本没被调用。
+     * 但后端接口实测返回的国家目录完全正常 ——
+     * 说明**初始化在某一步中断了**，后面的国家选择器初始化根本没被调用。
      *
      * 任何一个可选功能（账户列表、凭据状态、KV 列表、国家列表）出问题，
      * 都不应该拖累其它功能。所以每步各自 try/catch 独立执行。
@@ -1974,10 +2197,8 @@
     await runStep('KV 选项', () => {
       renderKvOptions()
     })
-    // 国家列表：不 await，避免拖慢界面；失败也不影响其它功能
-    void runStep('国家列表', fillCountryOptions)
-    // 分组筛选按钮（取消选择 / 亚洲组 / 美国组）：与国家列表各自独立
-    void runStep('国家分组筛选', initCountryFilters)
+    // 国家选择器：不 await，避免拖慢界面；加载失败也不影响优选
+    void runStep('国家选择器', initCountryControls)
 
     log('CFPilot GUI 已就绪')
     log('凭据只保存在本机，不会上传')

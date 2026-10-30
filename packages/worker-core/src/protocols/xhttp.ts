@@ -83,12 +83,12 @@ export async function handleXhttp(
   const stream = new ByteStream(body)
   const parsed = await withDeadline(parseVless(stream, config.uuid), HEADER_DEADLINE_MS)
   if (!parsed) {
-    // 超时或解析失败：把请求体取消掉，别让底层流一直挂着
-    try {
-      void body.cancel().catch(() => {})
-    } catch {
-      /* 已关闭 */
-    }
+    // 超时或解析失败：必须由 ByteStream 取消它自己持有的 reader。
+    //
+    // ⚠️ 直接 `body.cancel()` 是无效的 —— 原始流已被 `getReader()` 锁定，
+    // cancel 会抛错（被吞掉），解析任务里的 `reader.read()` 仍然挂着，
+    // 直到客户端断开或运行时超时。扫描器发半截 VLESS 头即可持续占用资源。
+    await stream.cancel('header timeout')
     return new Response('VLESS 头解析失败', { status: 400 })
   }
   if (parsed.header.command !== VLESS_COMMAND_TCP) {
@@ -132,8 +132,9 @@ export async function handleXhttp(
       { kind: 'dial', message: String(err), candidate: 'all' },
       `XHTTP 出站全部失败：${String(err)}`
     )
+    // 同理：上行流是从 ByteStream 释放出来的包装流，取消它才会真正取消底层 reader
     try {
-      void body.cancel().catch(() => {})
+      void parsed.payload.cancel('dial failed').catch(() => {})
     } catch {
       /* 已关闭 */
     }

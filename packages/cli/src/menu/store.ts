@@ -3,11 +3,28 @@
  *
  * 只存**非敏感**信息（账号 ID、KV ID、控制面域名等）。
  * Token 与面板密码默认不落盘，除非用户显式选择保存。
+ *
+ * ## 文件权限
+ *
+ * 一旦用户选择保存 Token / 面板密码，这个文件就是**完整凭据** ——
+ * 拿到它就能操作用户的 Cloudflare 账号。所以：
+ *
+ *   目录 0700（仅本人可进入）
+ *   文件 0600（仅本人可读写）
+ *
+ * ⚠️ 仅对新建文件生效是不够的：已有文件（旧版本创建的默认 0644）
+ * 必须显式 `chmod` 修正，否则升级后仍然全局可读。
+ * Windows 上 chmod 只切换只读位，不影响 ACL，调用一律容错处理。
  */
 
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { chmodSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
+
+/** 配置目录权限（仅本人可进入） */
+const DIR_MODE = 0o700
+/** 配置文件权限（仅本人可读写） */
+const FILE_MODE = 0o600
 
 export interface Config {
   /** Cloudflare API Token（可选保存） */
@@ -77,6 +94,23 @@ export const ACCOUNT_SCOPED_FIELDS = [
   'panelPassword',
 ] as const
 
+/**
+ * 创建（或收紧）配置目录权限。
+ *
+ * `mkdirSync` 的 `mode` 只对**新建**目录生效，已有目录保持原样；
+ * 所以这里补一次 `chmodSync`。失败（Windows / 只读挂载）不影响写入。
+ */
+function ensureConfigDir(): string {
+  const dir = configDir()
+  mkdirSync(dir, { recursive: true, mode: DIR_MODE })
+  try {
+    chmodSync(dir, DIR_MODE)
+  } catch {
+    /* Windows / 无权限：交给操作系统默认策略 */
+  }
+  return dir
+}
+
 export function saveConfig(patch: Partial<Config>): void {
   const current = loadConfig()
   const next = { ...current, ...patch }
@@ -84,8 +118,15 @@ export function saveConfig(patch: Partial<Config>): void {
   for (const k of Object.keys(next) as Array<keyof Config>) {
     if (next[k] === '' || next[k] === undefined) delete next[k]
   }
-  mkdirSync(configDir(), { recursive: true })
-  writeFileSync(configFile(), JSON.stringify(next, null, 2) + '\n', 'utf8')
+  ensureConfigDir()
+  const file = configFile()
+  writeFileSync(file, JSON.stringify(next, null, 2) + '\n', { encoding: 'utf8', mode: FILE_MODE })
+  try {
+    // 旧版本创建的 0644 文件不会因为 mode 参数而改变，必须显式修正
+    chmodSync(file, FILE_MODE)
+  } catch {
+    /* 同上 */
+  }
 }
 
 /**
@@ -134,7 +175,14 @@ export function saveToken(token: string, keep: Partial<Config> = {}): void {
 
 export function clearConfig(): void {
   const file = configFile()
-  if (existsSync(file)) writeFileSync(file, '{}\n', 'utf8')
+  if (!existsSync(file)) return
+  // 同样是凭据文件：清空后仍要维持 0600，否则后续写入会落在全局可读的旧文件上
+  writeFileSync(file, '{}\n', { encoding: 'utf8', mode: FILE_MODE })
+  try {
+    chmodSync(file, FILE_MODE)
+  } catch {
+    /* Windows / 无权限 */
+  }
 }
 
 /**

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,9 +8,24 @@ import {
   fetchRemoteKernelInfo,
   loadKernelBundle,
   versionFromTag,
+  CHECKSUMS_ASSET_NAME,
   CONTROL_ASSET_NAME,
   DATA_ASSET_NAME,
 } from '../src/deploy/kernel-remote'
+
+/** 算一个内容的 SHA-256（与实现同口径） */
+function sha256(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex')
+}
+
+/** 造一份 sha256sum 格式的内核清单 */
+function checksumsFor(control: string, data: string): string {
+  return [
+    `${sha256(control)}  ${CONTROL_ASSET_NAME}`,
+    `${sha256(data)}  ${DATA_ASSET_NAME}`,
+    '',
+  ].join('\n')
+}
 
 /** 造一个 GitHub Release 响应项。 */
 function release(tag: string, opts: { withAssets?: boolean; draft?: boolean; prerelease?: boolean } = {}) {
@@ -27,6 +43,10 @@ function release(tag: string, opts: { withAssets?: boolean; draft?: boolean; pre
           {
             name: DATA_ASSET_NAME,
             browser_download_url: `https://example.test/dl/${tag}/dataplane.js`,
+          },
+          {
+            name: CHECKSUMS_ASSET_NAME,
+            browser_download_url: `https://example.test/dl/${tag}/SHA256SUMS`,
           },
         ]
       : [],
@@ -160,6 +180,7 @@ describe('fetchRemoteKernelInfo', () => {
     expect(info!.version).toBe('0.7.6')
     expect(info!.controlUrl).toContain('control.js')
     expect(info!.dataUrl).toContain('dataplane.js')
+    expect(info!.checksumsUrl).toContain('SHA256SUMS')
   })
 
   it('跳过 draft 与 prerelease', async () => {
@@ -190,21 +211,56 @@ describe('loadKernelBundle', () => {
   const builtinControl = 'export default {control:1}'
   const builtinData = 'export default {data:1}'
 
+  /** 远程内核的正常下载链路（含清单） */
+  function mockRemoteKernel(control: string, data: string, sums = checksumsFor(control, data)) {
+    return async (input: unknown) => {
+      const url = String(input)
+      if (url.includes('/releases')) return jsonResponse([release('v9.9.9')])
+      if (url.includes('SHA256SUMS')) return textResponse(sums)
+      if (url.includes('control.js')) return textResponse(control)
+      if (url.includes('dataplane.js')) return textResponse(data)
+      throw new Error('unexpected url: ' + url)
+    }
+  }
+
   it('远程版本更新 → 用远程内核', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      mockRemoteKernel('export default {remote:"control"}', 'export default {remote:"data"}')
+    )
+
+    const bundle = await loadKernelBundle('0.7.5')
+    expect(bundle.version).toBe('9.9.9')
+    expect(bundle.source).toContain('远程')
+    expect(bundle.control).toContain('remote')
+  })
+
+  it('摘要不匹配 → 拒绝远程内核，回退内置并记日志', async () => {
+    const control = 'export default {remote:"control"}'
+    const data = 'export default {remote:"data"}'
+    // 清单里的摘要与真实内容不符（模拟镜像 / 中间人篡改产物）
+    const tampered = checksumsFor('别的控制面', '别的数据面')
+    vi.spyOn(globalThis, 'fetch').mockImplementation(mockRemoteKernel(control, data, tampered))
+
+    const logs: string[] = []
+    const bundle = await loadKernelBundle('0.7.5', { log: (m) => logs.push(m) })
+    expect(bundle.source).toContain('内置')
+    expect(bundle.control).not.toContain('remote')
+    expect(logs.some((l) => l.includes('摘要'))).toBe(true)
+  })
+
+  it('缺少校验清单 → 拒绝远程内核', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: unknown) => {
       const url = String(input)
-      if (url.includes('/releases')) {
-        return jsonResponse([release('v9.9.9')])
-      }
+      if (url.includes('/releases')) return jsonResponse([release('v9.9.9')])
+      // 清单取不到（发行版没发布 / 官方地址不可达）
+      if (url.includes('SHA256SUMS')) return textResponse('', false)
       if (url.includes('control.js')) return textResponse('export default {remote:"control"}')
       if (url.includes('dataplane.js')) return textResponse('export default {remote:"data"}')
       throw new Error('unexpected url: ' + url)
     })
 
     const bundle = await loadKernelBundle('0.7.5')
-    expect(bundle.version).toBe('9.9.9')
-    expect(bundle.source).toContain('远程')
-    expect(bundle.control).toContain('remote')
+    expect(bundle.source).toContain('内置')
   })
 
   it('远程版本不更新 → 用内置内核', async () => {

@@ -69,12 +69,30 @@ const MAX_RELAY_REDIAL = 2
 const MAX_HEADER_BYTES = 64 * 1024
 
 /**
- * 拨号期间暂存缓冲上限。
+ * 拨号期间暂存缓冲上限（单连接）。
  *
  * 协议头之后即为负载，拨号期间客户端可能继续发送任意大小的数据。
  * 上限用于兜底防内存膨胀（拨号正常应在数秒内完成）。
  */
 const MAX_RELAY_BUFFER_BYTES = 8 * 1024 * 1024
+
+/**
+ * 单个 isolate 内「未确认通路的上行留存」总预算。
+ *
+ * ## 为什么单连接上限不够
+ *
+ * 每个假活 / 拨号中的连接最多可留存 8 MiB。并发 20 条就是 160 MiB ——
+ * Workers 的 isolate 内存上限是 128 MiB，而且这 20 条连接完全可能是
+ * 同一个客户端（多开）或同一批扫描流量造成的，不是恶意才有的形态。
+ *
+ * 取 32 MiB：足够覆盖「TLS ClientHello + 大 POST 首包」的正常重放（几 KB~几 MB），
+ * 又能把极端情况下的占用压到 isolate 内存上限的四分之一。
+ * 超预算的连接直接关闭（1009），客户端重连后仍会走直连 —— 不会变成黑洞。
+ */
+const MAX_RETAINED_TOTAL_BYTES = 32 * 1024 * 1024
+
+/** 当前 isolate 内所有连接的上行留存总量（模块级，跨连接共享） */
+let retainedTotalBytes = 0
 
 /**
  * 截断 close reason 到 RFC 6455 允许的长度。
@@ -386,11 +404,20 @@ export async function handleWebSocket(
       closeWith(1009, '未确认通路的上行数据过多')
       return
     }
+    // 单连接上限之外还要看 isolate 总预算：并发连接各留几 MB 就能把内存吃穿
+    if (retainedTotalBytes + bytes.byteLength > MAX_RETAINED_TOTAL_BYTES) {
+      closeWith(1009, '实例内存预算已满，请重试')
+      return
+    }
     retained.push(bytes)
     retainedBytes += bytes.byteLength
+    retainedTotalBytes += bytes.byteLength
   }
 
   const clearRetained = (): void => {
+    // 先减总量再清空 —— 本函数会被「首字节到达」与「清理」各调一次，
+    // 靠 retainedBytes 归零保证不会重复扣减。
+    retainedTotalBytes = Math.max(0, retainedTotalBytes - retainedBytes)
     retained = []
     retainedBytes = 0
   }
@@ -430,6 +457,12 @@ export async function handleWebSocket(
     const stall = setTimeout(() => {
       if (stallTimer === stall) stallTimer = null
       if (downlinkBytes > 0) return
+      // 只有「已经向上游写过数据」时才值得判定假活。
+      //
+      // 客户端在协议头之后一个字节都没发（比如某些需要先收到响应才继续的
+      // 应用层协议），静默完全是**预期行为**：这时重拨既没有可重放的数据，
+      // 又会让同一个请求在另一个上游连接上再走一遍。
+      if (retainedBytes === 0) return
       // 一个字节都没收到 —— 这条出站是假活，换反代入口重拨
       recordDiagnostics(
         `${target!.hostname}:${target!.port}`,

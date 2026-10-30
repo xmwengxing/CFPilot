@@ -145,6 +145,42 @@ describe('XHTTP 生命周期', () => {
     }
   })
 
+  it('头解析超时 → 真正取消底层请求体（而不是只把等待者 resolve 成 null）', async () => {
+    setupDial()
+
+    // 关键：请求体是一个**保持打开**的流。
+    // 早前超时分支调 `body.cancel()`：流已被 ByteStream 的
+    // `getReader()` 锁定，cancel 直接抛 TypeError（被吞），
+    // 底层 `reader.read()` 继续挂着 —— 扫描器发半截头就能持续占用资源。
+    let cancelled = false
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([0x00, 0x01, 0x02]))
+        // 故意不 close
+      },
+      cancel() {
+        cancelled = true
+      },
+    })
+
+    const request = new Request('https://worker.test/xhttp', {
+      method: 'POST',
+      body: source,
+      duplex: 'half',
+    } as RequestInit)
+
+    vi.useFakeTimers()
+    try {
+      const pending = handleXhttp(request, baseConfig, [])
+      await vi.advanceTimersByTimeAsync(2500)
+      const response = await pending
+      expect(response.status).toBe(400)
+      expect(cancelled).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('出站全部失败 → 502 受控响应，而不是抛给外层 500', async () => {
     dialMock.mockReset()
     dialMock.mockRejectedValue(new Error('所有候选都失败'))

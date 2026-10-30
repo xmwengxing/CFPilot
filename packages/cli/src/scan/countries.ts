@@ -144,6 +144,11 @@ export const SUPPORTED_COUNTRIES: readonly string[] = Object.keys(COUNTRY_COLOS)
  * 分组关键字（`ASIA` / `US`）在这里展开成该组的全部国家代码，
  * 所以下游拿到的永远是国家码，不需要再认识分组。
  * 同时写分组和组内国家（如 `ASIA,HK`）会自动去重。
+ *
+ * **兼容机房三字码**：`HKG` 会被归一到它的国家 `HK`。
+ * 早前 CLI 只认国家码，`--countries HKG` 会被静默丢弃（直接跑全量），
+ * 而 Go 界面用的是机房码 —— 同一个参数在两端行为不一致。
+ * 现在两端都以**国家码为准**，机房码作别名兼容（Go 侧早已支持）。
  */
 export function normalizeCountryFilter(input: readonly string[] | undefined): string[] {
   if (!Array.isArray(input)) return []
@@ -159,7 +164,13 @@ export function normalizeCountryFilter(input: readonly string[] | undefined): st
       for (const member of REGION_GROUPS[code] ?? []) push(String(member).toUpperCase())
       continue
     }
-    if (isKnownCountry(code)) push(code)
+    if (isKnownCountry(code)) {
+      push(code)
+      continue
+    }
+    // 机房码 → 所属国家；未知码仍然丢弃（不当成「全量」以外的意外行为）
+    const country = countryOfColo(code)
+    if (country) push(country)
   }
   return out
 }

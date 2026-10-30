@@ -1,7 +1,56 @@
 import { describe, expect, it } from 'vitest'
-import { ensureBootstrap, verifyPassword } from '../src/auth'
+import { ensureBootstrap, upgradePasswordHash, verifyPassword, verifyPasswordDetailed } from '../src/auth'
 import { MemoryStore } from '../src/store'
 import { ADMIN_PW_HASH_KEY, ADMIN_PW_PLAIN_KEY, PANEL_PATH_KEY } from '../src/config'
+import { sha256Hex } from '../src/util'
+
+/** 旧版（单次 SHA-256）格式：`<salt>:<sha256(salt:password)>` */
+async function legacyHash(password: string, salt = 'aabbccdd'): Promise<string> {
+  return `${salt}:${await sha256Hex(`${salt}:${password}`)}`
+}
+
+describe('密码派生格式', () => {
+  it('新写入的是版本化 PBKDF2 格式', async () => {
+    const store = new MemoryStore()
+    await ensureBootstrap(store, 'pw-kdf', '/p-kdf')
+    const hash = (await store.get(ADMIN_PW_HASH_KEY)) ?? ''
+    expect(hash.startsWith('pbkdf2$')).toBe(true)
+    expect(hash.split('$')).toHaveLength(4)
+  })
+
+  it('旧版 sha256 哈希仍可登录（升级兼容）', async () => {
+    const store = new MemoryStore()
+    await store.put(ADMIN_PW_HASH_KEY, await legacyHash('old-pw'))
+    const ctx = await ensureBootstrap(store, undefined, '/p-legacy')
+    expect(await verifyPassword(ctx, 'old-pw')).toBe(true)
+    expect(await verifyPassword(ctx, 'wrong-pw')).toBe(false)
+    // 明细接口要告诉调用方「这份哈希还是旧格式」，才能触发静默升级
+    expect((await verifyPasswordDetailed(ctx, 'old-pw')).legacy).toBe(true)
+  })
+
+  it('旧格式登录后可升级为 PBKDF2，新旧密码都能校验', async () => {
+    const store = new MemoryStore()
+    await store.put(ADMIN_PW_HASH_KEY, await legacyHash('pw-upgrade'))
+    const ctx = await ensureBootstrap(store, undefined, '/p-upgrade')
+    expect((await verifyPasswordDetailed(ctx, 'pw-upgrade')).legacy).toBe(true)
+
+    await upgradePasswordHash(store, 'pw-upgrade')
+    const upgraded = (await store.get(ADMIN_PW_HASH_KEY)) ?? ''
+    expect(upgraded.startsWith('pbkdf2$')).toBe(true)
+    // 升级后重新引导：环境变量（无）→ 读 KV 哈希（PBKDF2）→ 密码仍可校验
+    const ctx2 = await ensureBootstrap(store, undefined, '/p-upgrade')
+    expect(await verifyPassword(ctx2, 'pw-upgrade')).toBe(true)
+    expect((await verifyPasswordDetailed(ctx2, 'pw-upgrade')).legacy).toBe(false)
+  })
+
+  it('环境变量密码不变时不会因为格式差异反复重写 KV', async () => {
+    const store = new MemoryStore()
+    await ensureBootstrap(store, 'stable-pw', '/p-stable')
+    const before = await store.get(ADMIN_PW_HASH_KEY)
+    await ensureBootstrap(store, 'stable-pw', '/p-stable')
+    expect(await store.get(ADMIN_PW_HASH_KEY)).toBe(before)
+  })
+})
 
 describe('ensureBootstrap 凭据优先级', () => {
   it('KV 为空时用环境变量的路径与密码', async () => {

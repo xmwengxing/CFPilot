@@ -12,9 +12,65 @@ import { randomHex } from './util'
 
 /** 匿名请求的测速上限（2026-10-29：15MB → 8MB，缩小被刷流量的暴露面） */
 const MAX_PROBE_BYTES = 8 * 1024 * 1024
-/** 带鉴权令牌时允许的上限（本地优选的 `--speed-bytes` 可以调到更大） */
-const MAX_PROBE_BYTES_TRUSTED = 15 * 1024 * 1024
 const DEFAULT_PROBE_BYTES = 2 * 1024 * 1024
+
+/**
+ * 匿名测速的实例级预算（滑动窗口）。
+ *
+ * ## 为什么需要
+ *
+ * 单次上限只是「一口能吃多少」，不限制「能吃多少口」：
+ * 循环请求 `?bytes=8388608` 就能持续拉走边缘带宽。
+ * 而探针端点**必须保持免鉴权**（铁律 5：101 校验与流式测速必须始终可用），
+ * 所以用实例级预算做兵底，而不是加令牌。
+ *
+ * ## 容量怎么定的
+ *
+ * 本地优选跑一轮：每条候选 8 条连接 × `--speed-bytes` 默认 5 MiB ≈ 40 MiB，
+ * 50 条候选约 2 GiB。取 6 GiB / 10 分钟：正常扫描跑不满，
+ * 持续滥用被压到约 0.6 GB/分钟/isolate。
+ *
+ * 计入的是**实际发出**的字节（在 `pull` 里累加），不是请求里的 `bytes`：
+ * 客户端提前断开 / 只读一小段就停，就不该占预算 —— 否则大并发扫描会被误伤。
+ *
+ * ⚠️ 这是**尽力而为**的兜底（isolate 级、不跨地域），
+ * 真正的带宽防护应在 Cloudflare 控制台配 Rate Limiting 规则，见 README。
+ */
+const PROBE_WINDOW_MS = 10 * 60 * 1000
+const PROBE_WINDOW_BYTES = 6 * 1024 * 1024 * 1024
+let probeWindowStart = Date.now()
+let probeWindowServed = 0
+
+/** 窗口过期就清零；返回当前窗口开始时刻 */
+function rollProbeWindow(now: number): void {
+  if (now - probeWindowStart >= PROBE_WINDOW_MS) {
+    probeWindowStart = now
+    probeWindowServed = 0
+  }
+}
+
+/**
+ * 计入**实际发出**的字节（在 `pull` 里按 enqueue 的量累加）。
+ *
+ * 导出是为了让测试直接构造「预算耗尽」状态 —— 真去跑满 6 GiB 不现实。
+ * 生产代码只有 `pull` 一个调用点。
+ */
+export function chargeProbeBudget(bytes: number, now = Date.now()): void {
+  rollProbeWindow(now)
+  probeWindowServed += bytes
+}
+
+/** 剩余预算（同时处理窗口过期） */
+function probeBudgetLeft(now: number): number {
+  rollProbeWindow(now)
+  return PROBE_WINDOW_BYTES - probeWindowServed
+}
+
+/** 重置预算窗口（仅供测试） */
+export function resetProbeBudget(now = Date.now()): void {
+  probeWindowStart = now
+  probeWindowServed = 0
+}
 
 /**
  * 测速用的 64KB 数据块（模块级常量，只初始化一次）。
@@ -75,11 +131,26 @@ export async function handleEdgeProbe(request: Request): Promise<Response> {
   // 2) 真实域名下的流式下行测速
   const requested = Number.parseInt(url.searchParams.get('bytes') ?? '', 10)
   // ⚠️ 令牌鉴权不在这里做：探针是数据面热路径，校验 uuid 要么读 KV（每次一次读），
-  // 要么依赖 env（KV 配置时不存在）。故本轮只收紧上限 —— 见 MAX_PROBE_BYTES 注释。
-  const maxBytes = MAX_PROBE_BYTES
+  // 要么依赖 env（KV 配置时不存在）。故统一用「单次上限 + 实例级预算」。
   const bytes = Number.isFinite(requested) && requested > 0
-    ? Math.min(requested, maxBytes)
+    ? Math.min(requested, MAX_PROBE_BYTES)
     : DEFAULT_PROBE_BYTES
+
+  // 实例级预算：已经用完就直接拒（真正的累加在下方的 pull 里做，按实际发出量计算）。
+  const now = Date.now()
+  if (probeBudgetLeft(now) <= 0) {
+    // Retry-After 用**剩余窗口**而不是整个窗口：
+    // 窗口刚过一半的请求不应该被告知「再等 10 分钟」。
+    const retryAfterMs = Math.max(1000, probeWindowStart + PROBE_WINDOW_MS - now)
+    return new Response(JSON.stringify({ ok: false, error: 'probe budget exhausted' }), {
+      status: 429,
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'Retry-After': String(Math.ceil(retryAfterMs / 1000)),
+      },
+    })
+  }
 
   // 测速块**模块级常量**：只初始化一次。
   //
@@ -91,13 +162,16 @@ export async function handleEdgeProbe(request: Request): Promise<Response> {
   let sent = 0
   const stream = new ReadableStream<Uint8Array>({
     pull(controller) {
-      if (sent >= bytes) {
+      // 预算用完就正常收尾（不 error）：客户端只看时间窗口，短流不影响测速
+      const budget = probeBudgetLeft(Date.now())
+      if (sent >= bytes || budget <= 0) {
         controller.close()
         return
       }
-      const remaining = Math.min(chunk.byteLength, bytes - sent)
+      const remaining = Math.min(chunk.byteLength, bytes - sent, budget)
       controller.enqueue(chunk.subarray(0, remaining))
       sent += remaining
+      chargeProbeBudget(remaining)
     },
   })
 

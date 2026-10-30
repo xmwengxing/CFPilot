@@ -84,6 +84,16 @@ describe('normalizeCountryFilter 展开分组', () => {
     expect(normalizeCountryFilter(['NOPE', ''])).toEqual([])
   })
 
+  it('机房三字码归一成国家码（与 Go 版选择单位一致）', () => {
+    // 同国家的多个机房只留一个国家码
+    expect(normalizeCountryFilter(['HKG'])).toEqual(['HK'])
+    expect(normalizeCountryFilter(['NRT', 'KIX'])).toEqual(['JP'])
+    // 与国家码 / 分组混写时去重
+    expect(normalizeCountryFilter(['ASIA', 'SIN', 'SG'])).toEqual(normalizeCountryFilter(['ASIA']))
+    // 未知三字码仍被丢弃，不能因为长度像机房码就放过
+    expect(normalizeCountryFilter(['ZZZ'])).toEqual([])
+  })
+
   it('展开出的国家都有机房码，且机房码能映射回该国家', () => {
     for (const countries of Object.values(REGION_GROUPS)) {
       for (const country of countries) {

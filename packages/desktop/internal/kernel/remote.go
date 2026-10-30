@@ -24,6 +24,16 @@ package kernel
 //
 // 命中缓存就不重复下载（离线时也能部署）。
 //
+// ## 完整性校验
+//
+// 远程产物会被上传到**用户的 Cloudflare 账号**里运行，所以「下载成功」
+// 不能当成「可以部署」：Release 同时发布 `cfpilot-kernel-SHA256SUMS`，
+// 本包从**官方 GitHub 地址**（不走镜像）取清单，
+// 再逐个比对下载到的产物与缓存文件。
+//
+// 清单取不到 / 摘要不匹配 → 返回错误，由 LoadPreferred 回退到内嵌内核。
+// ⚠️ 不从镜像取清单：镜像若能替换产物，就能一并替换清单。
+//
 // ⚠️ 目录选择遵循项目既有约定：桌面版的本地数据统一放在
 // `~/.cfpilot-gui/` 下（见 internal/config.Dir() 与
 // internal/update.DefaultDownloadPath），所以内核缓存也放在那里，
@@ -33,6 +43,7 @@ package kernel
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"log"
@@ -70,6 +81,8 @@ const (
 	ControlAssetName = "cfpilot-kernel-control.js"
 	// DataAssetName 是数据面内核产物在 Release 里的附件名。
 	DataAssetName = "cfpilot-kernel-dataplane.js"
+	// ChecksumsAssetName 是内核摘要清单的附件名（sha256sum 格式）。
+	ChecksumsAssetName = "cfpilot-kernel-SHA256SUMS"
 )
 
 // cacheDirEnv 覆盖缓存根目录（测试用）。
@@ -97,6 +110,8 @@ type RemoteInfo struct {
 	// ControlURL / DataURL 是两个内核产物的下载地址
 	ControlURL string
 	DataURL    string
+	// ChecksumsURL 是摘要清单的下载地址（空串 = 该发行版没有清单）
+	ChecksumsURL string
 }
 
 // FetchRemoteInfo 查询最新 Release 里的内核资产。
@@ -111,33 +126,36 @@ func FetchRemoteInfo(ctx context.Context) (*RemoteInfo, error) {
 		return nil, err
 	}
 	for _, rel := range releases {
-		controlURL, dataURL := findKernelAssets(rel.Assets)
+		controlURL, dataURL, checksumsURL := findKernelAssets(rel.Assets)
 		if controlURL == "" || dataURL == "" {
 			// 这个发行版没带完整的内核资产，跳过
 			continue
 		}
 		return &RemoteInfo{
-			Version:    rel.Version,
-			ControlURL: controlURL,
-			DataURL:    dataURL,
+			Version:      rel.Version,
+			ControlURL:   controlURL,
+			DataURL:      dataURL,
+			ChecksumsURL: checksumsURL,
 		}, nil
 	}
 	return nil, fmt.Errorf("没有找到带内核产物的发行版")
 }
 
-// findKernelAssets 在附件列表里找两个内核产物。
+// findKernelAssets 在附件列表里找内核产物与摘要清单。
 //
 // 返回空串表示没找到。
-func findKernelAssets(assets []update.Asset) (controlURL, dataURL string) {
+func findKernelAssets(assets []update.Asset) (controlURL, dataURL, checksumsURL string) {
 	for _, a := range assets {
 		switch strings.ToLower(strings.TrimSpace(a.Name)) {
 		case ControlAssetName:
 			controlURL = a.URL
 		case DataAssetName:
 			dataURL = a.URL
+		case strings.ToLower(ChecksumsAssetName):
+			checksumsURL = a.URL
 		}
 	}
-	return controlURL, dataURL
+	return controlURL, dataURL, checksumsURL
 }
 
 // FetchRemoteKernel 下载指定版本的内核产物，缓存到 ~/.cfpilot-gui/kernel/<version>/。
@@ -161,31 +179,71 @@ func FetchRemoteKernel(ctx context.Context, info *RemoteInfo) (*Artifacts, error
 	}
 	controlPath := filepath.Join(dir, "control.js")
 	dataPath := filepath.Join(dir, "dataplane.js")
+	sumsPath := filepath.Join(dir, "SHA256SUMS")
 
-	// ---- 1. 命中缓存就不下载 ----
+	// ---- 1. 先取（或复用）校验清单 ----
+	sumsText := readCached(sumsPath)
+	sums := parseChecksums(string(sumsText))
+	if !hasBothDigests(sums) {
+		fetched, fetchedSums, fetchErr := downloadChecksums(ctx, info)
+		if fetchErr != nil {
+			return nil, fetchErr
+		}
+		sumsText = []byte(fetched)
+		sums = fetchedSums
+	}
+
+	// ---- 2. 缓存命中也要校验（缓存文件同样会被篡改或写坏）----
 	control := readCached(controlPath)
+	if control != nil {
+		if err := verifyAsset(ControlAssetName, control, sums); err != nil {
+			log.Printf("[cfpilot] 缓存的控制面内核校验失败，已丢弃：%v", err)
+			_ = os.Remove(controlPath)
+			control = nil
+		}
+	}
 	data := readCached(dataPath)
+	if data != nil {
+		if err := verifyAsset(DataAssetName, data, sums); err != nil {
+			log.Printf("[cfpilot] 缓存的数据面内核校验失败，已丢弃：%v", err)
+			_ = os.Remove(dataPath)
+			data = nil
+		}
+	}
 	if control != nil && data != nil {
 		return &Artifacts{
 			Control: control,
 			Data:    data,
 			Build:   extractBuild(string(control)),
 			Version: version,
-			Source:  fmt.Sprintf("远程 %s（GitHub Release 缓存）", version),
+			Source:  fmt.Sprintf("远程 %s（GitHub Release 缓存，已校验）", version),
 		}, nil
 	}
 
-	// ---- 2. 下载 ----
-	control, err = downloadAsset(ctx, info.ControlURL, "control.js")
-	if err != nil {
-		return nil, err
+	// ---- 3. 下载（允许镜像）并逐个校验 ----
+	if control == nil {
+		control, err = downloadAsset(ctx, info.ControlURL, "control.js")
+		if err != nil {
+			return nil, err
+		}
+		if err := verifyAsset(ControlAssetName, control, sums); err != nil {
+			return nil, err
+		}
 	}
-	data, err = downloadAsset(ctx, info.DataURL, "dataplane.js")
-	if err != nil {
-		return nil, err
+	if data == nil {
+		data, err = downloadAsset(ctx, info.DataURL, "dataplane.js")
+		if err != nil {
+			return nil, err
+		}
+		if err := verifyAsset(DataAssetName, data, sums); err != nil {
+			return nil, err
+		}
 	}
 
-	// ---- 3. 落缓存（失败不影响本次使用，只是下次要重新下载）----
+	// ---- 4. 落缓存（失败不影响本次使用，只是下次要重新下载）----
+	if err := writeCached(sumsPath, sumsText); err != nil {
+		log.Printf("[cfpilot] 写入内核缓存失败：%v", err)
+	}
 	if err := writeCached(controlPath, control); err != nil {
 		log.Printf("[cfpilot] 写入内核缓存失败：%v", err)
 	}
@@ -198,8 +256,75 @@ func FetchRemoteKernel(ctx context.Context, info *RemoteInfo) (*Artifacts, error
 		Data:    data,
 		Build:   extractBuild(string(control)),
 		Version: version,
-		Source:  fmt.Sprintf("远程 %s（GitHub Release）", version),
+		Source:  fmt.Sprintf("远程 %s（GitHub Release，已校验）", version),
 	}, nil
+}
+
+// parseChecksums 解析 sha256sum 格式的清单（文件名 → 小写十六进制摘要）。
+//
+// 接受 `\t` 或空格分隔、以及二进制模式标记 `*` 前缀；其他行忽略。
+func parseChecksums(text string) map[string]string {
+	out := make(map[string]string)
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		digest := strings.ToLower(fields[0])
+		if len(digest) != 64 {
+			continue
+		}
+		name := strings.ToLower(strings.TrimPrefix(fields[1], "*"))
+		out[name] = digest
+	}
+	return out
+}
+
+// hasBothDigests 判断清单是否包含两个内核产物的摘要。
+func hasBothDigests(sums map[string]string) bool {
+	if len(sums) == 0 {
+		return false
+	}
+	_, hasControl := sums[strings.ToLower(ControlAssetName)]
+	_, hasData := sums[strings.ToLower(DataAssetName)]
+	return hasControl && hasData
+}
+
+// downloadChecksums 从**官方地址**（不走镜像）取内核摘要清单。
+func downloadChecksums(ctx context.Context, info *RemoteInfo) (string, map[string]string, error) {
+	if strings.TrimSpace(info.ChecksumsURL) == "" {
+		return "", nil, fmt.Errorf(
+			"Release %s 未发布 %s，无法校验内核完整性", info.Version, ChecksumsAssetName)
+	}
+	raw, err := downloadAssetFrom(ctx, info.ChecksumsURL, ChecksumsAssetName)
+	if err != nil {
+		return "", nil, fmt.Errorf("获取内核校验清单失败：%w", err)
+	}
+	text := string(raw)
+	sums := parseChecksums(text)
+	if !hasBothDigests(sums) {
+		return "", nil, fmt.Errorf("内核校验清单缺少完整摘要，拒绝使用未校验的远程内核")
+	}
+	return text, sums, nil
+}
+
+// verifyAsset 校验一份内核产物；不匹配时返回错误。
+func verifyAsset(assetName string, content []byte, sums map[string]string) error {
+	expected, ok := sums[strings.ToLower(assetName)]
+	if !ok {
+		return fmt.Errorf("校验清单缺少 %s 的摘要", assetName)
+	}
+	actual := fmt.Sprintf("%x", sha256.Sum256(content))
+	if actual != expected {
+		return fmt.Errorf(
+			"内核产物 %s 摘要不匹配（期望 %s…，实际 %s…）—— 已拒绝使用",
+			assetName, expected[:12], actual[:12])
+	}
+	return nil
 }
 
 // LoadPreferred 返回「应该用于部署」的内核。

@@ -23,6 +23,30 @@ export class ByteStream {
   }
 
   /**
+   * 取消底层读取并丢弃缓冲（幂等）。
+   *
+   * ## 为什么不能由调用方 `body.cancel()`
+   *
+   * 构造函数已经 `stream.getReader()` **锁定了原始流**。
+   * 锁定的流再调 `cancel()` 会抛 `TypeError`（被 try/catch 吞掉），
+   * 底层的 `reader.read()` 仍然挂起 —— 请求体没有真正取消，
+   * 要等运行时超时才回收。
+   *
+   * 因此超时 / 解析失败必须由持有 reader 的这一方取消。
+   */
+  async cancel(reason?: unknown): Promise<void> {
+    if (this.done) return
+    this.done = true
+    this.chunks = []
+    this.size = 0
+    try {
+      await this.reader.cancel(reason)
+    } catch {
+      /* 流已结束或已取消 */
+    }
+  }
+
+  /**
    * 从底层读取一个数据块进入内部缓冲（不消费）。
    *
    * 返回新到达的字节数；底层流结束返回 null。

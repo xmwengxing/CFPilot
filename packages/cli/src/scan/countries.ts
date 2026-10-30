@@ -174,3 +174,32 @@ export function normalizeCountryFilter(input: readonly string[] | undefined): st
   }
   return out
 }
+
+/**
+ * 机房三字码 → 城市中文名（**只用于展示**）。
+ *
+ * 与 worker-core 的 `src/data/pools.ts` 同源，修改规则同 `COUNTRY_COLOS`：
+ * 只在 worker-core 改，然后同步到这里。
+ *
+ * 为什么不用离线 IP 库：Cloudflare anycast IP 的注册地与真实机房没有稳定关系，
+ * 而 101 握手已经能拿到真实 colo —— 一张静态表足够，且不引入任何依赖。
+ */
+export const COLO_CITIES: Record<string, string> = {
+  HKG: '香港', TPE: '台北', KHH: '高雄', NRT: '东京', KIX: '大阪', CTS: '札幌', FUK: '福冈',
+  ICN: '首尔', PUS: '釜山', SIN: '新加坡', KUL: '吉隆坡', BKK: '曼谷', SGN: '胡志明市',
+  HAN: '河内', CGK: '雅加达', DPS: '登巴萨', MNL: '马尼拉', BOM: '孟买', MAA: '金奈',
+  DEL: '新德里', SYD: '悉尼', MEL: '墨尔本', BNE: '布里斯班', PER: '珀斯', AKL: '奥克兰',
+  LAX: '洛杉矶', SJC: '圣何塞', SEA: '西雅图', ORD: '芝加哥', DFW: '达拉斯', IAD: '华盛顿',
+  EWR: '纽瓦克', ATL: '亚特兰大', MIA: '迈阿密', DEN: '丹佛', PHX: '凤凰城', BOS: '波士顿',
+  YYZ: '多伦多', YVR: '温哥华', YYC: '卡尔加里', LHR: '伦敦', MAN: '曼彻斯特', FRA: '法兰克福',
+  MUC: '慕尼黑', BER: '柏林', CDG: '巴黎', MRS: '马赛', AMS: '阿姆斯特丹', MXP: '米兰',
+  FCO: '罗马', MAD: '马德里', BCN: '巴塞罗那', ARN: '斯德哥尔摩', ZRH: '苏黎世',
+  VIE: '维也纳', WAW: '华沙', DME: '莫斯科', SVO: '莫斯科', IST: '伊斯坦布尔', DXB: '迪拜',
+  TLV: '特拉维夫', JNB: '约翰内斯堡', GRU: '圣保罗', GIG: '里约热内卢', EZE: '布宜诺斯艾利斯',
+  SCL: '圣地亚哥', MEX: '墨西哥城',
+}
+
+/** 机房城市名；未知返回空串 */
+export function coloCity(colo: string): string {
+  return COLO_CITIES[colo.toUpperCase()] ?? ''
+}

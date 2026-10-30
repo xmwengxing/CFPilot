@@ -64,6 +64,11 @@ const config: UserConfig = {
   tlsFragment: false,
   tlsFragmentSize: '10-20',
   tlsFragmentDelay: '10-20',
+  subToken: 'legacy',
+  subTokenTtlDays: 0,
+  unlockProbe: false,
+  udpDns: 'off',
+  udpDnsEndpoint: 'https://dns.google/dns-query',
 }
 
 describe('cleanIpLine', () => {
@@ -130,6 +135,17 @@ describe('parseScannerRemark', () => {
 
   it('无法解析时返回空值', () => {
     expect(parseScannerRemark('普通备注')).toEqual({ colo: '', latency: 0, speed: 0 })
+  })
+
+  // 加了「出口体检」之后，备注尾部会多一段标签。
+  // 旧实现固定取最后两段，遇到 `_AI` 会把速度读成 NaN，整条记录的数字全丢。
+  it('容忍尾部体检标签', () => {
+    expect(parseScannerRemark('HKG_120_5.2_AI')).toEqual({ colo: 'HKG', latency: 120, speed: 5.2 })
+    expect(parseScannerRemark('HKG_120_5.2_AI+NF')).toEqual({ colo: 'HKG', latency: 120, speed: 5.2 })
+  })
+
+  it('只有标签没有数字时不误判为机房', () => {
+    expect(parseScannerRemark('HKG_AI')).toEqual({ colo: '', latency: 0, speed: 0 })
   })
 })
 

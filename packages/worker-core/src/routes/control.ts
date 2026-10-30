@@ -19,6 +19,8 @@ import {
   subProfileTitle,
 } from '../sub-engine'
 import { handleEdgeProbe } from '../probe'
+import { loadSubSecret, verifySubToken } from '../sub-token'
+import { timingSafeEqual } from '../util'
 import { getPanelHtml } from '../ui/panel'
 import { jsonError } from '../ui/neutral'
 import { getStore, getConfig, getAuth, invalidateConfig, resolveFormat, resolveFormatByUserAgent, normalizeNodeDomain } from './shared'
@@ -34,6 +36,46 @@ async function loadApi(): Promise<ApiModule> {
 }
 
 /**
+ * 订阅鉴权。
+ *
+ * ## 两种模式
+ *
+ * - `legacy`（默认）：路径段或 `?token=` 等于 UUID / Trojan 口令。
+ *   同时**也接受签名令牌** —— 这样用户可以先签发、把新链接导入各设备，
+ *   确认没问题后再切模式，切换那一刻不会有人掉线（见面板的两步流程）。
+ * - `signed`：只认签名令牌，经典链接立即 403。
+ *
+ * ## 为什么先看形态再校验签名
+ *
+ * UUID / Trojan 口令里不可能出现 `.`，而签名令牌一定以 `v1.` 开头。
+ * 先按形态分流，普通请求就不会为了一次 HMAC 去读一次 KV 里的密钥。
+ */
+async function authorizeSubscription(
+  store: Store,
+  config: UserConfig,
+  url: URL,
+  pathToken: string
+): Promise<boolean> {
+  const candidates = [pathToken, url.searchParams.get('token') ?? ''].filter((t) => t.length > 0)
+  if (candidates.length === 0) return false
+
+  let secret: string | null = null
+  for (const token of candidates) {
+    if (token.startsWith('v1.')) {
+      // 只有真的出现签名令牌时才去取密钥（未配置时会自动生成并写回 KV）
+      if (secret === null) secret = await loadSubSecret(store)
+      const result = await verifySubToken(secret, token)
+      if (result.ok) return true
+      continue
+    }
+    if (config.subToken === 'signed') continue
+    if (config.uuid && timingSafeEqual(token, config.uuid)) return true
+    if (config.trojanPassword && timingSafeEqual(token, config.trojanPassword)) return true
+  }
+  return false
+}
+
+/**
  * 订阅输出 */
 async function handleSubscription(
   request: Request,
@@ -43,11 +85,7 @@ async function handleSubscription(
 ): Promise<Response> {
   const config = await getConfig(store, env)
   const token = url.pathname.slice('/sub/'.length).split('/')[0] ?? ''
-  const authorized =
-    token === config.uuid ||
-    token === config.trojanPassword ||
-    url.searchParams.get('token') === config.uuid
-  if (!authorized) {
+  if (!(await authorizeSubscription(store, config, url, token))) {
     return jsonError('订阅令牌无效', 403)
   }
 

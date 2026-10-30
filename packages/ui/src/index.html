@@ -332,6 +332,15 @@
     .log-line.warn { color: var(--warn); }
     .log-line.err { color: var(--err); }
 
+    /* 链式代理的部署输出：等宽 + 可滚动，长日志不撑破卡片 */
+    .chain-out {
+      margin: 10px 0 0; padding: 10px 12px; max-height: 260px; overflow: auto;
+      background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px;
+      font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+      line-height: 1.55; white-space: pre-wrap; word-break: break-all;
+      color: var(--text-secondary);
+    }
+
     /* 矮窗口时把标题条压小一点，避免占掉内容 */
     @media (max-height: 600px) {
       .log-head { padding: 4px 16px; min-height: 26px; }
@@ -1134,6 +1143,50 @@
             </div>
             <p class="tip" id="deployActionHint" style="margin-top:10px">
               尚未读取部署状态，可先点击上方「检查状态」确认是否需要更新
+            </p>
+          </div>
+
+          <!--
+            链式代理（自建落地节点）
+
+            为什么叫「链式」：链路是 客户端 → Worker（前置）→ 你的 VPS（落地）→ 目标站。
+            Worker 那段负责抗封锁与就近接入，VPS 那段决定目标站看到的出口 IP。
+
+            为什么需要：Cloudflare 的出口是机房 IP，流媒体与部分站点对这类 IP 的
+            风控是结构性的 —— 不是配置错了，是 IP 类型不对。换一个自己的出口，
+            比任何「解锁检测」都有效。
+          -->
+          <div class="card">
+            <h2><span class="dot"></span>🔗 链式代理（自建落地节点）</h2>
+            <p class="desc">
+              在<b>你自己的 VPS</b> 上装一个带口令的 SOCKS5 落地节点，
+              让流量走 <b>客户端 → Worker → VPS → 目标站</b>。
+              这样目标站看到的是你的 VPS 出口，而不是 Cloudflare 的机房 IP。
+            </p>
+
+            <div class="row">
+              <div class="field">
+                <label>VPS 地址（user@主机）</label>
+                <input type="text" id="chainHost" placeholder="root@203.0.113.10" />
+              </div>
+              <div class="field" style="flex:0 0 160px">
+                <label>SOCKS5 端口</label>
+                <input type="text" id="chainPort" value="1080" />
+              </div>
+            </div>
+
+            <div class="btn-row" style="margin-top:4px">
+              <button class="btn btn-primary" id="btnChainDeploy">一键部署到 VPS</button>
+              <button class="btn btn-ghost" id="btnChainCopy">复制命令（手动执行）</button>
+            </div>
+
+            <pre id="chainOut" class="chain-out" hidden></pre>
+
+            <p class="tip" style="margin-top:10px">
+              · 需要本机有 <code>ssh</code> 客户端（Windows 10+ 自带）且已配好密钥。<br>
+              · <b>没有密钥也能用</b>：点「复制命令」在终端里执行 —— 终端里 ssh 才会提示输入密码。<br>
+              · 脚本会装 sing-box、生成随机口令、起 systemd 服务，仅支持 Debian/Ubuntu/CentOS 系。<br>
+              · 跑完会打印一行 <code>socks5://用户:口令@IP:端口</code>，粘到面板「出站与高级」→ SOCKS5。
             </p>
           </div>
         </section>

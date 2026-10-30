@@ -295,6 +295,9 @@ func (s *Server) routes() http.Handler {
 	// 检查更新 API
 	s.registerUpdateRoutes(mux)
 
+	// 链式代理（自建落地节点）API
+	s.registerChainRoutes(mux)
+
 	return s.withCommonHeaders(mux)
 }
 

@@ -440,6 +440,23 @@
       return post('/api/account/detect')
     },
 
+    // 链式代理：取内嵌脚本（原文 + 手动执行命令）
+    chainScript: function () {
+      return get('/api/chain/script')
+    },
+
+    // 链式代理：本机 ssh 远程执行部署脚本。
+    //
+    // ⚠️ 这是一个**长请求**（装 sing-box + 起 systemd，慢机器上要几十秒），
+    // 所以不走 post() 的默认超时策略 —— 见下方 call 的实现说明。
+    // 后端上限 3 分钟，超时会带着已收到的输出返回 ok:false。
+    chainDeploy: function (params) {
+      return post('/api/chain/run', {
+        host: (params && params.host) || '',
+        port: (params && params.port) || 1080,
+      })
+    },
+
     listKvOptions: function (accountId) {
       // ⚠️ 返回 `{ options: [...] }`，不是裸数组！
       //

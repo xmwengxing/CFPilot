@@ -1988,6 +1988,101 @@
     })
   }
 
+  /**
+   * 链式代理（自建落地节点）
+   *
+   * ## 为什么叫「链式」
+   *
+   * 链路形态是 客户端 → Worker（前置）→ 你的 VPS（落地）→ 目标站。
+   * 前半段负责抗封锁与就近接入，后半段决定目标站看到的出口 IP。
+   *
+   * ## 为什么需要它
+   *
+   * Cloudflare 的出口是机房 IP。流媒体与部分站点对机房 IP 的风控是
+   * 结构性的 —— 不是配置错了，是 IP 类型不对。换一个自己的出口，
+   * 比任何「解锁检测」都有效。
+   *
+   * ## 为什么要有「复制命令」这条路
+   *
+   * 桌面进程没有终端，ssh 读不到 /dev/tty，**无法提示输入密码**。
+   * 所以没配密钥的用户走「复制命令」：把整段脚本用 heredoc 包成一条命令，
+   * 粘到终端里执行 —— 那里 ssh 才能正常要密码。
+   */
+  function bindChain(): void {
+    const hostEl = $('chainHost')
+    const portEl = $('chainPort')
+    const outEl = $('chainOut')
+    const deployBtn = document.getElementById('btnChainDeploy') as HTMLButtonElement | null
+    const copyBtn = document.getElementById('btnChainCopy') as HTMLButtonElement | null
+    if (!hostEl || !portEl || !outEl || !deployBtn || !copyBtn) return
+
+    const showOut = (text: string): void => {
+      outEl.hidden = false
+      outEl.textContent = text
+      outEl.scrollTop = outEl.scrollHeight
+    }
+
+    const readPort = (): number => {
+      const n = Number.parseInt(portEl.value, 10)
+      return Number.isFinite(n) && n > 0 && n <= 65535 ? n : 1080
+    }
+
+    /** 把端口写进脚本（与 Go 端 withChainPort 同一套规则） */
+    const withPort = (script: string, port: number): string => {
+      if (port <= 0 || port === 1080) return script
+      return script.replace('\nPORT=1080\n', '\nPORT=' + port + '\n')
+    }
+
+    deployBtn.addEventListener('click', async () => {
+      const host = hostEl.value.trim()
+      if (!host) {
+        log('请先填写 VPS 地址（形如 root@203.0.113.10）', 'err')
+        hostEl.focus()
+        return
+      }
+      const label = deployBtn.textContent || '一键部署到 VPS'
+      deployBtn.disabled = true
+      deployBtn.textContent = '部署中…（最多 3 分钟）'
+      showOut('正在通过 ssh 在 ' + host + ' 上执行部署脚本…\n首次连接会确认主机指纹，需要 root 权限。\n')
+      try {
+        const r = await window.cfpilot.chainDeploy({ host, port: readPort() })
+        showOut(r.output || '(远端没有输出)')
+        if (r.ok) {
+          log('链式代理部署完成：把输出里的 socks5:// 粘到面板「出站与高级」→ SOCKS5', 'ok')
+        } else {
+          if (r.error) showOut((r.output || '') + '\n\n' + r.error)
+          log('链式代理部署失败：' + (r.error || '详见部署输出'), 'err')
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        showOut('调用失败：' + msg)
+        log('链式代理部署失败：' + msg, 'err')
+      } finally {
+        deployBtn.disabled = false
+        deployBtn.textContent = label
+      }
+    })
+
+    copyBtn.addEventListener('click', async () => {
+      try {
+        const info = await window.cfpilot.chainScript()
+        const host = hostEl.value.trim() || 'root@你的VPS_IP'
+        const script = withPort(info.script, readPort())
+        // 用 heredoc 把脚本和 ssh 包成一条命令：粘贴一次即可，不用先 scp 文件
+        const block =
+          "ssh -t " + host + " 'bash -s' <<'CFPILOT_EOF'\n" + script + '\nCFPILOT_EOF\n'
+        await navigator.clipboard.writeText(block)
+        showOut(
+          '已复制到剪贴板。\n\n在终端（Git Bash / WSL / macOS / Linux）里粘贴执行，' +
+            'ssh 会正常提示输入密码：\n\n' + block.slice(0, 600) + '\n…（完整内容已在剪贴板）'
+        )
+        log('已复制链式代理部署命令，请在终端里粘贴执行', 'ok')
+      } catch (err) {
+        log('复制失败：' + (err instanceof Error ? err.message : String(err)), 'err')
+      }
+    })
+  }
+
   document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('nav')!.addEventListener('click', (e) => {
       const btn = (e.target as HTMLElement).closest('button[data-page]') as HTMLElement | null
@@ -2159,6 +2254,7 @@
     bindProfiles()
     bindCredentials()
     bindDeploy()
+    bindChain()
     bindScan()
     bindLogs()
       bindUpdater()

@@ -272,6 +272,47 @@ export interface UserConfig {
   tlsFragmentSize: string
   /** TLS Fragment 延迟范围 */
   tlsFragmentDelay: string
+  /**
+   * 订阅链接模式。
+   *
+   * - `legacy`（默认）：`/sub/<UUID>`，永久有效、复制即用，适合绝大多数场景。
+   * - `signed`：`/sub/v1.<exp>.<nonce>.<sig>`，HMAC 签名，可一键轮换让旧链接全部失效。
+   *
+   * ⚠️ 切到 `signed` 之后**经典链接立即 403**，每台设备都要重新导入新链接。
+   * 面板因此在「订阅中心」里做了「先签发、后启用」的两步流程与醒目提示。
+   */
+  subToken: 'legacy' | 'signed'
+  /**
+   * 签名链接有效期（天）。
+   *
+   * `0`（默认）= 永久。**不建议设成很短**：客户端只在定时器到点时重新拉取订阅，
+   * 链接过期只会让「更新」失败（节点本身照旧可用），用户却必须重新导入一次。
+   * 真正的止损手段是「轮换密钥」，不是短 TTL。
+   */
+  subTokenTtlDays: number
+  /**
+   * 是否开放 `/__unlock_probe`（出口体检端点）。
+   *
+   * 该端点会用 Worker 的出站访问几个固定的检测地址，返回「当前机房出口能到哪些服务」。
+   * 关闭时端点一律 404（等价于不存在），避免被当成免费的探测服务滥用。
+   *
+   * 默认关闭 —— 它只对「想知道自己这条链路能干什么」的用户有价值。
+   */
+  unlockProbe: boolean
+  /**
+   * UDP 处理模式（VLESS `command=0x02`）。
+   *
+   * Workers **没有 UDP socket**，任意目标的 UDP（游戏 / QUIC / STUN）物理上无法转发。
+   * 唯一可行的是 **DNS（UDP/53）**：把查询改走 DoH（HTTPS），再把响应封回 UDP 帧。
+   *
+   * - `off`（默认）：与历史行为一致，收到 UDP 命令直接 1002 关闭。
+   * - `doh`：仅端口 53 走 DoH，其余端口仍明确拒绝。
+   *
+   * 开启后客户端把 DNS 走代理时不再断流 —— 这是「能连上但打不开网页」的常见根因。
+   */
+  udpDns: 'off' | 'doh'
+  /** UDP/53 转 DoH 时使用的 DoH 端点（必须是**非 Cloudflare** 域名） */
+  udpDnsEndpoint: string
 }
 
 /** 优选节点条目 */

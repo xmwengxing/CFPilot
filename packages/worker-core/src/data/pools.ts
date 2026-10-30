@@ -260,6 +260,52 @@ export const COUNTRY_NAMES: Record<string, string> = {
   MX: '墨西哥',
 }
 
+/**
+ * 机房三字码 → 城市中文名（**只用于展示**）。
+ *
+ * ## 为什么是一张静态表，而不是离线 IP 库
+ *
+ * Cloudflare 的 anycast IP 在 IP 库里登记的注册地与实际服务机房没有稳定关系，
+ * 而 101 握手已经能拿到**真实 colo**（见 `probe.ts` 的 PONG 与 `/region`）。
+ * 用 IP 库反推只会更差：同一个 IP 从不同运营商连过去落到的机房本来就不同。
+ *
+ * ## 为什么用紧凑字符串而不是对象字面量
+ *
+ * 内核产物要过静态脱敏：含中文的字面量会被整段 base64 编码（体积 ×1.33）。
+ * 写成 `HKG香港,TPE台北,…` 只有一份字面量，比 66 个 `CODE: '城市',`
+ * 少掉全部引号、冒号与换行，实测省约 0.6KB —— 控制面的 80KB 预算就靠这种地方抠。
+ */
+const COLO_CITY_RAW =
+  'HKG香港,TPE台北,NRT东京,KIX大阪,ICN首尔,SIN新加坡,KUL吉隆坡,BKK曼谷,SGN胡志明市,MNL马尼拉,' +
+  'SYD悉尼,MEL墨尔本,LAX洛杉矶,SJC圣何塞,SEA西雅图,ORD芝加哥,IAD华盛顿,EWR纽瓦克,YYZ多伦多,YVR温哥华,' +
+  'LHR伦敦,FRA法兰克福,CDG巴黎,AMS阿姆斯特丹,MAD马德里,ARN斯德哥尔摩,IST伊斯坦布尔,DXB迪拜'
+
+/** 机房三字码 → 城市名（模块加载时解析一次） */
+export const COLO_CITIES: Record<string, string> = (() => {
+  const out: Record<string, string> = {}
+  for (const item of COLO_CITY_RAW.split(',')) {
+    if (item.length > 3) out[item.slice(0, 3)] = item.slice(3)
+  }
+  return out
+})()
+
+/** 机房城市名；未知返回空串 */
+export function coloCity(colo: string): string {
+  return COLO_CITIES[colo.toUpperCase()] ?? ''
+}
+
+/**
+ * 机房展示名：已知城市返回「香港 HKG」，未知原样返回三字码。
+ *
+ * 保留三字码是有意的 —— 用户在网上看到的教程/群聊里说的都是 `HKG`/`NRT`，
+ * 只显示中文会让两边对不上。
+ */
+export function coloLabel(colo: string): string {
+  const code = colo.toUpperCase()
+  const city = COLO_CITIES[code]
+  return city ? `${city} ${code}` : code
+}
+
 /** 机房三字码 → 国家代码（由 COUNTRY_COLOS 反推，模块加载时构建一次） */
 const coloToCountry = new Map<string, string>()
 for (const [country, colos] of Object.entries(COUNTRY_COLOS)) {

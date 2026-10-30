@@ -219,7 +219,19 @@ for (const target of TARGETS) {
         ? '，已静态脱敏（literals）'
         : ''
   console.log(`[worker-core] ${target.label} → dist/${target.out} (${kb} KB${note}${safeNote})`)
-  if (target.out !== 'worker.js' && size > 80 * 1024) {
-    console.warn(`[worker-core] 警告：${target.label} 超过 80KB 预算上限`)
+  // 体积预算（**自定约束**，不是 Cloudflare 的官方限制）。
+  //
+  // 2026-10-30 从 80KB 调到 96KB，原因：
+  //   1. 80KB 是早期拍的数，没有平台依据；
+  //   2. 静态脱敏会把含中文的字面量整段 base64（体积 ×1.33），
+  //      产物里这样的字面量有 260 个 —— 真正吃预算的是脱敏，不是代码；
+  //   3. 80KB 时控制面只剩 26 字节余量，等于「下一个功能必然破线」，
+  //      这种卡点只会逼着后续改动去删有用的话术。
+  //
+  // 仍然保留上限是有意义的：它挡住「随手塞进一个大依赖」。
+  // 真要再往上放，请先看 `npm run build` 的实际体积与脱敏膨胀比例。
+  const SIZE_BUDGET_KB = 96
+  if (target.out !== 'worker.js' && size > SIZE_BUDGET_KB * 1024) {
+    console.warn(`[worker-core] 警告：${target.label} 超过 ${SIZE_BUDGET_KB}KB 预算上限`)
   }
 }

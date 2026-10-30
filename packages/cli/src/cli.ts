@@ -19,6 +19,7 @@ Cloudflare Pages 代理部署与优选工具
   ${NAME} scan [选项]         本地真连接优选
   ${NAME} status              查看当前实例状态
   ${NAME} token [选项]        检查 API Token 权限
+  ${NAME} vps [选项]          在自己的 VPS 上部署 SOCKS5 落地代理
   ${NAME} config [选项]       查看/修改本地配置
   ${NAME} --help              显示帮助
   ${NAME} --version           显示版本
@@ -82,6 +83,11 @@ async function main(): Promise<void> {
     case 'config': {
       const { runConfig } = await import('./menu/config')
       await runConfig(args)
+      return
+    }
+    case 'vps': {
+      const { runVpsCommand } = await import('./vps/command')
+      await runVpsCommand(args)
       return
     }
     default: {

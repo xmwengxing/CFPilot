@@ -107,6 +107,21 @@ console.log(
   `[desktop] 界面资源 adapter.js → internal/server/assets/ (${(statSync(join(assetsDir, 'adapter.js')).size / 1024).toFixed(1)} KB)`
 )
 
+// vps-socks5.sh：链式代理（自建落地节点）的部署脚本。
+//
+// 单一来源仍是 scripts/vps/deploy-socks5.sh —— 这里只是把它复制进
+// internal/server/assets/，好让 Go 的 //go:embed 能把它打进 exe。
+// ⚠️ 不要手工改 assets 里的副本，改源文件后重新跑构建。
+const chainScriptSrc = join(repoRoot, 'scripts/vps/deploy-socks5.sh')
+if (existsSync(chainScriptSrc)) {
+  copyFileSync(chainScriptSrc, join(assetsDir, 'vps-socks5.sh'))
+  console.log(
+    `[desktop] 链式代理脚本 → internal/server/assets/vps-socks5.sh (${(statSync(join(assetsDir, 'vps-socks5.sh')).size / 1024).toFixed(1)} KB)`
+  )
+} else {
+  console.warn('[desktop] 未找到 scripts/vps/deploy-socks5.sh，链式代理功能将不可用')
+}
+
 // ---- 1b. 同步 Worker 内核产物（go:embed 打进 exe）----
 //
 // ⚠️ 这一步曾经完全缺失，导致最严重的缺陷（2026-10-26）：

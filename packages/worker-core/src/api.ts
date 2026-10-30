@@ -26,7 +26,8 @@ import {
   saveDomainLibrary,
 } from './config'
 import { collectNodes, parseLocalList } from './sub-engine'
-import { CF_IPV4_CIDRS, COUNTRY_NAMES, PREFERRED_DOMAINS, SUPPORTED_COUNTRIES } from './data/pools'
+import { loadSubSecret, rotateSubSecret, signSubToken, verifySubToken } from './sub-token'
+import { CF_IPV4_CIDRS, COUNTRY_NAMES, PREFERRED_DOMAINS, SUPPORTED_COUNTRIES, coloLabel } from './data/pools'
 import { randomHex } from './util'
 import { CpuBudget } from './budget'
 import { BUILD_VERSION, PKG_VERSION } from './version'
@@ -280,6 +281,7 @@ export async function handleApi(
       nodeDomain,
       dataHost: env.DATA_HOST ?? '',
       colo: (request as unknown as { cf?: { colo?: string } }).cf?.colo ?? 'UNK',
+      coloLabel: coloLabel((request as unknown as { cf?: { colo?: string } }).cf?.colo ?? ''),
       localIps: parsed.length,
       generatedPassword: auth.generatedPassword,
       version: BUILD_VERSION,
@@ -371,7 +373,12 @@ export async function handleApi(
     return json({
       ok: true,
       count: result.nodes.length,
-      nodes: result.nodes.slice(0, 200),
+      // 附带机房中文名（`香港 HKG`）：面板表格直接显示，省得用户去查三字码。
+      // 映射表只在 worker-core 维护一份（data/pools.ts 的 COLO_CITIES）。
+      nodes: result.nodes.slice(0, 200).map((n) => ({
+        ...n,
+        coloLabel: n.colo ? coloLabel(n.colo) : '',
+      })),
       groups: result.groups.map((g) => ({ key: g.key, name: g.name, count: g.entries.length })),
       stats: result.stats,
     })
@@ -407,6 +414,29 @@ export async function handleApi(
   if (path === '/scanner-token' && method === 'POST') {
     const token = await issueOneTimeToken(store)
     return json({ ok: true, token, expiresIn: 600 })
+  }
+
+  // ---- 订阅签名令牌 ----
+  //
+  //   GET  /sub-token   查看当前模式并签发一条链接（不存在密钥时自动生成）
+  //   POST /sub-token   轮换密钥（**旧签名链接立即全部失效**）
+  //
+  // ⚠️ 刻意**不**提供「一键切换到签名模式」：模式切换走普通的 PUT /config，
+  // 必须由用户在面板上明确确认，避免任何自动化路径把订阅链接改坏。
+  if (path === '/sub-token' && (method === 'GET' || method === 'POST')) {
+    const rotated = method === 'POST'
+    const secret = rotated ? await rotateSubSecret(store) : await loadSubSecret(store)
+    const token = await signSubToken(secret, { ttlDays: config.subTokenTtlDays })
+    const verified = await verifySubToken(secret, token)
+    return json({
+      ok: true,
+      rotated,
+      mode: config.subToken,
+      ttlDays: config.subTokenTtlDays,
+      token,
+      link: `${url.origin}/sub/${token}`,
+      expiresAt: (verified.exp ?? 0) * 1000,
+    })
   }
 
   if (path === '/events' && method === 'GET') {

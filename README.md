@@ -416,20 +416,17 @@ npx -y cfpilot@latest scan
 | **Pages Write**              | Edit | 建/删 Pages 项目、上传内核、绑 KV、配环境变量、绑自定义域名 |
 | **Account API Tokens**       | Read | 可选，仅用于显示 Token 有效期                  |
 
-**数据面用 Workers 模式时，还要再加两项**（缺任何一项都会在部署**开始前**被拦下）：
+**数据面用 Workers 模式时，再加一项**：
 
 | 权限项（控制台显示名）             | 级别   | 分类      | 用途                          |
 | ----------------------- | ---- | ------- | --------------------------- |
 | **Workers Scripts**     | Edit | Account | 上传 / 更新数据面 Worker 脚本        |
-| **Workers Routes**      | Edit | Zone    | 绑定 Worker 自定义域名（`/workers/domains`） |
-| **DNS**                 | Edit | Zone    | 仅**换形态**时需要：清理 Pages 留下的 DNS 记录 |
 
-> ⚠️ **Zone 类权限必须先选 Zone Resources**（`Include → 你的域名`），否则列表里
-> 根本不会出现 `DNS` / `Workers Routes` 这两项 —— 这是最容易漏勾的地方。
+> ✅ **不需要** `Workers Routes`，也**不需要** `DNS` —— 工具不碰自定义域名：
+> Workers 模式只把数据面部署到 `*.workers.dev`，自定义域名请你在控制台自行绑定，
+> 然后到面板「设置 → 数据面域名」填一次（`CONFIG.subDomain` 优先级高于 `DATA_HOST`）。
 >
-> 绑一个**全新**子域时其实不需要 DNS 权限（Cloudflare 内部会建记录）；
-> 只有「Pages 数据面已绑过自定义域名，现在要换成 Workers」时才必须删掉那条遗留的
-> CNAME，那一步需要 DNS 写权限。没有 DNS 权限时，改用一个新子域一样能切过去。
+> 这样部署路径上没有任何域名/DNS 依赖，也就不存在「主机名已被占用（409 / 100117）」这类坑。
 
 
 <details>

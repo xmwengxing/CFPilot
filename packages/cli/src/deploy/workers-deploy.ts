@@ -1,25 +1,24 @@
 /**
- * Workers 数据面部署原语。
+ * Workers 数据面部署原语（**不含自定义域名托管**）。
  *
- * ## 为什么数据面允许跑 Workers
+ * ## 设计取舍（2026-10-31 重构）
  *
- * 2026-10-31 真机验证通过（面板 / 订阅 / 探针 / 真实 VLESS 5/5，见
- * `docs/workers-dataplane-deploy.md`）。历史「Workers 上必然 522」的结论
- * 只对当时的产物成立（含第三方 vendor 与动态 sockets 导入），当前产物未复现。
+ * 早期版本试图替用户绑定 Worker 自定义域名，结果踩了一串平台限制：
  *
- * ## 与控制面的关系
+ *   - Pages 绑过自定义域名后，解绑**不会**删掉那条 CNAME；
+ *   - Worker 自定义域名要求主机名**没有任何现存记录**，否则 409 / 100117；
+ *   - 删记录要 Zone / DNS 写权限，而账号级 Token（`cfat_`）在很多账号下
+ *     根本拿不到这一项 —— 真机两个令牌读 DNS 都是 403。
  *
- * **控制面永远留在 Pages**：面板 + 订阅 + 探针不含出站 TCP，Pages 上稳定；
- * 只有数据面（代理入站 + 出站拨号）才允许换成 Workers。
+ * 于是「工具替用户绑域名」这条路对相当一部分用户是走不通的。
  *
- * ## 三条硬约束（代码里都做了兜底）
+ * 现在改为：**工具只负责把 Worker 部署到它的生产域名**（`*.workers.dev`），
+ * 自定义域名由用户在控制台自行绑定，然后到面板「设置 → 数据面域名」填一次
+ * （`CONFIG.subDomain` 优先级高于 `DATA_HOST` 环境变量，订阅会跟着变）。
  *
- * 1. `*.workers.dev` 生产域名会被阻断 → 节点域名必须用**自定义域名**；
- *    没提供域名时仍可部署，但会告警，并把 `workers.dev` 域名写进订阅。
- * 2. 自定义域名必须属于**本账号的 zone**，否则 `PUT /workers/domains` 直接失败。
- * 3. 绑定的返回值只代表「已受理」，可达性必须再校验一次（见 `probeHost`）。
+ * 这样部署路径上不再有任何 DNS / Routes 依赖，也就不存在 100117 这类坑。
  */
-import { CloudflareClient, CloudflareError, type ScriptBinding, type WorkerDomain } from './cf-api'
+import { CloudflareClient, CloudflareError, type ScriptBinding } from './cf-api'
 
 /** 数据面部署形态 */
 export type DataPlaneMode = 'pages' | 'workers'
@@ -27,47 +26,15 @@ export type DataPlaneMode = 'pages' | 'workers'
 /**
  * Worker 的 compatibility_date。
  *
- * 固定值而不是取当天：产物必须可复现，且同一次部署在任意机器上行为一致。
+ * 固定值而不是取当天：产物必须可复现，同一次部署在任意机器上行为一致。
  * 改它等于改运行时语义，必须单独评估（例如 `cloudflare:sockets` 的开关）。
  */
 export const WORKERS_COMPAT_DATE = '2026-10-01'
 
-/**
- * Workers 数据面需要的权限（比 Pages 多三项）。
- *
- * ## 为什么必须预检，而不是「失败再说」
- *
- * 绑定自定义域名要 `PUT /accounts/{id}/workers/domains`，
- * 它同时依赖**账号级** Workers Routes 与**域名级** DNS —— 这两项
- * 与 Pages 部署用的三项权限完全不相交。
- *
- * 真机行为（改动前）：脚本上传成功 → 绑域名 403 → 整条部署抛出 →
- * 控制面根本没部署，账号里留下一个没域名、不接流量的孤儿 Worker。
- * 用户看到的是「部署失败」，却不知道是权限问题，也不知道清理什么。
- *
- * 所以这里**在上传任何东西之前**把权限探一遍：
- *   - 缺权限 → 直接给出「缺哪一项、去哪补」，一个资源都不创建；
- *   - 都通过 → 后面即使绑失败，也只可能是域名/证书类问题，与权限无关。
- */
 const WORKERS_PERMISSIONS = {
   scripts: {
     label: 'Workers 脚本',
     hint: 'Token 中添加 Account / Workers Scripts / Edit',
-  },
-  domains: {
-    label: 'Workers 自定义域名',
-    hint: 'Token 中添加 Zone / Workers Routes / Edit（控制台里就叫 Workers Routes）',
-  },
-  zoneRoutes: {
-    label: 'Zone 级 Worker 路由',
-    hint: 'Token 中添加 Zone / Workers Routes / Edit',
-  },
-  dns: {
-    label: 'Zone DNS',
-    // ⚠️ 名称必须与控制台一致：权限项就叫 **DNS**（分类 Zone），
-    // 而且必须先把 Zone Resources 选到目标域名，这一项才会出现在列表里。
-    hint:
-      'Token 中添加 Zone / DNS / Edit（确保 Zone Resources 包含目标域名；建议 Read + Edit 都给）',
   },
 } as const
 
@@ -76,12 +43,7 @@ export function isPermissionError(err: unknown): boolean {
   return err instanceof CloudflareError && (err.status === 401 || err.status === 403)
 }
 
-/**
- * 把权限错误翻译成「缺哪一项、去哪补」。
- *
- * 不是权限错误时返回 null，交给调用方按普通失败处理 ——
- * 把网络超时也说成「缺权限」会让人去改 Token，白折腾。
- */
+/** 把权限错误翻译成「缺哪一项、去哪补」；不是权限错误时返回 null */
 export function describeWorkersPermissionError(
   err: unknown,
   which: keyof typeof WORKERS_PERMISSIONS
@@ -92,43 +54,34 @@ export function describeWorkersPermissionError(
   return (
     `Token 缺少「${perm.label}」权限（${detail}）。\n` +
     `  → ${perm.hint}\n` +
-    '  → Workers 模式比 Pages 模式多需要这几项权限；不想加权限就把数据面部署模式改回 Pages。'
+    '  → Workers 模式比 Pages 模式多这一项权限；不想加就把数据面部署模式改回 Pages。'
   )
 }
 
-export interface WorkersPreflightResult {
-  /** 目标 zone（没给自定义域名时为 null） */
-  zone: { id: string; name: string } | null
-  /** 能否读取该 zone 的 DNS 记录（决定换形态时能否自动清理旧记录） */
-  dnsReadable: boolean
+/**
+ * 计算 Worker 的生产域名。
+ *
+ * 账号没注册 workers.dev 子域时返回 `<name>.workers.dev`（大概率不可用），
+ * 调用方据此告警。
+ */
+export function workersDevHost(name: string, subdomain: string): string {
+  const sub = subdomain.trim()
+  return sub ? `${name}.${sub}.workers.dev` : `${name}.workers.dev`
 }
 
 /**
  * 部署前权限预检（**只读**，不创建任何资源）。
  *
- * 全部通过才继续；任何一项缺失都抛错，由调用方中止部署。
- * 这样用户补完权限重跑时，账号里不会留下半成品。
+ * 只检查 Workers 脚本权限 —— 因为不再绑自定义域名，Routes / DNS 都不需要。
  */
 export async function preflightWorkersDataPlane(
   client: CloudflareClient,
   accountId: string,
-  hostname: string | undefined,
   log: (message: string) => void,
-  warnings: string[],
-  /**
-   * 是否**预期主机名下已有 Pages 遗留的 DNS 记录**。
-   *
-   * 换形态（Pages → Workers）时必然有：Pages 绑自定义域名时建的那条 CNAME，
-   * 解绑项目不会删掉它。而删它需要 DNS **写**权限。
-   *
-   * 这种情况下如果连读都读不到，就**必须在动任何东西之前拦下** ——
-   * 否则会先解绑线上域名、传完脚本、再失败回滚，每次尝试白掉十几秒线上可用性。
-   */
-  options: { expectLeftoverDns?: boolean } = {}
-): Promise<WorkersPreflightResult> {
+  warnings: string[]
+): Promise<void> {
   log('· 预检 Workers 数据面所需权限…')
 
-  // 1) Workers 脚本（上传脚本的前提）
   try {
     const scripts = await client.listScripts(accountId)
     log(`  · Workers 脚本权限正常（账号下 ${Array.isArray(scripts) ? scripts.length : 0} 个脚本）`)
@@ -138,165 +91,17 @@ export async function preflightWorkersDataPlane(
     warnings.push(`无法读取 Workers 脚本列表：${err instanceof Error ? err.message : String(err)}`)
   }
 
-  // 2) 自定义域名绑定（账号级 Workers Routes）
   try {
-    await client.listWorkerDomains(accountId)
-    log('  · Workers 自定义域名权限正常')
-  } catch (err) {
-    const message = describeWorkersPermissionError(err, 'domains')
-    if (message) throw new Error(message)
-    warnings.push(
-      `无法读取 Workers 自定义域名列表：${err instanceof Error ? err.message : String(err)}`
-    )
-  }
-
-  if (!hostname) {
-    // 没给域名 → 回落 workers.dev。这不是权限问题，是「节点会连不上」的问题，
-    // 所以不阻断，但必须说清楚（见 deployWorkersDataPlane 的告警）。
-    return { zone: null, dnsReadable: false }
-  }
-
-  // 3) 域名必须属于本账号的 zone
-  const zone = await resolveZoneForHost(client, hostname)
-  if (!zone) {
-    throw new Error(
-      `域名 ${hostname} 不在本账号的任何 zone 下，无法绑定为 Worker 自定义域名。\n` +
-        '  → Workers 自定义域名不支持外部 CNAME，域名的 DNS 必须托管在这个 Cloudflare 账号里。\n' +
-        '  → 换一个本账号下的域名，或把数据面部署模式改回 Pages（*.pages.dev 不需要自有域名）。'
-    )
-  }
-  log(`  · 域名 ${hostname} 归属 zone ${zone.name}`)
-
-  // 4) Zone DNS（绑定自定义域名时 Cloudflare 会自动建一条 DNS 记录）
-  //
-  // 这里只**告警不阻断**：读不到 DNS 记录也可能是「只有 Edit 没有 Read」的
-  // 令牌组合，那种令牌其实能建记录。硬拦会把可用配置挡在门外，
-  // 真正的失败留给绑定时的那一次调用（错误信息已带上权限提示）。
-  try {
-    await client.getDnsRecords(zone.id, hostname)
-    log('  · Zone DNS 权限正常')
-    return { zone, dnsReadable: true }
-  } catch (err) {
-    const message = describeWorkersPermissionError(err, 'dns')
-
-    // 换形态：主机名下一定有条 Pages 遗留的 CNAME，删它必须有 DNS 写权限。
-    // 读都读不到 = 一定没有写 → 现在拦下，别去动线上域名。
-    if (options.expectLeftoverDns) {
-      throw new Error(
-        `换形态需要删除 ${hostname} 上 Pages 遗留的 DNS 记录，但当前令牌读不到 DNS（${err instanceof Error ? err.message : String(err)}）。\n` +
-          `  → ${WORKERS_PERMISSIONS.dns.hint}\n` +
-          '  → 或者（任选其一，都不需要 DNS 权限）：\n' +
-          '     1) 到 Cloudflare 控制台 → 该域名的 DNS 页，手动删掉这个主机名下的记录，再重跑；\n' +
-          '     2) 给数据面换一个新子域（如 w1.你的域名）—— 绑新域名由 Cloudflare 自己建记录，不需要 DNS 权限。\n' +
-          '  → 不想折腾就把数据面部署模式改回 Pages。'
-      )
-    }
-
-    // 非换形态（全新子域）：没有遗留记录要清，DNS 权限用不上，只告警。
-    log('  ⚠ Zone DNS 权限缺失或不可读（换形态时可能无法自动清理旧记录）')
-    warnings.push(
-      message ??
-        `无法读取 DNS 记录：${err instanceof Error ? err.message : String(err)}` +
-          '\n  → 若绑定域名时报权限错误，请补 Zone / DNS / Edit。'
-    )
-    return { zone, dnsReadable: false }
-  }
-}
-
-/**
- * 清理「Pages 绑定留下的」DNS 记录。
- *
- * ## 为什么必须有这一步（真机 409 / code 100117）
- *
- * Pages 给项目绑自定义域名时会自动建一条 CNAME（指向 `<项目>.pages.dev`）。
- * 解绑 Pages 域名时，**这条 DNS 记录不一定会被删掉** —— 于是紧接着去绑
- * Worker 自定义域名就会撞：
- *
- *     Hostname 'x.example.com' already has externally managed DNS records
- *     (A, CNAME, etc). Delete them first or try a different hostname.
- *     （HTTP 409，code 100117）
- *
- * 也就是说「解绑 Pages 域名」只释放了项目侧的占用，**没有释放主机名本身**。
- * 换形态（Pages → Workers）必然踩到，因为两边的域名是同一个。
- *
- * ## 只删「确定是 Pages 遗留」的记录
- *
- * 判据：`CNAME` 且 content 以 `.pages.dev` 结尾。其余记录（A、指向别处的 CNAME、
- * TXT 验证记录……）一律**不动** —— 那可能是用户自己的业务记录，
- * 删错了比部署失败严重得多。此时直接报错，让用户自己决定。
- */
-export async function clearPagesLeftoverDns(
-  client: CloudflareClient,
-  zoneId: string,
-  hostname: string,
-  log: (message: string) => void,
-  warnings: string[]
-): Promise<void> {
-  // ⚠️ 这一步是**尽力而为**，不是必需前置。
-  //
-  // 真机踩过：令牌有 Workers Routes 但没有 Zone / DNS，读 dns_records 直接 403
-  // Authentication error —— 于是整个部署在这里中断，用户完全看不出是权限问题
-  // （报错只说 Authentication error，没提 DNS）。
-  //
-  // 而「没有残留记录」的情况下，DNS 权限其实用不上。所以读不到就跳过，
-  // 真正的失败留给绑定那一步（那里能给出 100117 的准确提示）。
-  let records: Awaited<ReturnType<CloudflareClient['getDnsRecords']>>
-  try {
-    records = await client.getDnsRecords(zoneId, hostname)
-  } catch (err) {
-    if (isPermissionError(err)) {
-      const message =
-        `无法读取 DNS 记录（缺 Zone / DNS 权限），已跳过「Pages 遗留记录」清理。\n` +
-        `  → 若接下来绑定域名报 409 / 100117，请给令牌加 Zone / DNS / Edit，\n` +
-        `    或到 Cloudflare 控制台手动删除 ${hostname} 下的 CNAME 记录。`
-      log('⚠ 无法读取 DNS 记录，跳过残留清理')
-      warnings.push(message)
-      return
-    }
-    throw err
-  }
-
-  const mine = (Array.isArray(records) ? records : []).filter(
-    (record) => record.name.toLowerCase() === hostname.toLowerCase()
-  )
-  if (mine.length === 0) return
-
-  const isPagesLeftover = (record: { type: string; content: string }): boolean =>
-    record.type === 'CNAME' && /\.pages\.dev\.?$/i.test(record.content ?? '')
-
-  const leftovers = mine.filter(isPagesLeftover)
-  const others = mine.filter((record) => !isPagesLeftover(record))
-
-  for (const record of leftovers) {
-    try {
-      await client.deleteDnsRecord(zoneId, record.id)
-      log(`· 已清理 Pages 遗留的 DNS 记录：${record.type} ${record.name} → ${record.content}`)
-    } catch (err) {
-      // 删不掉（权限不足 / 记录被并发改动）→ 不再继续，交给绑定那一步报 100117
-      const detail = err instanceof Error ? err.message : String(err)
-      log(`⚠ 清理 DNS 记录失败：${detail}`)
+    const subdomain = await client.getWorkersSubdomain(accountId)
+    if (subdomain) log(`  · workers.dev 子域：${subdomain}`)
+    else {
       warnings.push(
-        `无法删除 ${hostname} 上的 Pages 遗留记录（${record.type} ${record.content}）：${detail}\n` +
-          '  → 请给令牌加 Zone / DNS / Edit，或到控制台手动删除该记录。'
+        '该账号还没有 workers.dev 子域。\n' +
+          '  → 请到 Cloudflare 控制台 → Workers 和 Pages → 设置一次子域，否则节点域名不可用。'
       )
-      return
     }
-  }
-
-  if (others.length > 0) {
-    const list = others.map((r) => `${r.type} ${r.content}`).join('、')
-    throw new Error(
-      `${hostname} 上还有 ${others.length} 条非 Pages 的 DNS 记录（${list}）。\n` +
-        '  → Workers 自定义域名要求该主机名**没有任何现存记录**，否则会返回 409 / 100117。\n' +
-        '  → 请到 Cloudflare 控制台 → DNS 里删掉它们，或换一个没用过的子域。'
-    )
-  }
-
-  if (leftovers.length > 0) {
-    warnings.push(
-      `已删除 ${hostname} 上 ${leftovers.length} 条 Pages 遗留的 DNS 记录（CNAME → *.pages.dev）。\n` +
-        '  → 这些记录原本指向旧的 Pages 数据面，迁移到 Workers 后由 Workers 自己接管该主机名。'
-    )
+  } catch {
+    // 读不到子域不影响部署，后面按 `<name>.workers.dev` 兜底
   }
 }
 
@@ -307,15 +112,6 @@ export interface WorkersDataPlaneOptions {
   name: string
   /** 数据面产物（`dist/dataplane.js`） */
   code: string
-  /** 自定义域名（如 `w1a2b3c4.example.com`）；留空则回落到 workers.dev */
-  hostname?: string
-  /**
-   * 预检阶段已解析出的 zone。
-   *
-   * 传了就复用，不再重复查一次 `/zones` —— 预检与绑定之间账号域名
-   * 不可能变，多一次请求只是多一次失败机会。
-   */
-  zone?: { id: string; name: string } | null
   bindings: ScriptBinding[]
   log: (message: string) => void
   warnings: string[]
@@ -324,227 +120,64 @@ export interface WorkersDataPlaneOptions {
 export interface WorkersDataPlaneResult {
   /** 实际生效的脚本名 */
   name: string
-  /** 客户端要连的域名（自定义域名，或 workers.dev 回落） */
+  /** 客户端要连的域名（`<name>.<sub>.workers.dev`） */
   host: string
-  /** 自定义域名（没绑则为空串） */
-  customDomain: string
 }
 
 /**
- * 找出 `hostname` 归属的 zone（最长后缀匹配）。
+ * 部署 Workers 数据面：上传脚本 → 开启 workers.dev 路由 → 返回生产域名。
  *
- * 为什么不能只按 `?name=` 精确查：`/zones?name=` 只认 zone 的**顶点域名**，
- * 传 `w1.example.com` 会返回空数组，于是「账号里明明有这个域名」也会被误判成没有。
+ * 不做任何域名绑定 —— 自定义域名由用户在控制台配。
  */
-export async function resolveZoneForHost(
-  client: CloudflareClient,
-  hostname: string
-): Promise<{ id: string; name: string } | null> {
-  const zones = await client.listZones()
-  const host = hostname.trim().toLowerCase()
-  if (!host) return null
-  const matches = zones
-    .filter((zone) => host === zone.name || host.endsWith(`.${zone.name}`))
-    // 最长后缀优先：a.b.example.com 同时匹配 example.com 与 b.example.com
-    .sort((a, b) => b.name.length - a.name.length)
-  const zone = matches[0]
-  return zone ? { id: zone.id, name: zone.name } : null
-}
+export async function deployWorkersDataPlane(
+  options: WorkersDataPlaneOptions
+): Promise<WorkersDataPlaneResult> {
+  const { client, accountId, name, log, warnings } = options
 
-/** 找出某个 Worker 脚本已绑定的自定义域名（多个时取第一个） */
-export async function findWorkerDomain(
-  client: CloudflareClient,
-  accountId: string,
-  scriptName: string
-): Promise<WorkerDomain | null> {
-  const domains = await client.listWorkerDomains(accountId)
-  return domains.find((d) => d.service === scriptName) ?? null
-}
-
-/** 上传脚本（幂等：同名覆盖即为更新） */
-export async function uploadWorkerScript(options: WorkersDataPlaneOptions): Promise<void> {
-  await options.client.uploadScript(options.accountId, options.name, {
+  log(`· 上传 Workers 数据面脚本 ${name}`)
+  await client.uploadScript(accountId, name, {
     mainModule: 'worker.js',
     code: options.code,
     compatibilityDate: WORKERS_COMPAT_DATE,
     bindings: options.bindings,
   })
-}
 
-/**
- * 绑定自定义域名。
- *
- * ⚠️ 返回 200 只代表「绑定已受理」。真机上证书签发要 1~3 分钟，
- * 期间访问会 TLS 失败 —— 调用方必须用 `probeHost` 再确认一次。
- */
-export async function attachWorkerHostname(
-  client: CloudflareClient,
-  accountId: string,
-  hostname: string,
-  scriptName: string,
-  zone?: { id: string; name: string } | null
-): Promise<WorkerDomain> {
-  const targetZone = zone ?? (await resolveZoneForHost(client, hostname))
-  if (!targetZone) {
-    throw new Error(
-      `域名 ${hostname} 不在本账号的任何 zone 下，无法绑定为 Worker 自定义域名。\n` +
-        '  → 请确认该域名的 DNS 托管在这个 Cloudflare 账号里（Workers 自定义域名不支持外部 CNAME）。'
-    )
-  }
-
-  // 刚删掉的 DNS 记录在边缘侧生效有延迟，100117 会短暂残留 —— 重试几次。
-  const MAX_ATTEMPTS = 3
-  let lastError: unknown = null
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-    try {
-      return await client.attachCustomDomain(accountId, {
-        hostname,
-        service: scriptName,
-        zoneId: targetZone.id,
-      })
-    } catch (err) {
-      lastError = err
-      const message = err instanceof Error ? err.message : String(err)
-      const transient = /100117|externally managed/i.test(message)
-      if (!transient || attempt === MAX_ATTEMPTS) break
-      await new Promise((r) => setTimeout(r, 3000))
-    }
-  }
-
-  // 预检通过后仍然 403，通常是「DNS 记录创建」被拒（Zone / DNS 权限），
-  // 或账号级 Workers Routes 只有 Read。给一条能直接照做的提示。
-  if (isPermissionError(lastError)) {
-    throw new Error(
-      `绑定自定义域名 ${hostname} 被拒绝（权限不足）。\n` +
-        `  → ${WORKERS_PERMISSIONS.domains.hint}\n` +
-        `  → ${WORKERS_PERMISSIONS.dns.hint}\n` +
-        '  → 也可以先不绑域名：把「自定义域名」留空，部署到 *.workers.dev（多数网络下直连不可访问）。'
-    )
-  }
-  const message = lastError instanceof Error ? lastError.message : String(lastError)
-  if (/100117|externally managed/i.test(message)) {
-    throw new Error(
-      `${hostname} 上仍有 DNS 记录占用，Workers 无法接管该主机名（HTTP 409 / 100117）。\n` +
-        '  → 这些记录通常是 Pages 绑定时自动建的 CNAME（指向 *.pages.dev），解绑 Pages 域名不会删掉它。\n' +
-        '  → 三种解法（任选其一）：\n' +
-        '    1) 给令牌加 Zone / DNS / Edit，程序会自动清理后重试；\n' +
-        `    2) 到 Cloudflare 控制台 → ${hostname.split('.').slice(1).join('.')} 的 DNS 页，删掉这个主机名下的记录；\n` +
-        '    3) 换一个没用过的子域（如 w1.你的域名）作为数据面域名。'
-    )
-  }
-  throw lastError instanceof Error ? lastError : new Error(message)
-}
-
-/** 解除某个脚本上的自定义域名绑定 */
-export async function detachWorkerHostname(
-  client: CloudflareClient,
-  accountId: string,
-  scriptName: string
-): Promise<string> {
-  const domain = await findWorkerDomain(client, accountId, scriptName)
-  if (!domain) return ''
+  // 上传成功后 workers.dev 路由默认是关闭的，必须显式开启，
+  // 否则 https://<name>.<sub>.workers.dev 一直返回「There is nothing here yet」。
   try {
-    await client.deleteWorkerDomain(accountId, domain.id)
-    return domain.hostname
-  } catch {
-    return ''
-  }
-}
-
-/**
- * 轮询确认域名真的能访问（拿到任意 HTTP 响应即算通）。
- *
- * 只用 HEAD/GET 探一次不够 —— 证书签发期间 TLS 直接失败。
- * 失败**不阻断部署**：域名生效有延迟，用户稍后自己会看到；
- * 但必须告警，否则用户拿着一个连不上的节点排查半天。
- */
-export async function probeHost(
-  host: string,
-  options: { timeoutMs?: number; intervalMs?: number } = {}
-): Promise<boolean> {
-  const deadline = Date.now() + (options.timeoutMs ?? 90_000)
-  const interval = options.intervalMs ?? 5_000
-  for (;;) {
-    try {
-      await fetch(`https://${host}/`, {
-        method: 'GET',
-        redirect: 'manual',
-        signal: AbortSignal.timeout(10_000),
-      })
-      return true
-    } catch {
-      /* 证书未就绪 / DNS 未生效，继续等 */
-    }
-    if (Date.now() > deadline) return false
-    await new Promise((r) => setTimeout(r, interval))
-  }
-}
-
-/**
- * 部署 Workers 数据面：上传 → 绑域名（或开 workers.dev）→ 校验可达。
- *
- * 失败会抛错，由调用方决定是否回滚 —— 这里**不吞异常**：
- * 数据面部署失败等于用户拿不到可用节点，必须让上层知道。
- */
-export async function deployWorkersDataPlane(
-  options: WorkersDataPlaneOptions
-): Promise<WorkersDataPlaneResult> {
-  const { client, accountId, name, hostname, log, warnings } = options
-
-  log(`· 上传 Workers 数据面脚本 ${name}`)
-  await uploadWorkerScript(options)
-
-  let host = ''
-  let customDomain = ''
-
-  if (hostname) {
-    // ⚠️ 绑之前必须先清掉 Pages 遗留的 DNS 记录，否则必然 409 / 100117：
-    // 「解绑 Pages 域名」只释放项目侧占用，那条指向 *.pages.dev 的 CNAME 还在。
-    const targetZone = options.zone ?? (await resolveZoneForHost(client, hostname))
-    if (!targetZone) {
-      throw new Error(
-        `域名 ${hostname} 不在本账号的任何 zone 下，无法绑定为 Worker 自定义域名。\n` +
-          '  → 请确认该域名的 DNS 托管在这个 Cloudflare 账号里（Workers 自定义域名不支持外部 CNAME）。'
-      )
-    }
-    await clearPagesLeftoverDns(client, targetZone.id, hostname, log, warnings)
-
-    const domain = await attachWorkerHostname(client, accountId, hostname, name, targetZone)
-    customDomain = domain.hostname
-    host = domain.hostname
-    log(`✅ 已绑定自定义域名 ${host}`)
-    const reachable = await probeHost(host)
-    if (!reachable) {
-      warnings.push(
-        `自定义域名 ${host} 在 90 秒内仍未返回响应（证书签发通常需要 1~3 分钟）。\n` +
-          '  → 稍等片刻用浏览器打开该域名确认；若长时间不可用，请到 Cloudflare 控制台检查\n' +
-          '    Workers → 你的脚本 → 设置 → 域和路由 里的自定义域名状态。'
-      )
-    }
-  } else {
-    // 没有自定义域名 → 回落到 workers.dev（能部署，但多数网络下直连不可用）
     await client.putScriptSubdomain(accountId, name, true)
-    const subdomain = await client.getWorkersSubdomain(accountId)
-    host = subdomain ? `${name}.${subdomain}.workers.dev` : `${name}.workers.dev`
+  } catch (err) {
     warnings.push(
-      `未配置自定义域名，数据面使用 ${host}。\n` +
-        '  → *.workers.dev 域名直连无法访问，请登录 cloudflare 控制台配置自定义域名，\n' +
-        '    否则客户端节点会全部连不上。'
+      `开启 workers.dev 路由失败：${err instanceof Error ? err.message : String(err)}\n` +
+        '  → 到控制台 → Workers → 你的脚本 → 设置 → 域和路由 里手动开启即可。'
     )
   }
 
-  return { name, host, customDomain }
+  let subdomain = ''
+  try {
+    subdomain = await client.getWorkersSubdomain(accountId)
+  } catch {
+    /* 读不到就用裸名兜底 */
+  }
+  const host = workersDevHost(name, subdomain)
+
+  warnings.push(
+    `数据面已部署到 ${host}。\n` +
+      '  → *.workers.dev 域名在很多网络下直连不可访问，**需要**配一个自定义域名：\n' +
+      `     Cloudflare 控制台 → Workers 和 Pages → ${name} → 设置 → 域和路由 → 添加 → 自定义域名\n` +
+      '  → 配好后到面板「设置 → 数据面域名」填上它（优先级高于部署时写入的 DATA_HOST），订阅会跟着切过去。'
+  )
+
+  return { name, host }
 }
 
-/** 删除 Workers 数据面（先解绑域名，再删脚本） */
+/** 删除 Workers 数据面（脚本一删，它上面的自定义域名绑定也随之释放） */
 export async function deleteWorkersDataPlane(
   client: CloudflareClient,
   accountId: string,
   name: string,
   log: (message: string) => void
 ): Promise<void> {
-  const host = await detachWorkerHostname(client, accountId, name)
-  if (host) log(`· 已解绑旧数据面域名 ${host}`)
   await client.deleteScript(accountId, name)
   log(`✅ 已删除旧 Workers 数据面：${name}`)
 }

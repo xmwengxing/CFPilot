@@ -33,7 +33,6 @@ import { CloudflareClient, CloudflareError, type PagesDeployment, type ScriptBin
 import {
   deleteWorkersDataPlane,
   deployWorkersDataPlane,
-  detachWorkerHostname,
   preflightWorkersDataPlane,
   type DataPlaneMode,
 } from './workers-deploy'
@@ -68,22 +67,13 @@ export interface PagesSplitDeployOptions {
   /**
    * 数据面部署形态。
    *
-   * - `pages`（默认）：数据面也是一个 Pages 项目，`*.pages.dev` 直连可访问，
-   *   不需要自有域名。
-   * - `workers`：数据面是一个 Worker，动态与边缘控制更强，
-   *   但 `*.workers.dev` 直连不可访问，**必须绑自定义域名**。
+   * - `pages`（默认）：数据面也是一个 Pages 项目，`*.pages.dev` 直连可访问。
+   * - `workers`：数据面是一个 Worker，部署到 `*.workers.dev`；
+   *   **自定义域名不由工具托管**，需要用户自己到控制台绑，再在面板里填一次。
    *
    * 不传 = 沿用部署清单里记录的形态（没有清单则 `pages`）。
-   * 这与「显式传 pages」不同：后者对 Workers 实例来说是一次**形态切换**。
    */
   dataPlaneMode?: DataPlaneMode
-  /**
-   * Workers 数据面的自定义域名（如 `w1a2b3c4.example.com`）。
-   *
-   * 只对 `dataPlaneMode: 'workers'` 生效；留空时优先沿用清单里记录的旧域名，
-   * 都没有才回落到 `*.workers.dev`（并告警：该域名直连不可用）。
-   */
-  dataHost?: string
   /** 扫描令牌（可选） */
   scannerToken?: string
   /**
@@ -944,7 +934,22 @@ export async function deployPagesSplit(
       !!kernel.version &&
       compareSemver(kernel.version, onlineVersion) < 0
 
-    if (skipSameVersion && (sameBuild || wouldDowngrade)) {
+    /**
+     * 用户本次是否**要求换数据面形态**。
+     *
+     * ⚠️ 换形态必须绕过「同版本跳过」：
+     * 版本没变但形态变了（Pages ↔ Workers），这本身就是一次实质变更 ——
+     * 真机踩过：点「更新部署」选 Workers，日志只打印「线上已是最新版本，跳过部署」，
+     * 用户完全不知道模式根本没生效。
+     */
+    const modeSwitchRequested =
+      !!options.dataPlaneMode && options.dataPlaneMode !== (manifest.dataPlaneMode ?? 'pages')
+
+    if (modeSwitchRequested && skipSameVersion && (sameBuild || wouldDowngrade)) {
+      log('· 本次要求切换数据面形态，忽略「同版本跳过」')
+    }
+
+    if (skipSameVersion && !modeSwitchRequested && (sameBuild || wouldDowngrade)) {
       if (wouldDowngrade && !sameBuild) {
         log(
           `✅ 线上内核 ${onlineVersion} 比本次可用内核 ${kernel.version} 更新，跳过部署（避免降级）`
@@ -1018,47 +1023,22 @@ export async function deployPagesSplit(
   const dataMode: DataPlaneMode = options.dataPlaneMode ?? prevDataMode
   const modeSwitched = !!manifest && dataMode !== prevDataMode
   const oldDataName = manifest?.dataProject ?? ''
-  /** 换形态时要迁移的域名：优先用户本次指定，其次清单里记着的 */
-  const targetHost = (options.dataHost ?? '').trim() || (manifest?.dataCustomDomain ?? '').trim()
 
   if (modeSwitched) {
     log(
       `⚠ 数据面部署形态变更：${prevDataMode === 'pages' ? 'Pages' : 'Workers'} → ` +
         `${dataMode === 'pages' ? 'Pages' : 'Workers'}`
     )
-    log('  → 新数据面部署成功后，会自动删除旧的数据面并迁移域名')
+    log('  → 新数据面部署成功后，会自动删除旧的数据面')
+    log('  → 自定义域名不由工具托管：切换后需要你到控制台重新绑一次')
   }
 
-  // Workers 模式的权限预检必须发生在**创建任何资源之前**。
+  // Workers 模式的权限预检必须在**创建任何资源之前**。
   //
-  // 绑定自定义域名要额外的「账号级 Workers Routes」与「域级 DNS」权限，
-  // 这两项与 Pages 部署用的三项权限完全不相交。若先传了脚本再撞权限墙，
-  // 账号里就会留下一个没域名、不接流量的孤儿 Worker，而用户只看到「部署失败」。
-  //
-  // ⚠️ 预检用的域名要包含「从旧 Pages 项目现读出来的那个」：
-  // 清单里只记部署时见过的域名，用户在控制台手动绑的不在清单里，
-  // 不提前读出来就会漏检（等绑定时才失败，虽然会回滚，但白折腾一次）。
-  let oldPagesHost = ''
-  if (dataMode === 'workers' && prevDataMode === 'pages' && oldDataName) {
-    oldPagesHost = await readPagesCustomDomain(client, options.accountId, oldDataName)
-  }
-  const switchHostPreview = targetHost || oldPagesHost
-
-  let workersZone: { id: string; name: string } | null = null
+  // 只需要 Workers 脚本权限：数据面只部署到 *.workers.dev，
+  // 自定义域名由用户自己在控制台绑（见 workers-deploy.ts 顶部的取舍说明）。
   if (dataMode === 'workers') {
-    const preflight = await preflightWorkersDataPlane(
-      client,
-      options.accountId,
-      switchHostPreview || undefined,
-      log,
-      warnings,
-      {
-        // 只有「沿用旧域名」时主机名下才会有 Pages 遗留的 CNAME；
-        // 用户换了新子域就没有，不需要 DNS 写权限。
-        expectLeftoverDns: !!oldPagesHost && switchHostPreview === oldPagesHost,
-      }
-    )
-    workersZone = preflight.zone
+    await preflightWorkersDataPlane(client, options.accountId, log, warnings)
   }
 
   /* ---------------- 1. 创建 Pages 项目（数据面按部署形态决定） ---------------- */
@@ -1169,13 +1149,9 @@ export async function deployPagesSplit(
       log(`· 旧数据面项目 ${previousDataProject} 绑定了自定义域名 ${dataCustomDomain}，将自动迁移`)
     }
   }
-  // 从 Workers 换回 Pages 时，域名只可能来自清单或本次指定
-  if (dataMode === 'pages' && prevDataMode === 'workers' && !dataCustomDomain) {
-    dataCustomDomain = targetHost
-  }
 
   if (dataMode === 'workers') {
-    /* ---------- 数据面：Workers ---------- */
+    /* ---------- 数据面：Workers（**不托管自定义域名**） ---------- */
 
     // 绑定随脚本一起提交（Workers 没有 Pages 那种「先配变量再部署」的两段式）
     const workersBindings: ScriptBinding[] = [
@@ -1197,104 +1173,41 @@ export async function deployPagesSplit(
           ]),
     ]
 
-    const switchingFromPages = modeSwitched && prevDataMode === 'pages'
+    // 只部署到 *.workers.dev，不碰任何 DNS / 自定义域名。
+    const deployed = await deployWorkersDataPlane({
+      client,
+      accountId: options.accountId,
+      name: dataName,
+      code: dataCode,
+      bindings: workersBindings,
+      log,
+      warnings,
+    })
+    result.data.name = deployed.name
+    result.data.subdomain = deployed.host
 
-    /**
-     * 换形态时真正要迁到 Workers 的域名。
-     *
-     * 优先级：本次指定 > 清单里记的 > **旧 Pages 项目上现读的**（见 0c 的 oldPagesHost）。
-     *
-     * 第三档不能省：清单只记「部署时见过」的那个域名，
-     * 用户在控制台手动绑的域名不在清单里。漏掉它的后果很重 ——
-     * 下面的收尾会删除旧 Pages 项目，而**自定义域名是跟着项目走的**，
-     * 项目一删，用户唯一的访问入口就没了（订阅里的节点全部失效）。
-     */
-    const switchHost = targetHost || oldPagesHost
-    if (switchingFromPages && oldPagesHost) {
-      if (!targetHost) {
-        log(`· 将把旧 Pages 数据面的自定义域名 ${oldPagesHost} 迁移到 Workers`)
-      } else if (targetHost !== oldPagesHost) {
-        warnings.push(
-          `旧数据面的自定义域名 ${oldPagesHost} 与本次指定的 ${targetHost} 不同：\n` +
-            `  → 只有 ${targetHost} 会绑到 Workers；删除旧项目后 ${oldPagesHost} 会解绑（DNS 记录也会一起消失）。\n` +
-            '  → 想保留原域名就把「自定义域名」填成它。'
-        )
-      }
-    }
-
-    // 同一个域名不能同时挂在 Pages 项目与 Worker 上，必须先解绑旧的。
-    // 这一步会让旧实例短暂失去域名 —— 因此失败时必须回滚（见 catch）。
-    if (switchingFromPages && switchHost && oldDataName) {
-      try {
-        await client.removePagesDomain(options.accountId, oldDataName, switchHost)
-        log(`· 已从旧 Pages 数据面 ${oldDataName} 解绑域名 ${switchHost}（准备迁到 Workers）`)
-      } catch {
-        /* 旧项目可能本来就没绑这个域名 */
-      }
-    }
-
-    try {
-      const deployed = await deployWorkersDataPlane({
-        client,
-        accountId: options.accountId,
-        name: dataName,
-        code: dataCode,
-        hostname: switchHost || undefined,
-        zone: workersZone,
-        bindings: workersBindings,
-        log,
-        warnings,
-      })
-      result.data.name = deployed.name
-      result.data.subdomain = deployed.host
-      dataCustomDomain = deployed.customDomain
-    } catch (err) {
-      // 回滚：把域名还给旧 Pages 数据面，别让用户连一个不存在的域名
-      if (switchingFromPages && switchHost && oldDataName) {
-        try {
-          await client.addPagesDomain(options.accountId, oldDataName, switchHost)
-          log('· 已把域名回滚到旧 Pages 数据面')
-        } catch {
-          warnings.push(
-            `域名 ${switchHost} 回滚失败，请手动到 Cloudflare 控制台把它绑回 ${oldDataName}。`
-          )
-        }
-      }
-      // 脚本可能已经上传（绑域名失败发生在上传之后）。
-      // 说清楚「重跑不会重复建资源」，否则用户会以为要手工去控制台清理。
-      warnings.push(
-        `Workers 脚本 ${dataName} 可能已上传但未生效（未绑到可用域名）。\n` +
-          '  → 补完权限后重跑同一条命令即可：脚本名不变，会原地更新，不会重复创建。'
-      )
-      throw new Error(
-        `Workers 数据面部署失败：${err instanceof Error ? err.message : String(err)}`
-      )
-    }
-
-    // 新数据面已上线 → 删掉旧 Pages 数据面（换形态的唯一收尾动作）。
+    // 换形态：删掉旧 Pages 数据面。
     //
-    // ⚠️ 但**没有可用自定义域名时不删**：此时新数据面跑在 *.workers.dev 上，
-    // 多数网络下直连不可访问。旧 Pages 项目（及其域名）是用户唯一的可用入口，
-    // 删掉等于把「还能用」的实例亲手拆了。
-    const newHostUsable = !!result.data.subdomain && !result.data.subdomain.endsWith('.workers.dev')
-    if (switchingFromPages && oldDataName) {
-      if (!newHostUsable) {
-        warnings.push(
-          `未迁移到自定义域名（新数据面是 ${result.data.subdomain || '未知域名'}），` +
-            `因此**保留**了旧 Pages 数据面 ${oldDataName}。\n` +
-            '  → *.workers.dev 直连无法访问，节点会连不上；给它补一个自定义域名后重跑，' +
-            '迁移成功才会自动删除旧项目。'
-        )
-      } else {
-        try {
-          await client.deletePagesProject(options.accountId, oldDataName)
-          log(`✅ 已删除被替换的旧 Pages 数据面项目：${oldDataName}`)
-        } catch (err) {
+    // ⚠️ 删项目会**连带释放**它绑的自定义域名（那条 DNS 记录也随之消失，
+    // 真机验证过：删项目后再把同一主机名绑到 Worker 会直接成功）。
+    // 所以先把域名记下来，明确告诉用户重新绑到哪。
+    if (modeSwitched && prevDataMode === 'pages' && oldDataName) {
+      const oldHost = await readPagesCustomDomain(client, options.accountId, oldDataName)
+      try {
+        await client.deletePagesProject(options.accountId, oldDataName)
+        log(`✅ 已删除旧 Pages 数据面项目：${oldDataName}`)
+        if (oldHost) {
           warnings.push(
-            `删除旧 Pages 数据面失败（${oldDataName}）：${err instanceof Error ? err.message : String(err)}\n` +
-              '  → 它已经不再接收流量，可到控制台手动删除。'
+            `旧自定义域名 ${oldHost} 已随 Pages 项目一起释放（平台的连带行为，不是本工具删的）。\n` +
+              `  → 请到 Cloudflare 控制台 → Workers 和 Pages → ${deployed.name} → 设置 → 域和路由 → 添加 → 自定义域名，填 ${oldHost}\n` +
+              '  → 绑好后到面板「设置 → 数据面域名」填上它，订阅就会切过去（优先级高于 DATA_HOST）。'
           )
         }
+      } catch (err) {
+        warnings.push(
+          `删除旧 Pages 数据面失败（${oldDataName}）：${err instanceof Error ? err.message : String(err)}\n` +
+            '  → 它已经不再接收流量，可到控制台手动删除。'
+        )
       }
     }
   } else {
@@ -1327,54 +1240,21 @@ export async function deployPagesSplit(
       result.data.name = dataAttempt.project ?? options.dataProject
       result.data.subdomain = dataAttempt.subdomain
 
-      // 形态切换收尾：摘掉旧 Worker 的域名 → 绑到新 Pages 项目 → 删旧 Worker
+      // 从 Workers 换回 Pages：删掉旧 Worker。
+      // 脚本一删，它上面绑的自定义域名也随之释放 —— 需要用户重新绑到 Pages 项目。
       if (modeSwitched && prevDataMode === 'workers' && oldDataName) {
-        let detachedHost = ''
         try {
-          detachedHost = await detachWorkerHostname(client, options.accountId, oldDataName)
-          if (detachedHost) log(`· 已从旧 Workers 数据面解绑域名 ${detachedHost}`)
-        } catch {
-          /* 没有绑定就跳过 */
-        }
-
-        const host = dataCustomDomain || detachedHost
-        let moved = true
-        if (host) {
-          try {
-            await client.addPagesDomain(options.accountId, result.data.name, host)
-            log(`✅ 自定义域名已迁移到 Pages 数据面：${host}`)
-            dataCustomDomain = host
-          } catch (err) {
-            moved = false
-            warnings.push(
-              `自定义域名迁移失败（${host} → ${result.data.name}）：` +
-                `${err instanceof Error ? err.message : String(err)}\n` +
-                `  → 请手动到 Cloudflare 控制台把该域名绑到 ${result.data.name}，否则订阅地址会失效。`
-            )
-            // 迁移失败：把域名还给旧 Worker，且**不删**旧 Worker
-            try {
-              await client.attachCustomDomain(options.accountId, {
-                hostname: host,
-                service: oldDataName,
-                zoneId: (await client.listWorkerDomains(options.accountId)).find((d) => d.hostname === host)
-                  ?.zone_id ?? '',
-              })
-              log('· 已把域名回滚到旧 Workers 数据面')
-            } catch {
-              /* 回滚失败只告警，下面不再删旧 Worker */
-            }
-          }
-        }
-
-        if (moved) {
-          try {
-            await deleteWorkersDataPlane(client, options.accountId, oldDataName, log)
-          } catch (err) {
-            warnings.push(
-              `删除旧 Workers 数据面失败（${oldDataName}）：${err instanceof Error ? err.message : String(err)}\n` +
-                '  → 它已经不再接收流量，可到控制台手动删除。'
-            )
-          }
+          await deleteWorkersDataPlane(client, options.accountId, oldDataName, log)
+          warnings.push(
+            `旧 Worker ${oldDataName} 已删除，它上面的自定义域名绑定也随之释放。\n` +
+              `  → 如需继续用原来的域名，请到控制台把它绑到 Pages 项目 ${result.data.name}，\n` +
+              '  → 再到面板「设置 → 数据面域名」填上它。'
+          )
+        } catch (err) {
+          warnings.push(
+            `删除旧 Workers 数据面失败（${oldDataName}）：${err instanceof Error ? err.message : String(err)}\n` +
+              '  → 它已经不再接收流量，可到控制台手动删除。'
+          )
         }
       }
     }
@@ -1473,7 +1353,10 @@ export async function deployPagesSplit(
       controlSubdomain: result.control.subdomain,
       dataSubdomain: result.data.subdomain,
       // 自定义域名：本次迁过来的，或旧项目上原有的（下次更新还要靠它迁移）
-      dataCustomDomain: dataCustomDomain || manifest?.dataCustomDomain || '',
+      // 自定义域名：Pages 形态下由工具托管（换名时自动迁移）；
+      // Workers 形态下**不由工具托管**，写空串避免留下会误导后续迁移的旧值。
+      dataCustomDomain:
+        dataMode === 'workers' ? '' : dataCustomDomain || manifest?.dataCustomDomain || '',
       // 部署形态：更新时靠它识别「用户是否改过数据面形态」
       dataPlaneMode: dataMode,
       build,

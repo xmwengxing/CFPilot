@@ -11,7 +11,7 @@ import (
 // TestIsPermissionErr 覆盖权限错误识别。
 //
 // 这个判定决定「部署前预检是否拦下」：
-//   - 认不出 403 → 预检放行 → 又回到「先传脚本再失败」的老路
+//   - 认不出 403 → 预检放行 → 部署到一半才失败
 //   - 把网络错误当成权限错误 → 让用户去改 Token，白折腾
 func TestIsPermissionErr(t *testing.T) {
 	cases := []struct {
@@ -34,45 +34,30 @@ func TestIsPermissionErr(t *testing.T) {
 	}
 }
 
-// TestWorkersPermHintNotEmpty 保证三条权限提示都写清楚了「去哪勾什么」。
+// TestWorkersPermHintNotEmpty 保证权限提示写清楚了「去哪勾什么」。
 //
-// 提示为空等于把用户扔回一句裸的 Authentication error —— 这正是 0.12.3 的问题。
+// 提示为空等于把用户扔回一句裸的 Authentication error。
 func TestWorkersPermHintNotEmpty(t *testing.T) {
-	for name, hint := range map[string]string{
-		"scripts": workersPermHint.scripts,
-		"domains": workersPermHint.domains,
-		"dns":     workersPermHint.dns,
-	} {
-		if hint == "" {
-			t.Fatalf("%s 的权限提示为空", name)
-		}
+	if workersPermHint.scripts == "" {
+		t.Fatal("scripts 的权限提示为空")
 	}
 }
 
-// TestIsPagesLeftoverDns 覆盖「哪些 DNS 记录可以安全删掉」。
+// TestWorkersDevHost 覆盖生产域名的拼装。
 //
-// 判错一边都不行：
-//   - 漏判 → 换形态时 409 / 100117 依旧（Pages 遗留的 CNAME 没清掉）
-//   - 多判 → 把用户的业务记录删了，比部署失败严重得多
-func TestIsPagesLeftoverDns(t *testing.T) {
+// 账号没注册 workers.dev 子域时要能退回 `<name>.workers.dev` —— 否则
+// 订阅里会出现 `name..workers.dev` 这种畸形域名。
+func TestWorkersDevHost(t *testing.T) {
 	cases := []struct {
-		name string
-		rec  cfapi.DNSRecord
-		want bool
+		name, sub, want string
 	}{
-		{"Pages 遗留 CNAME", cfapi.DNSRecord{Type: "CNAME", Content: "aytwi20y.pages.dev"}, true},
-		{"大写域名", cfapi.DNSRecord{Type: "CNAME", Content: "abc.PAGES.DEV"}, true},
-		{"带尾点", cfapi.DNSRecord{Type: "CNAME", Content: "abc.pages.dev."}, true},
-		{"指向别处的 CNAME", cfapi.DNSRecord{Type: "CNAME", Content: "origin.example.net"}, false},
-		{"A 记录", cfapi.DNSRecord{Type: "A", Content: "203.0.113.9"}, false},
-		{"TXT 验证记录", cfapi.DNSRecord{Type: "TXT", Content: "verify=abc"}, false},
-		{"长得像但不以 pages.dev 结尾", cfapi.DNSRecord{Type: "CNAME", Content: "notpages.dev.evil.com"}, false},
+		{"abc123", "wxgo8609", "abc123.wxgo8609.workers.dev"},
+		{"abc123", "", "abc123.workers.dev"},
+		{"abc123", "   ", "abc123.workers.dev"},
 	}
 	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := isPagesLeftoverDns(c.rec); got != c.want {
-				t.Fatalf("isPagesLeftoverDns(%v) = %v, want %v", c.rec, got, c.want)
-			}
-		})
+		if got := workersDevHost(c.name, c.sub); got != c.want {
+			t.Fatalf("workersDevHost(%q,%q) = %q, want %q", c.name, c.sub, got, c.want)
+		}
 	}
 }

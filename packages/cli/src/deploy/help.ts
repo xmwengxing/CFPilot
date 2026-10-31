@@ -24,9 +24,9 @@ ${NAME} deploy —— 双面部署（控制面 Pages + 数据面 Pages/Workers�
   --data <name>          数据面名称（Pages 项目名 / Worker 脚本名，默认随机）
   --data-plane <mode>    数据面部署形态：pages（默认）/ workers
                          不传 = 沿用部署清单里记录的形态；
-                         显式传且与清单不同 = 切换形态（新数据面上线后自动删除旧的并迁移域名）
-  --data-host <host>     Workers 数据面的自定义域名（如 w1a2b3c4.example.com）
-                         ⚠️ *.workers.dev 直连不可访问，不给域名会告警
+                         显式传且与清单不同 = 切换形态（新数据面上线后自动删除旧的）
+                         ⚠️ workers 模式只部署到 *.workers.dev，**自定义域名要你自己到
+                            控制台绑**，绑好后到面板「设置 → 数据面域名」填一次即可
   --panel-path <path>    面板访问路径（默认随机）
   --mode <mode>          部署模式：auto（默认，自动判断）/ fresh（强制首次）/ update（强制更新）
   --force                忽略版本检查，强制重新部署
@@ -74,7 +74,5 @@ Token 所需权限:
   Account / Pages / Edit              创建项目、配置变量、触发部署
   Account / Workers KV Storage / Edit 创建 KV（若未提供 --kv）
   Account / Workers Scripts / Edit    部署 Workers 数据面（--data-plane workers）
-  Zone / Workers Routes / Edit        绑定 Workers 自定义域名（--data-host）
-  Zone / DNS / Edit                   仅换形态时清理 Pages 遗留的 DNS 记录
-                                      （绑全新子域不需要；控制台里权限项就叫 DNS）
+                                      （不需要 Workers Routes / DNS —— 工具不碰自定义域名）
 `

@@ -122,8 +122,6 @@ type deployRequest struct {
 	// 界面**总是**发送当前选中的值，并在读取部署状态时把清单里的形态回填到
 	// 单选框 —— 否则「一个 Workers 实例被顺手更新一次」就会被悄悄改成 Pages。
 	DataPlaneMode string `json:"dataPlaneMode"`
-	// DataHost 是 Workers 数据面的自定义域名（只对 workers 生效）
-	DataHost string `json:"dataHost"`
 
 	// KVNamespaceID 可选，留空用当前账户里保存的
 	KVNamespaceID string `json:"kvNamespaceId"`
@@ -216,9 +214,6 @@ func (s *Server) handleDeployRun(w http.ResponseWriter, r *http.Request) {
 	plane := strings.ToLower(strings.TrimSpace(req.DataPlaneMode))
 	if plane == "pages" || plane == "workers" {
 		opt.DataPlaneMode = plane
-	}
-	if opt.DataPlaneMode == "workers" {
-		opt.DataHost = strings.TrimSpace(req.DataHost)
 	}
 	opt.Force = req.ForceKv
 	opt.ControlProject = req.ControlProject

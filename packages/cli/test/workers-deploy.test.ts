@@ -1,69 +1,30 @@
 /**
  * Workers 数据面部署原语的单元测试。
  *
- * 只测**纯逻辑**（zone 归属判定）：
- * 真正上传 / 绑域名要打真实 API，放在 live 测试里做，
+ * 只测**纯逻辑**与权限判定：真正上传要打真实 API，放在真机验证里做，
  * 否则单测会变成「网络抖动即失败」的噪声源。
+ *
+ * 2026-10-31 重构：工具不再托管自定义域名（不绑 domain、不清 DNS），
+ * 因此这里不再有 zone / DNS 相关用例 —— 那些代码已经删掉了。
  */
 import { describe, expect, it } from 'vitest'
 import { CloudflareError, type CloudflareClient } from '../src/deploy/cf-api'
 import {
-  clearPagesLeftoverDns,
   describeWorkersPermissionError,
-  preflightWorkersDataPlane,
   isPermissionError,
-  resolveZoneForHost,
+  preflightWorkersDataPlane,
+  workersDevHost,
   WORKERS_COMPAT_DATE,
 } from '../src/deploy/workers-deploy'
 
-/** 只实现 listZones 的最小假客户端 */
-function fakeClient(zones: Array<{ id: string; name: string }>): CloudflareClient {
-  return { listZones: async () => zones } as unknown as CloudflareClient
-}
-
-const ZONES = [
-  { id: 'z-example', name: 'example.com' },
-  { id: 'z-sub', name: 'b.example.com' },
-  { id: 'z-other', name: 'other.net' },
-]
-
-describe('resolveZoneForHost', () => {
-  it('精确匹配顶点域名', async () => {
-    const zone = await resolveZoneForHost(fakeClient(ZONES), 'example.com')
-    expect(zone).toEqual({ id: 'z-example', name: 'example.com' })
+describe('workersDevHost', () => {
+  it('有子域时拼成 <name>.<sub>.workers.dev', () => {
+    expect(workersDevHost('abc123', 'wxgo8609')).toBe('abc123.wxgo8609.workers.dev')
   })
 
-  it('子域按最长后缀匹配（不能命中更短的顶点域）', async () => {
-    const zone = await resolveZoneForHost(fakeClient(ZONES), 'w1.b.example.com')
-    expect(zone?.id).toBe('z-sub')
-  })
-
-  it('单层子域命中顶点域', async () => {
-    const zone = await resolveZoneForHost(fakeClient(ZONES), 'w1.example.com')
-    expect(zone?.id).toBe('z-example')
-  })
-
-  it('大小写与空白不影响判定', async () => {
-    const zone = await resolveZoneForHost(fakeClient(ZONES), '  W1.Example.COM ')
-    expect(zone?.id).toBe('z-example')
-  })
-
-  it('不在任何 zone 下时返回 null（调用方据此拒绝绑定）', async () => {
-    const zone = await resolveZoneForHost(fakeClient(ZONES), 'w1.unknown.org')
-    expect(zone).toBeNull()
-  })
-
-  it('相似但不同后缀的域名不能被误判', async () => {
-    // notexample.com 以 example.com 结尾但不是它的子域
-    const zone = await resolveZoneForHost(fakeClient(ZONES), 'notexample.com')
-    expect(zone).toBeNull()
-  })
-})
-
-describe('WORKERS_COMPAT_DATE', () => {
-  it('必须是可复现的固定日期（不能是当天）', () => {
-    expect(WORKERS_COMPAT_DATE).toMatch(/^\d{4}-\d{2}-\d{2}$/)
-    expect(WORKERS_COMPAT_DATE).not.toBe(new Date().toISOString().slice(0, 10))
+  it('没注册子域时退回 <name>.workers.dev（调用方会告警）', () => {
+    expect(workersDevHost('abc123', '')).toBe('abc123.workers.dev')
+    expect(workersDevHost('abc123', '   ')).toBe('abc123.workers.dev')
   })
 })
 
@@ -78,149 +39,63 @@ describe('权限错误识别', () => {
     expect(isPermissionError(new Error('dial timeout'))).toBe(false)
   })
 
-  it('权限错误必须给出「去哪勾什么」，而不是裸的 Authentication error', () => {
+  it('权限错误必须给出「去哪勾什么」', () => {
     const message = describeWorkersPermissionError(
       new CloudflareError('Authentication error', 403),
-      'domains'
+      'scripts'
     )
     expect(message).toBeTruthy()
-    expect(message).toContain('Workers Routes')
+    expect(message).toContain('Workers Scripts')
     expect(message).toContain('Edit')
   })
 
   it('非权限错误返回 null（交给调用方按普通失败处理）', () => {
-    expect(describeWorkersPermissionError(new CloudflareError('boom', 500), 'dns')).toBeNull()
+    expect(describeWorkersPermissionError(new CloudflareError('boom', 500), 'scripts')).toBeNull()
   })
 })
 
-describe('clearPagesLeftoverDns（409/100117 的修法）', () => {
-  /** 造一个只实现 DNS 读写的假客户端，并记录被删的记录 */
-  function fakeDns(records: Array<Record<string, unknown>>) {
-    const deleted: string[] = []
+describe('preflightWorkersDataPlane', () => {
+  it('缺 Workers 脚本权限 → 在创建任何资源之前中止', async () => {
     const client = {
-      getDnsRecords: async () => records,
-      deleteDnsRecord: async (_zone: string, id: string) => {
-        deleted.push(id)
-      },
-    } as unknown as CloudflareClient
-    return { client, deleted }
-  }
-
-  it('删掉指向 *.pages.dev 的 CNAME（Pages 绑定的遗留）', async () => {
-    const { client, deleted } = fakeDns([
-      { id: 'r1', type: 'CNAME', name: 'data.example.com', content: 'aytwi20y.pages.dev', proxied: true },
-    ])
-    const warnings: string[] = []
-    await clearPagesLeftoverDns(client, 'z1', 'data.example.com', () => {}, warnings)
-    expect(deleted).toEqual(['r1'])
-    expect(warnings.join('')).toContain('Pages 遗留')
-  })
-
-  it('不删用户的业务记录，而是报错说清楚要删哪条', async () => {
-    const { client, deleted } = fakeDns([
-      { id: 'r2', type: 'A', name: 'data.example.com', content: '203.0.113.9' },
-    ])
-    await expect(
-      clearPagesLeftoverDns(client, 'z1', 'data.example.com', () => {}, [])
-    ).rejects.toThrow(/没有任何现存记录|100117/)
-    expect(deleted).toEqual([])
-  })
-
-  it('混合场景：只删 pages 遗留，仍因其它记录而中止', async () => {
-    const { client, deleted } = fakeDns([
-      { id: 'r1', type: 'CNAME', name: 'data.example.com', content: 'old.pages.dev' },
-      { id: 'r3', type: 'TXT', name: 'data.example.com', content: 'verify=abc' },
-    ])
-    await expect(
-      clearPagesLeftoverDns(client, 'z1', 'data.example.com', () => {}, [])
-    ).rejects.toThrow(/TXT/)
-    expect(deleted).toEqual(['r1'])
-  })
-
-  it('没有记录时是空操作（新建子域不该被打扰）', async () => {
-    const { client, deleted } = fakeDns([])
-    await clearPagesLeftoverDns(client, 'z1', 'w1.example.com', () => {}, [])
-    expect(deleted).toEqual([])
-  })
-
-  it('令牌没有 Zone/DNS 权限时不阻断部署，只告警', async () => {
-    // 真机：读 dns_records 返回 403 Authentication error，旧实现会让整条部署中断
-    const client = {
-      getDnsRecords: async () => {
+      listScripts: async () => {
         throw new CloudflareError('Authentication error', 403)
       },
-      deleteDnsRecord: async () => {},
+      getWorkersSubdomain: async () => 'wxgo8609',
     } as unknown as CloudflareClient
-    const warnings: string[] = []
-    const logs: string[] = []
-    await expect(
-      clearPagesLeftoverDns(client, 'z1', 'data.example.com', (m) => logs.push(m), warnings)
-    ).resolves.toBeUndefined()
-    expect(warnings.join('')).toContain('Zone / DNS')
-    expect(logs.join('')).toContain('跳过残留清理')
+
+    await expect(preflightWorkersDataPlane(client, 'acct', () => {}, [])).rejects.toThrow(
+      /Workers Scripts/
+    )
   })
 
-  it('同 zone 下别的主机名不受影响', async () => {
-    const { client, deleted } = fakeDns([
-      { id: 'r9', type: 'CNAME', name: 'other.example.com', content: 'x.pages.dev' },
-    ])
-    await clearPagesLeftoverDns(client, 'z1', 'data.example.com', () => {}, [])
-    expect(deleted).toEqual([])
+  it('没有 workers.dev 子域 → 只告警（还能部署，但节点域名不可用）', async () => {
+    const client = {
+      listScripts: async () => [],
+      getWorkersSubdomain: async () => '',
+    } as unknown as CloudflareClient
+
+    const warnings: string[] = []
+    await preflightWorkersDataPlane(client, 'acct', () => {}, warnings)
+    expect(warnings.join('')).toContain('workers.dev')
+  })
+
+  it('权限与子域都正常 → 不告警', async () => {
+    const client = {
+      listScripts: async () => [{ id: 'a' }, { id: 'b' }],
+      getWorkersSubdomain: async () => 'wxgo8609',
+    } as unknown as CloudflareClient
+
+    const warnings: string[] = []
+    const logs: string[] = []
+    await preflightWorkersDataPlane(client, 'acct', (m) => logs.push(m), warnings)
+    expect(warnings).toEqual([])
+    expect(logs.join('')).toContain('wxgo8609')
   })
 })
 
-describe('preflightWorkersDataPlane：换形态时的 DNS 硬门槛', () => {
-  function fakeClient(opts: { dnsThrows?: boolean } = {}) {
-    return {
-      listScripts: async () => [],
-      listWorkerDomains: async () => [],
-      listZones: async () => [{ id: 'z1', name: 'example.com' }],
-      getDnsRecords: async () => {
-        if (opts.dnsThrows) throw new CloudflareError('Authentication error', 403)
-        return []
-      },
-    } as unknown as CloudflareClient
-  }
-
-  it('换形态 + 读不到 DNS → 在动线上域名之前就拦下', async () => {
-    // 真机：令牌没有 DNS，0.12.8 会先解绑线上域名、传脚本、再失败回滚，
-    // 每次尝试白掉十几秒可用性。这里必须提前拦。
-    await expect(
-      preflightWorkersDataPlane(
-        fakeClient({ dnsThrows: true }),
-        'acct',
-        'data.example.com',
-        () => {},
-        [],
-        { expectLeftoverDns: true }
-      )
-    ).rejects.toThrow(/换一个新子域/)
-  })
-
-  it('全新子域 + 读不到 DNS → 只告警，继续部署', async () => {
-    const warnings: string[] = []
-    const result = await preflightWorkersDataPlane(
-      fakeClient({ dnsThrows: true }),
-      'acct',
-      'w1.example.com',
-      () => {},
-      warnings,
-      { expectLeftoverDns: false }
-    )
-    expect(result.zone).toEqual({ id: 'z1', name: 'example.com' })
-    expect(result.dnsReadable).toBe(false)
-    expect(warnings.length).toBeGreaterThan(0)
-  })
-
-  it('DNS 可读时返回 dnsReadable=true', async () => {
-    const result = await preflightWorkersDataPlane(
-      fakeClient(),
-      'acct',
-      'w1.example.com',
-      () => {},
-      [],
-      { expectLeftoverDns: true }
-    )
-    expect(result.dnsReadable).toBe(true)
+describe('WORKERS_COMPAT_DATE', () => {
+  it('必须是可复现的固定日期（不能是当天）', () => {
+    expect(WORKERS_COMPAT_DATE).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    expect(WORKERS_COMPAT_DATE).not.toBe(new Date().toISOString().slice(0, 10))
   })
 })

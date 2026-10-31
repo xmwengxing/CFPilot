@@ -309,10 +309,6 @@ export async function runDeployCommand(args: ParsedArgs): Promise<void> {
     return
   }
   const dataPlaneMode = dataPlaneRaw ? (dataPlaneRaw as 'pages' | 'workers') : undefined
-  const dataHost = flagString(args, 'data-host') || ''
-  if (dataHost && dataPlaneMode !== 'workers') {
-    process.stderr.write('· --data-host 只对 --data-plane workers 生效，已忽略\n')
-  }
   // 默认沿用旧凭据：客户端订阅地址不变。显式传参则覆盖。
   const keepCredentials = !flagBool(args, 'new-credentials')
   const skipSameVersion = !flagBool(args, 'force')
@@ -348,7 +344,6 @@ export async function runDeployCommand(args: ParsedArgs): Promise<void> {
     enableXhttp: true,
     // 数据面形态：不传 = 沿用清单；显式传且与清单不一致 = 切换形态
     dataPlaneMode,
-    dataHost: dataPlaneMode === 'workers' ? dataHost : undefined,
     mode,
     keepCredentials,
     skipSameVersion,

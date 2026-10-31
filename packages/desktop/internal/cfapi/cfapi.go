@@ -1042,19 +1042,35 @@ func (c *Client) ListScripts(ctx context.Context, accountID string) ([]string, e
 	return names, nil
 }
 
-// ListDNSRecords 读 zone 下的 DNS 记录（仅用于权限预检）。
+// DNSRecord 是 zone 下的一条 DNS 记录。
+type DNSRecord struct {
+	ID      string `json:"id"`
+	Type    string `json:"type"`
+	Name    string `json:"name"`
+	Content string `json:"content"`
+	Proxied bool   `json:"proxied"`
+}
+
+// ListDNSRecords 读 zone 下的 DNS 记录。
 //
-// 绑定 Worker 自定义域名时 Cloudflare 会自动建一条 DNS 记录，
-// 因此令牌必须有 Zone / DNS / Edit；用读接口做代理探测，
-// 403 基本等价于「写也写不了」。
-func (c *Client) ListDNSRecords(ctx context.Context, zoneID, name string) (int, error) {
-	path := fmt.Sprintf("/zones/%s/dns_records?per_page=1", url.PathEscape(zoneID))
+// 两个用途：
+//   - 权限预检（403 基本等价于「写也写不了」）
+//   - 换形态前清理 Pages 遗留记录（CNAME → *.pages.dev），否则绑 Worker
+//     自定义域名会返回 409 / 100117
+func (c *Client) ListDNSRecords(ctx context.Context, zoneID, name string) ([]DNSRecord, error) {
+	path := fmt.Sprintf("/zones/%s/dns_records?per_page=100", url.PathEscape(zoneID))
 	if name != "" {
 		path += "&name=" + url.QueryEscape(name)
 	}
-	var out []map[string]any
+	var out []DNSRecord
 	if err := c.doJSON(ctx, http.MethodGet, path, nil, &out); err != nil {
-		return 0, err
+		return nil, err
 	}
-	return len(out), nil
+	return out, nil
+}
+
+// DeleteDNSRecord 删除一条 DNS 记录（需要 Zone / DNS / Edit）。
+func (c *Client) DeleteDNSRecord(ctx context.Context, zoneID, recordID string) error {
+	return c.doJSON(ctx, http.MethodDelete,
+		fmt.Sprintf("/zones/%s/dns_records/%s", url.PathEscape(zoneID), url.PathEscape(recordID)), nil, nil)
 }

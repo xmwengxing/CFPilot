@@ -216,6 +216,114 @@ func (d *Deployer) preflightWorkersDataPlane(ctx context.Context, hostname strin
 	return zone, nil
 }
 
+// isPagesLeftoverDns 判断一条 DNS 记录是否是 Pages 绑定留下的。
+//
+// 判据：CNAME 且指向 *.pages.dev。其余记录一律不动 —— 那可能是用户自己的
+// 业务记录，删错了比部署失败严重得多。
+func isPagesLeftoverDns(r cfapi.DNSRecord) bool {
+	return r.Type == "CNAME" && strings.HasSuffix(strings.ToLower(strings.TrimSuffix(r.Content, ".")), ".pages.dev")
+}
+
+// clearPagesLeftoverDns 清理 Pages 绑定留下的 DNS 记录。
+//
+// ## 为什么必须有这一步（真机 409 / code 100117）
+//
+// Pages 给项目绑自定义域名时会自动建一条 CNAME（指向 `<项目>.pages.dev`）。
+// 解绑 Pages 域名时**这条 DNS 记录不一定会被删掉** —— 于是紧接着去绑
+// Worker 自定义域名就会撞：
+//
+//	Hostname 'x.example.com' already has externally managed DNS records
+//	(A, CNAME, etc). Delete them first or try a different hostname.
+//	（HTTP 409，code 100117）
+//
+// 也就是说「解绑 Pages 域名」只释放了项目侧占用，**没有释放主机名本身**。
+// 换形态（Pages → Workers）必然踩到，因为两边用的是同一个域名。
+func (d *Deployer) clearPagesLeftoverDns(ctx context.Context, zoneID, hostname string) error {
+	records, err := d.client.ListDNSRecords(ctx, zoneID, hostname)
+	if err != nil {
+		return err
+	}
+	var leftovers, others []cfapi.DNSRecord
+	for _, r := range records {
+		if !strings.EqualFold(r.Name, hostname) {
+			continue
+		}
+		if isPagesLeftoverDns(r) {
+			leftovers = append(leftovers, r)
+		} else {
+			others = append(others, r)
+		}
+	}
+
+	for _, r := range leftovers {
+		if err := d.client.DeleteDNSRecord(ctx, zoneID, r.ID); err != nil {
+			return fmt.Errorf("清理 Pages 遗留 DNS 记录失败（%s %s）：%w", r.Type, r.Content, err)
+		}
+		d.log(fmt.Sprintf("· 已清理 Pages 遗留的 DNS 记录：%s %s → %s", r.Type, r.Name, r.Content))
+	}
+	if len(leftovers) > 0 {
+		d.warn(fmt.Sprintf(
+			"已删除 %s 上 %d 条 Pages 遗留的 DNS 记录（CNAME → *.pages.dev）。\n"+
+				"  → 这些记录原本指向旧的 Pages 数据面，迁移到 Workers 后由 Workers 自己接管该主机名。",
+			hostname, len(leftovers)))
+	}
+
+	if len(others) > 0 {
+		parts := make([]string, 0, len(others))
+		for _, r := range others {
+			parts = append(parts, r.Type+" "+r.Content)
+		}
+		return fmt.Errorf(
+			"%s 上还有 %d 条非 Pages 的 DNS 记录（%s）。\n"+
+				"  → Workers 自定义域名要求该主机名**没有任何现存记录**，否则会返回 409 / 100117。\n"+
+				"  → 请到 Cloudflare 控制台 → DNS 里删掉它们，或换一个没用过的子域。",
+			hostname, len(others), strings.Join(parts, "、"))
+	}
+	return nil
+}
+
+// attachWorkerDomainWithRetry 绑定自定义域名，100117 时短暂重试。
+//
+// 刚删掉的 DNS 记录在边缘侧生效有延迟，409 会短暂残留 —— 直接失败太武断。
+func (d *Deployer) attachWorkerDomainWithRetry(
+	ctx context.Context, hostname, service, zoneID string,
+) (*cfapi.WorkerDomain, error) {
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		domain, err := d.client.AttachWorkerDomain(ctx, d.opt.AccountID, hostname, service, zoneID)
+		if err == nil {
+			return domain, nil
+		}
+		lastErr = err
+		msg := strings.ToLower(err.Error())
+		transient := strings.Contains(msg, "100117") || strings.Contains(msg, "externally managed")
+		if !transient || attempt == maxAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(3 * time.Second):
+		}
+	}
+
+	if isPermissionErr(lastErr) {
+		return nil, fmt.Errorf(
+			"绑定自定义域名 %s 被拒绝（权限不足）。\n  → %s\n  → %s\n"+
+				"  → 也可以先不绑域名：把「自定义域名」留空，部署到 *.workers.dev（多数网络下直连不可访问）。",
+			hostname, workersPermHint.domains, workersPermHint.dns)
+	}
+	msg := strings.ToLower(lastErr.Error())
+	if strings.Contains(msg, "100117") || strings.Contains(msg, "externally managed") {
+		return nil, fmt.Errorf(
+			"%s 上仍有 DNS 记录占用，Workers 无法接管该主机名（HTTP 409 / 100117）。\n"+
+				"  → 请到 Cloudflare 控制台 → 该域名的 DNS 页，删除这个主机名下的记录后重试；\n"+
+				"  → 或换一个没用过的子域（如 w1.你的域名）。", hostname)
+	}
+	return nil, lastErr
+}
+
 // deployWorkersDataPlane 上传脚本 → 绑域名（或开 workers.dev）→ 校验可达。
 //
 // 返回客户端要连的域名与绑定的自定义域名（没绑则空串）。
@@ -243,13 +351,13 @@ func (d *Deployer) deployWorkersDataPlane(
 				"域名 %s 不在本账号的任何 zone 下，无法绑定为 Worker 自定义域名。"+
 					"请确认该域名的 DNS 托管在这个 Cloudflare 账号里", hostname)
 		}
-		if _, aerr := d.client.AttachWorkerDomain(ctx, d.opt.AccountID, hostname, name, target.ID); aerr != nil {
-			if isPermissionErr(aerr) {
-				return "", "", fmt.Errorf(
-					"绑定自定义域名 %s 被拒绝（权限不足）。\n  → %s\n  → %s\n"+
-						"  → 也可以先不绑域名：把「自定义域名」留空，部署到 *.workers.dev（多数网络下直连不可访问）。",
-					hostname, workersPermHint.domains, workersPermHint.dns)
-			}
+
+		// ⚠️ 绑之前必须先清掉 Pages 遗留的 DNS 记录，否则必然 409 / 100117：
+		// 「解绑 Pages 域名」只释放项目侧占用，那条指向 *.pages.dev 的 CNAME 还在。
+		if cerr := d.clearPagesLeftoverDns(ctx, target.ID, hostname); cerr != nil {
+			return "", "", cerr
+		}
+		if _, aerr := d.attachWorkerDomainWithRetry(ctx, hostname, name, target.ID); aerr != nil {
 			return "", "", aerr
 		}
 		d.log("✅ 已绑定自定义域名 " + hostname)

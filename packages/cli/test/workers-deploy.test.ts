@@ -8,6 +8,7 @@
 import { describe, expect, it } from 'vitest'
 import { CloudflareError, type CloudflareClient } from '../src/deploy/cf-api'
 import {
+  clearPagesLeftoverDns,
   describeWorkersPermissionError,
   isPermissionError,
   resolveZoneForHost,
@@ -88,5 +89,64 @@ describe('权限错误识别', () => {
 
   it('非权限错误返回 null（交给调用方按普通失败处理）', () => {
     expect(describeWorkersPermissionError(new CloudflareError('boom', 500), 'dns')).toBeNull()
+  })
+})
+
+describe('clearPagesLeftoverDns（409/100117 的修法）', () => {
+  /** 造一个只实现 DNS 读写的假客户端，并记录被删的记录 */
+  function fakeDns(records: Array<Record<string, unknown>>) {
+    const deleted: string[] = []
+    const client = {
+      getDnsRecords: async () => records,
+      deleteDnsRecord: async (_zone: string, id: string) => {
+        deleted.push(id)
+      },
+    } as unknown as CloudflareClient
+    return { client, deleted }
+  }
+
+  it('删掉指向 *.pages.dev 的 CNAME（Pages 绑定的遗留）', async () => {
+    const { client, deleted } = fakeDns([
+      { id: 'r1', type: 'CNAME', name: 'data.example.com', content: 'aytwi20y.pages.dev', proxied: true },
+    ])
+    const warnings: string[] = []
+    await clearPagesLeftoverDns(client, 'z1', 'data.example.com', () => {}, warnings)
+    expect(deleted).toEqual(['r1'])
+    expect(warnings.join('')).toContain('Pages 遗留')
+  })
+
+  it('不删用户的业务记录，而是报错说清楚要删哪条', async () => {
+    const { client, deleted } = fakeDns([
+      { id: 'r2', type: 'A', name: 'data.example.com', content: '203.0.113.9' },
+    ])
+    await expect(
+      clearPagesLeftoverDns(client, 'z1', 'data.example.com', () => {}, [])
+    ).rejects.toThrow(/没有任何现存记录|100117/)
+    expect(deleted).toEqual([])
+  })
+
+  it('混合场景：只删 pages 遗留，仍因其它记录而中止', async () => {
+    const { client, deleted } = fakeDns([
+      { id: 'r1', type: 'CNAME', name: 'data.example.com', content: 'old.pages.dev' },
+      { id: 'r3', type: 'TXT', name: 'data.example.com', content: 'verify=abc' },
+    ])
+    await expect(
+      clearPagesLeftoverDns(client, 'z1', 'data.example.com', () => {}, [])
+    ).rejects.toThrow(/TXT/)
+    expect(deleted).toEqual(['r1'])
+  })
+
+  it('没有记录时是空操作（新建子域不该被打扰）', async () => {
+    const { client, deleted } = fakeDns([])
+    await clearPagesLeftoverDns(client, 'z1', 'w1.example.com', () => {}, [])
+    expect(deleted).toEqual([])
+  })
+
+  it('同 zone 下别的主机名不受影响', async () => {
+    const { client, deleted } = fakeDns([
+      { id: 'r9', type: 'CNAME', name: 'other.example.com', content: 'x.pages.dev' },
+    ])
+    await clearPagesLeftoverDns(client, 'z1', 'data.example.com', () => {}, [])
+    expect(deleted).toEqual([])
   })
 })

@@ -48,3 +48,31 @@ func TestWorkersPermHintNotEmpty(t *testing.T) {
 		}
 	}
 }
+
+// TestIsPagesLeftoverDns 覆盖「哪些 DNS 记录可以安全删掉」。
+//
+// 判错一边都不行：
+//   - 漏判 → 换形态时 409 / 100117 依旧（Pages 遗留的 CNAME 没清掉）
+//   - 多判 → 把用户的业务记录删了，比部署失败严重得多
+func TestIsPagesLeftoverDns(t *testing.T) {
+	cases := []struct {
+		name string
+		rec  cfapi.DNSRecord
+		want bool
+	}{
+		{"Pages 遗留 CNAME", cfapi.DNSRecord{Type: "CNAME", Content: "aytwi20y.pages.dev"}, true},
+		{"大写域名", cfapi.DNSRecord{Type: "CNAME", Content: "abc.PAGES.DEV"}, true},
+		{"带尾点", cfapi.DNSRecord{Type: "CNAME", Content: "abc.pages.dev."}, true},
+		{"指向别处的 CNAME", cfapi.DNSRecord{Type: "CNAME", Content: "origin.example.net"}, false},
+		{"A 记录", cfapi.DNSRecord{Type: "A", Content: "203.0.113.9"}, false},
+		{"TXT 验证记录", cfapi.DNSRecord{Type: "TXT", Content: "verify=abc"}, false},
+		{"长得像但不以 pages.dev 结尾", cfapi.DNSRecord{Type: "CNAME", Content: "notpages.dev.evil.com"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isPagesLeftoverDns(c.rec); got != c.want {
+				t.Fatalf("isPagesLeftoverDns(%v) = %v, want %v", c.rec, got, c.want)
+			}
+		})
+	}
+}

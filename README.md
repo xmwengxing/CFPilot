@@ -41,7 +41,7 @@
 
 > 全自动化：填 Token  → 自动部署  → 自动优选换 IP → 自动更新内核 → 日常维护 。
 >
-> 1. 全自动化使用需获取 Cloudflare Api Token 至少**三个权限** 。
+> 1. 全自动化使用需获取 Cloudflare Api Token 至少**三个权限**（数据面选 Workers 时是**六个**，见下文权限表）。
 > 2. **控制面 + 数据面必须分开**（控制面固定 Pages；数据面可选 Pages 或 Workers）。
 >    选 Workers 时**必须**配一个自有域名，`*.workers.dev` 直连不可访问。
 > 3. **不要与其它项目共用 KV** 。
@@ -415,6 +415,18 @@ npx -y cfpilot@latest scan
 | **Workers KV Storage Write** | Edit | 建 KV、读写部署清单与 `CONFIG`               |
 | **Pages Write**              | Edit | 建/删 Pages 项目、上传内核、绑 KV、配环境变量、绑自定义域名 |
 | **Account API Tokens**       | Read | 可选，仅用于显示 Token 有效期                  |
+
+**数据面用 Workers 模式时，还要再加三项**（缺任何一项都会在部署**开始前**被拦下）：
+
+| 权限项（控制台显示名）             | 级别   | 分类      | 用途                          |
+| ----------------------- | ---- | ------- | --------------------------- |
+| **Workers Scripts**     | Edit | Account | 上传 / 更新数据面 Worker 脚本        |
+| **Workers Routes**      | Edit | Zone    | 绑定 Worker 自定义域名（`/workers/domains`） |
+| **DNS**                 | Edit | Zone    | 自定义域名时自动创建 DNS 记录           |
+
+> Workers 模式的 zone 类权限要**覆盖你实际使用的那个域名**：控制台里可以选
+> 「所有区域」，也可以只勾目标域名 —— 只勾一个别的域名不算数。
+> 用 `cfpilot token --check --data-plane workers --zone 你的域名` 可以先验证一遍。
 
 <details>
 <summary><b>📋 点开看「照着勾」的图解</b>（哪些必勾 / 哪些不用勾 / 操作步骤）</summary>

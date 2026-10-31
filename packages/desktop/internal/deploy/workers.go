@@ -15,6 +15,7 @@ package deploy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -121,11 +122,105 @@ func probeHost(host string, timeout time.Duration) bool {
 	}
 }
 
+// workersPermHint 是 Workers 模式额外需要的权限（比 Pages 多三项）。
+//
+// 绑定自定义域名要 PUT /accounts/{id}/workers/domains，
+// 它同时依赖账号级 Workers Routes 与域级 DNS —— 与 Pages 用的三项权限完全不相交。
+var workersPermHint = struct {
+	scripts string
+	domains string
+	dns     string
+}{
+	scripts: "Token 中添加 Account / Workers Scripts / Edit",
+	domains: "Token 中添加 Account / Workers Routes / Edit（账号级）",
+	dns:     "Token 中添加 Zone / DNS / Edit（自定义域名要自动建 DNS 记录）",
+}
+
+// isPermissionErr 判断是否是 401/403 类权限错误。
+func isPermissionErr(err error) bool {
+	var apiErr *cfapi.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Status == 401 || apiErr.Status == 403
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "403") || strings.Contains(msg, "401") ||
+		strings.Contains(msg, "authentication error") || strings.Contains(msg, "permission")
+}
+
+// preflightWorkersDataPlane 部署前权限预检（只读，不创建任何资源）。
+//
+// ## 为什么必须先预检
+//
+// 改动前的行为：脚本上传成功 → 绑域名 403 → 整条部署抛出 →
+// 控制面根本没部署，账号里留下一个没域名、不接流量的孤儿 Worker。
+// 用户只看到「部署失败」，既不知道是权限问题，也不知道要清理什么。
+//
+// 现在缺权限**在上传任何东西之前**就中止，并直接告诉用户缺哪一项。
+func (d *Deployer) preflightWorkersDataPlane(ctx context.Context, hostname string) (*cfapi.Zone, error) {
+	d.log("· 预检 Workers 数据面所需权限…")
+
+	if _, err := d.client.ListScripts(ctx, d.opt.AccountID); err != nil {
+		if isPermissionErr(err) {
+			return nil, fmt.Errorf("Token 缺少「Workers 脚本」权限（%v）。\n"+
+				"  → %s\n"+
+				"  → Workers 模式比 Pages 模式多需要这几项权限；不想加权限就把数据面部署模式改回 Pages。",
+				err, workersPermHint.scripts)
+		}
+		d.warn(fmt.Sprintf("无法读取 Workers 脚本列表：%v", err))
+	} else {
+		d.log("  · Workers 脚本权限正常")
+	}
+
+	if _, err := d.client.ListWorkerDomains(ctx, d.opt.AccountID); err != nil {
+		if isPermissionErr(err) {
+			return nil, fmt.Errorf("Token 缺少「Workers 自定义域名」权限（%v）。\n"+
+				"  → %s\n"+
+				"  → Workers 模式比 Pages 模式多需要这几项权限；不想加权限就把数据面部署模式改回 Pages。",
+				err, workersPermHint.domains)
+		}
+		d.warn(fmt.Sprintf("无法读取 Workers 自定义域名列表：%v", err))
+	} else {
+		d.log("  · Workers 自定义域名权限正常")
+	}
+
+	if hostname == "" {
+		return nil, nil
+	}
+
+	zone, err := d.resolveZoneForHost(ctx, hostname)
+	if err != nil {
+		return nil, err
+	}
+	if zone == nil {
+		return nil, fmt.Errorf(
+			"域名 %s 不在本账号的任何 zone 下，无法绑定为 Worker 自定义域名。\n"+
+				"  → Workers 自定义域名不支持外部 CNAME，域名的 DNS 必须托管在这个 Cloudflare 账号里。\n"+
+				"  → 换一个本账号下的域名，或把数据面部署模式改回 Pages（*.pages.dev 不需要自有域名）。",
+			hostname)
+	}
+	d.log("  · 域名 " + hostname + " 归属 zone " + zone.Name)
+
+	// DNS 只告警不阻断：读不到也可能是「只有 Edit 没有 Read」的令牌组合，
+	// 那种令牌其实能建记录。真正的失败留给绑定时那一次调用。
+	if _, derr := d.client.ListDNSRecords(ctx, zone.ID, hostname); derr != nil {
+		if isPermissionErr(derr) {
+			d.warn("可能缺少 Zone / DNS 权限（" + workersPermHint.dns + "）\n" +
+				"  → 绑定域名时若报权限错误，补这一项即可。")
+		} else {
+			d.warn(fmt.Sprintf("无法读取 DNS 记录：%v", derr))
+		}
+	} else {
+		d.log("  · Zone DNS 权限正常")
+	}
+
+	return zone, nil
+}
+
 // deployWorkersDataPlane 上传脚本 → 绑域名（或开 workers.dev）→ 校验可达。
 //
 // 返回客户端要连的域名与绑定的自定义域名（没绑则空串）。
 func (d *Deployer) deployWorkersDataPlane(
-	ctx context.Context, name string, eff effective, hostname string,
+	ctx context.Context, name string, eff effective, hostname string, zone *cfapi.Zone,
 ) (host string, customDomain string, err error) {
 	d.log("· 上传 Workers 数据面脚本 " + name)
 	if err := d.client.UploadWorkerScript(
@@ -135,16 +230,26 @@ func (d *Deployer) deployWorkersDataPlane(
 	}
 
 	if hostname != "" {
-		zone, zerr := d.resolveZoneForHost(ctx, hostname)
-		if zerr != nil {
-			return "", "", zerr
+		target := zone
+		if target == nil {
+			z, zerr := d.resolveZoneForHost(ctx, hostname)
+			if zerr != nil {
+				return "", "", zerr
+			}
+			target = z
 		}
-		if zone == nil {
+		if target == nil {
 			return "", "", fmt.Errorf(
 				"域名 %s 不在本账号的任何 zone 下，无法绑定为 Worker 自定义域名。"+
 					"请确认该域名的 DNS 托管在这个 Cloudflare 账号里", hostname)
 		}
-		if _, aerr := d.client.AttachWorkerDomain(ctx, d.opt.AccountID, hostname, name, zone.ID); aerr != nil {
+		if _, aerr := d.client.AttachWorkerDomain(ctx, d.opt.AccountID, hostname, name, target.ID); aerr != nil {
+			if isPermissionErr(aerr) {
+				return "", "", fmt.Errorf(
+					"绑定自定义域名 %s 被拒绝（权限不足）。\n  → %s\n  → %s\n"+
+						"  → 也可以先不绑域名：把「自定义域名」留空，部署到 *.workers.dev（多数网络下直连不可访问）。",
+					hostname, workersPermHint.domains, workersPermHint.dns)
+			}
 			return "", "", aerr
 		}
 		d.log("✅ 已绑定自定义域名 " + hostname)

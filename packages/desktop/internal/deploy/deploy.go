@@ -411,6 +411,20 @@ func (d *Deployer) Run(ctx context.Context) (*Result, error) {
 	}
 	d.result.DataPlaneMode = dataMode
 
+	// Workers 模式的权限预检必须发生在**创建任何资源之前**。
+	//
+	// 绑定自定义域名要额外的「账号级 Workers Routes」与「域级 DNS」权限，
+	// 这两项与 Pages 部署用的三项权限完全不相交。若先传了脚本再撞权限墙，
+	// 账号里就会留下一个没域名、不接流量的孤儿 Worker，而用户只看到「部署失败」。
+	var workersZone *cfapi.Zone
+	if dataMode == "workers" {
+		z, perr := d.preflightWorkersDataPlane(ctx, targetHost)
+		if perr != nil {
+			return nil, perr
+		}
+		workersZone = z
+	}
+
 	// ---------------- 1. 创建 Pages 项目（数据面按形态决定） ----------------
 	//
 	// 控制面**永远**在 Pages：面板 + 订阅 + 探针不含出站 TCP，Pages 上最稳。
@@ -441,7 +455,6 @@ func (d *Deployer) Run(ctx context.Context) (*Result, error) {
 	} else {
 		d.log("· 数据面部署形态：Workers（不创建 Pages 数据面项目）")
 	}
-
 	// ---------------- 2. 配置环境变量与 KV（必须在部署前） ----------------
 	if d.result.Control.Subdomain != "" {
 		d.configureProject(ctx, controlName, "控制面", eff)
@@ -487,7 +500,7 @@ func (d *Deployer) Run(ctx context.Context) (*Result, error) {
 			}
 		}
 
-		host, custom, werr := d.deployWorkersDataPlane(ctx, dataName, eff, targetHost)
+		host, custom, werr := d.deployWorkersDataPlane(ctx, dataName, eff, targetHost, workersZone)
 		if werr != nil {
 			// 回滚：把域名还给旧 Pages 数据面，别让用户连一个不存在的域名
 			if switchingFromPages && targetHost != "" && previousDataProject != "" {

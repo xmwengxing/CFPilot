@@ -34,6 +34,7 @@ import {
   deleteWorkersDataPlane,
   deployWorkersDataPlane,
   detachWorkerHostname,
+  preflightWorkersDataPlane,
   type DataPlaneMode,
 } from './workers-deploy'
 import { randomPanelPath, randomPassword, randomWorkerName, randomWsPath } from './utils'
@@ -995,6 +996,23 @@ export async function deployPagesSplit(
     log('  → 新数据面部署成功后，会自动删除旧的数据面并迁移域名')
   }
 
+  // Workers 模式的权限预检必须发生在**创建任何资源之前**。
+  //
+  // 绑定自定义域名要额外的「账号级 Workers Routes」与「域级 DNS」权限，
+  // 这两项与 Pages 部署用的三项权限完全不相交。若先传了脚本再撞权限墙，
+  // 账号里就会留下一个没域名、不接流量的孤儿 Worker，而用户只看到「部署失败」。
+  let workersZone: { id: string; name: string } | null = null
+  if (dataMode === 'workers') {
+    const preflight = await preflightWorkersDataPlane(
+      client,
+      options.accountId,
+      targetHost || undefined,
+      log,
+      warnings
+    )
+    workersZone = preflight.zone
+  }
+
   /* ---------------- 1. 创建 Pages 项目（数据面按部署形态决定） ---------------- */
   //
   // 控制面**永远**在 Pages：面板 + 订阅 + 探针不含出站 TCP，Pages 上最稳。
@@ -1162,6 +1180,7 @@ export async function deployPagesSplit(
         name: dataName,
         code: dataCode,
         hostname: targetHost || undefined,
+        zone: workersZone,
         bindings: workersBindings,
         log,
         warnings,
@@ -1181,6 +1200,12 @@ export async function deployPagesSplit(
           )
         }
       }
+      // 脚本可能已经上传（绑域名失败发生在上传之后）。
+      // 说清楚「重跑不会重复建资源」，否则用户会以为要手工去控制台清理。
+      warnings.push(
+        `Workers 脚本 ${dataName} 可能已上传但未生效（未绑到可用域名）。\n` +
+          '  → 补完权限后重跑同一条命令即可：脚本名不变，会原地更新，不会重复创建。'
+      )
       throw new Error(
         `Workers 数据面部署失败：${err instanceof Error ? err.message : String(err)}`
       )

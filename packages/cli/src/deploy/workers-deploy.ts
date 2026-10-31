@@ -161,6 +161,9 @@ export async function preflightWorkersDataPlane(
     log('  · Zone DNS 权限正常')
   } catch (err) {
     const message = describeWorkersPermissionError(err, 'dns')
+    // 同时打到日志里：只塞进 warnings 的话，用户在部署过程中看不到，
+    // 等到绑定失败才知道缺权限，白等一轮。
+    log('  ⚠ Zone DNS 权限缺失或不可读（换形态时可能无法自动清理旧记录）')
     warnings.push(
       message ??
         `无法读取 DNS 记录：${err instanceof Error ? err.message : String(err)}\n` +
@@ -200,7 +203,30 @@ export async function clearPagesLeftoverDns(
   log: (message: string) => void,
   warnings: string[]
 ): Promise<void> {
-  const records = await client.getDnsRecords(zoneId, hostname)
+  // ⚠️ 这一步是**尽力而为**，不是必需前置。
+  //
+  // 真机踩过：令牌有 Workers Routes 但没有 Zone / DNS，读 dns_records 直接 403
+  // Authentication error —— 于是整个部署在这里中断，用户完全看不出是权限问题
+  // （报错只说 Authentication error，没提 DNS）。
+  //
+  // 而「没有残留记录」的情况下，DNS 权限其实用不上。所以读不到就跳过，
+  // 真正的失败留给绑定那一步（那里能给出 100117 的准确提示）。
+  let records: Awaited<ReturnType<CloudflareClient['getDnsRecords']>>
+  try {
+    records = await client.getDnsRecords(zoneId, hostname)
+  } catch (err) {
+    if (isPermissionError(err)) {
+      const message =
+        `无法读取 DNS 记录（缺 Zone / DNS 权限），已跳过「Pages 遗留记录」清理。\n` +
+        `  → 若接下来绑定域名报 409 / 100117，请给令牌加 Zone / DNS / Edit，\n` +
+        `    或到 Cloudflare 控制台手动删除 ${hostname} 下的 CNAME 记录。`
+      log('⚠ 无法读取 DNS 记录，跳过残留清理')
+      warnings.push(message)
+      return
+    }
+    throw err
+  }
+
   const mine = (Array.isArray(records) ? records : []).filter(
     (record) => record.name.toLowerCase() === hostname.toLowerCase()
   )
@@ -213,8 +239,19 @@ export async function clearPagesLeftoverDns(
   const others = mine.filter((record) => !isPagesLeftover(record))
 
   for (const record of leftovers) {
-    await client.deleteDnsRecord(zoneId, record.id)
-    log(`· 已清理 Pages 遗留的 DNS 记录：${record.type} ${record.name} → ${record.content}`)
+    try {
+      await client.deleteDnsRecord(zoneId, record.id)
+      log(`· 已清理 Pages 遗留的 DNS 记录：${record.type} ${record.name} → ${record.content}`)
+    } catch (err) {
+      // 删不掉（权限不足 / 记录被并发改动）→ 不再继续，交给绑定那一步报 100117
+      const detail = err instanceof Error ? err.message : String(err)
+      log(`⚠ 清理 DNS 记录失败：${detail}`)
+      warnings.push(
+        `无法删除 ${hostname} 上的 Pages 遗留记录（${record.type} ${record.content}）：${detail}\n` +
+          '  → 请给令牌加 Zone / DNS / Edit，或到控制台手动删除该记录。'
+      )
+      return
+    }
   }
 
   if (others.length > 0) {
@@ -359,8 +396,11 @@ export async function attachWorkerHostname(
   if (/100117|externally managed/i.test(message)) {
     throw new Error(
       `${hostname} 上仍有 DNS 记录占用，Workers 无法接管该主机名（HTTP 409 / 100117）。\n` +
-        '  → 请到 Cloudflare 控制台 → 该域名的 DNS 页，删除这个主机名下的记录后重试；\n' +
-        '  → 或换一个没用过的子域（如 w1.你的域名）。'
+        '  → 这些记录通常是 Pages 绑定时自动建的 CNAME（指向 *.pages.dev），解绑 Pages 域名不会删掉它。\n' +
+        '  → 三种解法（任选其一）：\n' +
+        '    1) 给令牌加 Zone / DNS / Edit，程序会自动清理后重试；\n' +
+        `    2) 到 Cloudflare 控制台 → ${hostname.split('.').slice(1).join('.')} 的 DNS 页，删掉这个主机名下的记录；\n` +
+        '    3) 换一个没用过的子域（如 w1.你的域名）作为数据面域名。'
     )
   }
   throw lastError instanceof Error ? lastError : new Error(message)

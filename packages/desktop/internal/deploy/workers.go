@@ -204,9 +204,13 @@ func (d *Deployer) preflightWorkersDataPlane(ctx context.Context, hostname strin
 	// 那种令牌其实能建记录。真正的失败留给绑定时那一次调用。
 	if _, derr := d.client.ListDNSRecords(ctx, zone.ID, hostname); derr != nil {
 		if isPermissionErr(derr) {
+			// 同时打到日志里：只塞进 warnings 的话，用户在部署过程中看不到，
+			// 等到绑定失败才知道缺权限，白等一轮。
+			d.log("  ⚠ Zone DNS 权限缺失或不可读（换形态时可能无法自动清理旧记录）")
 			d.warn("可能缺少 Zone / DNS 权限（" + workersPermHint.dns + "）\n" +
 				"  → 绑定域名时若报权限错误，补这一项即可。")
 		} else {
+			d.log(fmt.Sprintf("  ⚠ 无法读取 DNS 记录：%v", derr))
 			d.warn(fmt.Sprintf("无法读取 DNS 记录：%v", derr))
 		}
 	} else {
@@ -239,10 +243,27 @@ func isPagesLeftoverDns(r cfapi.DNSRecord) bool {
 // 也就是说「解绑 Pages 域名」只释放了项目侧占用，**没有释放主机名本身**。
 // 换形态（Pages → Workers）必然踩到，因为两边用的是同一个域名。
 func (d *Deployer) clearPagesLeftoverDns(ctx context.Context, zoneID, hostname string) error {
+	// ⚠️ 这一步是**尽力而为**，不是必需前置。
+	//
+	// 真机踩过：令牌有 Workers Routes 但没有 Zone / DNS，读 dns_records 直接
+	// 403 Authentication error —— 于是整个部署在这里中断，报错只说
+	// Authentication error，用户完全看不出是 DNS 权限问题。
+	//
+	// 而「没有残留记录」时 DNS 权限其实用不上。所以读不到就跳过，
+	// 真正的失败留给绑定那一步（那里能给出 100117 的准确提示）。
 	records, err := d.client.ListDNSRecords(ctx, zoneID, hostname)
 	if err != nil {
+		if isPermissionErr(err) {
+			d.log("⚠ 无法读取 DNS 记录，跳过残留清理")
+			d.warn(fmt.Sprintf(
+				"无法读取 DNS 记录（缺 Zone / DNS 权限），已跳过「Pages 遗留记录」清理。\n"+
+					"  → 若接下来绑定域名报 409 / 100117，请给令牌加 Zone / DNS / Edit，\n"+
+					"    或到 Cloudflare 控制台手动删除 %s 下的 CNAME 记录。", hostname))
+			return nil
+		}
 		return err
 	}
+
 	var leftovers, others []cfapi.DNSRecord
 	for _, r := range records {
 		if !strings.EqualFold(r.Name, hostname) {
@@ -256,8 +277,14 @@ func (d *Deployer) clearPagesLeftoverDns(ctx context.Context, zoneID, hostname s
 	}
 
 	for _, r := range leftovers {
-		if err := d.client.DeleteDNSRecord(ctx, zoneID, r.ID); err != nil {
-			return fmt.Errorf("清理 Pages 遗留 DNS 记录失败（%s %s）：%w", r.Type, r.Content, err)
+		if derr := d.client.DeleteDNSRecord(ctx, zoneID, r.ID); derr != nil {
+			// 删不掉（权限不足 / 并发改动）→ 不再继续，交给绑定那一步报 100117
+			d.log(fmt.Sprintf("⚠ 清理 DNS 记录失败：%v", derr))
+			d.warn(fmt.Sprintf(
+				"无法删除 %s 上的 Pages 遗留记录（%s %s）：%v\n"+
+					"  → 请给令牌加 Zone / DNS / Edit，或到控制台手动删除该记录。",
+				hostname, r.Type, r.Content, derr))
+			return nil
 		}
 		d.log(fmt.Sprintf("· 已清理 Pages 遗留的 DNS 记录：%s %s → %s", r.Type, r.Name, r.Content))
 	}
@@ -316,10 +343,18 @@ func (d *Deployer) attachWorkerDomainWithRetry(
 	}
 	msg := strings.ToLower(lastErr.Error())
 	if strings.Contains(msg, "100117") || strings.Contains(msg, "externally managed") {
+		zoneHint := hostname
+		if i := strings.Index(hostname, "."); i > 0 {
+			zoneHint = hostname[i+1:]
+		}
 		return nil, fmt.Errorf(
 			"%s 上仍有 DNS 记录占用，Workers 无法接管该主机名（HTTP 409 / 100117）。\n"+
-				"  → 请到 Cloudflare 控制台 → 该域名的 DNS 页，删除这个主机名下的记录后重试；\n"+
-				"  → 或换一个没用过的子域（如 w1.你的域名）。", hostname)
+				"  → 这些记录通常是 Pages 绑定时自动建的 CNAME（指向 *.pages.dev），解绑 Pages 域名不会删掉它。\n"+
+				"  → 三种解法（任选其一）：\n"+
+				"    1) 给令牌加 Zone / DNS / Edit，程序会自动清理后重试；\n"+
+				"    2) 到 Cloudflare 控制台 → %s 的 DNS 页，删掉这个主机名下的记录；\n"+
+				"    3) 换一个没用过的子域（如 w1.你的域名）作为数据面域名。",
+			hostname, zoneHint)
 	}
 	return nil, lastErr
 }

@@ -224,7 +224,7 @@ jobs:
         # 说明来源优先级：
         #   1. 仓库外的 .release-notes/<tag>.md（本地写好，git add -f 提交时带上）
         #   2. tag 注释正文
-        #   3. 自动变更列表
+        #   3. 都没有 → 发布失败（绝不回退到 commit 列表）
         #
         # ⚠️ 为什么不用 tag 注释做主来源：git 的 tag 注释格式规定
         #    「第一段是标题、空行后才是正文」，Markdown 的 ## 标题会被
@@ -250,15 +250,15 @@ jobs:
             [ -n "$BODY" ] && echo "使用 tag 注释"
           fi
 
-          # 3. 自动变更列表
+          # 3. 都没有 → **直接失败**，绝不回退到 commit 列表
+          #
+          # ⚠️ 2026-10-31 教训：回退到 `git log` 会把 commit 正文（含排查过程、
+          #    内部讨论）原样贴到 Release 页面。发布说明是给用户看的变更清单，
+          #    宁可让发布失败，也不能把开发过程发出去。
           if [ -z "$(printf '%s' "$BODY" | tr -d '[:space:]')" ]; then
-            echo "无说明，回退到自动变更列表"
-            PREV=$(git tag -l 'desktop-v*' --sort=-v:refname | grep -v "^${TAG}$" | head -1 || true)
-            if [ -n "$PREV" ]; then
-              BODY=$(git log --pretty=format:'- %s' "$PREV..HEAD" | head -50)
-            else
-              BODY=$(git log --pretty=format:'- %s' -20)
-            fi
+            echo "::error::缺少 .release-notes/${VERSION}.md（或 tag 注释），发布中止。"
+            echo "请写好发布说明（只含 新增 / 修复 / 优化 三项）后重试。"
+            exit 1
           fi
 
           # 追加安装说明

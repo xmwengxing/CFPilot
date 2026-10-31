@@ -460,11 +460,19 @@ func (s *Server) handleDeployCheck(w http.ResponseWriter, r *http.Request) {
 
 	localBuild := localKernelBuild()
 
-	// 线上版本：优先读数据面的 /__version 端点（最权威）
+	// 线上版本：优先问数据面自己（最权威），探不到才回落清单里的值。
+	//
+	// ⚠️ 用 `rv.Build`（构建指纹）比对，**不能**用 `rv.Version`（语义版本）：
+	// 两者含义不同，混用会让「线上与本地是否同一份产物」永远判为不同。
+	// 见 version_probe.go 的 remoteVersion 注释。
 	remoteBuild := m.Build
+	liveKernel := ""
 	if m.DataSubdomain != "" {
-		if v := s.probeRemoteBuild(ctx, m.DataSubdomain); v != "" {
-			remoteBuild = v
+		if rv := s.probeRemoteVersion(ctx, m.DataSubdomain); rv.Build != "" || rv.Version != "" {
+			if rv.Build != "" {
+				remoteBuild = rv.Build
+			}
+			liveKernel = rv.Version
 		}
 	}
 
@@ -482,6 +490,13 @@ func (s *Server) handleDeployCheck(w http.ResponseWriter, r *http.Request) {
 	// ⚠️ 远程查询**必须能失败**（离线时不能让整个检查状态失败）。
 	// 查不到就返回空串 + kernelUpdatable=false，并给出说明字段。
 	ks := kernelStatus{Deployed: strings.TrimSpace(m.KernelVersion), Local: Version()}
+	// 线上自报的语义版本比清单可靠（清单是部署时写死的，用户可能在控制台
+	// 手工重新部署过）。有就用它；没有才退回清单值。
+	//
+	// 这就是「Workers 实例没有内核版本」的直接修法：不再只依赖清单。
+	if liveKernel != "" && liveKernel != "dev" {
+		ks.Deployed = liveKernel
+	}
 	remoteCtx, cancelRemote := context.WithTimeout(ctx, 8*time.Second)
 	if info, e := kernel.FetchRemoteInfo(remoteCtx); e != nil {
 		ks.RemoteErr = e.Error()

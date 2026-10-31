@@ -29,21 +29,41 @@ import (
 // versionProbePaths 是候选的版本端点路径，按优先级排列。
 var versionProbePaths = []string{"/__version", "/__cfp_version"}
 
-// probeRemoteBuild 访问数据面的版本端点，返回构建号。
+// remoteVersion 是线上数据面报告的版本信息。
 //
-// 失败时返回空串（不报错），因为「探测不到」是正常情况
+// ## ⚠️ 两个字段的含义**不能混**
+//
+// 数据面的 `versionResponse()` 返回的是：
+//
+//	{"build": "<git短hash>-<源码哈希>", "version": "0.12.5"}
+//
+//   - `Build`   精确到源码内容，用于判断「线上与本地是不是同一份产物」
+//   - `Version` 人读的语义版本，用于显示与判断「谁更新」
+//
+// 早期这里把两者当成了同一个东西（优先取 `version`），于是拿 semver
+// 去和本地 build 指纹比对 —— **永远不相等**，状态卡永远显示「建议更新」。
+// Pages 上因为 `*.pages.dev` 经常不可达、探测失败回落清单值，反而把 bug 掩盖了；
+// Workers 用自定义域名时探测必定成功，问题就暴露出来了。
+type remoteVersion struct {
+	Build   string
+	Version string
+}
+
+// probeRemoteVersion 访问数据面的版本端点。
+//
+// 失败时返回零值（不报错），因为「探测不到」是正常情况
 // （域名还没生效、数据面被删、网络不通等），不该阻断状态检查。
-func (s *Server) probeRemoteBuild(ctx context.Context, subdomain string) string {
+func (s *Server) probeRemoteVersion(ctx context.Context, subdomain string) remoteVersion {
 	host := strings.TrimSpace(subdomain)
 	if host == "" {
-		return ""
+		return remoteVersion{}
 	}
 	// 清单里可能存的是完整 URL，也可能是裸域名
 	host = strings.TrimPrefix(host, "https://")
 	host = strings.TrimPrefix(host, "http://")
 	host = strings.TrimSuffix(host, "/")
 	if host == "" {
-		return ""
+		return remoteVersion{}
 	}
 
 	client := &http.Client{Timeout: 6 * time.Second}
@@ -74,22 +94,22 @@ func (s *Server) probeRemoteBuild(ctx context.Context, subdomain string) string 
 			continue
 		}
 
-		if v := parseVersionBody(body); v != "" {
+		if v := parseVersionBody(body); v.Build != "" || v.Version != "" {
 			return v
 		}
 	}
-	return ""
+	return remoteVersion{}
 }
 
-// parseVersionBody 从端点响应里解出版本号。
+// parseVersionBody 从端点响应里解出版本信息。
 //
 // 兼容两种形态：
-//   - JSON：`{"version":"a946dfa-1f2e3d4c","build":"..."}`
-//   - 纯文本：`a946dfa-1f2e3d4c`
-func parseVersionBody(body []byte) string {
+//   - JSON：`{"build":"a946dfa-1f2e3d4c","version":"0.12.5"}`
+//   - 纯文本：`a946dfa-1f2e3d4c`（当作 build 指纹）
+func parseVersionBody(body []byte) remoteVersion {
 	text := strings.TrimSpace(string(body))
 	if text == "" {
-		return ""
+		return remoteVersion{}
 	}
 
 	// 先试 JSON
@@ -99,14 +119,12 @@ func parseVersionBody(body []byte) string {
 			Build   string `json:"build"`
 		}
 		if err := json.Unmarshal(body, &obj); err == nil {
-			if v := strings.TrimSpace(obj.Version); v != "" {
-				return v
-			}
-			if v := strings.TrimSpace(obj.Build); v != "" {
-				return v
+			return remoteVersion{
+				Build:   strings.TrimSpace(obj.Build),
+				Version: strings.TrimSpace(obj.Version),
 			}
 		}
-		return ""
+		return remoteVersion{}
 	}
 
 	// 纯文本：只取第一行，且长度合理（防止把整页 HTML 当版本号）
@@ -116,11 +134,11 @@ func parseVersionBody(body []byte) string {
 	}
 	line = strings.TrimSpace(line)
 	if line == "" || len(line) > 64 {
-		return ""
+		return remoteVersion{}
 	}
 	// 版本号里不该有尖括号或空格（排除 HTML 片段）
 	if strings.ContainsAny(line, "<> ") {
-		return ""
+		return remoteVersion{}
 	}
-	return line
+	return remoteVersion{Build: line}
 }

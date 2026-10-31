@@ -416,9 +416,21 @@ func (d *Deployer) Run(ctx context.Context) (*Result, error) {
 	// 绑定自定义域名要额外的「账号级 Workers Routes」与「域级 DNS」权限，
 	// 这两项与 Pages 部署用的三项权限完全不相交。若先传了脚本再撞权限墙，
 	// 账号里就会留下一个没域名、不接流量的孤儿 Worker，而用户只看到「部署失败」。
+	//
+	// ⚠️ 预检用的域名要包含「从旧 Pages 项目现读出来的那个」：
+	// 清单里只记部署时见过的域名，用户在控制台手动绑的不在清单里。
+	oldPagesHost := ""
+	if dataMode == "workers" && prevDataMode == "pages" && previousDataProject != "" {
+		oldPagesHost = d.findCustomDomain(ctx, previousDataProject)
+	}
+	switchHostPreview := targetHost
+	if switchHostPreview == "" {
+		switchHostPreview = oldPagesHost
+	}
+
 	var workersZone *cfapi.Zone
 	if dataMode == "workers" {
-		z, perr := d.preflightWorkersDataPlane(ctx, targetHost)
+		z, perr := d.preflightWorkersDataPlane(ctx, switchHostPreview)
 		if perr != nil {
 			return nil, perr
 		}
@@ -491,24 +503,47 @@ func (d *Deployer) Run(ctx context.Context) (*Result, error) {
 
 		switchingFromPages := modeSwitched && prevDataMode == "pages"
 
-		// 同一个域名不能同时挂在 Pages 项目与 Worker 上，必须先解绑旧的。
-		// 这一步会让旧实例短暂失去域名 —— 因此失败时必须回滚（见下面）。
-		if switchingFromPages && targetHost != "" && previousDataProject != "" {
-			if err := d.client.RemovePagesDomain(ctx, d.opt.AccountID, previousDataProject, targetHost); err == nil {
-				d.log(fmt.Sprintf("· 已从旧 Pages 数据面 %s 解绑域名 %s（准备迁到 Workers）",
-					previousDataProject, targetHost))
+		// 换形态时真正要迁到 Workers 的域名。
+		//
+		// 优先级：本次指定 > 清单里记的 > **旧 Pages 项目上现读的**（见 0d 的 oldPagesHost）。
+		//
+		// 第三档不能省：清单只记「部署时见过」的域名，用户在控制台手动绑的
+		// 不在清单里。漏掉它的后果很重 —— 下面的收尾会删除旧 Pages 项目，
+		// 而**自定义域名是跟着项目走的**，项目一删，用户唯一的入口就没了。
+		switchHost := targetHost
+		if switchHost == "" {
+			switchHost = oldPagesHost
+		}
+		if switchingFromPages && oldPagesHost != "" {
+			if targetHost == "" {
+				d.log("· 将把旧 Pages 数据面的自定义域名 " + oldPagesHost + " 迁移到 Workers")
+			} else if targetHost != oldPagesHost {
+				d.warn(fmt.Sprintf(
+					"旧数据面的自定义域名 %s 与本次指定的 %s 不同：\n"+
+						"  → 只有 %s 会绑到 Workers；删除旧项目后 %s 会解绑（DNS 记录也会一起消失）。\n"+
+						"  → 想保留原域名就把「自定义域名」填成它。",
+					oldPagesHost, targetHost, targetHost, oldPagesHost))
 			}
 		}
 
-		host, custom, werr := d.deployWorkersDataPlane(ctx, dataName, eff, targetHost, workersZone)
+		// 同一个域名不能同时挂在 Pages 项目与 Worker 上，必须先解绑旧的。
+		// 这一步会让旧实例短暂失去域名 —— 因此失败时必须回滚（见下面）。
+		if switchingFromPages && switchHost != "" && previousDataProject != "" {
+			if err := d.client.RemovePagesDomain(ctx, d.opt.AccountID, previousDataProject, switchHost); err == nil {
+				d.log(fmt.Sprintf("· 已从旧 Pages 数据面 %s 解绑域名 %s（准备迁到 Workers）",
+					previousDataProject, switchHost))
+			}
+		}
+
+		host, custom, werr := d.deployWorkersDataPlane(ctx, dataName, eff, switchHost, workersZone)
 		if werr != nil {
 			// 回滚：把域名还给旧 Pages 数据面，别让用户连一个不存在的域名
-			if switchingFromPages && targetHost != "" && previousDataProject != "" {
-				if rerr := d.client.AddPagesDomain(ctx, d.opt.AccountID, previousDataProject, targetHost); rerr == nil {
+			if switchingFromPages && switchHost != "" && previousDataProject != "" {
+				if rerr := d.client.AddPagesDomain(ctx, d.opt.AccountID, previousDataProject, switchHost); rerr == nil {
 					d.log("· 已把域名回滚到旧 Pages 数据面")
 				} else {
 					d.warn(fmt.Sprintf("域名 %s 回滚失败，请手动到 Cloudflare 控制台把它绑回 %s。",
-						targetHost, previousDataProject))
+						switchHost, previousDataProject))
 				}
 			}
 			return nil, fmt.Errorf("Workers 数据面部署失败：%w", werr)
@@ -517,9 +552,19 @@ func (d *Deployer) Run(ctx context.Context) (*Result, error) {
 		d.result.Data.Subdomain = host
 		dataCustomDomain = custom
 
-		// 新数据面已上线 → 删掉旧 Pages 数据面（换形态的唯一收尾动作）
+		// 新数据面已上线 → 删掉旧 Pages 数据面（换形态的唯一收尾动作）。
+		//
+		// ⚠️ 但**没有可用自定义域名时不删**：此时新数据面跑在 *.workers.dev 上，
+		// 多数网络下直连不可访问。旧 Pages 项目（及其域名）是用户唯一的可用入口，
+		// 删掉等于把「还能用」的实例亲手拆了。
+		newHostUsable := host != "" && !strings.HasSuffix(host, ".workers.dev")
 		if switchingFromPages && previousDataProject != "" {
-			if err := d.client.DeletePagesProject(ctx, d.opt.AccountID, previousDataProject); err != nil {
+			if !newHostUsable {
+				d.warn(fmt.Sprintf(
+					"未迁移到自定义域名（新数据面是 %s），因此**保留**了旧 Pages 数据面 %s。\n"+
+						"  → *.workers.dev 直连无法访问，节点会连不上；给它补一个自定义域名后重跑，"+
+						"迁移成功才会自动删除旧项目。", host, previousDataProject))
+			} else if err := d.client.DeletePagesProject(ctx, d.opt.AccountID, previousDataProject); err != nil {
 				d.warn(fmt.Sprintf("删除旧 Pages 数据面失败（%s）：%v\n"+
 					"  → 它已经不再接收流量，可到控制台手动删除。", previousDataProject, err))
 			} else {

@@ -2345,6 +2345,15 @@
         syncDataPlaneUI()
       }
 
+      // 回填「自定义域名」：留空时后端会自动沿用这个域名。
+      //
+      // 显示出来比让用户猜强得多 —— 换形态时最怕的就是「以为没填就丢了域名」。
+      // 只在输入框为空时填，绝不覆盖用户已经输入的内容。
+      const hostInput = document.getElementById('dataHost') as HTMLInputElement | null
+      if (hostInput && !hostInput.value.trim() && status.customDomain) {
+        hostInput.value = status.customDomain
+      }
+
       const instance =
         '<b>' + escapeHtml(status.controlProject ?? '?') + '</b> / <b>' +
         escapeHtml(status.dataProject ?? '?') + '</b>'

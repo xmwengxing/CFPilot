@@ -1174,7 +1174,8 @@
                 <input type="text" id="dataHost" placeholder="如 w1a2b3c4.example.com" />
                 <p class="tip">
                   必须是把 DNS 托管在<b>本 Cloudflare 账号</b>里的域名（Workers 自定义域名不支持外部 CNAME）。<br>
-                  留空会回落到 <code>*.workers.dev</code> —— 该域名直连不可访问，节点会全部连不上。
+                  <b>留空 = 自动沿用当前实例已绑定的自定义域名</b>（换形态时会一并迁移）；
+                  连一个都没有才回落到 <code>*.workers.dev</code> —— 该域名直连不可访问，节点会全部连不上。
                 </p>
               </div>
               <p class="tip">

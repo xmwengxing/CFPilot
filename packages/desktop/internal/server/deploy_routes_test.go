@@ -322,23 +322,39 @@ func TestAccountDetectMissingToken(t *testing.T) {
 
 func TestParseVersionBody(t *testing.T) {
 	cases := []struct {
-		name string
-		body string
-		want string
+		name        string
+		body        string
+		wantBuild   string
+		wantVersion string
 	}{
-		{"JSON version 字段", `{"version":"a946dfa-1f2e3d4c"}`, "a946dfa-1f2e3d4c"},
-		{"JSON build 字段", `{"build":"a946dfa-1f2e3d4c"}`, "a946dfa-1f2e3d4c"},
-		{"JSON 优先 version", `{"version":"v1","build":"v2"}`, "v1"},
-		{"纯文本", "a946dfa-1f2e3d4c\n", "a946dfa-1f2e3d4c"},
-		{"纯文本带 CRLF", "a946dfa-1f2e3d4c\r\nextra", "a946dfa-1f2e3d4c"},
-		{"空响应", "", ""},
-		{"JSON 无版本字段", `{"ok":true}`, ""},
-		{"HTML 片段不当版本", "<!DOCTYPE html>", ""},
-		{"超长文本不当版本", strings.Repeat("a", 100), ""},
+		{
+			name:        "真实响应：build 是指纹、version 是语义版本",
+			body:        `{"build":"a946dfa-1f2e3d4c","version":"0.12.5","ts":1}`,
+			wantBuild:   "a946dfa-1f2e3d4c",
+			wantVersion: "0.12.5",
+		},
+		{
+			// ⚠️ 这条是回归用例：早期实现「优先取 version」，把语义版本当成
+			// 构建指纹去比对，导致任何可达的数据面都显示「建议更新」。
+			name:        "build 与 version 同时存在时不能被搞混",
+			body:        `{"version":"0.12.5","build":"a946dfa-1f2e3d4c"}`,
+			wantBuild:   "a946dfa-1f2e3d4c",
+			wantVersion: "0.12.5",
+		},
+		{"只有 version", `{"version":"0.12.5"}`, "", "0.12.5"},
+		{"只有 build", `{"build":"a946dfa-1f2e3d4c"}`, "a946dfa-1f2e3d4c", ""},
+		{"纯文本当 build", "a946dfa-1f2e3d4c\n", "a946dfa-1f2e3d4c", ""},
+		{"纯文本带 CRLF", "a946dfa-1f2e3d4c\r\nextra", "a946dfa-1f2e3d4c", ""},
+		{"空响应", "", "", ""},
+		{"JSON 无版本字段", `{"ok":true}`, "", ""},
+		{"HTML 片段不当版本", "<!DOCTYPE html>", "", ""},
+		{"超长文本不当版本", strings.Repeat("a", 100), "", ""},
 	}
 	for _, tc := range cases {
-		if got := parseVersionBody([]byte(tc.body)); got != tc.want {
-			t.Errorf("%s：期望 %q，实际 %q", tc.name, tc.want, got)
+		got := parseVersionBody([]byte(tc.body))
+		if got.Build != tc.wantBuild || got.Version != tc.wantVersion {
+			t.Errorf("%s：期望 build=%q version=%q，实际 build=%q version=%q",
+				tc.name, tc.wantBuild, tc.wantVersion, got.Build, got.Version)
 		}
 	}
 }

@@ -5,9 +5,10 @@
 import { NAME, VERSION } from '../shared/version'
 
 export const DEPLOY_HELP = `
-${NAME} deploy —— Pages 双项目部署（控制面 + 数据面）
+${NAME} deploy —— 双面部署（控制面 Pages + 数据面 Pages/Workers）
 
-⚠️ 这是唯一受支持的部署形态。合并成单项目会触发 8000119 风控。
+⚠️ 控制面必须留在 Pages；数据面可选 Pages 或 Workers。
+   合并成单项目会触发 8000119 风控。
 
 用法:
   ${NAME} deploy [选项]
@@ -15,12 +16,17 @@ ${NAME} deploy —— Pages 双项目部署（控制面 + 数据面）
 选项:
   --token <token>        Cloudflare API Token（也可用环境变量 CLOUDFLARE_API_TOKEN）
   --account <id>         目标账号 ID
-  --kv <id>              KV 命名空间 ID（两个项目共用）
+  --kv <id>              KV 命名空间 ID（两个面共用）
   --kv-title <title>     新建 KV 时使用的标题
   --new-kv               强制新建一个 KV 命名空间（用于部署第 2、3… 个实例）
   --list-kv              列出该账号下的 KV 与其中的 CFPilot 实例，不执行部署
   --control <name>       控制面 Pages 项目名（默认随机）
-  --data <name>          数据面 Pages 项目名（默认随机）
+  --data <name>          数据面名称（Pages 项目名 / Worker 脚本名，默认随机）
+  --data-plane <mode>    数据面部署形态：pages（默认）/ workers
+                         不传 = 沿用部署清单里记录的形态；
+                         显式传且与清单不同 = 切换形态（新数据面上线后自动删除旧的并迁移域名）
+  --data-host <host>     Workers 数据面的自定义域名（如 w1a2b3c4.example.com）
+                         ⚠️ *.workers.dev 直连不可访问，不给域名会告警
   --panel-path <path>    面板访问路径（默认随机）
   --mode <mode>          部署模式：auto（默认，自动判断）/ fresh（强制首次）/ update（强制更新）
   --force                忽略版本检查，强制重新部署
@@ -60,11 +66,14 @@ ${NAME} deploy —— Pages 双项目部署（控制面 + 数据面）
   packages/worker-core/dist/dataplane.js 数据面（VLESS/Trojan-WS/XHTTP，自研实现）
 
 部署顺序（不可调换）:
-  1. 创建两个 Pages 项目
+  1. 创建控制面 Pages 项目（数据面按形态创建 Pages 项目或 Worker）
   2. 配置 KV 绑定与环境变量（Pages 的绑定只对之后的部署生效）
   3. 先部署数据面，再部署控制面（控制面需要数据面域名生成订阅）
 
 Token 所需权限:
   Account / Pages / Edit              创建项目、配置变量、触发部署
+  Account / Workers Scripts / Edit    部署 Workers 数据面（--data-plane workers）
   Account / Workers KV Storage / Edit 创建 KV（若未提供 --kv）
+  Zone / Workers Routes / Edit        绑定 Workers 自定义域名（--data-host）
+  Zone / DNS / Edit                   自定义域名需要自动建 DNS 记录
 `

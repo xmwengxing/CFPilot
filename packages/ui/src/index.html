@@ -1141,7 +1141,7 @@
           <div class="card">
             <h2><span class="dot"></span>🚀 部署 / 更新</h2>
             <p class="desc">
-              Pages 双项目：控制面（面板 + 订阅 + 探针）+ 数据面（代理入站），共用同一个 KV。
+              双项目：控制面（面板 + 订阅 + 探针）+ 数据面（代理入站），共用同一个 KV。
             </p>
 
             <div class="field">
@@ -1159,6 +1159,27 @@
                 <br>⚠ 选中已有实例的 KV 会被<b>直接拦截</b>并提示 ——
                 全新部署会生成新的 UUID 与 WS 路径，覆盖原 KV 的话，
                 <b>原实例的客户端节点将全部失效</b>。
+              </p>
+            </div>
+
+            <div class="field">
+              <label>数据面部署模式</label>
+              <div class="radios">
+                <label class="chk"><input type="radio" name="dataPlane" value="pages" checked /> Pages 模式（默认）</label>
+                <label class="chk"><input type="radio" name="dataPlane" value="workers" /> Workers 模式</label>
+              </div>
+              <p class="tip" id="dataPlaneHint"></p>
+              <div id="dataHostField" style="display:none;margin-top:10px">
+                <label>自定义域名（Workers 模式必填）</label>
+                <input type="text" id="dataHost" placeholder="如 w1a2b3c4.example.com" />
+                <p class="tip">
+                  必须是把 DNS 托管在<b>本 Cloudflare 账号</b>里的域名（Workers 自定义域名不支持外部 CNAME）。<br>
+                  留空会回落到 <code>*.workers.dev</code> —— 该域名直连不可访问，节点会全部连不上。
+                </p>
+              </div>
+              <p class="tip">
+                ⚠ 更新部署时如果<b>改变了这里的模式</b>，新数据面上线后会自动删除旧的数据面
+                （Pages 项目或 Worker）并把自定义域名迁过去。
               </p>
             </div>
 
@@ -1301,8 +1322,8 @@
                   <button class="btn btn-ghost" id="btnAutoDetect" style="flex:0 0 auto">自动识别</button>
                 </div>
                 <p class="tip">
-                  · <b>建议使用自定义域名</b>，<code>*.pages.dev</code> 生产链接可能被阻断<br>
-                  · 点击「自动识别」：优先填入数据面自定义域名，否则填入 pages.dev
+                  · <b>workers部署请使用自定义域名！</b>，<code>*.workers.dev</code> 生产链接网络阻断<br>
+                  · 点击「自动识别」：优先填入数据面自定义域名，否则填入 workers.dev / pages.dev
                 </p>
               </div>
               <div class="field">
@@ -1529,10 +1550,10 @@
 			  3. 多CFPilot实例：「凭据」页选择本次部署使用的 KV，其他同上<br>
               <b>订阅地址、面板密码、面板路径、WS 路径、UUID均保持不变</b>。<br><br>
               <b>关于 CFPilot</b><br>
-              CFPilot 采用双 Pages 项目部署一对实例：控制面（Web 面板）+ 数据面（流量转发），
+              CFPilot 采用双项目部署一对实例：控制面（Web 面板）+ 数据面（流量转发），
               实测稳定无 1101、无8000119，支持在触发 CF 限制时进行无损更新部署<br>
               不建议在同一账户下部署多个 CFPilot 实例；若确需部署：创建新的 KV，选择该 KV 后部署第二对实例<br>
-              <b>本项目暂不支持 Worker 形式部署</b>
+              <b>本项目已支持数据面 Workers 形式部署</b>
             </div>
           </div>
 

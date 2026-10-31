@@ -300,6 +300,19 @@ export async function runDeployCommand(args: ParsedArgs): Promise<void> {
     process.exitCode = 1
     return
   }
+
+  // 数据面部署形态：不传 = 沿用清单（旧清单按 pages 处理）
+  const dataPlaneRaw = (flagString(args, 'data-plane') || '').toLowerCase()
+  if (dataPlaneRaw && dataPlaneRaw !== 'pages' && dataPlaneRaw !== 'workers') {
+    process.stderr.write(`✗ --data-plane 只接受 pages / workers，收到：${dataPlaneRaw}\n`)
+    process.exitCode = 1
+    return
+  }
+  const dataPlaneMode = dataPlaneRaw ? (dataPlaneRaw as 'pages' | 'workers') : undefined
+  const dataHost = flagString(args, 'data-host') || ''
+  if (dataHost && dataPlaneMode !== 'workers') {
+    process.stderr.write('· --data-host 只对 --data-plane workers 生效，已忽略\n')
+  }
   // 默认沿用旧凭据：客户端订阅地址不变。显式传参则覆盖。
   const keepCredentials = !flagBool(args, 'new-credentials')
   const skipSameVersion = !flagBool(args, 'force')
@@ -333,6 +346,9 @@ export async function runDeployCommand(args: ParsedArgs): Promise<void> {
     // 想关在面板「入站配置 → 启用服务端 XHTTP 入站监听」关即可
     //（KV 配置优先级高于环境变量，面板开关会覆盖这里的默认值）。
     enableXhttp: true,
+    // 数据面形态：不传 = 沿用清单；显式传且与清单不一致 = 切换形态
+    dataPlaneMode,
+    dataHost: dataPlaneMode === 'workers' ? dataHost : undefined,
     mode,
     keepCredentials,
     skipSameVersion,

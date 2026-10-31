@@ -116,6 +116,15 @@ type deployRequest struct {
 	PanelPath      string `json:"panelPath"`
 	WSPath         string `json:"wsPath"`
 
+	// DataPlaneMode 是数据面部署形态：pages / workers。
+	//
+	// 留空 = 沿用部署清单里记录的形态（没有清单则 pages）。
+	// 界面**总是**发送当前选中的值，并在读取部署状态时把清单里的形态回填到
+	// 单选框 —— 否则「一个 Workers 实例被顺手更新一次」就会被悄悄改成 Pages。
+	DataPlaneMode string `json:"dataPlaneMode"`
+	// DataHost 是 Workers 数据面的自定义域名（只对 workers 生效）
+	DataHost string `json:"dataHost"`
+
 	// KVNamespaceID 可选，留空用当前账户里保存的
 	KVNamespaceID string `json:"kvNamespaceId"`
 
@@ -203,6 +212,14 @@ func (s *Server) handleDeployRun(w http.ResponseWriter, r *http.Request) {
 	opt.ControlScript = controlScript
 	opt.DataScript = dataScript
 	opt.Mode = mode
+	// 数据面形态：只接受 pages / workers，其它值当作「沿用清单」
+	plane := strings.ToLower(strings.TrimSpace(req.DataPlaneMode))
+	if plane == "pages" || plane == "workers" {
+		opt.DataPlaneMode = plane
+	}
+	if opt.DataPlaneMode == "workers" {
+		opt.DataHost = strings.TrimSpace(req.DataHost)
+	}
 	opt.Force = req.ForceKv
 	opt.ControlProject = req.ControlProject
 	opt.DataProject = req.DataProject
@@ -506,6 +523,17 @@ func (k kernelStatus) Updatable() bool {
 // buildDeployStatusResponse 组装「检查状态」的响应体。
 //
 // 抽成纯函数是为了能直接测字段契约（界面读的就是这些字段名）。
+// dataPlaneModeOf 归一化清单里的数据面形态。
+//
+// 旧清单没有这个字段（历史版本只有 Pages 形态），一律按 pages 处理 ——
+// 不能返回空串，否则界面单选框会「一个都不选中」。
+func dataPlaneModeOf(m *deploy.Manifest) string {
+	if m != nil && m.DataPlaneMode == "workers" {
+		return "workers"
+	}
+	return "pages"
+}
+
 func buildDeployStatusResponse(
 	m *deploy.Manifest,
 	state, localBuild, remoteBuild string,
@@ -536,6 +564,9 @@ func buildDeployStatusResponse(
 		"controlSubdomain": m.ControlSubdomain,
 		"dataSubdomain":    m.DataSubdomain,
 		"customDomain":     m.DataCustomDomain,
+		// 数据面形态：界面用它把「Pages / Workers」单选框回填成线上实际形态。
+		// 旧清单没有这个字段 → 按 pages 处理（旧版本只有 Pages 形态）。
+		"dataPlaneMode": dataPlaneModeOf(m),
 
 		// ---- 内核版本对比（新增）----
 		//

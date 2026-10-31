@@ -5,7 +5,9 @@
 
 · 把「代理内核 + 优选订阅 + 本地真连接优选 + 中文部署向导」整合成一套方案；
 
-· 采用双 pages 项目部署：控制面  (web管理面板) + 数据面（流量转发）；
+· 采用「控制面 + 数据面」拆分部署：控制面（web 管理面板）跑 Pages，
+  数据面（流量转发）可选 **Pages（默认）** 或 **Workers**（已真机验证，见
+  `docs/workers-dataplane-deploy.md`）；
 
 · 静态脱敏 + 交叉混淆，稳定无1101、8000119，但也支持在触发限制后无损更新部署；
 
@@ -40,7 +42,8 @@
 > 全自动化：填 Token  → 自动部署  → 自动优选换 IP → 自动更新内核 → 日常维护 。
 >
 > 1. 全自动化使用需获取 Cloudflare Api Token 至少**三个权限** 。
-> 2. **必须两个 Pages 项目**（控制面 + 数据面），无风控最佳实践。
+> 2. **控制面 + 数据面必须分开**（控制面固定 Pages；数据面可选 Pages 或 Workers）。
+>    选 Workers 时**必须**配一个自有域名，`*.workers.dev` 直连不可访问。
 > 3. **不要与其它项目共用 KV** 。
 > 4. 免 Api Token 部署请**选择手动部署**流程。
 
@@ -245,16 +248,23 @@ GNOME 默认不支持（Ubuntu 自带的 AppIndicator 扩展默认启用，所�
 
 | 文件                                               | 用途         |
 | ------------------------------------------------ | ---------- |
-| [`CFPilot-dataplane.zip`](CFPilot-dataplane.zip) | 数据面（纯转发）   |
-| [`CFPilot-control.zip`](CFPilot-control.zip)     | 控制面（面板与订阅） |
+| [`CFPilot-dataplane.zip`](CFPilot-dataplane.zip) | 数据面（纯转发，Pages 方式上传）   |
+| [`CFPilot-control.zip`](CFPilot-control.zip)     | 控制面（面板与订阅，Pages 方式上传） |
+| [`_worker.js`](_worker.js)                       | 数据面**代码文件**（Workers 方式粘贴用） |
 
-> 两份包随每次构建自动更新，与本仓库代码一致。
+> 三份文件随每次构建自动更新，与本仓库代码一致。
 
 **第 1 步：创建 KV**
 
 Cloudflare 控制台 → **存储和数据库 → KV** → 创建命名空间，记下**命名空间 ID**。
 
-**第 2 步：部署数据面**
+**第 2 步：部署数据面（两种形态二选一）**
+
+控制面**始终**是 Pages 项目；数据面可以选 Pages 或 Workers。
+两种形态都可以，区别只有一条：**Workers 必须配自定义域名**。
+
+<details>
+<summary><b>2A. Pages 方式（默认，不需要自有域名）</b></summary>
 
 1. **Workers 和 Pages → 创建 → Pages → 上传资产**
 
@@ -275,6 +285,48 @@ Cloudflare 控制台 → **存储和数据库 → KV** → 创建命名空间，
 
 6. **重新上传一次压缩包**（绑定与变量只对之后的部署生效）
 
+</details>
+
+<details>
+<summary><b>2B. Workers 方式（需要自有域名，动态与边缘控制更强）</b></summary>
+
+> ⚠️ `*.workers.dev` 域名直连无法访问，**必须**在最后一步绑一个自定义域名，
+> 否则客户端节点全部连不上。该域名要托管在**本 Cloudflare 账号**里
+> （Workers 自定义域名不支持外部 CNAME）。
+
+1. **Workers 和 Pages → 创建 → Workers → 从 Hello World 开始**
+
+2. 脚本名随意（建议普通名称），点「部署」
+
+3. 进入 **编辑代码**，删掉默认示例，把仓库根目录 [`_worker.js`](_worker.js)
+   的**全部内容**粘贴进去 → 右上角「部署」
+
+   > 代码是单文件 ES module，不需要 `wrangler.toml`，也不需要构建步骤。
+
+4. **设置 → 变量和密钥 → 添加**（与 2A 的表完全一致）：
+
+   | 名称              | 值                  |
+   | --------------- | ------------------ |
+   | `UUID`          | 自己的 UUID（36 位标准格式） |
+   | `WS_PATH`       | 自定义路径，如 `/abc123`  |
+   | `ENABLE_TROJAN` | `true` / `false`   |
+   | `ENABLE_XHTTP`  | `true` / `false`   |
+
+5. **设置 → 绑定 → 添加 → KV 命名空间**：变量名 `KV` → 第 1 步的命名空间
+
+   > 变量与绑定保存后会自动创建一个新版本并部署；若页面上没有自动生效，
+   > 回「部署」页点一次部署即可。
+
+6. **设置 → 域和路由 → 添加 → 自定义域名**：填 `w1.example.com` 这类子域，
+   等状态变成 **Active**（证书签发通常 1~3 分钟）
+
+7. 记下这个**自定义域名** —— 第 3 步的 `DATA_HOST` 用它（不是 `*.workers.dev`）
+
+> 想换回 Pages 形态？删掉这个 Worker，按 2A 重做一遍即可 ——
+> 用 CLI / 桌面版更新部署时会**自动**完成这套清理与域名迁移。
+
+</details>
+
 **第 3 步：部署控制面**
 
 1. 另建一个 Pages 项目，上传 `CFPilot-control.zip`
@@ -285,7 +337,7 @@ Cloudflare 控制台 → **存储和数据库 → KV** → 创建命名空间，
    | ---------------- | ----------------- |
    | `UUID`           | 与数据面相同            |
    | `WS_PATH`        | 与数据面相同            |
-   | `DATA_HOST`      | 第 2 步记下的**数据面域名** |
+   | `DATA_HOST`      | 第 2 步记下的**数据面域名**（Pages 的 `*.pages.dev` 或 Workers 的自定义域名） |
    | `PANEL_PATH`     | 面板路径，如 `/mypanel` |
    | `ADMIN_PASSWORD` | 面板登录密码            |
 
@@ -298,7 +350,11 @@ Cloudflare 控制台 → **存储和数据库 → KV** → 创建命名空间，
 打开 `https://<控制面域名><PANEL_PATH>`，用 `ADMIN_PASSWORD` 登录。
 订阅地址：`https://<控制面域名>/sub/<UUID>`
 
-**更新时**：分别打开两个 pages 项目 → 点击新建部署 → 分别上传新版 zip → 部署完成更新。
+**更新时**：
+
+- 数据面是 Pages：打开项目 → 新建部署 → 上传新版 `CFPilot-dataplane.zip`
+- 数据面是 Workers：打开脚本 → 编辑代码 → 用新版 `_worker.js` 覆盖 → 部署
+- 控制面：打开项目 → 新建部署 → 上传新版 `CFPilot-control.zip`
 
 </details>
 

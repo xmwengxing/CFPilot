@@ -29,7 +29,13 @@
  * Pages 的绑定与变量只对**之后的**部署生效，先部署再配置等于白配。
  */
 import { randomBytes, randomUUID } from 'node:crypto'
-import { CloudflareClient, CloudflareError, type PagesDeployment } from './cf-api'
+import { CloudflareClient, CloudflareError, type PagesDeployment, type ScriptBinding } from './cf-api'
+import {
+  deleteWorkersDataPlane,
+  deployWorkersDataPlane,
+  detachWorkerHostname,
+  type DataPlaneMode,
+} from './workers-deploy'
 import { randomPanelPath, randomPassword, randomWorkerName, randomWsPath } from './utils'
 import { extractBuildVersion, loadBuiltinBundle, loadKernelBundle } from './kernel-remote'
 import { compareSemver } from '../shared/version-util'
@@ -58,6 +64,25 @@ export interface PagesSplitDeployOptions {
   enableTrojan: boolean
   /** 是否启用 XHTTP */
   enableXhttp: boolean
+  /**
+   * 数据面部署形态。
+   *
+   * - `pages`（默认）：数据面也是一个 Pages 项目，`*.pages.dev` 直连可访问，
+   *   不需要自有域名。
+   * - `workers`：数据面是一个 Worker，动态与边缘控制更强，
+   *   但 `*.workers.dev` 直连不可访问，**必须绑自定义域名**。
+   *
+   * 不传 = 沿用部署清单里记录的形态（没有清单则 `pages`）。
+   * 这与「显式传 pages」不同：后者对 Workers 实例来说是一次**形态切换**。
+   */
+  dataPlaneMode?: DataPlaneMode
+  /**
+   * Workers 数据面的自定义域名（如 `w1a2b3c4.example.com`）。
+   *
+   * 只对 `dataPlaneMode: 'workers'` 生效；留空时优先沿用清单里记录的旧域名，
+   * 都没有才回落到 `*.workers.dev`（并告警：该域名直连不可用）。
+   */
+  dataHost?: string
   /** 扫描令牌（可选） */
   scannerToken?: string
   /**
@@ -164,6 +189,14 @@ export interface DeployManifest {
    * 自动把它迁到新项目（否则用户订阅里的地址全部失效）。
    */
   dataCustomDomain?: string
+  /**
+   * 数据面部署形态；旧清单没有这个字段 = `pages`。
+   *
+   * 记它是为了「更新部署时识别形态是否被改过」——
+   * 改了就要在新数据面上线后删掉旧的，否则账号里会同时留着一个
+   * Pages 项目和一个 Worker，用户完全不知道哪个在生效。
+   */
+  dataPlaneMode?: DataPlaneMode
   /** 上次部署的构建版本 */
   build: string
   /**
@@ -942,11 +975,31 @@ export async function deployPagesSplit(
   result.wsPath = effective.wsPath
   result.panelPassword = effective.panelPassword
 
-  /* ---------------- 1. 创建两个 Pages 项目 ---------------- */
-  for (const [label, name] of [
-    ['控制面', controlName],
-    ['数据面', dataName],
-  ] as const) {
+  /* ---------------- 0c. 数据面部署形态 ---------------- */
+
+  // 未显式指定时**沿用清单里的形态**（而不是无脑回落到 pages）：
+  // 否则「一个 Workers 实例被顺手更新一次」就会被悄悄改成 Pages，
+  // 而用户根本没动过这个选项。
+  const prevDataMode: DataPlaneMode = manifest?.dataPlaneMode === 'workers' ? 'workers' : 'pages'
+  const dataMode: DataPlaneMode = options.dataPlaneMode ?? prevDataMode
+  const modeSwitched = !!manifest && dataMode !== prevDataMode
+  const oldDataName = manifest?.dataProject ?? ''
+  /** 换形态时要迁移的域名：优先用户本次指定，其次清单里记着的 */
+  const targetHost = (options.dataHost ?? '').trim() || (manifest?.dataCustomDomain ?? '').trim()
+
+  if (modeSwitched) {
+    log(
+      `⚠ 数据面部署形态变更：${prevDataMode === 'pages' ? 'Pages' : 'Workers'} → ` +
+        `${dataMode === 'pages' ? 'Pages' : 'Workers'}`
+    )
+    log('  → 新数据面部署成功后，会自动删除旧的数据面并迁移域名')
+  }
+
+  /* ---------------- 1. 创建 Pages 项目（数据面按部署形态决定） ---------------- */
+  //
+  // 控制面**永远**在 Pages：面板 + 订阅 + 探针不含出站 TCP，Pages 上最稳。
+  // 只有数据面允许换成 Workers（见 docs/workers-dataplane-deploy.md）。
+  const ensurePagesProject = async (label: '控制面' | '数据面', name: string): Promise<void> => {
     try {
       const project = await client.createPagesProject(options.accountId, {
         name,
@@ -977,13 +1030,20 @@ export async function deployPagesSplit(
     }
   }
 
+  await ensurePagesProject('控制面', controlName)
+  if (dataMode === 'pages') {
+    await ensurePagesProject('数据面', dataName)
+  } else {
+    log('· 数据面部署形态：Workers（不创建 Pages 数据面项目）')
+  }
+
   /* ---------------- 2. 配置环境变量与 KV（必须在部署前） ---------------- */
 
   if (result.control.subdomain) {
     await configureProject(client, options.accountId, controlName, '控制面', result, options, log, warnings, effective)
   }
 
-  if (result.data.subdomain) {
+  if (dataMode === 'pages' && result.data.subdomain) {
     await configureProject(client, options.accountId, dataName, '数据面', result, options, log, warnings, effective)
   }
 
@@ -1037,7 +1097,7 @@ export async function deployPagesSplit(
   // 只有 `active` 的才列出。若此时恰好触发 8000119 换名，就会漏掉该域名
   // → 新项目没继承它 → 用户订阅地址失效。
   let dataCustomDomain = ''
-  if (previousDataProject) {
+  if (dataMode === 'pages' && previousDataProject) {
     const isCustom = (d: string): boolean => typeof d === 'string' && !d.endsWith('.pages.dev')
     try {
       // 1) 优先 `/domains`（含未生效状态）
@@ -1054,25 +1114,171 @@ export async function deployPagesSplit(
       /* 旧项目读不到就不迁移（可能已被删） */
     }
   }
+  // 从 Workers 换回 Pages 时，域名只可能来自清单或本次指定
+  if (dataMode === 'pages' && prevDataMode === 'workers' && !dataCustomDomain) {
+    dataCustomDomain = targetHost
+  }
 
-  const dataAttempt = await deployWithBlockRetry({
-    client,
-    accountId: options.accountId,
-    preferredName: dataName,
-    code: dataCode,
-    label: '数据面',
-    result,
-    options,
-    effective,
-    wait,
-    log,
-    warnings,
-    oldProject: previousDataProject,
-    customDomain: dataCustomDomain,
-  })
-  if (dataAttempt) {
-    result.data.name = dataAttempt.project ?? options.dataProject
-    result.data.subdomain = dataAttempt.subdomain
+  if (dataMode === 'workers') {
+    /* ---------- 数据面：Workers ---------- */
+
+    // 绑定随脚本一起提交（Workers 没有 Pages 那种「先配变量再部署」的两段式）
+    const workersBindings: ScriptBinding[] = [
+      { type: 'kv_namespace', name: 'KV', namespace_id: options.kvNamespaceId },
+      { type: 'plain_text', name: 'UUID', text: effective.uuid },
+      { type: 'plain_text', name: 'TROJAN_PASSWORD', text: effective.trojanPassword },
+      { type: 'plain_text', name: 'WS_PATH', text: effective.wsPath },
+      { type: 'plain_text', name: 'PATH', text: effective.wsPath },
+      { type: 'plain_text', name: 'ENABLE_TROJAN', text: options.enableTrojan ? 'true' : 'false' },
+      { type: 'plain_text', name: 'ENABLE_XHTTP', text: options.enableXhttp ? 'true' : 'false' },
+      ...(options.resolvePreferred === undefined
+        ? []
+        : [
+            {
+              type: 'plain_text' as const,
+              name: 'RESOLVE_PREFERRED',
+              text: options.resolvePreferred ? 'true' : 'false',
+            },
+          ]),
+    ]
+
+    const switchingFromPages = modeSwitched && prevDataMode === 'pages'
+
+    // 同一个域名不能同时挂在 Pages 项目与 Worker 上，必须先解绑旧的。
+    // 这一步会让旧实例短暂失去域名 —— 因此失败时必须回滚（见 catch）。
+    if (switchingFromPages && targetHost && oldDataName) {
+      try {
+        await client.removePagesDomain(options.accountId, oldDataName, targetHost)
+        log(`· 已从旧 Pages 数据面 ${oldDataName} 解绑域名 ${targetHost}（准备迁到 Workers）`)
+      } catch {
+        /* 旧项目可能本来就没绑这个域名 */
+      }
+    }
+
+    try {
+      const deployed = await deployWorkersDataPlane({
+        client,
+        accountId: options.accountId,
+        name: dataName,
+        code: dataCode,
+        hostname: targetHost || undefined,
+        bindings: workersBindings,
+        log,
+        warnings,
+      })
+      result.data.name = deployed.name
+      result.data.subdomain = deployed.host
+      dataCustomDomain = deployed.customDomain
+    } catch (err) {
+      // 回滚：把域名还给旧 Pages 数据面，别让用户连一个不存在的域名
+      if (switchingFromPages && targetHost && oldDataName) {
+        try {
+          await client.addPagesDomain(options.accountId, oldDataName, targetHost)
+          log('· 已把域名回滚到旧 Pages 数据面')
+        } catch {
+          warnings.push(
+            `域名 ${targetHost} 回滚失败，请手动到 Cloudflare 控制台把它绑回 ${oldDataName}。`
+          )
+        }
+      }
+      throw new Error(
+        `Workers 数据面部署失败：${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+
+    // 新数据面已上线 → 删掉旧 Pages 数据面（换形态的唯一收尾动作）
+    if (switchingFromPages && oldDataName) {
+      try {
+        await client.deletePagesProject(options.accountId, oldDataName)
+        log(`✅ 已删除被替换的旧 Pages 数据面项目：${oldDataName}`)
+      } catch (err) {
+        warnings.push(
+          `删除旧 Pages 数据面失败（${oldDataName}）：${err instanceof Error ? err.message : String(err)}\n` +
+            '  → 它已经不再接收流量，可到控制台手动删除。'
+        )
+      }
+    }
+  } else {
+    /* ---------- 数据面：Pages ---------- */
+
+    // 从 Workers 换回 Pages：Pages 的变量必须在部署前配好
+    if (modeSwitched && prevDataMode === 'workers') {
+      await ensurePagesProject('数据面', dataName)
+      if (result.data.subdomain) {
+        await configureProject(client, options.accountId, dataName, '数据面', result, options, log, warnings, effective)
+      }
+    }
+
+    const dataAttempt = await deployWithBlockRetry({
+      client,
+      accountId: options.accountId,
+      preferredName: dataName,
+      code: dataCode,
+      label: '数据面',
+      result,
+      options,
+      effective,
+      wait,
+      log,
+      warnings,
+      oldProject: previousDataProject,
+      customDomain: dataCustomDomain,
+    })
+    if (dataAttempt) {
+      result.data.name = dataAttempt.project ?? options.dataProject
+      result.data.subdomain = dataAttempt.subdomain
+
+      // 形态切换收尾：摘掉旧 Worker 的域名 → 绑到新 Pages 项目 → 删旧 Worker
+      if (modeSwitched && prevDataMode === 'workers' && oldDataName) {
+        let detachedHost = ''
+        try {
+          detachedHost = await detachWorkerHostname(client, options.accountId, oldDataName)
+          if (detachedHost) log(`· 已从旧 Workers 数据面解绑域名 ${detachedHost}`)
+        } catch {
+          /* 没有绑定就跳过 */
+        }
+
+        const host = dataCustomDomain || detachedHost
+        let moved = true
+        if (host) {
+          try {
+            await client.addPagesDomain(options.accountId, result.data.name, host)
+            log(`✅ 自定义域名已迁移到 Pages 数据面：${host}`)
+            dataCustomDomain = host
+          } catch (err) {
+            moved = false
+            warnings.push(
+              `自定义域名迁移失败（${host} → ${result.data.name}）：` +
+                `${err instanceof Error ? err.message : String(err)}\n` +
+                `  → 请手动到 Cloudflare 控制台把该域名绑到 ${result.data.name}，否则订阅地址会失效。`
+            )
+            // 迁移失败：把域名还给旧 Worker，且**不删**旧 Worker
+            try {
+              await client.attachCustomDomain(options.accountId, {
+                hostname: host,
+                service: oldDataName,
+                zoneId: (await client.listWorkerDomains(options.accountId)).find((d) => d.hostname === host)
+                  ?.zone_id ?? '',
+              })
+              log('· 已把域名回滚到旧 Workers 数据面')
+            } catch {
+              /* 回滚失败只告警，下面不再删旧 Worker */
+            }
+          }
+        }
+
+        if (moved) {
+          try {
+            await deleteWorkersDataPlane(client, options.accountId, oldDataName, log)
+          } catch (err) {
+            warnings.push(
+              `删除旧 Workers 数据面失败（${oldDataName}）：${err instanceof Error ? err.message : String(err)}\n` +
+                '  → 它已经不再接收流量，可到控制台手动删除。'
+            )
+          }
+        }
+      }
+    }
   }
 
   // ⚠️ **数据面换名后必须重配控制面**
@@ -1093,7 +1299,11 @@ export async function deployPagesSplit(
     try {
       const controlProject = await client.getPagesProject(options.accountId, result.control.name)
       const currentHost = controlProject.deployment_configs?.production?.env_vars?.DATA_HOST?.value ?? ''
-      if (currentHost && currentHost !== expected) {
+      // ⚠️ 这里**不能用 `currentHost &&`** 兜底：
+      // 首次部署 Workers 数据面时，控制面的 DATA_HOST 在部署前是**空串**
+      // （那一步还不知道数据面域名），用「非空才比对」会直接跳过同步
+      // → 订阅里的节点域名是空的，用户拿到一堆连不上的节点。
+      if (currentHost !== expected) {
         log(`⚠ 控制面 DATA_HOST 仍指向旧域名 ${currentHost}，正在同步为 ${expected}`)
         await configureProject(
           client,
@@ -1165,6 +1375,8 @@ export async function deployPagesSplit(
       dataSubdomain: result.data.subdomain,
       // 自定义域名：本次迁过来的，或旧项目上原有的（下次更新还要靠它迁移）
       dataCustomDomain: dataCustomDomain || manifest?.dataCustomDomain || '',
+      // 部署形态：更新时靠它识别「用户是否改过数据面形态」
+      dataPlaneMode: dataMode,
       build,
       kernelVersion,
       at: new Date().toISOString(),

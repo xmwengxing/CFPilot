@@ -156,7 +156,9 @@ func isPermissionErr(err error) bool {
 // 用户只看到「部署失败」，既不知道是权限问题，也不知道要清理什么。
 //
 // 现在缺权限**在上传任何东西之前**就中止，并直接告诉用户缺哪一项。
-func (d *Deployer) preflightWorkersDataPlane(ctx context.Context, hostname string) (*cfapi.Zone, error) {
+func (d *Deployer) preflightWorkersDataPlane(
+	ctx context.Context, hostname string, expectLeftoverDns bool,
+) (*cfapi.Zone, error) {
 	d.log("· 预检 Workers 数据面所需权限…")
 
 	if _, err := d.client.ListScripts(ctx, d.opt.AccountID); err != nil {
@@ -200,9 +202,20 @@ func (d *Deployer) preflightWorkersDataPlane(ctx context.Context, hostname strin
 	}
 	d.log("  · 域名 " + hostname + " 归属 zone " + zone.Name)
 
-	// DNS 只告警不阻断：读不到也可能是「只有 Edit 没有 Read」的令牌组合，
-	// 那种令牌其实能建记录。真正的失败留给绑定时那一次调用。
+	// DNS 只告警不阻断 —— **但换形态例外**：
+	// 主机名下一定有条 Pages 遗留的 CNAME，删它必须有 DNS 写权限，
+	// 读都读不到 = 一定没有写。这时必须在动线上域名之前拦下。
 	if _, derr := d.client.ListDNSRecords(ctx, zone.ID, hostname); derr != nil {
+		if expectLeftoverDns {
+			return nil, fmt.Errorf(
+				"换形态需要删除 %s 上 Pages 遗留的 DNS 记录，但当前令牌读不到 DNS（%v）。\n"+
+					"  → %s\n"+
+					"  → 或者（任选其一，都不需要 DNS 权限）：\n"+
+					"     1) 到 Cloudflare 控制台 → 该域名的 DNS 页，手动删掉这个主机名下的记录，再重跑；\n"+
+					"     2) 给数据面换一个新子域（如 w1.你的域名）—— 绑新域名由 Cloudflare 自己建记录，不需要 DNS 权限。\n"+
+					"  → 不想折腾就把数据面部署模式改回 Pages。",
+				hostname, derr, workersPermHint.dns)
+		}
 		if isPermissionErr(derr) {
 			// 同时打到日志里：只塞进 warnings 的话，用户在部署过程中看不到，
 			// 等到绑定失败才知道缺权限，白等一轮。

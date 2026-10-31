@@ -56,14 +56,18 @@ const WORKERS_PERMISSIONS = {
   },
   domains: {
     label: 'Workers 自定义域名',
-    hint: 'Token 中添加 Account / Workers Routes / Edit（账号级）',
+    hint: 'Token 中添加 Zone / Workers Routes / Edit（控制台里就叫 Workers Routes）',
   },
   zoneRoutes: {
     label: 'Zone 级 Worker 路由',
-    hint: 'Token 中添加 Zone / Workers Routes / Edit（域级）',
-  },  dns: {
-    label: 'Zone DNS 记录',
-    hint: 'Token 中添加 Zone / DNS / Edit（自定义域名要自动建 DNS 记录）',
+    hint: 'Token 中添加 Zone / Workers Routes / Edit',
+  },
+  dns: {
+    label: 'Zone DNS',
+    // ⚠️ 名称必须与控制台一致：权限项就叫 **DNS**（分类 Zone），
+    // 而且必须先把 Zone Resources 选到目标域名，这一项才会出现在列表里。
+    hint:
+      'Token 中添加 Zone / DNS / Edit（确保 Zone Resources 包含目标域名；建议 Read + Edit 都给）',
   },
 } as const
 
@@ -95,6 +99,8 @@ export function describeWorkersPermissionError(
 export interface WorkersPreflightResult {
   /** 目标 zone（没给自定义域名时为 null） */
   zone: { id: string; name: string } | null
+  /** 能否读取该 zone 的 DNS 记录（决定换形态时能否自动清理旧记录） */
+  dnsReadable: boolean
 }
 
 /**
@@ -108,7 +114,17 @@ export async function preflightWorkersDataPlane(
   accountId: string,
   hostname: string | undefined,
   log: (message: string) => void,
-  warnings: string[]
+  warnings: string[],
+  /**
+   * 是否**预期主机名下已有 Pages 遗留的 DNS 记录**。
+   *
+   * 换形态（Pages → Workers）时必然有：Pages 绑自定义域名时建的那条 CNAME，
+   * 解绑项目不会删掉它。而删它需要 DNS **写**权限。
+   *
+   * 这种情况下如果连读都读不到，就**必须在动任何东西之前拦下** ——
+   * 否则会先解绑线上域名、传完脚本、再失败回滚，每次尝试白掉十几秒线上可用性。
+   */
+  options: { expectLeftoverDns?: boolean } = {}
 ): Promise<WorkersPreflightResult> {
   log('· 预检 Workers 数据面所需权限…')
 
@@ -137,7 +153,7 @@ export async function preflightWorkersDataPlane(
   if (!hostname) {
     // 没给域名 → 回落 workers.dev。这不是权限问题，是「节点会连不上」的问题，
     // 所以不阻断，但必须说清楚（见 deployWorkersDataPlane 的告警）。
-    return { zone: null }
+    return { zone: null, dnsReadable: false }
   }
 
   // 3) 域名必须属于本账号的 zone
@@ -159,19 +175,32 @@ export async function preflightWorkersDataPlane(
   try {
     await client.getDnsRecords(zone.id, hostname)
     log('  · Zone DNS 权限正常')
+    return { zone, dnsReadable: true }
   } catch (err) {
     const message = describeWorkersPermissionError(err, 'dns')
-    // 同时打到日志里：只塞进 warnings 的话，用户在部署过程中看不到，
-    // 等到绑定失败才知道缺权限，白等一轮。
+
+    // 换形态：主机名下一定有条 Pages 遗留的 CNAME，删它必须有 DNS 写权限。
+    // 读都读不到 = 一定没有写 → 现在拦下，别去动线上域名。
+    if (options.expectLeftoverDns) {
+      throw new Error(
+        `换形态需要删除 ${hostname} 上 Pages 遗留的 DNS 记录，但当前令牌读不到 DNS（${err instanceof Error ? err.message : String(err)}）。\n` +
+          `  → ${WORKERS_PERMISSIONS.dns.hint}\n` +
+          '  → 或者（任选其一，都不需要 DNS 权限）：\n' +
+          '     1) 到 Cloudflare 控制台 → 该域名的 DNS 页，手动删掉这个主机名下的记录，再重跑；\n' +
+          '     2) 给数据面换一个新子域（如 w1.你的域名）—— 绑新域名由 Cloudflare 自己建记录，不需要 DNS 权限。\n' +
+          '  → 不想折腾就把数据面部署模式改回 Pages。'
+      )
+    }
+
+    // 非换形态（全新子域）：没有遗留记录要清，DNS 权限用不上，只告警。
     log('  ⚠ Zone DNS 权限缺失或不可读（换形态时可能无法自动清理旧记录）')
     warnings.push(
       message ??
-        `无法读取 DNS 记录：${err instanceof Error ? err.message : String(err)}\n` +
-          '  → 若绑定域名时报权限错误，请补 Zone / DNS / Edit。'
+        `无法读取 DNS 记录：${err instanceof Error ? err.message : String(err)}` +
+          '\n  → 若绑定域名时报权限错误，请补 Zone / DNS / Edit。'
     )
+    return { zone, dnsReadable: false }
   }
-
-  return { zone }
 }
 
 /**

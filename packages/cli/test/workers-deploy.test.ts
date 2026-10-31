@@ -10,6 +10,7 @@ import { CloudflareError, type CloudflareClient } from '../src/deploy/cf-api'
 import {
   clearPagesLeftoverDns,
   describeWorkersPermissionError,
+  preflightWorkersDataPlane,
   isPermissionError,
   resolveZoneForHost,
   WORKERS_COMPAT_DATE,
@@ -165,5 +166,61 @@ describe('clearPagesLeftoverDns（409/100117 的修法）', () => {
     ])
     await clearPagesLeftoverDns(client, 'z1', 'data.example.com', () => {}, [])
     expect(deleted).toEqual([])
+  })
+})
+
+describe('preflightWorkersDataPlane：换形态时的 DNS 硬门槛', () => {
+  function fakeClient(opts: { dnsThrows?: boolean } = {}) {
+    return {
+      listScripts: async () => [],
+      listWorkerDomains: async () => [],
+      listZones: async () => [{ id: 'z1', name: 'example.com' }],
+      getDnsRecords: async () => {
+        if (opts.dnsThrows) throw new CloudflareError('Authentication error', 403)
+        return []
+      },
+    } as unknown as CloudflareClient
+  }
+
+  it('换形态 + 读不到 DNS → 在动线上域名之前就拦下', async () => {
+    // 真机：令牌没有 DNS，0.12.8 会先解绑线上域名、传脚本、再失败回滚，
+    // 每次尝试白掉十几秒可用性。这里必须提前拦。
+    await expect(
+      preflightWorkersDataPlane(
+        fakeClient({ dnsThrows: true }),
+        'acct',
+        'data.example.com',
+        () => {},
+        [],
+        { expectLeftoverDns: true }
+      )
+    ).rejects.toThrow(/换一个新子域/)
+  })
+
+  it('全新子域 + 读不到 DNS → 只告警，继续部署', async () => {
+    const warnings: string[] = []
+    const result = await preflightWorkersDataPlane(
+      fakeClient({ dnsThrows: true }),
+      'acct',
+      'w1.example.com',
+      () => {},
+      warnings,
+      { expectLeftoverDns: false }
+    )
+    expect(result.zone).toEqual({ id: 'z1', name: 'example.com' })
+    expect(result.dnsReadable).toBe(false)
+    expect(warnings.length).toBeGreaterThan(0)
+  })
+
+  it('DNS 可读时返回 dnsReadable=true', async () => {
+    const result = await preflightWorkersDataPlane(
+      fakeClient(),
+      'acct',
+      'w1.example.com',
+      () => {},
+      [],
+      { expectLeftoverDns: true }
+    )
+    expect(result.dnsReadable).toBe(true)
   })
 })

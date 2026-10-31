@@ -430,7 +430,7 @@ func (d *Deployer) Run(ctx context.Context) (*Result, error) {
 
 	var workersZone *cfapi.Zone
 	if dataMode == "workers" {
-		z, perr := d.preflightWorkersDataPlane(ctx, switchHostPreview)
+		z, perr := d.preflightWorkersDataPlane(ctx, switchHostPreview, oldPagesHost != "" && switchHostPreview == oldPagesHost)
 		if perr != nil {
 			return nil, perr
 		}

@@ -72,8 +72,9 @@ ${NAME} deploy —— 双面部署（控制面 Pages + 数据面 Pages/Workers�
 
 Token 所需权限:
   Account / Pages / Edit              创建项目、配置变量、触发部署
-  Account / Workers Scripts / Edit    部署 Workers 数据面（--data-plane workers）
   Account / Workers KV Storage / Edit 创建 KV（若未提供 --kv）
+  Account / Workers Scripts / Edit    部署 Workers 数据面（--data-plane workers）
   Zone / Workers Routes / Edit        绑定 Workers 自定义域名（--data-host）
-  Zone / DNS / Edit                   自定义域名需要自动建 DNS 记录
+  Zone / DNS / Edit                   仅换形态时清理 Pages 遗留的 DNS 记录
+                                      （绑全新子域不需要；控制台里权限项就叫 DNS）
 `

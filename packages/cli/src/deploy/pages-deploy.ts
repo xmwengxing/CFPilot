@@ -1051,7 +1051,12 @@ export async function deployPagesSplit(
       options.accountId,
       switchHostPreview || undefined,
       log,
-      warnings
+      warnings,
+      {
+        // 只有「沿用旧域名」时主机名下才会有 Pages 遗留的 CNAME；
+        // 用户换了新子域就没有，不需要 DNS 写权限。
+        expectLeftoverDns: !!oldPagesHost && switchHostPreview === oldPagesHost,
+      }
     )
     workersZone = preflight.zone
   }

@@ -1,3 +1,3 @@
 // 本文件由 scripts/sync-version.mjs 从根 package.json 生成，请勿手改
-export const VERSION = '0.12.6'
+export const VERSION = '0.12.7'
 export const NAME = 'cfpilot'

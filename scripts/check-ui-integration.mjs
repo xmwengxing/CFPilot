@@ -116,6 +116,32 @@ for (const [label, re, field] of fieldChecks) {
   if (!ok) bad++
 }
 
+/* ---------------- 4. 部署状态卡的版本文案 ---------------- */
+
+console.log('\n=== 版本信息文案（三个来源不能混叫） ===\n')
+
+// ⚠️ 必须读**源码**而不是 dist 产物：esbuild 会把中文转成 `\uXXXX`，
+// 在产物里搜「已部署」永远搜不到（实测踩过，检查会假通过/假失败）。
+const rendererSrc = readFileSync('packages/ui/src/renderer.ts', 'utf8')
+
+// 三个版本来自三个地方，必须各有唯一名字：
+//   已部署     ← Cloudflare 上正在跑的
+//   最新发布   ← GitHub 上发布的最新内核
+//   本程序内置 ← 当前桌面版自带的产物
+//
+// 早期三者挤在一行、两个都叫「线上」，用户分不清该不该更新（2026-10-31 报障）。
+const versionLabels = ['已部署', '最新发布', '本程序内置']
+for (const label of versionLabels) {
+  const ok = rendererSrc.includes(label)
+  console.log(`${ok ? 'PASS' : 'FAIL'}  renderer 含「${label}」`)
+  if (!ok) bad++
+}
+
+// 「线上内核」是有歧义的历史叫法，不能再出现在状态卡里
+const ambiguous = rendererSrc.includes('线上内核')
+console.log(`${ambiguous ? 'FAIL' : 'PASS'}  状态卡不再使用有歧义的「线上内核」`)
+if (ambiguous) bad++
+
 console.log(
   bad === 0 ? '\n全部通过：界面 ↔ 适配层 ↔ 后端 三方接口一致。' : `\n${bad} 项不一致 —— 界面会静默失效。`
 )

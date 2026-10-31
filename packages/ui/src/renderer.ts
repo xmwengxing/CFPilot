@@ -2362,25 +2362,76 @@
         : ''
 
       /**
-       * 内核版本信息行。
+       * 内核版本三行表。
        *
-       * `build` 是 build 指纹（`<hash>-<hash>`），只能判断「一样不一样」，
-       * **判断不了新旧** —— 而部署代码现在可以独立于应用版本更新，
-       * 所以必须用可比较的 semver（`kernelVersion`）来判断。
+       * ## 为什么是三行、为什么必须换名字
+       *
+       * 三个版本来自**三个不同的地方**，早期挤在一行里，于是出现了两个「线上」：
+       * 第一行指的是 Cloudflare 上正在跑的那份，第二行其实指的是 GitHub 上发布的最新版
+       * —— 同名不同义，用户根本没法判断该不该更新（2026-10-31 报障）。
+       *
+       * 现在拆成三行，名字各自唯一：
+       *
+       *   已部署      ← Cloudflare 上这个实例正在运行的（现状）
+       *   最新发布    ← GitHub Release 上的最新内核（目标，可升级到它）
+       *   本程序内置  ← 当前这个桌面版自带的内核产物（点部署会传它）
+       *
+       * 每行都带 tooltip 说明来源，避免再出现「线上是哪个线上」的问题。
        */
-      const kernelLine = (): string => {
+      const versionTable = (): string => {
+        const row = (label: string, tip: string, value: string, dim = false): string =>
+          '<div class="verrow">' +
+          '<span class="verlabel" title="' + escapeHtml(tip) + '">' + label + '</span>' +
+          '<span class="verval' + (dim ? ' dim' : '') + '">' + value + '</span>' +
+          '</div>'
+
         const parts: string[] = []
-        if (status.kernelVersion) {
-          parts.push('线上内核 <code>' + escapeHtml(status.kernelVersion) + '</code>')
+
+        // 1) 已部署：Cloudflare 上正在跑的（语义版本 · 构建指纹）
+        const deployedParts: string[] = []
+        if (status.kernelVersion) deployedParts.push(escapeHtml(status.kernelVersion))
+        if (status.build) deployedParts.push('<span class="dim">' + escapeHtml(status.build) + '</span>')
+        parts.push(
+          row(
+            '已部署',
+            'Cloudflare 上这个实例当前正在运行的内核（现读数据面的版本端点，读不到才用部署记录）',
+            deployedParts.length > 0 ? deployedParts.join(' · ') : '未记录',
+            deployedParts.length === 0
+          )
+        )
+
+        // 2) 最新发布：GitHub 上的最新内核
+        if (status.remoteKernelVersion || status.kernelRemoteError) {
+          const hasNewer =
+            !!status.remoteKernelVersion &&
+            !!status.kernelVersion &&
+            status.remoteKernelVersion !== status.kernelVersion
+          parts.push(
+            row(
+              '最新发布',
+              'GitHub Release 上发布的最新内核；比「已部署」新时可以用「更新部署」升级',
+              status.remoteKernelVersion
+                ? escapeHtml(status.remoteKernelVersion) +
+                    (hasNewer ? '<span class="vertag">可升级</span>' : '')
+                : '<span class="dim">查询失败</span>'
+            )
+          )
         }
-        if (status.localKernelVersion) {
-          parts.push('应用内置 <code>' + escapeHtml(status.localKernelVersion) + '</code>')
-        }
-        if (status.remoteKernelVersion) {
-          parts.push('最新可用 <code>' + escapeHtml(status.remoteKernelVersion) + '</code>')
-        }
-        if (parts.length === 0) return ''
-        return '<br>' + parts.join(' · ')
+
+        // 3) 本程序内置：这个桌面版自带的内核产物
+        const localParts: string[] = []
+        if (status.localKernelVersion) localParts.push(escapeHtml(status.localKernelVersion))
+        if (status.localBuild) localParts.push('<span class="dim">' + escapeHtml(status.localBuild) + '</span>')
+        parts.push(
+          row(
+            '本程序内置',
+            '当前这个桌面版自带的内核产物；点「部署 / 更新」上传的就是它',
+            localParts.length > 0 ? localParts.join(' · ') : '读取失败',
+            localParts.length === 0
+          )
+        )
+
+        return '<div class="vertable">' + parts.join('') + '</div>'
       }
 
       /**
@@ -2392,7 +2443,7 @@
         if (!status.kernelUpdatable) return ''
         const target = status.remoteKernelVersion ? '（可更新到 ' + escapeHtml(status.remoteKernelVersion) + '）' : ''
         return (
-          '<br><span style="color:var(--warn)">👉 线上内核有新版' + target +
+          '<br><span style="color:var(--warn)">👉 GitHub 上发布了更新的内核' + target +
           '，点下面的「更新部署」即可升级 —— <b>不需要升级本程序</b></span>'
         )
       }
@@ -2400,27 +2451,25 @@
       if (status.state === 'latest') {
         el.innerHTML =
           '<span class="badge ok">已是最新</span><br>' +
-          '实例：' + instance + '<br>' +
-          '内核版本 <code>' + escapeHtml(status.localBuild ?? '') + '</code>' +
-          kernelLine() + kernelUpdateHint() + deployedAt
+          '实例：' + instance +
+          versionTable() + kernelUpdateHint() + deployedAt
         setBtn('重新部署', false)
         if (hint) {
           hint.textContent = status.kernelUpdatable
-            ? '线上内核与本地一致，但远程有更新的内核可用 —— 点「重新部署」会升到最新版。'
-            : '线上与本地内核版本一致，通常不需要再部署。'
+            ? '「已部署」与「本程序内置」一致，但 GitHub 上有更新的内核 —— 点「重新部署」会升到最新版。'
+            : '「已部署」与「本程序内置」是同一份产物，通常不需要再部署。'
         }
         return
       }
 
       // 三种子情况分开表达，绝不让用户看到 `unknown` 这种占位符
       if (!status.build) {
-        // 线上没有版本记录（早期部署的，或当时没读到本地版本）
+        // 已部署的内核读不到版本（早期部署的，或数据面探测不到且清单里没记）
         el.innerHTML =
           '<span class="badge warn">建议更新</span><br>' +
-          '实例：' + instance + '<br>' +
-          '线上部署记录里<b>没有内核版本号</b>（较早版本部署的）<br>' +
-          '本地内核版本：<code>' + escapeHtml(status.localBuild ?? '读取失败') + '</code>' +
-          kernelLine() + kernelUpdateHint() + deployedAt
+          '实例：' + instance +
+          '<br>读不到「已部署」内核的版本号（较早版本部署的，或数据面暂时探测不到）' +
+          versionTable() + kernelUpdateHint() + deployedAt
         setBtn('更新并记录版本', true)
         if (hint) {
           hint.textContent =
@@ -2433,26 +2482,24 @@
         // 本地读不到版本 —— 通常是产物缺失
         el.innerHTML =
           '<span class="badge err">本地产物异常</span><br>' +
-          '实例：' + instance + '<br>' +
-          '线上内核版本：<code>' + escapeHtml(status.build) + '</code><br>' +
-          '但<b>读不到本地内核版本</b> —— 应用内的内核产物可能缺失' +
-          kernelLine() + deployedAt
+          '实例：' + instance +
+          versionTable() +
+          '<br>但<b>读不到「本程序内置」的内核版本</b> —— 应用内的内核产物可能缺失' +
+          deployedAt
         setBtn('重新部署', false)
         if (hint) hint.textContent = '请重新安装或联系维护者；直接部署可能上传不完整的产物。'
         return
       }
 
-      // 正常差异：线上旧、本地新
+      // 正常差异：已部署的比本程序内置的旧
       el.innerHTML =
         '<span class="badge warn">可更新</span><br>' +
-        '实例：' + instance + '<br>' +
-        '线上内核 <code>' + escapeHtml(status.build) + '</code>' +
-        ' → 本地 <code>' + escapeHtml(status.localBuild) + '</code>' +
-        kernelLine() + kernelUpdateHint() + deployedAt
+        '实例：' + instance +
+        versionTable() + kernelUpdateHint() + deployedAt
       setBtn('更新到最新内核', true)
       if (hint) {
         hint.textContent =
-          '更新会沿用原 UUID 与 WS 路径，客户端订阅地址不用改。'
+          '「已部署」与「本程序内置」不是同一份产物，更新会换成后者。沿用原 UUID 与 WS 路径，客户端订阅地址不用改。'
       }
     }
 

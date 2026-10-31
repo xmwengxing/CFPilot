@@ -581,6 +581,31 @@
     body.light .pill { background: rgba(15, 23, 42, 0.04); }
 
     /* --------------------------------------------------------------
+       内核版本三行表（已部署 / 最新发布 / 本程序内置）
+
+       为什么不用一句话：三个版本来自三个地方（Cloudflare 上跑的、
+       GitHub 上发布的、当前程序自带的），写成一行必然出现两个「线上」，
+       用户分不清谁是谁。
+       -------------------------------------------------------------- */
+    .vertable {
+      margin-top: 8px;
+      display: flex; flex-direction: column; gap: 3px;
+      font-size: 12.5px;
+    }
+    .verrow { display: flex; gap: 10px; align-items: baseline; }
+    .verlabel {
+      color: var(--muted); min-width: 72px; flex: none;
+      cursor: help; border-bottom: 1px dotted var(--border);
+    }
+    .verval { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text-main); }
+    /* 版本表里所有 .dim（整行降级 + 行内的构建指纹）统一走弱化色 */
+    .vertable .dim { color: var(--muted); }
+    .vertag {
+      margin-left: 6px; font-size: 11px; padding: 1px 6px;
+      border-radius: 999px; background: var(--warn-bg); color: var(--warn);
+    }
+
+    /* --------------------------------------------------------------
        提示框
        -------------------------------------------------------------- */
     .secure {
@@ -1101,8 +1126,10 @@
               <button class="btn btn-ghost" id="btnShowCreds">查看面板凭据</button>
             </div>
             <p class="tip" style="margin-top:8px">
-              会读取该 KV 中的部署记录，比对<b>线上内核版本</b>与<b>本地内核版本</b>：
-              一致说明无需更新，不一致即可一键更新。
+              会读取该 KV 中的部署记录，并现读数据面的版本端点，得到三样东西：<br>
+              <b>已部署</b>（Cloudflare 上正在跑的）· <b>最新发布</b>（GitHub 上的最新内核）·
+              <b>本程序内置</b>（当前程序自带的产物）。<br>
+              「已部署」与「本程序内置」一致说明无需更新，不一致即可一键更新。
             </p>
 
             <!--

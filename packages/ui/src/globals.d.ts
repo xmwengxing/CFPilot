@@ -155,6 +155,15 @@ interface Window {
         panelPath: string
         wsPath: string
         /**
+         * 数据面部署形态：pages（默认）/ workers。
+         *
+         * 留空 = 沿用部署清单里记录的形态（没有清单则 pages）。
+         * 与清单不一致时后端会当成形态切换：新数据面上线后删除旧的并迁移域名。
+         */
+        dataPlaneMode?: 'pages' | 'workers'
+        /** Workers 数据面的自定义域名（只对 workers 生效，留空回落 workers.dev） */
+        dataHost?: string
+        /**
          * 本次部署要设置的面板密码（可选）。
          *
          * 留空 = 首次随机生成 / 更新沿用原密码。

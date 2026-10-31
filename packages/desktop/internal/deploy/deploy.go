@@ -66,6 +66,15 @@ type Options struct {
 	// ---- 模式 ----
 	// Mode: "auto"（有清单就更新）/ "fresh"（强制首次）
 	Mode string
+	// DataPlaneMode 是数据面部署形态："pages"（默认）/ "workers"。
+	//
+	// 空串 = **沿用清单里记录的形态**（没有清单则 pages）。
+	// 与「显式传 pages」不同：后者对 Workers 实例来说是一次形态切换。
+	DataPlaneMode string
+	// DataHost 是 Workers 数据面的自定义域名（只对 workers 生效）。
+	//
+	// 留空时优先沿用清单里记录的旧域名，都没有才回落到 *.workers.dev（并告警）。
+	DataHost string
 	// KeepCredentials 更新时沿用清单里的 UUID / WS 路径（默认 true）
 	KeepCredentials bool
 	// SkipSameVersion 本地版本与线上一致时跳过部署（默认 true）
@@ -136,6 +145,9 @@ type Result struct {
 
 	// Skipped 为 true 表示因同版本而跳过
 	Skipped bool `json:"skipped"`
+
+	// DataPlaneMode 是本次生效的数据面形态（pages / workers）
+	DataPlaneMode string `json:"dataPlaneMode"`
 }
 
 // Slot 是一个项目的部署状态。
@@ -154,6 +166,11 @@ type Manifest struct {
 	ControlSubdomain string `json:"controlSubdomain"`
 	DataSubdomain    string `json:"dataSubdomain"`
 	DataCustomDomain string `json:"dataCustomDomain"`
+	// DataPlaneMode 是数据面部署形态；旧清单没有这个字段 = "pages"。
+	//
+	// 记它是为了更新时识别「用户是否改过形态」—— 改过就要在新数据面上线后
+	// 删掉旧的，否则账号里同时留着一个 Pages 项目和一个 Worker。
+	DataPlaneMode string `json:"dataPlaneMode,omitempty"`
 	// Build 是内核**构建指纹**（`<hash>-<hash>`），读不到为空串
 	Build string `json:"build"`
 	// KernelVersion 是内核**语义化版本**（如 "0.7.6"）。
@@ -367,36 +384,69 @@ func (d *Deployer) Run(ctx context.Context) (*Result, error) {
 	d.result.WSPath = eff.wsPath
 	d.result.PanelPassword = eff.panelPassword
 
-	// ---------------- 1. 创建两个 Pages 项目 ----------------
-	for _, item := range []struct{ label, name string }{
-		{"控制面", controlName},
-		{"数据面", dataName},
-	} {
-		proj, err := d.client.CreatePagesProject(ctx, d.opt.AccountID, item.name, "main")
+	// ---------------- 0d. 数据面部署形态 ----------------
+	//
+	// 未显式指定时**沿用清单里的形态**（而不是无脑回落到 pages）：
+	// 否则「一个 Workers 实例被顺手更新一次」就会被悄悄改成 Pages。
+	prevDataMode := "pages"
+	if manifest != nil && manifest.DataPlaneMode == "workers" {
+		prevDataMode = "workers"
+	}
+	dataMode := strings.TrimSpace(d.opt.DataPlaneMode)
+	if dataMode != "pages" && dataMode != "workers" {
+		dataMode = prevDataMode
+	}
+	modeSwitched := manifest != nil && dataMode != prevDataMode
+	targetHost := strings.TrimSpace(d.opt.DataHost)
+	if targetHost == "" && manifest != nil {
+		targetHost = strings.TrimSpace(manifest.DataCustomDomain)
+	}
+	if modeSwitched {
+		from, to := "Pages", "Workers"
+		if dataMode == "pages" {
+			from, to = "Workers", "Pages"
+		}
+		d.log(fmt.Sprintf("⚠ 数据面部署形态变更：%s → %s", from, to))
+		d.log("  → 新数据面部署成功后，会自动删除旧的数据面并迁移域名")
+	}
+	d.result.DataPlaneMode = dataMode
+
+	// ---------------- 1. 创建 Pages 项目（数据面按形态决定） ----------------
+	//
+	// 控制面**永远**在 Pages：面板 + 订阅 + 探针不含出站 TCP，Pages 上最稳。
+	ensurePagesProject := func(label, name string) {
+		proj, err := d.client.CreatePagesProject(ctx, d.opt.AccountID, name, "main")
 		if err != nil {
 			// 「项目已存在」的错误码不固定（实测是无 code 的 800 型错误），
 			// 因此按消息内容判断，覆盖原地更新场景。
 			if isAlreadyExists(err) {
-				if p2, e2 := d.client.GetPagesProject(ctx, d.opt.AccountID, item.name); e2 == nil && p2 != nil {
-					d.log(fmt.Sprintf("· %s项目 %s 已存在，复用它（%s）", item.label, item.name, p2.Subdomain))
-					d.setSlotSubdomain(item.label, p2.Subdomain)
+				if p2, e2 := d.client.GetPagesProject(ctx, d.opt.AccountID, name); e2 == nil && p2 != nil {
+					d.log(fmt.Sprintf("· %s项目 %s 已存在，复用它（%s）", label, name, p2.Subdomain))
+					d.setSlotSubdomain(label, p2.Subdomain)
 				} else {
-					d.warn("无法读取已存在的" + item.label + "项目 " + item.name)
+					d.warn("无法读取已存在的" + label + "项目 " + name)
 				}
 			} else {
-				d.warn(fmt.Sprintf("创建%s项目 %s 失败：%v", item.label, item.name, err))
+				d.warn(fmt.Sprintf("创建%s项目 %s 失败：%v", label, name, err))
 			}
-			continue
+			return
 		}
-		d.log(fmt.Sprintf("✅ 已创建%s项目 %s（%s）", item.label, item.name, proj.Subdomain))
-		d.setSlotSubdomain(item.label, proj.Subdomain)
+		d.log(fmt.Sprintf("✅ 已创建%s项目 %s（%s）", label, name, proj.Subdomain))
+		d.setSlotSubdomain(label, proj.Subdomain)
+	}
+
+	ensurePagesProject("控制面", controlName)
+	if dataMode == "pages" {
+		ensurePagesProject("数据面", dataName)
+	} else {
+		d.log("· 数据面部署形态：Workers（不创建 Pages 数据面项目）")
 	}
 
 	// ---------------- 2. 配置环境变量与 KV（必须在部署前） ----------------
 	if d.result.Control.Subdomain != "" {
 		d.configureProject(ctx, controlName, "控制面", eff)
 	}
-	if d.result.Data.Subdomain != "" {
+	if dataMode == "pages" && d.result.Data.Subdomain != "" {
 		d.configureProject(ctx, dataName, "数据面", eff)
 	}
 
@@ -411,25 +461,119 @@ func (d *Deployer) Run(ctx context.Context) (*Result, error) {
 	// ---------------- 3. 部署：先数据面 ----------------
 	// 读取旧数据面的自定义域名（用于换名后迁移）
 	dataCustomDomain := ""
-	if previousDataProject != "" {
+	if dataMode == "pages" && previousDataProject != "" {
 		dataCustomDomain = d.findCustomDomain(ctx, previousDataProject)
 		if dataCustomDomain != "" {
 			d.log(fmt.Sprintf("· 旧数据面项目 %s 绑定了自定义域名 %s，将自动迁移",
 				previousDataProject, dataCustomDomain))
 		}
 	}
+	// 从 Workers 换回 Pages 时，域名只可能来自清单或本次指定
+	if dataMode == "pages" && prevDataMode == "workers" && dataCustomDomain == "" {
+		dataCustomDomain = targetHost
+	}
 
-	dataAttempt := d.deployWithBlockRetry(ctx, deployAttemptParams{
-		preferredName: dataName,
-		code:          d.opt.DataScript,
-		label:         "数据面",
-		eff:           eff,
-		oldProject:    previousDataProject,
-		customDomain:  dataCustomDomain,
-	})
-	if dataAttempt != nil {
-		d.result.Data.Name = dataAttempt.project
-		d.result.Data.Subdomain = dataAttempt.subdomain
+	if dataMode == "workers" {
+		/* ---------- 数据面：Workers ---------- */
+
+		switchingFromPages := modeSwitched && prevDataMode == "pages"
+
+		// 同一个域名不能同时挂在 Pages 项目与 Worker 上，必须先解绑旧的。
+		// 这一步会让旧实例短暂失去域名 —— 因此失败时必须回滚（见下面）。
+		if switchingFromPages && targetHost != "" && previousDataProject != "" {
+			if err := d.client.RemovePagesDomain(ctx, d.opt.AccountID, previousDataProject, targetHost); err == nil {
+				d.log(fmt.Sprintf("· 已从旧 Pages 数据面 %s 解绑域名 %s（准备迁到 Workers）",
+					previousDataProject, targetHost))
+			}
+		}
+
+		host, custom, werr := d.deployWorkersDataPlane(ctx, dataName, eff, targetHost)
+		if werr != nil {
+			// 回滚：把域名还给旧 Pages 数据面，别让用户连一个不存在的域名
+			if switchingFromPages && targetHost != "" && previousDataProject != "" {
+				if rerr := d.client.AddPagesDomain(ctx, d.opt.AccountID, previousDataProject, targetHost); rerr == nil {
+					d.log("· 已把域名回滚到旧 Pages 数据面")
+				} else {
+					d.warn(fmt.Sprintf("域名 %s 回滚失败，请手动到 Cloudflare 控制台把它绑回 %s。",
+						targetHost, previousDataProject))
+				}
+			}
+			return nil, fmt.Errorf("Workers 数据面部署失败：%w", werr)
+		}
+		d.result.Data.Name = dataName
+		d.result.Data.Subdomain = host
+		dataCustomDomain = custom
+
+		// 新数据面已上线 → 删掉旧 Pages 数据面（换形态的唯一收尾动作）
+		if switchingFromPages && previousDataProject != "" {
+			if err := d.client.DeletePagesProject(ctx, d.opt.AccountID, previousDataProject); err != nil {
+				d.warn(fmt.Sprintf("删除旧 Pages 数据面失败（%s）：%v\n"+
+					"  → 它已经不再接收流量，可到控制台手动删除。", previousDataProject, err))
+			} else {
+				d.log("✅ 已删除被替换的旧 Pages 数据面项目：" + previousDataProject)
+			}
+		}
+	} else {
+		/* ---------- 数据面：Pages ---------- */
+
+		// 从 Workers 换回 Pages：Pages 的变量必须在部署前配好
+		if modeSwitched && prevDataMode == "workers" {
+			ensurePagesProject("数据面", dataName)
+			if d.result.Data.Subdomain != "" {
+				d.configureProject(ctx, dataName, "数据面", eff)
+			}
+		}
+
+		dataAttempt := d.deployWithBlockRetry(ctx, deployAttemptParams{
+			preferredName: dataName,
+			code:          d.opt.DataScript,
+			label:         "数据面",
+			eff:           eff,
+			oldProject:    previousDataProject,
+			customDomain:  dataCustomDomain,
+		})
+		if dataAttempt != nil {
+			d.result.Data.Name = dataAttempt.project
+			d.result.Data.Subdomain = dataAttempt.subdomain
+
+			// 形态切换收尾：摘掉旧 Worker 的域名 → 绑到新 Pages 项目 → 删旧 Worker
+			if modeSwitched && prevDataMode == "workers" && previousDataProject != "" {
+				detachedHost := d.detachWorkerHostname(ctx, previousDataProject)
+				if detachedHost != "" {
+					d.log("· 已从旧 Workers 数据面解绑域名 " + detachedHost)
+				}
+
+				host := dataCustomDomain
+				if host == "" {
+					host = detachedHost
+				}
+				moved := true
+				if host != "" {
+					if err := d.client.AddPagesDomain(ctx, d.opt.AccountID, d.result.Data.Name, host); err != nil {
+						moved = false
+						d.warn(fmt.Sprintf("自定义域名迁移失败（%s → %s）：%v\n"+
+							"  → 请手动到 Cloudflare 控制台把该域名绑到 %s，否则订阅地址会失效。",
+							host, d.result.Data.Name, err, d.result.Data.Name))
+						// 迁移失败：把域名还给旧 Worker，且**不删**旧 Worker
+						if zone, zerr := d.resolveZoneForHost(ctx, host); zerr == nil && zone != nil {
+							if _, aerr := d.client.AttachWorkerDomain(ctx, d.opt.AccountID, host, previousDataProject, zone.ID); aerr == nil {
+								d.log("· 已把域名回滚到旧 Workers 数据面")
+							}
+						}
+					} else {
+						d.log("✅ 自定义域名已迁移到 Pages 数据面：" + host)
+						dataCustomDomain = host
+					}
+				}
+
+				if moved {
+					if err := d.deleteWorkersDataPlane(ctx, previousDataProject); err != nil {
+						d.warn(fmt.Sprintf("删除旧 Workers 数据面失败（%s）：%v\n"+
+							"  → 它已经不再接收流量，可到控制台手动删除。", previousDataProject, err))
+					}
+				}
+			}
+		}
 	}
 
 	// ⚠️ 数据面换名后必须重配控制面。
@@ -701,6 +845,8 @@ func (d *Deployer) writeManifest(ctx context.Context, old *Manifest, eff effecti
 		ControlSubdomain: d.result.Control.Subdomain,
 		DataSubdomain:    d.result.Data.Subdomain,
 		DataCustomDomain: customDomain,
+		// 部署形态：更新时靠它识别「用户是否改过数据面形态」
+		DataPlaneMode: d.result.DataPlaneMode,
 		Build:            build,
 		KernelVersion:    kernelVersion,
 		At:               time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
@@ -867,7 +1013,10 @@ func (d *Deployer) syncControlDataHost(ctx context.Context, eff effective) {
 			current = v.Value
 		}
 	}
-	if current != "" && current != expected {
+	// ⚠️ 这里**不能加 `current != ""`** 兜底：首次部署 Workers 数据面时，
+	// 控制面的 DATA_HOST 在部署前是空串（那一步还不知道数据面域名），
+	// 用「非空才比对」会直接跳过同步 → 订阅里的节点域名是空的。
+	if current != expected {
 		d.log(fmt.Sprintf("⚠ 控制面 DATA_HOST 仍指向旧域名 %s，正在同步为 %s", current, expected))
 		d.configureProject(ctx, d.result.Control.Name, "控制面", eff)
 		d.log("✅ 控制面 DATA_HOST 已同步为 " + expected)

@@ -535,6 +535,33 @@ export class CloudflareClient {
     )
   }
 
+  /**
+   * 列出账号下全部 Worker 自定义域名绑定。
+   *
+   * 换部署形态（Pages ↔ Workers）时靠它找出旧数据面占用的域名，
+   * 否则迁移时只能依赖清单里的 `dataCustomDomain`（清单缺失就会漏）。
+   */
+  async listWorkerDomains(accountId: string): Promise<WorkerDomain[]> {
+    const result = await this.request<WorkerDomain[]>(
+      'GET',
+      `/accounts/${encodeURIComponent(accountId)}/workers/domains`
+    )
+    return Array.isArray(result) ? result : []
+  }
+
+  /**
+   * 删除 Worker 脚本。
+   *
+   * 换形态到 Pages 之后用它清理旧数据面 —— 只删**自己**创建的那个脚本名，
+   * 绝不按前缀批量删。
+   */
+  async deleteScript(accountId: string, scriptName: string): Promise<void> {
+    await this.request(
+      'DELETE',
+      `/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(scriptName)}`
+    )
+  }
+
   /** 解除 Worker 自定义域名绑定（降级到 Route + CNAME 前清理用） */
   async deleteWorkerDomain(accountId: string, domainId: string): Promise<void> {
     await this.request(

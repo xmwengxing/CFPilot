@@ -853,3 +853,175 @@ func (c *Client) RemovePagesDomain(ctx context.Context, accountID, name, domain 
 		fmt.Sprintf("/accounts/%s/pages/projects/%s/domains/%s",
 			accountID, url.PathEscape(name), url.PathEscape(domain)), nil, nil)
 }
+
+// ================================================================
+// Workers（数据面）
+// ================================================================
+
+// Zone 是账号下的一个 DNS 托管域。
+type Zone struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// WorkerDomain 是 Worker 的自定义域名绑定。
+type WorkerDomain struct {
+	ID       string `json:"id"`
+	Hostname string `json:"hostname"`
+	Service  string `json:"service"`
+	ZoneID   string `json:"zone_id"`
+	ZoneName string `json:"zone_name"`
+	Enabled  bool   `json:"enabled"`
+}
+
+// WorkerBinding 是脚本绑定（KV / 明文变量）。
+//
+// 用 map 序列化而不是结构体：不同类型绑定字段不同
+// （kv_namespace 要 namespace_id，plain_text 要 text），
+// 结构体加 omitempty 很容易漏字段，直接构造 map 更不容易错。
+type WorkerBinding map[string]any
+
+// ListZones 列出账号下的全部 zone（绑定 Workers 自定义域名时要用 zone_id）。
+func (c *Client) ListZones(ctx context.Context) ([]Zone, error) {
+	var out []Zone
+	if err := c.doJSON(ctx, http.MethodGet, "/zones?per_page=50", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// UploadWorkerScript 上传（或更新）一个 ES module 形式的 Worker 脚本。
+//
+// ⚠️ metadata 段必须是 `application/json`，模块段必须是
+// `application/javascript+module` —— 用 CreateFormFile 会把两段都写成
+// application/octet-stream，Cloudflare 会当成「没有 main_module」而拒绝。
+func (c *Client) UploadWorkerScript(
+	ctx context.Context,
+	accountID, scriptName string,
+	code []byte,
+	bindings []WorkerBinding,
+	compatibilityDate string,
+) error {
+	metadata, err := json.Marshal(map[string]any{
+		"main_module":        "worker.js",
+		"compatibility_date": compatibilityDate,
+		"bindings":           bindings,
+	})
+	if err != nil {
+		return err
+	}
+
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+
+	metaHeader := make(textproto.MIMEHeader)
+	metaHeader.Set("Content-Disposition", `form-data; name="metadata"; filename="metadata.json"`)
+	metaHeader.Set("Content-Type", "application/json")
+	metaPart, err := w.CreatePart(metaHeader)
+	if err != nil {
+		return err
+	}
+	if _, err := metaPart.Write(metadata); err != nil {
+		return err
+	}
+
+	modHeader := make(textproto.MIMEHeader)
+	modHeader.Set("Content-Disposition", `form-data; name="worker.js"; filename="worker.js"`)
+	modHeader.Set("Content-Type", "application/javascript+module")
+	modPart, err := w.CreatePart(modHeader)
+	if err != nil {
+		return err
+	}
+	if _, err := modPart.Write(code); err != nil {
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut,
+		c.apiBase+fmt.Sprintf("/accounts/%s/workers/scripts/%s", accountID, url.PathEscape(scriptName)),
+		&buf)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+
+	res, err := c.httpC.Do(req)
+	if err != nil {
+		return wrapNetErr(err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	raw, err := io.ReadAll(res.Body)
+	if err != nil {
+		return wrapNetErr(err)
+	}
+	_, err = readResponse(res.StatusCode, raw)
+	return err
+}
+
+// DeleteWorkerScript 删除 Worker 脚本。
+func (c *Client) DeleteWorkerScript(ctx context.Context, accountID, scriptName string) error {
+	return c.doJSON(ctx, http.MethodDelete,
+		fmt.Sprintf("/accounts/%s/workers/scripts/%s", accountID, url.PathEscape(scriptName)), nil, nil)
+}
+
+// GetWorkersSubdomain 返回账号的 workers.dev 子域（未注册时为空串）。
+func (c *Client) GetWorkersSubdomain(ctx context.Context, accountID string) (string, error) {
+	var out struct {
+		Subdomain string `json:"subdomain"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet,
+		fmt.Sprintf("/accounts/%s/workers/subdomain", accountID), nil, &out); err != nil {
+		return "", err
+	}
+	return out.Subdomain, nil
+}
+
+// PutScriptSubdomain 开启 / 关闭脚本的 workers.dev 路由。
+//
+// 上传成功后该路由默认是关闭的，必须显式开启，
+// 否则 https://<name>.<sub>.workers.dev 一直返回「There is nothing here yet」。
+func (c *Client) PutScriptSubdomain(ctx context.Context, accountID, scriptName string, enabled bool) error {
+	return c.doJSON(ctx, http.MethodPost,
+		fmt.Sprintf("/accounts/%s/workers/scripts/%s/subdomain", accountID, url.PathEscape(scriptName)),
+		map[string]bool{"enabled": enabled}, nil)
+}
+
+// ListWorkerDomains 列出账号下全部 Worker 自定义域名绑定。
+func (c *Client) ListWorkerDomains(ctx context.Context, accountID string) ([]WorkerDomain, error) {
+	var out []WorkerDomain
+	if err := c.doJSON(ctx, http.MethodGet,
+		fmt.Sprintf("/accounts/%s/workers/domains", accountID), nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// AttachWorkerDomain 绑定 Worker 自定义域名。
+//
+// ⚠️ 返回 200 只代表「已受理」：证书签发要 1~3 分钟，
+// 期间访问会 TLS 失败，调用方必须再探一次可达性。
+func (c *Client) AttachWorkerDomain(
+	ctx context.Context, accountID, hostname, service, zoneID string,
+) (*WorkerDomain, error) {
+	var out WorkerDomain
+	body := map[string]string{
+		"hostname":    hostname,
+		"service":     service,
+		"zone_id":     zoneID,
+		"environment": "production",
+	}
+	if err := c.doJSON(ctx, http.MethodPut,
+		fmt.Sprintf("/accounts/%s/workers/domains", accountID), body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// DeleteWorkerDomain 解除自定义域名绑定。
+func (c *Client) DeleteWorkerDomain(ctx context.Context, accountID, domainID string) error {
+	return c.doJSON(ctx, http.MethodDelete,
+		fmt.Sprintf("/accounts/%s/workers/domains/%s", accountID, url.PathEscape(domainID)), nil, nil)
+}

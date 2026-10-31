@@ -126,6 +126,14 @@
     controlSubdomain?: string
     dataSubdomain?: string
     customDomain?: string
+    /**
+     * 线上数据面的部署形态：pages / workers。
+     *
+     * 旧清单没有这个字段 → 后端按 pages 返回。
+     * 界面靠它把「Pages / Workers」单选框回填成线上实际形态 ——
+     * 不回填的话，一个 Workers 实例被顺手更新一次就会被悄悄改成 Pages。
+     */
+    dataPlaneMode?: 'pages' | 'workers'
     deployedAt?: string
     at?: string
   }
@@ -836,6 +844,38 @@
   }
 
   /**
+   * 数据面部署形态的说明文案。
+   *
+   * 文案是产品口径（用户给的原话），不要随手改：
+   * 它同时承担「这个模式适合什么」和「域名会不会被阻断」两个告知义务。
+   */
+  const DATA_PLANE_HINTS: Record<'pages' | 'workers', string> = {
+    pages:
+      '深度集成 Git (GitHub/GitLab)，自动构建便利，开放流量，适合静态网站和无自有域名部署；' +
+      '*.pages.dev 域名直连可访问，无需配置自定义域名！',
+    workers:
+      '极致的动态与边缘控制，适合 API、代理、鉴权、重定向、SSR 渲染以及结合 D1、R2、KV 等全栈后端部署；' +
+      ' *.workers.dev 域名直连无法访问，请登录 cloudflare 控制台配置自定义域名！',
+  }
+
+  /** 用户是否手动改过「数据面部署模式」单选框 */
+  let dataPlaneTouched = false
+
+  function readDataPlane(): 'pages' | 'workers' {
+    const el = document.querySelector('input[name="dataPlane"]:checked') as HTMLInputElement | null
+    return el?.value === 'workers' ? 'workers' : 'pages'
+  }
+
+  /** 按当前选中的形态切换说明文案与「自定义域名」输入框的可见性 */
+  function syncDataPlaneUI(): void {
+    const mode = readDataPlane()
+    const hint = document.getElementById('dataPlaneHint')
+    if (hint) hint.textContent = DATA_PLANE_HINTS[mode]
+    const field = document.getElementById('dataHostField')
+    if (field) field.style.display = mode === 'workers' ? 'block' : 'none'
+  }
+
+  /**
    * 统一的忙碌态开关。
    *
    * ⚠️ 不要用 `setAttribute('disabled', '')` 来「取消禁用」：
@@ -859,6 +899,15 @@
   }
 
   function bindDeploy(): void {
+    // 数据面形态：切换时更新说明文案与「自定义域名」输入框
+    document.querySelectorAll('input[name="dataPlane"]').forEach((el) => {
+      el.addEventListener('change', () => {
+        dataPlaneTouched = true
+        syncDataPlaneUI()
+      })
+    })
+    syncDataPlaneUI()
+
     /**
      * 渲染「部署状态」卡片的函数引用。
      *
@@ -938,6 +987,10 @@
             dataProject: $('dataProject').value.trim(),
             panelPath: $('panelPath').value.trim(),
             wsPath: $('wsPath').value.trim(),
+            // 数据面形态：始终发送当前选中值。
+            // 后端只有在「与清单不一致」时才当成形态切换（并自动清理旧数据面）。
+            dataPlaneMode: readDataPlane(),
+            dataHost: $('dataHost').value.trim(),
             // 本次部署要设的面板密码（留空 = 随机 / 沿用清单）
             panelPassword: deployPw,
           },
@@ -2277,6 +2330,19 @@
         setBtn('开始首次部署', true)
         if (hint) hint.textContent = '首次部署会生成新的 UUID、WS 路径与面板密码，请存好。'
         return
+      }
+
+      // 回填数据面形态（只在用户本次没手动改过时）。
+      //
+      // 不回填的话，一个 Workers 实例被顺手更新一次就会被悄悄改成 Pages ——
+      // 而界面上「默认 Pages」看起来毫无异常。
+      if (!dataPlaneTouched) {
+        const plane = status.dataPlaneMode === 'workers' ? 'workers' : 'pages'
+        const radio = document.querySelector(
+          `input[name="dataPlane"][value="${plane}"]`
+        ) as HTMLInputElement | null
+        if (radio) radio.checked = true
+        syncDataPlaneUI()
       }
 
       const instance =

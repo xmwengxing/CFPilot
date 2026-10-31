@@ -74,3 +74,13 @@ for (const t of TARGETS) {
 }
 
 rmSync(STAGE, { recursive: true, force: true })
+
+// 仓库根目录再放一份**数据面代码文件**，供「手动部署到 Workers」直接复制粘贴。
+//
+// 为什么需要它：Workers 的手动部署是在网页编辑器里粘贴代码，
+// 而 zip 是给 Pages 上传用的 —— 让用户解压再找文件属于多余的一步。
+// 文件名固定 `_worker.js`：与 Cloudflare 控制台「模块名」默认值一致，
+// 也与 Pages Advanced Mode 的入口名一致，用户不会搞混。
+const rootWorker = resolve(ROOT, '_worker.js')
+copyFileSync(resolve(DIST, 'dataplane.js'), rootWorker)
+console.log(`[pages-zip] 数据面代码 → _worker.js (${(readFileSync(rootWorker).length / 1024).toFixed(1)} KB)`)

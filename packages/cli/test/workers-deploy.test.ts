@@ -142,6 +142,23 @@ describe('clearPagesLeftoverDns（409/100117 的修法）', () => {
     expect(deleted).toEqual([])
   })
 
+  it('令牌没有 Zone/DNS 权限时不阻断部署，只告警', async () => {
+    // 真机：读 dns_records 返回 403 Authentication error，旧实现会让整条部署中断
+    const client = {
+      getDnsRecords: async () => {
+        throw new CloudflareError('Authentication error', 403)
+      },
+      deleteDnsRecord: async () => {},
+    } as unknown as CloudflareClient
+    const warnings: string[] = []
+    const logs: string[] = []
+    await expect(
+      clearPagesLeftoverDns(client, 'z1', 'data.example.com', (m) => logs.push(m), warnings)
+    ).resolves.toBeUndefined()
+    expect(warnings.join('')).toContain('Zone / DNS')
+    expect(logs.join('')).toContain('跳过残留清理')
+  })
+
   it('同 zone 下别的主机名不受影响', async () => {
     const { client, deleted } = fakeDns([
       { id: 'r9', type: 'CNAME', name: 'other.example.com', content: 'x.pages.dev' },

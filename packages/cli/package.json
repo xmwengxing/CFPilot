@@ -1,6 +1,6 @@
 {
   "name": "cfpilot",
-  "version": "0.12.9",
+  "version": "0.13.0",
   "description": "CFPilot —— Cloudflare Pages 代理部署与优选工具（交互菜单 + 子命令）",
   "type": "module",
   "license": "AGPL-3.0-only",

@@ -22,21 +22,25 @@
  *
  * ## ⚠️ 哪些权限是**部署真正必需**的
  *
- * 现在唯一受支持的部署形态是 **Pages 双项目**，它只调用这些接口：
+ * 部署形态有两种，**权限集不同**：
+ *
+ * ### Pages 数据面（默认）
  *
  *   GET  /accounts                                   → Account Settings Read
  *   GET/POST/PUT  .../storage/kv/namespaces…         → Workers KV Storage Write
  *   GET/PUT/DELETE  .../pages/projects…              → Pages Write
  *
- * 也就是说**最小权限集只有 3 项**：
+ * ### Workers 数据面（`--data-plane workers`）
  *
- *   Account / Account Settings Read
- *   Account / Workers KV Storage Write
- *   Account / Pages Write
+ * 在上面三项之外，还要：
  *
- * Workers 脚本 / workers.dev 子域 / DNS / Routes 这些
- * **只被已归档的单项目 Workers 形态使用**，Pages 部署完全不碰。
- * 所以它们在表格里标为「非必需」，别让用户为用不上的权限多勾一堆。
+ *   GET/PUT  /accounts/{id}/workers/scripts…         → Workers Scripts Edit
+ *   PUT      /accounts/{id}/workers/domains          → Workers Routes Edit（账号级）
+ *   GET      /zones/{zone}/workers/routes            → Workers Routes Edit（域级）
+ *   GET/POST /zones/{zone}/dns_records               → DNS Edit（自定义域名自动建记录）
+ *
+ * ⚠️ 后三项**只在 Workers 模式 + 自定义域名时**才必需。
+ * 混在「可选」里会让 Workers 用户以为勾三项就够，结果是部署到一半撞 403。
  */
 import {
   CloudflareClient,
@@ -73,6 +77,14 @@ export interface TokenCheckOptions {
    * 为 true 时 Zone / DNS / Routes 权限计入「必需」。
    */
   expectCustomDomain?: boolean
+  /**
+   * 是否要用 **Workers 数据面**（`--data-plane workers`）。
+   *
+   * 为 true 时额外要求 `Account / Workers Scripts / Edit` 与
+   * `Account / Workers Routes / Edit` —— 这两项 Pages 部署完全用不到，
+   * 混在「可选」里会让 Workers 用户以为勾三项就够了。
+   */
+  expectWorkers?: boolean
 }
 
 export interface TokenCheckResult {
@@ -362,6 +374,7 @@ export async function checkTokenPermissions(
   )
 
   // 5) Workers 脚本
+  const expectWorkers = options.expectWorkers ?? false
   const scriptsProbe = await probePermission(async () => {
     const scripts = await client.listScripts(account.id)
     return `共 ${scripts.length} 个脚本`
@@ -369,10 +382,33 @@ export async function checkTokenPermissions(
   rows.push(
     makeRow(
       'Workers 脚本',
-      false,
-      '不影响 Pages 部署（内核走 Pages 部署接口上传，不经过 Workers 脚本 API）',
-      '仅当你要用归档的单项目 Workers 形态时才需要',
+      expectWorkers,
+      expectWorkers
+        ? 'Workers 数据面无法上传脚本，部署会在第一步中断'
+        : '不影响 Pages 部署（内核走 Pages 部署接口上传，不经过 Workers 脚本 API）',
+      'Token 中添加 Account / Workers Scripts / Edit（仅 Workers 数据面需要）',
       scriptsProbe
+    )
+  )
+
+  // 5.5) Workers 自定义域名（账号级 Workers Routes）
+  //
+  // 这一项与下面的「Worker Routes」不是同一件事：
+  //   - 这里：PUT /accounts/{id}/workers/domains —— 绑 Worker 自定义域名
+  //   - 下面：GET /zones/{zone}/workers/routes —— 老的 Route + CNAME 降级方案
+  const workerDomainsProbe = await probePermission(async () => {
+    const domains = await client.listWorkerDomains(account.id)
+    return `共 ${domains.length} 个自定义域名绑定`
+  })
+  rows.push(
+    makeRow(
+      'Workers 自定义域名',
+      expectWorkers && expectCustomDomain,
+      expectWorkers && expectCustomDomain
+        ? 'Workers 数据面绑不上域名 → 只能退到 *.workers.dev（直连不可访问，节点全部连不上）'
+        : '不影响 Pages 部署（Pages 用 Pages 自己的域名绑定接口）',
+      'Token 中添加 Account / Workers Routes / Edit（仅 Workers 数据面 + 自定义域名需要）',
+      workerDomainsProbe
     )
   )
 
@@ -386,7 +422,7 @@ export async function checkTokenPermissions(
       'workers.dev 子域读取',
       false,
       '不影响 Pages 部署（Pages 项目用自己的 *.pages.dev 域名）',
-      '仅当你要用归档的单项目 Workers 形态时才需要',
+      'Workers 模式没配自定义域名（回落到 *.workers.dev）时才需要',
       subdomainProbe
     )
   )
@@ -419,7 +455,7 @@ export async function checkTokenPermissions(
       'workers.dev 路由开关',
       false,
       '不影响 Pages 部署（Pages 项目用自己的 *.pages.dev 域名）',
-      '仅当你要用归档的单项目 Workers 形态时才需要',
+      'Workers 模式没配自定义域名（回落到 *.workers.dev）时才需要',
       subdomainRouteProbe
     )
   )

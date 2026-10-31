@@ -18,11 +18,15 @@ export async function runTokenCheck(args: ParsedArgs): Promise<void> {
   if (flagBool(args, 'check')) {
     const zoneName = flagString(args, 'zone') || undefined
     const domain = flagString(args, 'domain') || undefined
+    // 数据面形态决定「哪些权限算必需」：
+    // Workers 模式额外要 Workers Scripts + Workers Routes（账号级）+ DNS。
+    const plane = (flagString(args, 'data-plane') || '').toLowerCase()
     const result = await checkTokenPermissions({
       token,
       accountId: flagString(args, 'account') || undefined,
       zoneName,
       expectCustomDomain: Boolean(zoneName || domain),
+      expectWorkers: plane === 'workers',
     })
     process.stdout.write(renderTokenCheck(result))
     if (!result.ok) process.exitCode = 1

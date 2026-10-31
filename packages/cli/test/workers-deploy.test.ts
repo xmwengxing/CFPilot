@@ -6,8 +6,13 @@
  * 否则单测会变成「网络抖动即失败」的噪声源。
  */
 import { describe, expect, it } from 'vitest'
-import type { CloudflareClient } from '../src/deploy/cf-api'
-import { resolveZoneForHost, WORKERS_COMPAT_DATE } from '../src/deploy/workers-deploy'
+import { CloudflareError, type CloudflareClient } from '../src/deploy/cf-api'
+import {
+  describeWorkersPermissionError,
+  isPermissionError,
+  resolveZoneForHost,
+  WORKERS_COMPAT_DATE,
+} from '../src/deploy/workers-deploy'
 
 /** 只实现 listZones 的最小假客户端 */
 function fakeClient(zones: Array<{ id: string; name: string }>): CloudflareClient {
@@ -57,5 +62,31 @@ describe('WORKERS_COMPAT_DATE', () => {
   it('必须是可复现的固定日期（不能是当天）', () => {
     expect(WORKERS_COMPAT_DATE).toMatch(/^\d{4}-\d{2}-\d{2}$/)
     expect(WORKERS_COMPAT_DATE).not.toBe(new Date().toISOString().slice(0, 10))
+  })
+})
+
+describe('权限错误识别', () => {
+  it('401 / 403 判为权限问题', () => {
+    expect(isPermissionError(new CloudflareError('Authentication error', 403))).toBe(true)
+    expect(isPermissionError(new CloudflareError('Unauthorized', 401))).toBe(true)
+  })
+
+  it('5xx 与普通异常不判为权限问题（否则会让人白改 Token）', () => {
+    expect(isPermissionError(new CloudflareError('boom', 500))).toBe(false)
+    expect(isPermissionError(new Error('dial timeout'))).toBe(false)
+  })
+
+  it('权限错误必须给出「去哪勾什么」，而不是裸的 Authentication error', () => {
+    const message = describeWorkersPermissionError(
+      new CloudflareError('Authentication error', 403),
+      'domains'
+    )
+    expect(message).toBeTruthy()
+    expect(message).toContain('Workers Routes')
+    expect(message).toContain('Edit')
+  })
+
+  it('非权限错误返回 null（交给调用方按普通失败处理）', () => {
+    expect(describeWorkersPermissionError(new CloudflareError('boom', 500), 'dns')).toBeNull()
   })
 })

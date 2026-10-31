@@ -1025,3 +1025,36 @@ func (c *Client) DeleteWorkerDomain(ctx context.Context, accountID, domainID str
 	return c.doJSON(ctx, http.MethodDelete,
 		fmt.Sprintf("/accounts/%s/workers/domains/%s", accountID, url.PathEscape(domainID)), nil, nil)
 }
+
+// ListScripts 列出账号下的 Worker 脚本（仅用于权限预检）。
+func (c *Client) ListScripts(ctx context.Context, accountID string) ([]string, error) {
+	var out []struct {
+		ID string `json:"id"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet,
+		fmt.Sprintf("/accounts/%s/workers/scripts", accountID), nil, &out); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(out))
+	for _, s := range out {
+		names = append(names, s.ID)
+	}
+	return names, nil
+}
+
+// ListDNSRecords 读 zone 下的 DNS 记录（仅用于权限预检）。
+//
+// 绑定 Worker 自定义域名时 Cloudflare 会自动建一条 DNS 记录，
+// 因此令牌必须有 Zone / DNS / Edit；用读接口做代理探测，
+// 403 基本等价于「写也写不了」。
+func (c *Client) ListDNSRecords(ctx context.Context, zoneID, name string) (int, error) {
+	path := fmt.Sprintf("/zones/%s/dns_records?per_page=1", url.PathEscape(zoneID))
+	if name != "" {
+		path += "&name=" + url.QueryEscape(name)
+	}
+	var out []map[string]any
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return 0, err
+	}
+	return len(out), nil
+}

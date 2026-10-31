@@ -19,7 +19,7 @@
  * 2. 自定义域名必须属于**本账号的 zone**，否则 `PUT /workers/domains` 直接失败。
  * 3. 绑定的返回值只代表「已受理」，可达性必须再校验一次（见 `probeHost`）。
  */
-import { CloudflareClient, type ScriptBinding, type WorkerDomain } from './cf-api'
+import { CloudflareClient, CloudflareError, type ScriptBinding, type WorkerDomain } from './cf-api'
 
 /** 数据面部署形态 */
 export type DataPlaneMode = 'pages' | 'workers'
@@ -32,6 +32,145 @@ export type DataPlaneMode = 'pages' | 'workers'
  */
 export const WORKERS_COMPAT_DATE = '2026-10-01'
 
+/**
+ * Workers 数据面需要的权限（比 Pages 多三项）。
+ *
+ * ## 为什么必须预检，而不是「失败再说」
+ *
+ * 绑定自定义域名要 `PUT /accounts/{id}/workers/domains`，
+ * 它同时依赖**账号级** Workers Routes 与**域名级** DNS —— 这两项
+ * 与 Pages 部署用的三项权限完全不相交。
+ *
+ * 真机行为（改动前）：脚本上传成功 → 绑域名 403 → 整条部署抛出 →
+ * 控制面根本没部署，账号里留下一个没域名、不接流量的孤儿 Worker。
+ * 用户看到的是「部署失败」，却不知道是权限问题，也不知道清理什么。
+ *
+ * 所以这里**在上传任何东西之前**把权限探一遍：
+ *   - 缺权限 → 直接给出「缺哪一项、去哪补」，一个资源都不创建；
+ *   - 都通过 → 后面即使绑失败，也只可能是域名/证书类问题，与权限无关。
+ */
+const WORKERS_PERMISSIONS = {
+  scripts: {
+    label: 'Workers 脚本',
+    hint: 'Token 中添加 Account / Workers Scripts / Edit',
+  },
+  domains: {
+    label: 'Workers 自定义域名',
+    hint: 'Token 中添加 Account / Workers Routes / Edit（账号级）',
+  },
+  zoneRoutes: {
+    label: 'Zone 级 Worker 路由',
+    hint: 'Token 中添加 Zone / Workers Routes / Edit（域级）',
+  },  dns: {
+    label: 'Zone DNS 记录',
+    hint: 'Token 中添加 Zone / DNS / Edit（自定义域名要自动建 DNS 记录）',
+  },
+} as const
+
+/** 是否是「权限不足」类错误（401 / 403） */
+export function isPermissionError(err: unknown): boolean {
+  return err instanceof CloudflareError && (err.status === 401 || err.status === 403)
+}
+
+/**
+ * 把权限错误翻译成「缺哪一项、去哪补」。
+ *
+ * 不是权限错误时返回 null，交给调用方按普通失败处理 ——
+ * 把网络超时也说成「缺权限」会让人去改 Token，白折腾。
+ */
+export function describeWorkersPermissionError(
+  err: unknown,
+  which: keyof typeof WORKERS_PERMISSIONS
+): string | null {
+  if (!isPermissionError(err)) return null
+  const perm = WORKERS_PERMISSIONS[which]
+  const detail = err instanceof Error ? err.message : String(err)
+  return (
+    `Token 缺少「${perm.label}」权限（${detail}）。\n` +
+    `  → ${perm.hint}\n` +
+    '  → Workers 模式比 Pages 模式多需要这几项权限；不想加权限就把数据面部署模式改回 Pages。'
+  )
+}
+
+export interface WorkersPreflightResult {
+  /** 目标 zone（没给自定义域名时为 null） */
+  zone: { id: string; name: string } | null
+}
+
+/**
+ * 部署前权限预检（**只读**，不创建任何资源）。
+ *
+ * 全部通过才继续；任何一项缺失都抛错，由调用方中止部署。
+ * 这样用户补完权限重跑时，账号里不会留下半成品。
+ */
+export async function preflightWorkersDataPlane(
+  client: CloudflareClient,
+  accountId: string,
+  hostname: string | undefined,
+  log: (message: string) => void,
+  warnings: string[]
+): Promise<WorkersPreflightResult> {
+  log('· 预检 Workers 数据面所需权限…')
+
+  // 1) Workers 脚本（上传脚本的前提）
+  try {
+    const scripts = await client.listScripts(accountId)
+    log(`  · Workers 脚本权限正常（账号下 ${Array.isArray(scripts) ? scripts.length : 0} 个脚本）`)
+  } catch (err) {
+    const message = describeWorkersPermissionError(err, 'scripts')
+    if (message) throw new Error(message)
+    warnings.push(`无法读取 Workers 脚本列表：${err instanceof Error ? err.message : String(err)}`)
+  }
+
+  // 2) 自定义域名绑定（账号级 Workers Routes）
+  try {
+    await client.listWorkerDomains(accountId)
+    log('  · Workers 自定义域名权限正常')
+  } catch (err) {
+    const message = describeWorkersPermissionError(err, 'domains')
+    if (message) throw new Error(message)
+    warnings.push(
+      `无法读取 Workers 自定义域名列表：${err instanceof Error ? err.message : String(err)}`
+    )
+  }
+
+  if (!hostname) {
+    // 没给域名 → 回落 workers.dev。这不是权限问题，是「节点会连不上」的问题，
+    // 所以不阻断，但必须说清楚（见 deployWorkersDataPlane 的告警）。
+    return { zone: null }
+  }
+
+  // 3) 域名必须属于本账号的 zone
+  const zone = await resolveZoneForHost(client, hostname)
+  if (!zone) {
+    throw new Error(
+      `域名 ${hostname} 不在本账号的任何 zone 下，无法绑定为 Worker 自定义域名。\n` +
+        '  → Workers 自定义域名不支持外部 CNAME，域名的 DNS 必须托管在这个 Cloudflare 账号里。\n' +
+        '  → 换一个本账号下的域名，或把数据面部署模式改回 Pages（*.pages.dev 不需要自有域名）。'
+    )
+  }
+  log(`  · 域名 ${hostname} 归属 zone ${zone.name}`)
+
+  // 4) Zone DNS（绑定自定义域名时 Cloudflare 会自动建一条 DNS 记录）
+  //
+  // 这里只**告警不阻断**：读不到 DNS 记录也可能是「只有 Edit 没有 Read」的
+  // 令牌组合，那种令牌其实能建记录。硬拦会把可用配置挡在门外，
+  // 真正的失败留给绑定时的那一次调用（错误信息已带上权限提示）。
+  try {
+    await client.getDnsRecords(zone.id, hostname)
+    log('  · Zone DNS 权限正常')
+  } catch (err) {
+    const message = describeWorkersPermissionError(err, 'dns')
+    warnings.push(
+      message ??
+        `无法读取 DNS 记录：${err instanceof Error ? err.message : String(err)}\n` +
+          '  → 若绑定域名时报权限错误，请补 Zone / DNS / Edit。'
+    )
+  }
+
+  return { zone }
+}
+
 export interface WorkersDataPlaneOptions {
   client: CloudflareClient
   accountId: string
@@ -41,6 +180,13 @@ export interface WorkersDataPlaneOptions {
   code: string
   /** 自定义域名（如 `w1a2b3c4.example.com`）；留空则回落到 workers.dev */
   hostname?: string
+  /**
+   * 预检阶段已解析出的 zone。
+   *
+   * 传了就复用，不再重复查一次 `/zones` —— 预检与绑定之间账号域名
+   * 不可能变，多一次请求只是多一次失败机会。
+   */
+  zone?: { id: string; name: string } | null
   bindings: ScriptBinding[]
   log: (message: string) => void
   warnings: string[]
@@ -106,20 +252,35 @@ export async function attachWorkerHostname(
   client: CloudflareClient,
   accountId: string,
   hostname: string,
-  scriptName: string
+  scriptName: string,
+  zone?: { id: string; name: string } | null
 ): Promise<WorkerDomain> {
-  const zone = await resolveZoneForHost(client, hostname)
-  if (!zone) {
+  const targetZone = zone ?? (await resolveZoneForHost(client, hostname))
+  if (!targetZone) {
     throw new Error(
       `域名 ${hostname} 不在本账号的任何 zone 下，无法绑定为 Worker 自定义域名。\n` +
         '  → 请确认该域名的 DNS 托管在这个 Cloudflare 账号里（Workers 自定义域名不支持外部 CNAME）。'
     )
   }
-  return await client.attachCustomDomain(accountId, {
-    hostname,
-    service: scriptName,
-    zoneId: zone.id,
-  })
+  try {
+    return await client.attachCustomDomain(accountId, {
+      hostname,
+      service: scriptName,
+      zoneId: targetZone.id,
+    })
+  } catch (err) {
+    // 预检通过后仍然 403，通常是「DNS 记录创建」被拒（Zone / DNS 权限），
+    // 或账号级 Workers Routes 只有 Read。给一条能直接照做的提示。
+    if (isPermissionError(err)) {
+      throw new Error(
+        `绑定自定义域名 ${hostname} 被拒绝（权限不足）。\n` +
+          `  → ${WORKERS_PERMISSIONS.domains.hint}\n` +
+          `  → ${WORKERS_PERMISSIONS.dns.hint}\n` +
+          '  → 也可以先不绑域名：把「自定义域名」留空，部署到 *.workers.dev（多数网络下直连不可访问）。'
+      )
+    }
+    throw err
+  }
 }
 
 /** 解除某个脚本上的自定义域名绑定 */
@@ -185,7 +346,7 @@ export async function deployWorkersDataPlane(
   let customDomain = ''
 
   if (hostname) {
-    const domain = await attachWorkerHostname(client, accountId, hostname, name)
+    const domain = await attachWorkerHostname(client, accountId, hostname, name, options.zone)
     customDomain = domain.hostname
     host = domain.hostname
     log(`✅ 已绑定自定义域名 ${host}`)

@@ -61,3 +61,19 @@ func TestWorkersDevHost(t *testing.T) {
 		}
 	}
 }
+
+// TestResolveNodeHost 覆盖节点域名选择。
+//
+// 用户填了就写进 DATA_HOST（订阅用它）；留空才退回 workers.dev。
+func TestResolveNodeHost(t *testing.T) {
+	cases := []struct{ dataHost, devHost, want string }{
+		{"w1.example.com", "abc.wxgo8609.workers.dev", "w1.example.com"},
+		{"", "abc.wxgo8609.workers.dev", "abc.wxgo8609.workers.dev"},
+		{"   ", "abc.workers.dev", "abc.workers.dev"},
+	}
+	for _, c := range cases {
+		if got := resolveNodeHost(c.dataHost, c.devHost); got != c.want {
+			t.Fatalf("resolveNodeHost(%q,%q) = %q, want %q", c.dataHost, c.devHost, got, c.want)
+		}
+	}
+}

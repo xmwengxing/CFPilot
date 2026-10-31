@@ -9,10 +9,12 @@
  */
 import { describe, expect, it } from 'vitest'
 import { CloudflareError, type CloudflareClient } from '../src/deploy/cf-api'
+import { detachAllPagesDomains } from '../src/deploy/pages-deploy'
 import {
   describeWorkersPermissionError,
   isPermissionError,
   preflightWorkersDataPlane,
+  resolveNodeHost,
   workersDevHost,
   WORKERS_COMPAT_DATE,
 } from '../src/deploy/workers-deploy'
@@ -25,6 +27,18 @@ describe('workersDevHost', () => {
   it('没注册子域时退回 <name>.workers.dev（调用方会告警）', () => {
     expect(workersDevHost('abc123', '')).toBe('abc123.workers.dev')
     expect(workersDevHost('abc123', '   ')).toBe('abc123.workers.dev')
+  })
+})
+
+describe('resolveNodeHost', () => {
+  it('填了节点域名就用它（工具只写 DATA_HOST，不绑定）', () => {
+    expect(resolveNodeHost('w1.example.com', 'abc.wxgo8609.workers.dev')).toBe('w1.example.com')
+  })
+
+  it('留空 / 全空格 → 退回 workers.dev', () => {
+    expect(resolveNodeHost('', 'abc.wxgo8609.workers.dev')).toBe('abc.wxgo8609.workers.dev')
+    expect(resolveNodeHost('   ', 'abc.wxgo8609.workers.dev')).toBe('abc.wxgo8609.workers.dev')
+    expect(resolveNodeHost(undefined, 'abc.workers.dev')).toBe('abc.workers.dev')
   })
 })
 
@@ -97,5 +111,40 @@ describe('WORKERS_COMPAT_DATE', () => {
   it('必须是可复现的固定日期（不能是当天）', () => {
     expect(WORKERS_COMPAT_DATE).toMatch(/^\d{4}-\d{2}-\d{2}$/)
     expect(WORKERS_COMPAT_DATE).not.toBe(new Date().toISOString().slice(0, 10))
+  })
+})
+
+describe('detachAllPagesDomains（8000028 的修法）', () => {
+  function fakePages(domains: string[], failOn?: string) {
+    const removed: string[] = []
+    const client = {
+      listPagesDomains: async () => domains,
+      removePagesDomain: async (_a: string, _p: string, name: string) => {
+        if (name === failOn) throw new CloudflareError('boom', 500)
+        removed.push(name)
+      },
+    } as unknown as CloudflareClient
+    return { client, removed }
+  }
+
+  it('先解绑全部自定义域名，跳过 *.pages.dev', async () => {
+    const { client, removed } = fakePages(['a.example.com', 'b.example.com'])
+    const out = await detachAllPagesDomains(client, 'acct', 'proj', () => {}, [])
+    expect(removed).toEqual(['a.example.com', 'b.example.com'])
+    expect(out).toEqual(['a.example.com', 'b.example.com'])
+  })
+
+  it('没有自定义域名时是空操作', async () => {
+    const { client, removed } = fakePages([])
+    await detachAllPagesDomains(client, 'acct', 'proj', () => {}, [])
+    expect(removed).toEqual([])
+  })
+
+  it('单个解绑失败不阻断其余，但要告警（否则项目删不掉且没线索）', async () => {
+    const { client, removed } = fakePages(['a.example.com', 'b.example.com'], 'a.example.com')
+    const warnings: string[] = []
+    await detachAllPagesDomains(client, 'acct', 'proj', () => {}, warnings)
+    expect(removed).toEqual(['b.example.com'])
+    expect(warnings.join('')).toContain('a.example.com')
   })
 })

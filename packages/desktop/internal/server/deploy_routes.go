@@ -116,6 +116,8 @@ type deployRequest struct {
 	PanelPath      string `json:"panelPath"`
 	WSPath         string `json:"wsPath"`
 
+	// DataHost 是 Workers 数据面的节点域名（写进控制面 DATA_HOST，工具不绑定）
+	DataHost string `json:"dataHost"`
 	// DataPlaneMode 是数据面部署形态：pages / workers。
 	//
 	// 留空 = 沿用部署清单里记录的形态（没有清单则 pages）。
@@ -214,6 +216,9 @@ func (s *Server) handleDeployRun(w http.ResponseWriter, r *http.Request) {
 	plane := strings.ToLower(strings.TrimSpace(req.DataPlaneMode))
 	if plane == "pages" || plane == "workers" {
 		opt.DataPlaneMode = plane
+	}
+	if opt.DataPlaneMode == "workers" {
+		opt.DataHost = strings.TrimSpace(req.DataHost)
 	}
 	opt.Force = req.ForceKv
 	opt.ControlProject = req.ControlProject

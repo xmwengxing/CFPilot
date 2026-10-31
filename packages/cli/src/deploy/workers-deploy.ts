@@ -70,6 +70,16 @@ export function workersDevHost(name: string, subdomain: string): string {
 }
 
 /**
+ * 决定订阅里的**节点域名**。
+ *
+ * 用户填了就用它（工具只把它写进 DATA_HOST，不绑定），否则退回 workers.dev。
+ */
+export function resolveNodeHost(dataHost: string | undefined, devHost: string): string {
+  const host = (dataHost ?? '').trim()
+  return host || devHost
+}
+
+/**
  * 部署前权限预检（**只读**，不创建任何资源）。
  *
  * 只检查 Workers 脚本权限 —— 因为不再绑自定义域名，Routes / DNS 都不需要。
@@ -112,6 +122,13 @@ export interface WorkersDataPlaneOptions {
   name: string
   /** 数据面产物（`dist/dataplane.js`） */
   code: string
+  /**
+   * 节点域名（用户自定义域名）。
+   *
+   * ⚠️ 工具**不会**去绑定它，只把它作为订阅里的节点地址写进控制面 `DATA_HOST`，
+   * 并提示用户到 Worker 的「域」标签页添加。
+   */
+  dataHost?: string
   bindings: ScriptBinding[]
   log: (message: string) => void
   warnings: string[]
@@ -120,14 +137,22 @@ export interface WorkersDataPlaneOptions {
 export interface WorkersDataPlaneResult {
   /** 实际生效的脚本名 */
   name: string
-  /** 客户端要连的域名（`<name>.<sub>.workers.dev`） */
+  /** 订阅里要用的节点域名（用户填的自定义域名，或 workers.dev 兜底） */
   host: string
+  /** Worker 自身的生产域名（`<name>.<sub>.workers.dev`），仅用于提示 */
+  devHost: string
 }
 
 /**
- * 部署 Workers 数据面：上传脚本 → 开启 workers.dev 路由 → 返回生产域名。
+ * 部署 Workers 数据面：上传脚本 → 开启 workers.dev 路由 → 返回节点域名。
  *
- * 不做任何域名绑定 —— 自定义域名由用户在控制台配。
+ * ## 节点域名从哪来
+ *
+ * 控制面的 `DATA_HOST` 决定订阅里节点的 sni/host，**必须**是用户能连通的域名。
+ * `*.workers.dev` 在很多网络下直连不可访问，所以：
+ *
+ *   - 用户填了自定义域名 → 用它做节点域名（工具**不绑定**，只提示去「域」标签页添加）；
+ *   - 没填 → 用 workers.dev 兜底，并显著告警。
  */
 export async function deployWorkersDataPlane(
   options: WorkersDataPlaneOptions
@@ -159,16 +184,25 @@ export async function deployWorkersDataPlane(
   } catch {
     /* 读不到就用裸名兜底 */
   }
-  const host = workersDevHost(name, subdomain)
+  const devHost = workersDevHost(name, subdomain)
+  const dataHost = (options.dataHost ?? '').trim()
+  const host = resolveNodeHost(dataHost, devHost)
 
-  warnings.push(
-    `数据面已部署到 ${host}。\n` +
-      '  → *.workers.dev 域名在很多网络下直连不可访问，**需要**配一个自定义域名：\n' +
-      `     Cloudflare 控制台 → Workers 和 Pages → ${name} → 设置 → 域和路由 → 添加 → 自定义域名\n` +
-      '  → 配好后到面板「设置 → 数据面域名」填上它（优先级高于部署时写入的 DATA_HOST），订阅会跟着切过去。'
-  )
+  if (dataHost) {
+    warnings.push(
+      `控制面的节点域名已设为 ${dataHost}（写入 DATA_HOST）。\n` +
+        `  → 工具不会替你绑定域名，请到 Cloudflare 控制台 → Workers 和 Pages → ${name} → 「域」标签页 → 添加自定义域名，填 ${dataHost}\n` +
+        '  → 没绑定之前，这个域名的流量到不了 Worker。'
+    )
+  } else {
+    warnings.push(
+      `未填写节点域名，控制面的 DATA_HOST 用的是 ${devHost}。\n` +
+        '  → *.workers.dev 域名在很多网络下直连不可访问，节点会连不上；\n' +
+        `  → 请到 Workers 和 Pages → ${name} → 「域」标签页添加自定义域名，然后回面板「设置 → 数据面域名」填上它。`
+    )
+  }
 
-  return { name, host }
+  return { name, host, devHost }
 }
 
 /** 删除 Workers 数据面（脚本一删，它上面的自定义域名绑定也随之释放） */

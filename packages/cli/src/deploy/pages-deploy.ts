@@ -74,6 +74,17 @@ export interface PagesSplitDeployOptions {
    * 不传 = 沿用部署清单里记录的形态（没有清单则 `pages`）。
    */
   dataPlaneMode?: DataPlaneMode
+  /**
+   * Workers 数据面的**节点域名**（用户自定义域名，如 `w1.example.com`）。
+   *
+   * ⚠️ 工具**不会**去绑定它，只做两件事：
+   *   1. 写进控制面的 `DATA_HOST`（订阅里的节点 sni/host 用它）；
+   *   2. 部署完成后提示用户到 Worker 的「域」标签页把它加上。
+   *
+   * 留空时 `DATA_HOST` 用 `*.workers.dev` —— 多数网络下直连不可访问，
+   * 节点会连不上，所以会显著告警。
+   */
+  dataHost?: string
   /** 扫描令牌（可选） */
   scannerToken?: string
   /**
@@ -795,6 +806,70 @@ async function readPagesCustomDomain(
 }
 
 /**
+ * 列出 Pages 项目上绑定的全部自定义域名（不含 `*.pages.dev`）。
+ *
+ * `/domains` 子接口包含 `initializing` 状态，`project.domains` 只有 `active` 的，
+ * 所以优先用前者，失败才回落。
+ */
+async function listPagesCustomDomains(
+  client: CloudflareClient,
+  accountId: string,
+  project: string
+): Promise<string[]> {
+  const isCustom = (d: string): boolean => typeof d === 'string' && !d.endsWith('.pages.dev')
+  try {
+    const all = await client.listPagesDomains(accountId, project)
+    const found = all.filter(isCustom)
+    if (found.length > 0) return found
+  } catch {
+    /* /domains 不可用 → 回落 project.domains */
+  }
+  try {
+    const prev = await client.getPagesProject(accountId, project)
+    const domains: string[] = Array.isArray(prev.domains) ? prev.domains : []
+    return domains.filter(isCustom)
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 解绑 Pages 项目上的全部自定义域名。
+ *
+ * ⚠️ **删除项目前必须做**（真机 8000028）：
+ *
+ *     To delete your project, you must first delete all custom domains
+ *     associated with your project.（HTTP 400，code 8000028）
+ *
+ * 原来的 8000119 换名流程里就有这一步（`migrateAndCleanup`：先 removePagesDomain
+ * 再 addPagesDomain 到新项目、最后才删旧项目）；换形态时漏了它，
+ * 于是删除直接被平台拒绝。
+ */
+export async function detachAllPagesDomains(
+  client: CloudflareClient,
+  accountId: string,
+  project: string,
+  log: (message: string) => void,
+  warnings: string[]
+): Promise<string[]> {
+  const domains = await listPagesCustomDomains(client, accountId, project)
+  const removed: string[] = []
+  for (const domain of domains) {
+    try {
+      await client.removePagesDomain(accountId, project, domain)
+      removed.push(domain)
+      log(`· 已从旧 Pages 数据面 ${project} 解绑域名 ${domain}`)
+    } catch (err) {
+      warnings.push(
+        `解绑 ${project} 的域名 ${domain} 失败：${err instanceof Error ? err.message : String(err)}\n` +
+          '  → 需要先到 Cloudflare 控制台手动删除该项目的自定义域名，否则项目删不掉。'
+      )
+    }
+  }
+  return removed
+}
+
+/**
  * 执行双项目部署。
  *
  * 设计原则与单 Worker 向导一致：**尽力而为，绝不抛出**。
@@ -1173,12 +1248,13 @@ export async function deployPagesSplit(
           ]),
     ]
 
-    // 只部署到 *.workers.dev，不碰任何 DNS / 自定义域名。
+    // 部署到 *.workers.dev；若用户填了节点域名，只写进 DATA_HOST，不做任何绑定。
     const deployed = await deployWorkersDataPlane({
       client,
       accountId: options.accountId,
       name: dataName,
       code: dataCode,
+      dataHost: options.dataHost,
       bindings: workersBindings,
       log,
       warnings,
@@ -1188,19 +1264,26 @@ export async function deployPagesSplit(
 
     // 换形态：删掉旧 Pages 数据面。
     //
-    // ⚠️ 删项目会**连带释放**它绑的自定义域名（那条 DNS 记录也随之消失，
-    // 真机验证过：删项目后再把同一主机名绑到 Worker 会直接成功）。
-    // 所以先把域名记下来，明确告诉用户重新绑到哪。
+    // ⚠️ 顺序不能省：**先解绑它绑的自定义域名，再删项目**。
+    // 直接删会报 8000028「To delete your project, you must first delete all
+    // custom domains associated with your project.」
+    // 原来的 8000119 换名流程里本来就有这一步，换形态时漏了。
     if (modeSwitched && prevDataMode === 'pages' && oldDataName) {
-      const oldHost = await readPagesCustomDomain(client, options.accountId, oldDataName)
+      const removedHosts = await detachAllPagesDomains(
+        client,
+        options.accountId,
+        oldDataName,
+        log,
+        warnings
+      )
       try {
         await client.deletePagesProject(options.accountId, oldDataName)
         log(`✅ 已删除旧 Pages 数据面项目：${oldDataName}`)
-        if (oldHost) {
+        const target = options.dataHost?.trim() || removedHosts[0] || ''
+        if (target) {
           warnings.push(
-            `旧自定义域名 ${oldHost} 已随 Pages 项目一起释放（平台的连带行为，不是本工具删的）。\n` +
-              `  → 请到 Cloudflare 控制台 → Workers 和 Pages → ${deployed.name} → 设置 → 域和路由 → 添加 → 自定义域名，填 ${oldHost}\n` +
-              '  → 绑好后到面板「设置 → 数据面域名」填上它，订阅就会切过去（优先级高于 DATA_HOST）。'
+            `请到 Cloudflare 控制台 → Workers 和 Pages → ${deployed.name} → 「域」标签页 → 添加自定义域名，填 ${target}\n` +
+              '  → 工具不会替你绑定，只把它写进了控制面的 DATA_HOST；没绑之前这个域名的流量到不了 Worker。'
           )
         }
       } catch (err) {
@@ -1354,9 +1437,11 @@ export async function deployPagesSplit(
       dataSubdomain: result.data.subdomain,
       // 自定义域名：本次迁过来的，或旧项目上原有的（下次更新还要靠它迁移）
       // 自定义域名：Pages 形态下由工具托管（换名时自动迁移）；
-      // Workers 形态下**不由工具托管**，写空串避免留下会误导后续迁移的旧值。
+      // Workers 形态下只记录用户填的**节点域名**（写进 DATA_HOST 用），不绑定。
       dataCustomDomain:
-        dataMode === 'workers' ? '' : dataCustomDomain || manifest?.dataCustomDomain || '',
+        dataMode === 'workers'
+          ? (options.dataHost?.trim() ?? '')
+          : dataCustomDomain || manifest?.dataCustomDomain || '',
       // 部署形态：更新时靠它识别「用户是否改过数据面形态」
       dataPlaneMode: dataMode,
       build,

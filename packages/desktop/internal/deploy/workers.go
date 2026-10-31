@@ -52,6 +52,16 @@ func isPermissionErr(err error) bool {
 		strings.Contains(msg, "authentication error") || strings.Contains(msg, "permission")
 }
 
+// resolveNodeHost 决定订阅里的**节点域名**。
+//
+// 用户填了就用它（工具只把它写进 DATA_HOST，不绑定），否则退回 workers.dev。
+func resolveNodeHost(dataHost, devHost string) string {
+	if host := strings.TrimSpace(dataHost); host != "" {
+		return host
+	}
+	return devHost
+}
+
 // workersDevHost 计算 Worker 的生产域名。
 func workersDevHost(name, subdomain string) string {
 	sub := strings.TrimSpace(subdomain)
@@ -114,9 +124,15 @@ func (d *Deployer) preflightWorkersDataPlane(ctx context.Context) error {
 	return nil
 }
 
-// deployWorkersDataPlane 上传脚本 → 开启 workers.dev 路由 → 返回生产域名。
+// deployWorkersDataPlane 上传脚本 → 开启 workers.dev 路由 → 返回节点域名。
 //
-// 不做任何域名绑定 —— 自定义域名由用户在控制台配。
+// ## 节点域名从哪来
+//
+// 控制面的 `DATA_HOST` 决定订阅里节点的 sni/host，**必须**是用户能连通的域名。
+// `*.workers.dev` 在很多网络下直连不可访问，所以：
+//
+//   - 用户填了自定义域名 → 用它做节点域名（工具**不绑定**，只提示去「域」标签页添加）；
+//   - 没填 → 用 workers.dev 兜底，并显著告警。
 func (d *Deployer) deployWorkersDataPlane(ctx context.Context, name string, eff effective) (string, error) {
 	d.log("· 上传 Workers 数据面脚本 " + name)
 	if err := d.client.UploadWorkerScript(
@@ -133,14 +149,23 @@ func (d *Deployer) deployWorkersDataPlane(ctx context.Context, name string, eff 
 	}
 
 	sub, _ := d.client.GetWorkersSubdomain(ctx, d.opt.AccountID)
-	host := workersDevHost(name, sub)
+	devHost := workersDevHost(name, sub)
+	dataHost := strings.TrimSpace(d.opt.DataHost)
+	host := resolveNodeHost(dataHost, devHost)
 
-	d.warn(fmt.Sprintf(
-		"数据面已部署到 %s。\n"+
-			"  → *.workers.dev 域名在很多网络下直连不可访问，**需要**配一个自定义域名：\n"+
-			"     Cloudflare 控制台 → Workers 和 Pages → %s → 设置 → 域和路由 → 添加 → 自定义域名\n"+
-			"  → 配好后到面板「设置 → 数据面域名」填上它（优先级高于部署时写入的 DATA_HOST），订阅会跟着切过去。",
-		host, name))
+	if dataHost != "" {
+		d.warn(fmt.Sprintf(
+			"控制面的节点域名已设为 %s（写入 DATA_HOST）。\n"+
+				"  → 工具不会替你绑定域名，请到 Cloudflare 控制台 → Workers 和 Pages → %s → 「域」标签页 → 添加自定义域名，填 %s\n"+
+				"  → 没绑定之前，这个域名的流量到不了 Worker。",
+			dataHost, name, dataHost))
+	} else {
+		d.warn(fmt.Sprintf(
+			"未填写节点域名，控制面的 DATA_HOST 用的是 %s。\n"+
+				"  → *.workers.dev 域名在很多网络下直连不可访问，节点会连不上；\n"+
+				"  → 请到 Workers 和 Pages → %s → 「域」标签页添加自定义域名，然后回面板「设置 → 数据面域名」填上它。",
+			devHost, name))
+	}
 
 	return host, nil
 }
@@ -152,4 +177,35 @@ func (d *Deployer) deleteWorkersDataPlane(ctx context.Context, name string) erro
 	}
 	d.log("✅ 已删除旧 Workers 数据面：" + name)
 	return nil
+}
+
+// detachAllPagesDomains 解绑 Pages 项目上的全部自定义域名。
+//
+// ⚠️ **删除项目前必须做**（真机 8000028）：
+//
+//	To delete your project, you must first delete all custom domains
+//	associated with your project.（HTTP 400，code 8000028）
+//
+// 原来的 8000119 换名流程里本来就有这一步（先解绑再删旧项目），换形态时漏了。
+func (d *Deployer) detachAllPagesDomains(ctx context.Context, project string) []string {
+	domains, err := d.client.ListPagesDomains(ctx, d.opt.AccountID, project)
+	if err != nil {
+		return nil
+	}
+	var removed []string
+	for _, item := range domains {
+		name := item.Name
+		if name == "" || strings.HasSuffix(name, ".pages.dev") {
+			continue
+		}
+		if rerr := d.client.RemovePagesDomain(ctx, d.opt.AccountID, project, name); rerr != nil {
+			d.warn(fmt.Sprintf("解绑 %s 的域名 %s 失败：%v\n"+
+				"  → 需要先到 Cloudflare 控制台手动删除该项目的自定义域名，否则项目删不掉。",
+				project, name, rerr))
+			continue
+		}
+		removed = append(removed, name)
+		d.log(fmt.Sprintf("· 已从旧 Pages 数据面 %s 解绑域名 %s", project, name))
+	}
+	return removed
 }

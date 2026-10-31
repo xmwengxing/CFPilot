@@ -868,8 +868,11 @@
 
   /** 按当前选中的形态切换说明文案与「自定义域名」输入框的可见性 */
   function syncDataPlaneUI(): void {
+    const mode = readDataPlane()
     const hint = document.getElementById('dataPlaneHint')
-    if (hint) hint.textContent = DATA_PLANE_HINTS[readDataPlane()]
+    if (hint) hint.textContent = DATA_PLANE_HINTS[mode]
+    const field = document.getElementById('dataHostField')
+    if (field) field.style.display = mode === 'workers' ? 'block' : 'none'
   }
 
   /**
@@ -987,6 +990,8 @@
             // 数据面形态：始终发送当前选中值。
             // 后端只有在「与清单不一致」时才当成形态切换（并自动清理旧数据面）。
             dataPlaneMode: readDataPlane(),
+            // 节点域名：只写进控制面 DATA_HOST，工具不绑定（要去 Worker 的「域」标签页自己加）
+            dataHost: $('dataHost').value.trim(),
             // 本次部署要设的面板密码（留空 = 随机 / 沿用清单）
             panelPassword: deployPw,
           },
@@ -2326,6 +2331,13 @@
         setBtn('开始首次部署', true)
         if (hint) hint.textContent = '首次部署会生成新的 UUID、WS 路径与面板密码，请存好。'
         return
+      }
+
+      // 回填节点域名：换形态时最怕「以为没填就丢了域名」，显示出来比让用户猜强。
+      // 只在输入框为空时填，绝不覆盖用户已经输入的内容。
+      const hostInput = document.getElementById('dataHost') as HTMLInputElement | null
+      if (hostInput && !hostInput.value.trim() && status.customDomain) {
+        hostInput.value = status.customDomain
       }
 
       // 回填数据面形态（只在用户本次没手动改过时）。

@@ -66,6 +66,10 @@ type Options struct {
 	// ---- 模式 ----
 	// Mode: "auto"（有清单就更新）/ "fresh"（强制首次）
 	Mode string
+	// DataHost 是 Workers 数据面的**节点域名**（写进控制面 DATA_HOST）。
+	//
+	// ⚠️ 工具不会绑定它，只提示用户到 Worker 的「域」标签页添加。
+	DataHost string
 	// DataPlaneMode 是数据面部署形态："pages"（默认）/ "workers"。
 	//
 	// 空串 = **沿用清单里记录的形态**（没有清单则 pages）。
@@ -498,6 +502,8 @@ func (d *Deployer) Run(ctx context.Context) (*Result, error) {
 		}
 		d.result.Data.Name = dataName
 		d.result.Data.Subdomain = host
+		// 清单里记录用户填的节点域名（下次更新时回填到输入框）
+		dataCustomDomain = strings.TrimSpace(d.opt.DataHost)
 
 		// 换形态：删掉旧 Pages 数据面。
 		//
@@ -505,18 +511,28 @@ func (d *Deployer) Run(ctx context.Context) (*Result, error) {
 		// 真机验证过：删项目后再把同一主机名绑到 Worker 会直接成功）。
 		// 所以先把域名记下来，明确告诉用户重新绑到哪。
 		if modeSwitched && prevDataMode == "pages" && previousDataProject != "" {
+			// ⚠️ 顺序不能省：**先解绑它绑的自定义域名，再删项目**。
+			// 直接删会报 8000028「To delete your project, you must first delete all
+			// custom domains associated with your project.」
+			removedHosts := d.detachAllPagesDomains(ctx, previousDataProject)
 			oldHost := d.findCustomDomain(ctx, previousDataProject)
+			if oldHost == "" && len(removedHosts) > 0 {
+				oldHost = removedHosts[0]
+			}
 			if err := d.client.DeletePagesProject(ctx, d.opt.AccountID, previousDataProject); err != nil {
 				d.warn(fmt.Sprintf("删除旧 Pages 数据面失败（%s）：%v\n"+
 					"  → 它已经不再接收流量，可到控制台手动删除。", previousDataProject, err))
 			} else {
 				d.log("✅ 已删除旧 Pages 数据面项目：" + previousDataProject)
-				if oldHost != "" {
+				target := strings.TrimSpace(d.opt.DataHost)
+				if target == "" {
+					target = oldHost
+				}
+				if target != "" {
 					d.warn(fmt.Sprintf(
-						"旧自定义域名 %s 已随 Pages 项目一起释放（平台的连带行为，不是本工具删的）。\n"+
-							"  → 请到 Cloudflare 控制台 → Workers 和 Pages → %s → 设置 → 域和路由 → 添加 → 自定义域名，填 %s\n"+
-							"  → 绑好后到面板「设置 → 数据面域名」填上它，订阅就会切过去（优先级高于 DATA_HOST）。",
-						oldHost, dataName, oldHost))
+						"请到 Cloudflare 控制台 → Workers 和 Pages → %s → 「域」标签页 → 添加自定义域名，填 %s\n"+
+							"  → 工具不会替你绑定，只把它写进了控制面的 DATA_HOST；没绑之前这个域名的流量到不了 Worker。",
+						dataName, target))
 				}
 			}
 		}

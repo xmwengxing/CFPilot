@@ -162,6 +162,11 @@ interface Window {
          */
         dataPlaneMode?: 'pages' | 'workers'
         /**
+         * Workers 数据面的**节点域名**（写进控制面 DATA_HOST）。
+         * 工具不会绑定它，部署后需用户到 Worker 的「域」标签页自行添加。
+         */
+        dataHost?: string
+        /**
          * 本次部署要设置的面板密码（可选）。
          *
          * 留空 = 首次随机生成 / 更新沿用原密码。

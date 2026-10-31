@@ -25,8 +25,10 @@ ${NAME} deploy —— 双面部署（控制面 Pages + 数据面 Pages/Workers�
   --data-plane <mode>    数据面部署形态：pages（默认）/ workers
                          不传 = 沿用部署清单里记录的形态；
                          显式传且与清单不同 = 切换形态（新数据面上线后自动删除旧的）
-                         ⚠️ workers 模式只部署到 *.workers.dev，**自定义域名要你自己到
-                            控制台绑**，绑好后到面板「设置 → 数据面域名」填一次即可
+  --data-host <host>     Workers 数据面的**节点域名**（如 w1.example.com）
+                         只做两件事：写进控制面 DATA_HOST（订阅用它）、提示你去
+                         Worker 的「域」标签页添加。**工具不会替你绑定域名**。
+                         不填则用 *.workers.dev（多数网络直连不可访问，节点会连不上）
   --panel-path <path>    面板访问路径（默认随机）
   --mode <mode>          部署模式：auto（默认，自动判断）/ fresh（强制首次）/ update（强制更新）
   --force                忽略版本检查，强制重新部署

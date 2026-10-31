@@ -1196,10 +1196,17 @@
                 <label class="chk"><input type="radio" name="dataPlane" value="workers" /> Workers 模式</label>
               </div>
               <p class="tip" id="dataPlaneHint"></p>
+              <div id="dataHostField" style="display:none;margin-top:10px">
+                <label>节点域名（Workers 模式）</label>
+                <input type="text" id="dataHost" placeholder="如 w1.example.com" />
+                <p class="tip">
+                  这个域名会写进控制面的 <code>DATA_HOST</code>（订阅里的节点地址），
+                  <b>工具不会替你绑定它</b>。部署成功后请到
+                  Cloudflare 控制台 → Workers 和 Pages → 该 Worker →「域」标签页 → 添加自定义域名，填同一个域名。<br>
+                  留空则节点用 <code>*.workers.dev</code> —— 多数网络直连不可访问，节点会连不上。
+                </p>
+              </div>
               <p class="tip">
-                ⚠ 自定义域名<b>不由工具托管</b>：Workers 模式只会部署到 <code>*.workers.dev</code>。
-                部署完成后请到 Cloudflare 控制台给这个 Worker 绑一个自定义域名，
-                再回面板「设置 → 数据面域名」填上它 —— 订阅就会切过去。<br>
                 ⚠ 更新部署时如果<b>改变了这里的模式</b>，新数据面上线后会自动删除旧的数据面
                 （Pages 项目或 Worker），旧的自定义域名会随之失效，需要你重新绑一次。
               </p>

@@ -1480,8 +1480,11 @@
       latency: number
       tlsMs: number
       speed: number
+      tcpMs?: number
+      peakSpeed?: number
     }>
     copyable: string
+    sessionId?: string
     skippedSpeed?: boolean
   }): void {
     const out = $('scanOut')
@@ -1497,12 +1500,39 @@
       const tls = e.tlsMs > 0 ? String(e.tlsMs) : '—'
       // 机房列显示「SIN新加坡」——与可复制结果的备注一致
       const colo = e.colo ? e.colo + (e.city || '') : '—'
-      const cells = [String(i + 1), e.ip + ':' + e.port, colo, tls, String(e.latency), speed]
+      // 「TCP(ms)」列显示真正的 TCP 建连耗时；101 握手延迟放进悬浮提示。
+      // 旧记录没有 TCP 耗时，退回显示 101 延迟并说明。
+      const hasTcp = typeof e.tcpMs === 'number' && e.tcpMs > 0
+      const tcpText = hasTcp ? String(e.tcpMs) : String(e.latency)
+      const cells = [String(i + 1), e.ip + ':' + e.port, colo, tls, tcpText, speed]
       for (const c of cells) {
         const td = document.createElement('td')
         td.textContent = c
         tr.appendChild(td)
       }
+      const tcpCell = tr.querySelectorAll('td')[4]
+      if (tcpCell) {
+        tcpCell.title = hasTcp
+          ? `TCP 建连 ${e.tcpMs} ms · 101 握手 ${e.latency} ms`
+          : `未记录 TCP 建连耗时（旧数据），此处为 101 握手延迟 ${e.latency} ms`
+      }
+      const reportCell = document.createElement('td')
+      const reportButton = document.createElement('button')
+      reportButton.type = 'button'
+      reportButton.className = 'btn btn-ghost'
+      reportButton.textContent = '查看'
+      reportButton.disabled = !payload.sessionId
+      reportCell.appendChild(reportButton)
+      tr.appendChild(reportCell)
+      reportButton.addEventListener('click', async () => {
+        if (!payload.sessionId) return
+        reportButton.disabled = true
+        try {
+          const result = await window.cfpilot.getIPQualityReport({ sessionId: payload.sessionId, ip: e.ip, port: e.port })
+          if (result.ok && result.report) renderIPQualityReport(reportCell, result.report)
+          else reportButton.title = result.error || '报告不可用'
+        } finally { reportButton.disabled = false }
+      })
       tbody.appendChild(tr)
     })
     table.hidden = payload.entries.length === 0
@@ -1530,6 +1560,101 @@
     }
   }
 
+  /**
+   * 总进度条：贴着结果框下边框，一条贯穿全程。
+   *
+   * 百分比按**阶段加权**映射（连通性 0–25%、协议验证 25–55%、测速 55–95%），
+   * 否则用户看到的是「第一阶段就 100%」的假进度。
+   */
+  function updateScanProgress(message: string): void {
+    const wrap = document.getElementById('scanProgressWrap')
+    const bar = document.getElementById('scanProgressBar')
+    const stageEl = document.getElementById('scanProgressStage')
+    const textEl = document.getElementById('scanProgressText')
+    if (!wrap || !bar) return
+    const match = /（(\d+)\/(\d+)）/.exec(message)
+    const stage = message.includes('阶段一') || message.includes('TCP') ? '连通性'
+      : message.includes('阶段二') || message.includes('TLS') || message.includes('101') ? '协议验证'
+      : message.includes('阶段三') || message.includes('测速') ? '性能测速'
+      : '处理中'
+    const local = match && Number(match[2]) > 0 ? Math.max(0, Math.min(1, Number(match[1]) / Number(match[2]))) : 0.05
+    const base = stage === '连通性' ? 0 : stage === '协议验证' ? 25 : stage === '性能测速' ? 55 : 0
+    const span = stage === '连通性' ? 25 : stage === '协议验证' ? 30 : stage === '性能测速' ? 40 : 5
+    const pct = Math.max(1, Math.min(99, Math.round(base + local * span)))
+    wrap.hidden = false
+    bar.style.width = pct + '%'
+    if (stageEl) stageEl.textContent = `${stage} · 总进度 ${pct}%`
+    // 按钮行只放阶段数字进度，进度条不再挤在这里。
+    if (textEl) textEl.textContent = match ? `${stage} ${match[1]}/${match[2]}` : stage
+  }
+
+  function finishScanProgress(ok: boolean): void {
+    const wrap = document.getElementById('scanProgressWrap')
+    const bar = document.getElementById('scanProgressBar')
+    const stageEl = document.getElementById('scanProgressStage')
+    const textEl = document.getElementById('scanProgressText')
+    if (!wrap || !bar) return
+    wrap.hidden = false
+    bar.style.width = ok ? '100%' : '0%'
+    if (stageEl) stageEl.textContent = ok ? '优选完成' : '优选未完成'
+    if (textEl) textEl.textContent = ok ? '已完成' : '未完成'
+  }
+
+  /**
+   * 实验性功能开关（默认全部关闭）。
+   *
+   * 只在用户显式保存后才生效；读取失败时保持界面原样，
+   * 绝不让实验能力影响默认优选。
+   */
+  function bindExperimental(): void {
+    const saveBtn = document.getElementById('btnExpSave') as HTMLButtonElement | null
+    const hint = document.getElementById('expHint')
+
+    const fill = (settings: ExperimentalSettings): void => {
+      const adaptive = document.getElementById('optAdaptive') as HTMLInputElement | null
+      const isp = document.getElementById('optExpIsp') as HTMLSelectElement | null
+      const region = document.getElementById('optExpRegion') as HTMLInputElement | null
+      const access = document.getElementById('optExpAccess') as HTMLSelectElement | null
+      const explore = document.getElementById('optExpExplore') as HTMLInputElement | null
+      if (adaptive) adaptive.checked = settings.adaptiveSampling
+      if (isp) isp.value = settings.isp || 'other'
+      if (region) region.value = settings.region || ''
+      if (access) access.value = settings.access || 'fixed'
+      if (explore) explore.value = String(Math.round((settings.exploreRatio || 0.2) * 100))
+    }
+
+    void window.cfpilot
+      .getExperimental()
+      .then((res) => {
+        if (res && res.ok && res.experimental) fill(res.experimental)
+      })
+      .catch(() => {
+        /* 读不到开关时保持界面默认（关闭）即可 */
+      })
+
+    saveBtn?.addEventListener('click', async () => {
+      const adaptive = document.getElementById('optAdaptive') as HTMLInputElement | null
+      const isp = document.getElementById('optExpIsp') as HTMLSelectElement | null
+      const region = document.getElementById('optExpRegion') as HTMLInputElement | null
+      const access = document.getElementById('optExpAccess') as HTMLSelectElement | null
+      const explore = document.getElementById('optExpExplore') as HTMLInputElement | null
+      const ratio = Math.max(5, Math.min(100, Number(explore?.value) || 20)) / 100
+      const payload: ExperimentalSettings = {
+        adaptiveSampling: Boolean(adaptive?.checked),
+        exploreRatio: ratio,
+        isp: isp?.value || 'other',
+        region: (region?.value || '').trim(),
+        access: access?.value || 'fixed',
+      }
+      if (hint) hint.textContent = '保存中…'
+      const res = await window.cfpilot.saveExperimental(payload)
+      if (hint) {
+        hint.textContent = res && res.ok ? '已保存（下次优选生效）' : res?.error || '保存失败'
+      }
+      if (res && res.ok && res.experimental) fill(res.experimental)
+    })
+  }
+
   function bindScan(): void {
     document.getElementById('btnScan')!.addEventListener('click', async () => {
       const host = $('optHost').value.trim()
@@ -1545,7 +1670,8 @@
       const speedUrl = probeInput && !probeInput.startsWith('/') ? probeInput : ''
 
       setBusy(true)
-      $('scanOut').textContent = '正在优选，请稍候…'
+      updateScanProgress('开始优选')
+       $('scanOut').textContent = '正在优选，请稍候…'
       try {
         const result = await window.cfpilot.runScan({
           host,
@@ -1575,13 +1701,16 @@
         })
         // 同上：Go 版异步执行，`started` 阶段的响应里没有 ok 字段
         if (result.started) {
-          $('scanOut').textContent = '正在优选…（进度见下方日志）'
+          updateScanProgress('扫描任务已启动')
+           $('scanOut').textContent = '正在优选…（下方进度条会实时更新）'
         } else if (result.ok === false || result.error) {
-          $('scanOut').textContent = '优选失败：' + (result.error ?? '')
+          finishScanProgress(false)
+           $('scanOut').textContent = '优选失败：' + (result.error ?? '')
         }
       } catch (err) {
         log('优选异常：' + (err instanceof Error ? err.message : String(err)), 'err')
-        $('scanOut').textContent = '优选异常'
+        finishScanProgress(false)
+         $('scanOut').textContent = '优选异常'
       } finally {
         setBusy(false)
       }
@@ -1904,7 +2033,7 @@
     })
     thCheck.appendChild(selAll)
     hrow.appendChild(thCheck)
-    for (const h of ['#', '地址', '机房', 'TLS(ms)', 'TCP(ms)', '下行(MB/s)', '最近复测']) {
+    for (const h of ['#', '地址', '机房', 'TLS(ms)', 'TCP(ms)', '下行(MB/s)', '最近复测', '质量报告']) {
       const th = document.createElement('th')
       th.textContent = h
       hrow.appendChild(th)
@@ -1933,11 +2062,20 @@
       const tls = e.tlsMs > 0 ? String(e.tlsMs) : '—'
       // 机房列显示「SIN新加坡」——与可复制结果的备注一致
       const colo = e.colo ? e.colo + (e.city || '') : '—'
-      const cells = [String(i + 1), e.ip + ':' + e.port, colo, tls, String(e.latency), speed]
+      // 「TCP(ms)」列显示真正的 TCP 建连耗时；101 握手延迟放进悬浮提示。
+      const hasTcp = typeof e.tcpMs === 'number' && e.tcpMs > 0
+      const tcpText = hasTcp ? String(e.tcpMs) : String(e.latency)
+      const cells = [String(i + 1), e.ip + ':' + e.port, colo, tls, tcpText, speed]
       for (const c of cells) {
         const td = document.createElement('td')
         td.textContent = c
         tr.appendChild(td)
+      }
+      const tcpCell = tr.querySelectorAll('td')[4]
+      if (tcpCell) {
+        tcpCell.title = hasTcp
+          ? `TCP 建连 ${e.tcpMs} ms · 101 握手 ${e.latency} ms`
+          : `未记录 TCP 建连耗时（旧数据），此处为 101 握手延迟 ${e.latency} ms`
       }
 
       // 最近复测状态列：✓ 可用 / ✗ 失败原因（悬停看时间）
@@ -1958,10 +2096,270 @@
       }
       tr.appendChild(tdTest)
 
+      const tdReport = document.createElement('td')
+      const reportButton = document.createElement('button')
+      reportButton.type = 'button'
+      reportButton.textContent = '质量报告'
+      reportButton.className = 'btn'
+      tdReport.appendChild(reportButton)
+      tr.appendChild(tdReport)
       tbody.appendChild(tr)
+      const reportRow = document.createElement('tr')
+      reportRow.hidden = true
+      const reportCell = document.createElement('td')
+      reportCell.colSpan = 9
+      reportCell.style.whiteSpace = 'normal'
+      reportRow.appendChild(reportCell)
+      tbody.appendChild(reportRow)
+      let loaded = false
+      reportButton.addEventListener('click', async () => {
+        reportRow.hidden = !reportRow.hidden
+        reportButton.setAttribute('aria-expanded', String(!reportRow.hidden))
+        if (reportRow.hidden || loaded) return
+        reportCell.textContent = '正在读取本地报告…'
+        reportButton.disabled = true
+        try {
+          const result = await window.cfpilot.getIPQualityReport({ sessionId: sess.id, ip: e.ip, port: e.port })
+          if (!result.ok || !result.report) { reportCell.textContent = result.error || '报告不可用'; return }
+          renderIPQualityReport(reportCell, result.report)
+          loaded = true
+        } catch (error) { reportCell.textContent = error instanceof Error ? error.message : String(error) }
+        finally { reportButton.disabled = false }
+      })
     })
     table.appendChild(tbody)
     return table
+  }
+
+  /**
+   * 质量报告字段说明（悬浮气泡）。
+   *
+   * 每个字段写清「是什么 / 哪来的 / 影响什么 / 参考值」，
+   * 避免用户看到数字却不知道好坏。
+   */
+  const QUALITY_FIELD_INFO: Record<string, { label: string; unit: string; kind: 'ms' | 'ms-tls' | 'ms-p95' | 'ms-jitter' | 'speed' | 'percent' | 'bool' | 'text'; tip: string }> = {
+    'basic.tcpMs': {
+      label: 'TCP 耗时',
+      unit: 'ms',
+      kind: 'ms',
+      tip: '【是什么】本机到该候选 IP 完成 TCP 三次握手所需的时间。\n【来源】优选阶段一实测；历史复测时会用更近的一次覆盖。\n【影响】反映链路往返与运营商路由质量；过大时客户端握手容易超时。\n【参考】<80ms 良好，80–200ms 一般，>200ms 偏慢（跨境链路通常更高）。',
+    },
+    'protocol.tlsMs': {
+      label: 'TLS 耗时',
+      unit: 'ms',
+      kind: 'ms-tls',
+      tip: '【是什么】TCP 建连后完成 TLS 握手（证书校验 + 密钥协商）的时间。\n【来源】优选阶段一之二实测。\n【影响】最关键指标：它超时就是客户端里显示 -1 的典型原因。\n【参考】<300ms 良好，300–800ms 一般，>800ms 偏慢。',
+    },
+    'protocol.wsOk': {
+      label: 'WS101',
+      unit: '',
+      kind: 'bool',
+      tip: '【是什么】用你的数据面域名作 SNI/Host 完成 TLS 后发起 WebSocket 升级，是否收到 101。\n【来源】优选阶段二实测。\n【影响】只有 101 才代表这个 IP 能真正服务你的域名。\n【参考】通过即可用；未通过时该 IP 对你的部署不可用。',
+    },
+    'protocol.pongOk': {
+      label: 'PONG',
+      unit: '',
+      kind: 'bool',
+      tip: '【是什么】在 101 之后再发一帧探针数据，确认对端确实是数据面在应答，而不是静态页。\n【来源】CLI 侧支持；桌面版复测暂未实现。\n【影响】可排除「路径上只有静态资源」的假阳性 IP。\n【参考】通过表示握手后的数据面确实在线。',
+    },
+    'protocol.realTunnelOk': {
+      label: '真实隧道',
+      unit: '',
+      kind: 'bool',
+      tip: '【是什么】用真实 VLESS/Trojan 凭据建立隧道并访问一个外部目标。\n【来源】CLI 侧支持；桌面版历史复测暂未实现。\n【影响】唯一能证明「节点能真正出网」的检查。\n【参考】通过表示整条代理链路可用。',
+    },
+    'performance.speedMBps': {
+      label: '稳态下行',
+      unit: 'MB/s',
+      kind: 'speed',
+      tip: '【是什么】丢弃慢启动后、按时长加权的平均下行吞吐。\n【来源】优选阶段三真实测速（多流并发 + 丢弃预热）。\n【影响】决定实际下载、看视频与加载体验；也是默认排序依据。\n【参考】>1 MB/s 良好，0.5–1 MB/s 一般，<0.5 MB/s 偏慢（跨境链路整体偏低）。',
+    },
+    'performance.peakMBps': {
+      label: '峰值下行',
+      unit: 'MB/s',
+      kind: 'speed',
+      tip: '【是什么】测速窗口内的瞬时最高吞吐。\n【来源】优选阶段三测速的窗口统计。\n【影响】反映突发能力，不代表持续能力；与稳态值差距大说明链路抖动明显。\n【参考】不参与排序，仅作诊断；与稳态值同量级说明链路稳定。',
+    },
+    'performance.stabilityP95': {
+      label: 'TCP P95',
+      unit: 'ms',
+      kind: 'ms-p95',
+      tip: '【是什么】多次观测中 95% 的 TCP 握手都快于该值（长尾延迟）。\n【来源】历史优选与复测保留的 TCP 观测（至少 3 次才计算）。\n【影响】刻画长尾：均值正常但 P95 高，表现为偶发卡顿、偶发 -1。\n【参考】<120ms 良好，120–250ms 一般，>250ms 抖动明显。',
+    },
+    'performance.jitter': {
+      label: '抖动',
+      unit: 'ms',
+      kind: 'ms-jitter',
+      tip: '【是什么】多次 TCP 观测中最大值与最小值之差。\n【来源】同 P95，取自同一批保留样本。\n【影响】数值越大说明链路质量随时间波动越大，节点更容易时好时坏。\n【参考】<30ms 稳定，30–80ms 一般，>80ms 波动明显。',
+    },
+    egress: {
+      label: '出口识别',
+      unit: '',
+      kind: 'text',
+      tip: '【是什么】通过用户自有的 HTTPS 识别服务，观察该传输路径真正对外的出口地址。\n【来源】实验性能力，需用户显式指定识别服务与传输路径。\n【影响】决定目标网站看到的 IP；数据中心出口常被风控。\n【参考】默认未执行；观测结果只代表当时那条路径。',
+    },
+    compatibility: {
+      label: '目标站兼容性',
+      unit: '',
+      kind: 'text',
+      tip: '【是什么】对用户指定的测试站点做低频真实访问，观察是否被挑战或拒绝。\n【来源】实验性能力，需用户显式指定目标站点。\n【影响】反映该路径访问特定网站的可用性，与 IP 快慢无关。\n【参考】默认未执行；结果是某一时点的观测，不代表长期结论。',
+    },
+    'history.successRate': {
+      label: '历史成功率',
+      unit: '%',
+      kind: 'percent',
+      tip: '【是什么】已保留样本（优选 + 复测）中通过的比例。\n【来源】本地历史记录。\n【影响】反映该 IP 在本机当前网络下的稳定程度。\n【参考】>90% 稳定；注意它只统计被保留的样本，不是全部候选的通过率。',
+    },
+  }
+
+  /** 延迟类指标的阈值（毫秒）：低于 good 绿，低于 warn 黄，其余红。 */
+  function latencyColor(value: number, kind: string): string {
+    const thresholds: Record<string, [number, number]> = {
+      ms: [80, 200],
+      'ms-tls': [300, 800],
+      'ms-p95': [120, 250],
+      'ms-jitter': [30, 80],
+    }
+    const pair = thresholds[kind] || thresholds['ms']!
+    if (value <= pair[0]) return 'quality-good'
+    if (value <= pair[1]) return 'quality-warn'
+    return 'quality-bad'
+  }
+
+  /** 速度类指标的阈值：>1 绿，0.5–1 黄，<0.5 红。 */
+  function speedColor(value: number): string {
+    if (value > 1) return 'quality-good'
+    if (value >= 0.5) return 'quality-warn'
+    return 'quality-bad'
+  }
+
+  /** 报告仅呈现已记录证据；缺失指标保留状态，不伪造评分。 */
+  function renderIPQualityReport(container: HTMLElement, report: IPQualityReport): void {
+    container.replaceChildren()
+    const title = document.createElement('h4')
+    title.textContent = `${report.ip}:${report.port} · IP 质量报告`
+    container.appendChild(title)
+    const description = document.createElement('p')
+    description.textContent = `生成于 ${fmtHistoryTime(report.generatedAt)} · 仅聚合本地已保留样本，查看不触发检测。样本 ${report.history.testCount} 次。`
+    container.appendChild(description)
+    const metric = document.createElement('div')
+    const rate = Math.max(0, Math.min(1, report.history.successRate))
+    metric.textContent = `已保留样本成功率 ${(rate * 100).toFixed(1)}%（非全部候选通过率）`
+    const meter = document.createElement('progress')
+    meter.max = 1
+    meter.value = rate
+    meter.style.width = '100%'
+    meter.setAttribute('aria-label', '已保留样本成功率')
+    metric.appendChild(meter)
+    container.appendChild(metric)
+
+    const statusLabels: Record<QualityFieldStatus, string> = { available: '可用', not_run: '未执行', not_implemented: '尚未实现', failed: '失败', stale: '已过期' }
+    const groups: Array<{ key: string; label: string }> = [
+      { key: 'basic', label: '基础连接' },
+      { key: 'protocol', label: '协议验证' },
+      { key: 'performance', label: '性能' },
+      { key: 'egress', label: '出口' },
+      { key: 'compatibility', label: '目标站兼容性' },
+      { key: 'history', label: '历史' },
+    ]
+    // 左栏放连接与性能，右栏放出口、兼容性与历史，中间竖线分隔。
+    const leftKeys = ['basic', 'protocol', 'performance']
+    const layout = document.createElement('div')
+    layout.className = 'quality-layout'
+    const left = document.createElement('div')
+    left.className = 'quality-col'
+    const right = document.createElement('div')
+    right.className = 'quality-col'
+    layout.appendChild(left)
+    layout.appendChild(right)
+    container.appendChild(layout)
+
+    for (const group of groups) {
+      const fields = report.fields.filter((item) => item.name.split('.')[0] === group.key)
+      if (fields.length === 0) continue
+      const host = leftKeys.includes(group.key) ? left : right
+      const heading = document.createElement('strong')
+      heading.className = 'quality-group-title'
+      heading.textContent = group.label
+      host.appendChild(heading)
+      for (const field of fields) {
+        const info = QUALITY_FIELD_INFO[field.name]
+        const row = document.createElement('div')
+        row.className = 'quality-row'
+        const label = document.createElement('span')
+        label.className = 'q-label'
+        label.textContent = info?.label || field.name
+        if (info) label.setAttribute('data-tip', info.tip)
+        const value = document.createElement('span')
+        const numeric = typeof field.value === 'number' && Number.isFinite(field.value)
+        const raw = field.value === undefined || field.value === null ? '—' : typeof field.value === 'boolean' ? (field.value ? '通过' : '未通过') : String(field.value)
+        if (info && info.kind === 'percent' && numeric) {
+          // 成功率是 0~1 的比例，展示成百分比。
+          value.textContent = `${(field.value as number * 100).toFixed(1)} %`
+          value.className = 'q-value'
+        } else if (info && info.unit && numeric && info.kind !== 'text') {
+          value.textContent = `${raw} ${info.unit}`
+          value.className = 'q-value ' + (info.kind === 'speed' ? speedColor(field.value as number) : latencyColor(field.value as number, info.kind))
+        } else {
+          value.textContent = raw
+          value.className = 'q-value'
+        }
+        if (field.status === 'failed') value.classList.add('quality-bad')
+        else if (field.status !== 'available') value.classList.add('quality-note')
+        const note = document.createElement('span')
+        note.className = 'q-note'
+        note.textContent = statusLabels[field.status] || field.status
+        if (field.reason) note.textContent += ' · ' + field.reason
+        row.appendChild(label)
+        row.appendChild(value)
+        row.appendChild(note)
+        host.appendChild(row)
+      }
+    }
+
+    const trend = document.createElement('div')
+    trend.setAttribute('aria-label', '历史测试趋势，绿色成功，红色失败')
+    trend.style.display = 'flex'
+    trend.style.gap = '3px'
+    trend.style.marginTop = '12px'
+    trend.style.alignItems = 'end'
+    for (const point of report.history.trend.slice(-60)) {
+      const bar = document.createElement('span')
+      bar.style.width = '8px'
+      bar.style.height = point.ok ? '24px' : '10px'
+      bar.style.backgroundColor = point.ok ? 'var(--ok, #34d399)' : 'var(--err, #f87171)'
+      bar.title = `${fmtHistoryTime(point.at)} · ${point.kind === 'scan' ? '优选' : '复测'} · ${point.ok ? '通过' : '失败'}`
+      trend.appendChild(bar)
+    }
+    right.appendChild(trend)
+
+    // 悬浮气泡：说明字段定义、来源、影响与参考值。
+    const tip = document.createElement('div')
+    tip.className = 'quality-tip'
+    tip.style.display = 'none'
+    document.body.appendChild(tip)
+    const hideTip = (): void => { tip.style.display = 'none' }
+    container.addEventListener('mouseover', (event) => {
+      const target = (event.target as HTMLElement | null)?.closest('[data-tip]') as HTMLElement | null
+      if (!target) return
+      tip.textContent = target.getAttribute('data-tip') || ''
+      tip.style.display = 'block'
+    })
+    container.addEventListener('mousemove', (event) => {
+      if (tip.style.display === 'none') return
+      const pad = 14
+      const rect = tip.getBoundingClientRect()
+      let left = event.clientX + pad
+      let top = event.clientY + pad
+      if (left + rect.width > window.innerWidth - 8) left = event.clientX - rect.width - pad
+      if (top + rect.height > window.innerHeight - 8) top = event.clientY - rect.height - pad
+      tip.style.left = Math.max(8, left) + 'px'
+      tip.style.top = Math.max(8, top) + 'px'
+    })
+    container.addEventListener('mouseout', (event) => {
+      const target = (event.target as HTMLElement | null)?.closest('[data-tip]') as HTMLElement | null
+      if (target) hideTip()
+    })
   }
 
   /** 展开会话里被勾选的条目 */
@@ -2294,7 +2692,7 @@
   }
 
   function bindPush(): void {
-    window.cfpilot.onLog((entry) => log(entry.message, entry.level as never))
+    window.cfpilot.onLog((entry) => { log(entry.message, entry.level as never); if (entry.message.includes('阶段') || entry.message.includes('扫描')) updateScanProgress(entry.message) })
 
     /**
      * 渲染部署状态，并**同步驱动部署按钮的语义**。
@@ -2873,6 +3271,7 @@
     bindChain()
     bindScan()
     bindHistory()
+    bindExperimental()
     bindLogs()
       bindUpdater()
     bindPush()

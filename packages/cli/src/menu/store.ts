@@ -63,6 +63,15 @@ function configFile(): string {
   return join(configDir(), 'config.json')
 }
 
+/**
+ * 配置目录（公开）。
+ *
+ * 网络档案等实验性数据也放这里（同一个目录便于整体迁移与备份）。
+ */
+export function configDirPath(): string {
+  return configDir()
+}
+
 export function configPath(): string {
   return configFile()
 }

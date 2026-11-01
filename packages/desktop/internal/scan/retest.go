@@ -33,6 +33,8 @@ type IPTestResult struct {
 	WSOK  bool    `json:"wsOk"`
 	Colo  string  `json:"colo"`
 	Speed float64 `json:"speed"` // 仅 withSpeed=true 时有意义
+	// PeakSpeed 是复测测速的窗口峰值（MB/s），仅 withSpeed=true 时有意义。
+	PeakSpeed float64 `json:"peakSpeed,omitempty"`
 	// OK 表示三层（TCP + TLS + WS101）全部通过。
 	OK bool `json:"ok"`
 	// Error 是**第一道失败层**的原因（TCP 失败就不测后面了）。
@@ -116,6 +118,7 @@ func TestIP(ctx context.Context, t TestTarget, opt TestOptions) IPTestResult {
 		})
 		if dl.OK {
 			res.Speed = dl.SteadyMBps
+			res.PeakSpeed = dl.PeakMBps
 		}
 	}
 	return res

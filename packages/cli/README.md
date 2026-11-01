@@ -64,6 +64,28 @@ cfpilot config --token <TOKEN>          # 配置管理
 
 完整参数见 `cfpilot scan --help`。
 
+### 实验性出口识别
+
+```bash
+cfpilot egress-identify --url https://identity.example.com/identify --proxy socks5://127.0.0.1:10808
+```
+
+仅调用用户自有 HTTPS 识别服务，返回**指定传输路径**观察到的公网出口；省略 `--proxy` 时仅测 CLI 本机直连基线。不绑定候选 IP，不参与默认 `scan`、排序或回填，也不代表逐入口 IP 或 Worker 出口差异。
+
+服务返回 `application/json`，必填 `remote_ip`（实际 TCP 对端的公网 IPv4/IPv6）、`observed_at`（带时区 RFC3339），可选 `egress_kind`、`colo`。不得直接信任客户端 XFF。观察超过五分钟或未来超过 30 秒则拒绝；总超时八秒、响应体最多 16 KiB，不接受压缩或重定向。
+
+可选专用短期 Bearer token 通过 `CFPILOT_EGRESS_TOKEN` 提供，同时设置 `CFPILOT_EGRESS_TOKEN_EXPIRES_AT`（剩余有效期须在五分钟以内）；服务端仍须独立校验真实有效期和专用权限。代理凭据可用 `CFPILOT_EGRESS_PROXY`，凭据不落盘、不输出，代理失败不回退直连。完整命令见 `cfpilot egress-identify --help`，服务协议见源码包内 `EXPERIMENTAL-EGRESS.md`。
+
+### 实验性网站兼容性
+
+```bash
+cfpilot website-check --url https://site.example.com/check --label site --expected-text ready --proxy socks5://127.0.0.1:10808
+```
+
+仅检测用户明确指定的 HTTPS 目标，省略代理时是直连基线，不登录、不执行脚本、不发送识别 token，不宣称账号权限或完整解锁。默认只判定 2xx；可用 `--expected-text` 要求正文包含标记。挑战、403 禁止、429 限流、TLS 错误、超时和其他 HTTP 错误分别输出，不跟随重定向；响应最多 16 KiB、总超时八秒。
+
+命令输出 `{targets:[...]}`，目标字段与质量报告兼容，不接入默认 `scan` 或排序，不读写扫描历史。模块支持最多十个目标串行检测；完整说明见源码包内 `EXPERIMENTAL-WEBSITES.md` 和 `cfpilot website-check --help`。
+
 ## 部署代码可以独立更新
 
 部署用的内核产物（数据面 / 控制面）**不随应用版本绑死**：

@@ -52,6 +52,7 @@ import {
 import { parseSpeedUrl, withBytes, schemeForPort, DEFAULT_SPEED_URL } from './speed-url'
 import { coloCity, countryOfColo, normalizeCountryFilter } from './countries'
 import { describeUnlock, probeUnlock } from './unlock'
+import type { Observation } from './network-profile'
 
 export interface ScanOptions {
   /** Worker 域名（作为 SNI / Host） */
@@ -150,6 +151,8 @@ export interface ScanOptions {
   top?: number
   /** 进度回调 */
   onProgress?: (event: ScanEvent) => void
+  /** 自适应档案回写：仅记录实际执行的阶段结果。 */
+  onObservation?: (observation: Observation) => void
 }
 
 export type ScanEvent =
@@ -201,13 +204,36 @@ export interface ScanEntry {
   port: number
   colo: string
   latency: number
+  /** TCP 建连耗时（ms） */
+  tcpMs: number
   /** TLS 握手耗时（ms）—— 客户端能否连上主要看这个 */
   tlsMs: number
   speed: number
+  /** 测速窗口峰值（MB/s）；未测速或测速失败时为 0 */
+  peakMBps: number
+  /** 多次测速的稳态速度极差（MB/s）；只测了一次时为 0 */
+  speedJitter?: number
+}
+
+export interface ScanObservation {
+  /** 候选 IP */
+  ip: string
+  /** 协议验证是否通过（WS101 + 内容校验） */
+  ok: boolean
+  /** TCP 建连耗时（毫秒） */
+  latencyMs: number
+  /** 稳态下行速度（MB/s）；未测速或测速失败时为空 */
+  speedMBps?: number
 }
 
 export interface ScanSummary {
   entries: ScanEntry[]
+  /**
+   * 每个进入阶段二的候选的结论（实验性：供网络档案学习）。
+   *
+   * 只记录**实际探测过**的候选；未进入阶段二的不会出现在这里。
+   */
+  observations: ScanObservation[]
   stats: {
     candidates: number
     tcpOk: number
@@ -470,6 +496,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
         message: `TCP 初筛 ${done}/${candidates.length}`,
       })
     }
+    options.onObservation?.({ ip, ok: result.ok, stage: 'tcp', latencyMs: result.latency, error: result.ok ? undefined : 'TCP 连接失败' })
     return result
   })
 
@@ -525,6 +552,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
         message: `TLS 握手 ${tlsDone}/${tlsInput.length}${probe.tlsMs > 0 ? ` ${probe.tlsMs}ms` : ' ✗'}`,
       })
     }
+    options.onObservation?.({ ip: item.ip, ok: probe.tlsMs > 0, stage: 'tls', latencyMs: probe.tlsMs, error: probe.error })
     return { ...item, tls: probe }
   })
 
@@ -626,6 +654,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
           ? `101+PING 校验 ${probeDone}/${stage1.length}${result.ok ? ` ✓ ${result.colo}` : result.pongVerified === false ? ' ✗ 无响应' : ''}`
           : `101 校验 ${probeDone}/${stage1.length}${result.ok ? ` ✓ ${result.colo}` : ''}`,
       })
+      options.onObservation?.({ ip: item.ip, ok: result.ok, stage: 'ws', error: result.error })
       return { ...item, probe: result, pathOk }
     },
     () => {
@@ -737,6 +766,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
     tls: TlsProbeResult
     probe: WsProbeResult
     speed?: number
+    peakMBps?: number
     jitter?: number
   }>
 
@@ -753,6 +783,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
     speedResults = await pool(stage2, speedConcurrency, async (item) => {
         const repeat = Math.max(1, options.speedRepeat ?? 1)
         const samples: number[] = []
+        const peakSamples: number[] = []
         for (let r = 0; r < repeat; r++) {
           const one = await measureThroughput({
             ip: item.ip,
@@ -764,12 +795,14 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
             durationMs: options.speedDurationMs ?? 6000,
             timeoutMs: options.speedTimeoutMs ?? 20000,
           })
-          if (one.ok) samples.push(one.steadyMBps)
+          if (one.ok) { samples.push(one.steadyMBps); peakSamples.push(one.peakMBps) }
         }
         samples.sort((a, b) => a - b)
+        peakSamples.sort((a, b) => a - b)
         const median = samples.length === 0 ? 0 : samples[Math.floor(samples.length / 2)]!
+        const peak = peakSamples.length === 0 ? 0 : peakSamples[Math.floor(peakSamples.length / 2)]!
         const jitter = samples.length < 2 ? 0 : samples[samples.length - 1]! - samples[0]!
-      const result = { ok: samples.length > 0, steadyMBps: median }
+      const result = { ok: samples.length > 0, steadyMBps: median, peakMBps: peak }
       speedDone++
       report({
         type: 'progress',
@@ -778,7 +811,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
         total: stage2.length,
         message: `测速 ${speedDone}/${stage2.length} [${item.probe.colo || 'UNK'}] ${result.steadyMBps.toFixed(1)} MB/s${jitter > 0 ? ` ±${jitter.toFixed(1)}` : ''}`,
       })
-      return { ...item, speed: result.ok ? result.steadyMBps : 0, jitter }
+      return { ...item, speed: result.ok ? result.steadyMBps : 0, peakMBps: result.peakMBps, jitter }
     })
   } else {
     report({ type: 'stage', stage: 3, name: '真实下行速度测试（项目探针端点 · 多流稳态）', total: stage2.length })
@@ -786,6 +819,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
     speedResults = await pool(stage2, speedConcurrency, async (item) => {
         const repeat = Math.max(1, options.speedRepeat ?? 1)
         const samples: number[] = []
+        const peakSamples: number[] = []
         for (let r = 0; r < repeat; r++) {
           const one = await measureProbeThroughput({
             ip: item.ip,
@@ -798,12 +832,14 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
             timeoutMs: speedTimeoutMs,
             token: options.uuid,
           })
-          if (one.ok) samples.push(one.steadyMBps)
+          if (one.ok) { samples.push(one.steadyMBps); peakSamples.push(one.peakMBps) }
         }
         samples.sort((a, b) => a - b)
+        peakSamples.sort((a, b) => a - b)
         const median = samples.length === 0 ? 0 : samples[Math.floor(samples.length / 2)]!
+        const peak = peakSamples.length === 0 ? 0 : peakSamples[Math.floor(peakSamples.length / 2)]!
         const jitter = samples.length < 2 ? 0 : samples[samples.length - 1]! - samples[0]!
-      const result = { ok: samples.length > 0, steadyMBps: median }
+      const result = { ok: samples.length > 0, steadyMBps: median, peakMBps: peak }
       speedDone++
       report({
         type: 'progress',
@@ -812,7 +848,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
         total: stage2.length,
         message: `测速 ${speedDone}/${stage2.length} [${item.probe.colo || 'UNK'}] ${result.steadyMBps.toFixed(1)} MB/s${jitter > 0 ? ` ±${jitter.toFixed(1)}` : ''}`,
       })
-      return { ...item, speed: result.ok ? result.steadyMBps : 0 }
+      return { ...item, speed: result.ok ? result.steadyMBps : 0, peakMBps: result.peakMBps, jitter }
     })
   }
 
@@ -823,8 +859,12 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
       port: options.port,
       colo: r.probe.colo || 'UNK',
       latency: r.latency,
+      // tcpMs 是阶段一测得的 TCP 建连耗时（CLI 的 latency 字段本身就是它，
+      // 这里显式补一份，便于与桌面版报告字段一一对应）。
+      tcpMs: r.latency,
       tlsMs: r.tls.tlsMs,
       speed: r.speed ? Number(r.speed.toFixed(2)) : 0,
+      peakMBps: r.peakMBps ? Number(r.peakMBps.toFixed(2)) : 0,
       speedJitter: r.jitter ? Number(r.jitter.toFixed(2)) : 0,
     }))
     .sort((a, b) =>
@@ -885,8 +925,28 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
     report({ type: 'result', entry })
   }
 
+  // ---- 观测（实验性：供网络档案学习）----
+  //
+  // 记录**每个进入阶段二的候选**的结论：协议验证是否通过、TCP 建连耗时。
+  // 未进入阶段二的候选不记录 —— 没探测过就没有证据。
+  const observations: ScanObservation[] = probeResults.map((r) => ({
+    ip: r.ip,
+    ok: r.probe.ok && r.probe.pongVerified !== false,
+    latencyMs: r.latency,
+  }))
+  // 测速成功的候选补上速度（档案里的速度是「这个 IP 在本机有多快」）。
+  const speedByIp = new Map<string, number>()
+  for (const item of speedResults) {
+    if (item.speed && item.speed > 0) speedByIp.set(item.ip, item.speed)
+  }
+  for (const observation of observations) {
+    const speed = speedByIp.get(observation.ip)
+    if (speed !== undefined) observation.speedMBps = Number(speed.toFixed(2))
+  }
+
   const summary: ScanSummary = {
     entries,
+    observations,
     stats: {
       candidates: candidates.length,
       tcpOk: tcpOk.length,

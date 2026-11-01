@@ -144,4 +144,10 @@ CI（`.github/workflows/release-desktop.yml`）在 `ubuntu-latest` 上
 
 - **凭据共用**：同一个 `~/.cfpilot-gui/secrets.json`，换版本不用重填 Token
 - **界面共用**：同一份 `packages/gui/src/renderer/`
+
+## IP 质量报告与实验功能
+
+历史页中的“质量报告”是正式的本地历史查看功能：它只聚合已保存的优选与复测证据，不触发检测、不参与默认扫描排序。旧版数组格式会自动兼容读取，新写入采用版本化 JSON。
+
+出口识别仍是实验功能，默认关闭。它只在调用者明确指定时请求用户自有 HTTPS 识别服务，可走指定 SOCKS5 传输；不会注册默认路由、自动运行或保存 Bearer token。服务限制为 HTTPS、8 秒超时、16 KiB 响应上限，并校验公网 IP 与 RFC3339 观测时间；未实现项目保留明确状态，不会伪装成通过。
 - **并行发布**：Go 版发满 3 个版本后停发 Electron 版 exe，源码永久保留

@@ -18,12 +18,22 @@ import {
   runScan,
   type ScanEntry,
   type ScanEvent,
+  type ScanObservation,
 } from './scan'
 import { coloCity, normalizeCountryFilter } from './countries'
 import { formatEntries } from './scan'
 import { postResults, fetchScannerToken } from './callback'
 import { resolveCandidates } from './candidates'
+import {
+  loadNetworkProfile,
+  normalizeNetworkProfile,
+  saveNetworkProfile,
+  updateNetworkProfile,
+  type ProfileStoreDocument,
+} from './network-profile'
+import { configDirPath } from '../menu/store'
 import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { detectProxyInterference, isMsysPollutedPath } from './net-env'
 import { NAME, VERSION } from '../shared/version'
 import { SCAN_HELP } from './help'
@@ -73,6 +83,51 @@ function seedFromArgs(args: ParsedArgs): number | undefined {
   return args.flags['seed'] !== undefined ? flagNumber(args, 'seed', 24301) : undefined
 }
 
+/**
+ * 网络档案（实验性）。
+ *
+ * ## 为什么要有「档案」
+ *
+ * Cloudflare 网段的可用性**因网络而异**：在福建电信测得几乎不可用的网段，
+ * 在广东联通可能完全正常。用一份全局静态权重去采样，
+ * 等于把某个运营商的结论套到所有用户身上。
+ *
+ * 档案由「运营商 + 地区 + 接入方式」组成，**不同档案的历史互不混用**。
+ *
+ * ## 默认关闭
+ *
+ * 不传 `--adaptive` 时，采样行为与历史完全一致（走 expandCidrs）。
+ */
+interface AdaptiveContext {
+  file: string
+  store: ProfileStoreDocument
+  profileId: string
+}
+
+/** 运营商归一化：只接受已知枚举，其它一律记为 other。 */
+function normalizeIsp(raw: string | undefined): string {
+  const value = (raw ?? '').trim().toLowerCase()
+  return ['ct', 'cu', 'cm', 'other'].includes(value) ? value : 'other'
+}
+
+/** 接入类型归一化。 */
+function normalizeAccess(raw: string | undefined): string {
+  const value = (raw ?? '').trim().toLowerCase()
+  return value === 'mobile' ? 'mobile' : 'fixed'
+}
+
+/** 加载（或建立）本机网络档案。 */
+async function loadAdaptiveContext(args: ParsedArgs): Promise<AdaptiveContext> {
+  const file = join(configDirPath(), 'network-profiles.json')
+  const isp = normalizeIsp(flagString(args, 'isp'))
+  const region = (flagString(args, 'region') ?? '').trim().slice(0, 32)
+  const access = normalizeAccess(flagString(args, 'access'))
+  const store = await loadNetworkProfile(file, `${isp}-${region}-${access}`)
+  const profile = normalizeNetworkProfile({ isp, region, access, family: 'ipv4', source: 'manual' })
+  store.profiles[profile.id] = { ...profile, updatedAt: Date.now() }
+  return { file, store, profileId: profile.id }
+}
+
 async function resolveCandidatesFromArgs(args: ParsedArgs): Promise<string[]> {
   const ipFile = flagString(args, 'ip-file')
   if (ipFile) {
@@ -80,7 +135,7 @@ async function resolveCandidatesFromArgs(args: ParsedArgs): Promise<string[]> {
     return readIpFile(text)
   }
 
-  return resolveCandidates({
+  const base = {
     // 选国家时**自动中性采样**：采样发生在阶段一之前、那时还不知道机房，
     // 若某国家的 IP 集中在低权重网段，候选会被压少 → 可能「扫了几千个还是找不到 HKG/NRT」。
     neutral: args.flags['neutral-sampling'] !== undefined || flagList(args, 'countries').length > 0,
@@ -89,7 +144,49 @@ async function resolveCandidatesFromArgs(args: ParsedArgs): Promise<string[]> {
     // ⚠️ 不传 seed = 每次随机（默认）。只有用户显式给了 --seed 才固定，
     // 否则「每次跑都测同一批 IP」——那批落在劣质路由段上时永远测不出好 IP。
     seed: seedFromArgs(args),
+  }
+
+  // 实验性：自适应采样（默认关闭）。
+  if (!flagBool(args, 'adaptive')) return resolveCandidates(base)
+
+  const context = await loadAdaptiveContext(args)
+  const exploreRate = flagNumber(args, 'explore-rate', 20) / 100
+  const candidates = await resolveCandidates({
+    ...base,
+    profile: context.store,
+    adaptiveSampling: {
+      explorationRate: Math.min(1, Math.max(0.05, exploreRate)),
+      includeZeroWeight: flagBool(args, 'explore-zero'),
+      profileId: context.profileId,
+    },
   })
+  // 把档案留在内存里，扫描结束后回写观测。
+  adaptiveContexts.set(args, context)
+  return candidates
+}
+
+/** 本次命令使用的自适应上下文（扫描结束后回写观测用）。 */
+const adaptiveContexts = new WeakMap<ParsedArgs, AdaptiveContext>()
+
+/** 把本轮观测写回网络档案（仅在开启自适应时执行）。 */
+async function saveAdaptiveObservations(args: ParsedArgs, observations: ScanObservation[]): Promise<void> {
+  const context = adaptiveContexts.get(args)
+  if (!context || observations.length === 0) return
+  const now = Date.now()
+  const next = updateNetworkProfile(
+    context.store,
+    observations.map((observation) => ({
+      ip: observation.ip,
+      ok: observation.ok,
+      latencyMs: observation.latencyMs,
+      speedMBps: observation.speedMBps,
+      at: now,
+      profileId: context.profileId,
+      stage: 'ws',
+    })),
+    now,
+  )
+  await saveNetworkProfile(context.file, next)
 }
 
 function printProgress(event: ScanEvent, quiet: boolean): void {
@@ -451,6 +548,9 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
     onProgress: (event) => printProgress(event, quiet),
   })
 
+  // 实验性：把本轮观测写回网络档案（仅在开启 --adaptive 时有档案）。
+  await saveAdaptiveObservations(args, summary.observations)
+
   if (asJson) {
     // 可复现报告：参数 + 种子 + 环境 + 失败分布 + 结果
     //
@@ -477,6 +577,15 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
             skipSpeed,
             verifyPayload,
             tunnelVerified: Boolean(flagString(args, 'uuid') || flagString(args, 'trojan-password')),
+            // 实验性：自适应采样的开关与档案（未开启时为 null，便于复现报告区分模式）
+            adaptive: flagBool(args, 'adaptive')
+              ? {
+                  isp: normalizeIsp(flagString(args, 'isp')),
+                  region: (flagString(args, 'region') ?? '').trim().slice(0, 32),
+                  access: normalizeAccess(flagString(args, 'access')),
+                  exploreRate: flagNumber(args, 'explore-rate', 20) / 100,
+                }
+              : null,
           },
           env: envResult,
           stats: summary.stats,

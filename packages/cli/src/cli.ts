@@ -18,6 +18,8 @@ Cloudflare Pages 代理部署与优选工具
   ${NAME} deploy [选项]       部署 Pages 双项目
   ${NAME} scan [选项]         本地真连接优选
   ${NAME} test [选项]         测试单个 IP 的完整链路
+  ${NAME} egress-identify     实验性指定传输路径出口识别
+  ${NAME} website-check       实验性网站兼容性检测
   ${NAME} status              查看当前实例状态
   ${NAME} token [选项]        检查 API Token 权限
   ${NAME} vps [选项]          在自己的 VPS 上部署 SOCKS5 落地代理
@@ -75,6 +77,16 @@ async function main(): Promise<void> {
     case 'test': {
       const { runTestCommand } = await import('./scan/single-command')
       await runTestCommand(args)
+      return
+    }
+    case 'egress-identify': {
+      const { runEgressIdentityCommand } = await import('./experimental/egress-command')
+      await runEgressIdentityCommand(args)
+      return
+    }
+    case 'website-check': {
+      const { runWebsiteCommand } = await import('./experimental/website-command')
+      await runWebsiteCommand(args)
       return
     }
     case 'status': {

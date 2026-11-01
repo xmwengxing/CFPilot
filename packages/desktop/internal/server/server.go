@@ -506,6 +506,8 @@ func (s *Server) handleServiceStatus(w http.ResponseWriter, r *http.Request) {
 		"keepInTray":    st.KeepRunningInTray,
 		"settingsFile":  config.SettingsPathForDisplay(),
 		"pid":           osGetpid(),
+		// 程序版本（界面「运行状态」要显示**真实版本**，不能只写「运行中」）。
+		"version": Version(),
 	})
 }
 

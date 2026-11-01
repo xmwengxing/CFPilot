@@ -140,6 +140,8 @@
   .field { margin-bottom: 16px; }
   .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
   .grid-3 { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+  #tab-advanced .grid, #tab-advanced .grid-3 { gap: 10px; }
+  #tab-advanced .field .tip { font-size: 11px; line-height: 1.35; margin-top: 4px; }
 
   /* === Cards === */
   .card {
@@ -425,8 +427,9 @@
             </div>
           </div>
           <div class="field" style="margin-bottom:0">
-            <label>自定义优选域名库（每行一个域名；留空则使用系统内置库）</label>
+            <label>自定义优选域名库（每行一个域名）</label>
             <textarea id="domainLib" placeholder="cf.example.com&#10;bestcf.example.net"></textarea>
+            <p class="tip">与内置库随机域名互补下发，重复自动合并。</p>
           </div>
         </div>
       </div>
@@ -745,26 +748,32 @@
         <div class="field">
           <label>SOCKS5 出站代理</label>
           <input id="cfgSocks5" class="mono" placeholder="user:pass@1.2.3.4:1080" />
+          <p class="tip">支持 user:pass@host:port。</p>
         </div>
         <div class="field">
           <label>HTTP / HTTPS 出站代理</label>
           <input id="cfgHttpProxy" class="mono" placeholder="https://user:pass@proxy.example.com:8443#sni=proxy.example.com" />
+          <p class="tip">支持 https:// 与 #sni=。</p>
         </div>
         <div class="field">
           <label>专用 ProxyIP 池（每行一条 host:port）</label>
           <textarea id="cfgProxyIp" class="mono" placeholder="1.2.3.4:443"></textarea>
+          <p class="tip">每行一个 host:port。</p>
         </div>
         <div class="field">
           <label>自定义反代入口池</label>
           <textarea id="cfgRelayPool" class="mono" placeholder="1.2.3.4:443&#10;relay.example.com:443"></textarea>
+          <p class="tip">用于 Cloudflare 网段目标。</p>
         </div>
         <div class="field">
           <label>NAT64 转换前缀（用于 IPv6 出站回退）</label>
           <input id="cfgNat64" class="mono" placeholder="64:ff9b::" />
+          <p class="tip">IPv6 出站回退前缀。</p>
         </div>
         <div class="field">
           <label>客户端 TLS 指纹伪装（uTLS Fingerprint）</label>
           <input id="cfgFingerprint" class="mono" placeholder="chrome" />
+          <p class="tip">填写 chrome 等指纹名。</p>
         </div>
       </div>
 
@@ -822,8 +831,8 @@
       </div>
 
       <div class="grid" style="margin-top:12px">
-        <div class="field"><label>ECH 公共引导域名（留空默认 cloudflare-ech.com）</label><input id="cfgEchHost" class="mono" placeholder="cloudflare-ech.com" /></div>
-        <div class="field"><label>ECH DoH 查询地址（留空使用客户端默认）</label><input id="cfgEchDns" class="mono" placeholder="https://223.5.5.5/dns-query" /></div>
+        <div class="field"><label>ECH 公共引导域名（留空默认 cloudflare-ech.com）</label><input id="cfgEchHost" class="mono" placeholder="cloudflare-ech.com" /><p class="tip">留空使用默认域名。</p></div>
+        <div class="field"><label>ECH DoH 查询地址（留空使用客户端默认）</label><input id="cfgEchDns" class="mono" placeholder="https://223.5.5.5/dns-query" /><p class="tip">留空使用客户端默认。</p></div>
       </div>
 
       <!--
@@ -856,9 +865,9 @@
         <div class="field"><label>远程 CSV 测速表地址（ADDCSV，每行一个 URL）</label><textarea id="cfgAddCsv" class="mono" placeholder="https://example.com/result.csv"></textarea></div>
       </div>
       <div class="grid-3">
-        <div class="field"><label>最低准入下行速度 DLS（MB/s，0 = 不限，仅 CSV 生效）</label><input id="cfgDls" type="number" min="0" step="1" /></div>
-        <div class="field"><label>最高准入延迟 MAX_LATENCY（ms，0 = 不限，仅 CSV 生效）</label><input id="cfgMaxLatency" type="number" min="0" step="1" /></div>
-        <div class="field"><label>订阅节点总数上限（0 = 不限）</label><input id="cfgMaxNodes" type="number" min="0" step="1" /></div>
+        <div class="field"><label>最低准入下行速度 DLS（MB/s，0 = 不限，仅 CSV 生效）</label><input id="cfgDls" type="number" min="0" step="1" /><p class="tip">仅过滤 CSV。</p></div>
+        <div class="field"><label>最高准入延迟 MAX_LATENCY（ms，0 = 不限，仅 CSV 生效）</label><input id="cfgMaxLatency" type="number" min="0" step="1" /><p class="tip">仅过滤 CSV。</p></div>
+        <div class="field"><label>订阅节点总数上限（0 = 不限）</label><input id="cfgMaxNodes" type="number" min="0" step="1" /><p class="tip">限制订阅节点总数。</p></div>
       </div>
       <div class="row end"><button class="primary" id="btnSaveRemote">保存远程订阅源配置</button></div>
     </div>

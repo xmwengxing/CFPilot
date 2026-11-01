@@ -49,6 +49,8 @@ func (s *Server) registerDeployRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/deploy/run", s.guard(s.handleDeployRun))
 	mux.HandleFunc("/api/deploy/check", s.guard(s.handleDeployCheck))
 	mux.HandleFunc("/api/deploy/credentials", s.guard(s.handleDeployCredentials))
+	// 纯本地的部署信息（不联网、不用 Token）：运行状态卡片常态用
+	mux.HandleFunc("/api/deploy/local", s.guard(s.handleDeployLocal))
 	mux.HandleFunc("/api/account/detect", s.guard(s.handleAccountDetect))
 	mux.HandleFunc("/api/kv/list", s.guard(s.handleKvList))
 	mux.HandleFunc("/api/kv/create", s.guard(s.handleKvCreate))
@@ -127,7 +129,18 @@ func (s *Server) resolveDeployKv(
 	if id == "" {
 		return "", "", errors.New("尚未选择 KV 命名空间，请到「Cloudflare 凭据」页刷新 KV 列表并选一个")
 	}
-	return id, "", nil
+	// 顺手查出这个 KV 的**名称**：界面要显示「KV 名称」而不是一串 ID。
+	// 这里已经在用 Token（部署本身就要用），多查一次列表的成本可忽略。
+	title := ""
+	if list, err := client.ListKVNamespaces(ctx, profile.AccountID); err == nil {
+		for _, ns := range list {
+			if ns.ID == id {
+				title = ns.Title
+				break
+			}
+		}
+	}
+	return id, title, nil
 }
 
 // deploySkipSameVersion 判断本次部署是否跳过「线上版本与本地相同」的部署。
@@ -339,6 +352,21 @@ func (s *Server) handleDeployRun(w http.ResponseWriter, r *http.Request) {
 			s.logLevel("部署失败："+runErr.Error(), "err")
 		} else {
 			payload["result"] = res
+			// 留档最近一次部署：运行状态卡片不用调 Token 也能显示它
+			s.saveSnapshot(&DeploySnapshot{
+				KVNamespaceID:    kvID,
+				KVTitle:          freshKvTitle,
+				ControlProject:   res.Control.Name,
+				ControlSubdomain: res.Control.Subdomain,
+				DataProject:      res.Data.Name,
+				DataSubdomain:    res.Data.Subdomain,
+				KernelVersion:    kernelVersion,
+				Build:            build,
+				At:               time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+				AccountID:        profile.AccountID,
+				AccountName:      profile.AccountName,
+				DataPlaneMode:    res.DataPlaneMode,
+			})
 			for _, warn := range res.Warnings {
 				s.logLevel("⚠ "+warn, "warn")
 			}
@@ -557,6 +585,43 @@ func (s *Server) handleDeployCheck(w http.ResponseWriter, r *http.Request) {
 		ks.Remote = info.Version
 	}
 	cancelRemote()
+
+	// 检查过状态 = 拿到了最新的部署记录 → 顺手刷新本地快照，
+	// 这样「运行状态」卡片在下次打开时能直接显示它（不用再调 Token）。
+	kvTitle := ""
+	if list, err := client.ListKVNamespaces(ctx, profile.AccountID); err == nil {
+		for _, ns := range list {
+			if ns.ID == kvID {
+				kvTitle = ns.Title
+				break
+			}
+		}
+	}
+	info := InstanceInfo{
+		KVTitle:          kvTitle,
+		ControlProject:   m.ControlProject,
+		DataProject:      m.DataProject,
+		ControlSubdomain: m.ControlSubdomain,
+		DataSubdomain:    m.DataSubdomain,
+		KernelVersion:    ks.Deployed,
+		Build:            remoteBuild,
+		At:               m.At,
+	}
+	s.rememberInstances(map[string]InstanceInfo{kvID: info})
+	s.saveSnapshot(&DeploySnapshot{
+		KVNamespaceID:    kvID,
+		KVTitle:          kvTitle,
+		ControlProject:   m.ControlProject,
+		ControlSubdomain: m.ControlSubdomain,
+		DataProject:      m.DataProject,
+		DataSubdomain:    m.DataSubdomain,
+		KernelVersion:    ks.Deployed,
+		Build:            remoteBuild,
+		At:               m.At,
+		AccountID:        profile.AccountID,
+		AccountName:      profile.AccountName,
+		DataPlaneMode:    m.DataPlaneMode,
+	})
 
 	writeJSON(w, http.StatusOK, buildDeployStatusResponse(&m, state, localBuild, remoteBuild, ks))
 }
@@ -994,11 +1059,23 @@ func (s *Server) handleKvList(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 
 	instanceCount := 0
+	known := map[string]InstanceInfo{}
 	for _, o := range options {
 		if o.Ownership == "instance" {
 			instanceCount++
+			known[o.ID] = InstanceInfo{
+				KVTitle:          o.Title,
+				ControlProject:   o.ControlProject,
+				DataProject:      o.DataProject,
+				ControlSubdomain: o.ControlSubdomain,
+				DataSubdomain:    o.DataSubdomain,
+				Build:            o.Build,
+				At:               o.At,
+			}
 		}
 	}
+	// 把实例信息记到本地：部署页显示「KV 名称 · 控制面 / 数据面」时不用再调 Token。
+	s.rememberInstances(known)
 	s.logf(fmt.Sprintf("找到 %d 个 KV 命名空间，其中 %d 个是 CFPilot 实例", len(options), instanceCount))
 
 	writeJSON(w, http.StatusOK, map[string]any{

@@ -592,9 +592,18 @@ export function buildOfficialPool(count: number): NodeEntry[] {
   }))
 }
 
-/** 构造优选域名池 */
-export function buildDomainPool(count: number, pool: readonly string[] = PREFERRED_DOMAINS): NodeEntry[] {
-  return sampleDomains(count, pool).map((domain) => ({
+/** 构造优选域名池：内置随机抽样，并追加自定义库。 */
+export function buildDomainPool(count: number, pool?: readonly string[]): NodeEntry[] {
+  const domains = [...sampleDomains(count, PREFERRED_DOMAINS)]
+  const seen = new Set(domains.map((domain) => domain.toLowerCase()))
+  for (const domain of pool ?? []) {
+    if (!isHostname(domain)) continue
+    const key = domain.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    domains.push(domain)
+  }
+  return domains.map((domain) => ({
     ip: domain,
     port: DEFAULT_NODE_PORT,
     remark: '',

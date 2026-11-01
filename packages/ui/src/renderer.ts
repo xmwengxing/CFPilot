@@ -61,6 +61,27 @@
     if (name === 'logs' && autoLoadLogs) {
       autoLoadLogs()
     }
+    // 部署页：切进来后重算横向滚动。
+    //
+    // 为什么必须重算：页面**隐藏时**容器宽度是 0，测不出超出量，
+    // 于是滚动没被启用 —— 用户切到这一页看到的仍然是一截被截断的文本。
+    if (name === 'deploy') {
+      refreshMarquees()
+    }
+  }
+
+  /** 重新计算运行状态三行的横向滚动（页面可见时才有意义）。 */
+  function refreshMarquees(): void {
+    const pairs: Array<[string, string]> = [
+      ['rtEnvWrap', 'rtEnv'],
+      ['rtDeployWrap', 'rtDeploy'],
+      ['rtKernelWrap', 'rtKernel'],
+    ]
+    for (const [wrapId, innerId] of pairs) {
+      const wrap = document.getElementById(wrapId)
+      const inner = document.getElementById(innerId)
+      if (wrap && inner) setupMarquee(wrap, inner)
+    }
   }
 
   function log(message: string, level: 'info' | 'ok' | 'warn' | 'err' = 'info'): void {
@@ -163,6 +184,10 @@
 
   /** 当前账号 ID（检测后填充） */
   let currentAccountId = ''
+  /** 当前账号的可读标识（名称 + ID），并入 KV 提示显示 */
+  let detectedAccountLabel = ''
+  /** KV 选择的引导语（自动选中 / 多实例待选 / 无实例） */
+  let kvGuidance = ''
   /** KV 候选列表 */
   let kvOptions: Array<{
     id: string
@@ -257,33 +282,38 @@
     const id = select.value
     const item = kvOptions.find((o) => o.id === id)
     const hint = $text('kvHint')
-    const deployKv = $text('deployKv')
+    // 「目标账号」不再单独占一行，说明并到 KV 提示里。
+    const prefix = detectedAccountLabel ? '目标账号 ' + detectedAccountLabel + ' · ' : ''
     if (!item) {
-      hint.textContent = currentAccountId
-        ? '请选择一个命名空间（全新部署时会自动创建 KV）。'
-        : '点「刷新 KV 列表」查看账号下有哪些命名空间。'
-      deployKv.textContent = '—'
+      hint.textContent =
+        prefix +
+        (currentAccountId
+          ? kvGuidance || '请选择一个命名空间（全新部署时会自动创建 KV）。'
+          : '选择账户后会自动检测账号与实例；检测到已部署实例会自动选中对应的 KV。')
       return
     }
     if (item.ownership === 'instance') {
       hint.textContent =
-        `控制面 ${item.controlProject} / 数据面 ${item.dataProject}，部署于 ${item.at}。`
-      deployKv.textContent = `${item.title}（${item.id}）`
+        prefix + `控制面 ${item.controlProject} / 数据面 ${item.dataProject}，部署于 ${item.at}。` + (kvGuidance ? ' ' + kvGuidance : '')
     } else if (item.ownership === 'foreign') {
       hint.textContent =
+        prefix +
         '此命名空间已被其他项目占用，不能用于 CFPilot。' +
         'CFPilot 的数据面已完全自研，两者不再共用同一 KV' +
         '（会共享配额、混淆配置、让排查变难）。请到「部署」页新建一个实例。'
-      deployKv.textContent = `${item.title}（${item.id}）— 不可用`
     } else if (item.ownership === 'cfpilot') {
       hint.textContent =
+        prefix +
         '此命名空间含 CFPilot 的 CONFIG 键但没有部署清单（残留配置）。' +
         '部署会覆盖它，除非你确实知道自己在做什么。'
-      deployKv.textContent = `${item.title}（${item.id}）`
     } else {
-      hint.textContent = '空命名空间，可用于部署新实例。'
-      deployKv.textContent = `${item.title}（${item.id}）`
+      hint.textContent = prefix + '空命名空间，可用于部署新实例。'
     }
+    // 换了 KV 之后，之前那次检测结果就不适用了 —— 清掉，回到本地留档显示。
+    deployChecked = null
+    // KV 列表变化后，部署页的「部署实例」信息也要跟着更新
+    // （控制面 / 数据面项目名就来自这份列表）。
+    void loadLocalDeployInfo()
   }
 
   /** 拉取 KV 列表 */
@@ -422,9 +452,11 @@
    */
   function resetAccountContext(): void {
     currentAccountId = ''
+    detectedAccountLabel = ''
+    kvGuidance = ''
     kvOptions = []
     renderKvOptions()
-    $text('detAccount').textContent = '—'
+    updateKvHint()
     $('cfToken').value = ''
     $('panelPassword').value = ''
     clearCredAlert()
@@ -471,48 +503,155 @@
     return m + ' 分钟'
   }
 
+  /**
+   * 让长文本横向滚动，且**不会滚到一半就消失**。
+   *
+   * 位移量必须按「超出部分」算：内容宽度 − 容器宽度。
+   * 早前用 translateX(-100%)（按元素自身宽度位移），
+   * 结果整段文本被一次性滑出容器 —— 用户看到的就是「滚一半就没了」。
+   *
+   * @param wrap 外层（overflow:hidden 的容器）
+   * @param inner 内层（承载文本的元素）
+   */
+  function setupMarquee(wrap: HTMLElement | null, inner: HTMLElement | null): void {
+    if (!wrap || !inner) return
+    const apply = (): void => {
+      const delta = inner.scrollWidth - wrap.clientWidth
+      if (delta > 2) {
+        wrap.style.setProperty('--mq-delta', delta + 'px')
+        wrap.classList.add('scroll')
+      } else {
+        wrap.style.removeProperty('--mq-delta')
+        wrap.classList.remove('scroll')
+      }
+    }
+    apply()
+    // 窗口宽度变化后超出量会变，重算一次（用 dataset 标记避免重复绑定）
+    if (wrap.dataset.mqBound !== '1') {
+      wrap.dataset.mqBound = '1'
+      window.addEventListener('resize', apply)
+    }
+  }
+
+  /** 运行状态：部署实例那一行的展示内容（账号 · KV · 控制面/数据面）。 */
+  function renderDeployInstance(text: string, highlight: boolean): void {
+    const el = $text('rtDeploy')
+    const wrap = document.getElementById('rtDeployWrap')
+    el.textContent = text
+    el.classList.toggle('rt-hl', highlight)
+    if (wrap) {
+      wrap.title = text
+      setupMarquee(wrap, el)
+    }
+  }
+
+  /**
+   * 运行状态：内核版本那一行。
+   *
+   * html 参数用于把「可升级」这类片段单独着色（内容全部经过转义）。
+   */
+  function renderKernelInfo(text: string, highlight: boolean, title: string, html?: string): void {
+    const el = $text('rtKernel')
+    const wrap = document.getElementById('rtKernelWrap')
+    if (html) {
+      el.innerHTML = html
+    } else {
+      el.textContent = text
+    }
+    el.classList.toggle('rt-hl', highlight)
+    if (wrap) {
+      wrap.title = title || text
+      setupMarquee(wrap, el)
+    }
+  }
+
+  /**
+   * 常态显示：**只用本机信息**，不调用 Token。
+   *
+   * 内核版本 = 本程序内置的 + 最近一次部署留档的；
+   * 部署实例 = 账号 · KV 名称 · 控制面/数据面项目名。
+   */
+  async function loadLocalDeployInfo(): Promise<void> {
+    try {
+      const info = await window.cfpilot.getLocalDeployInfo()
+      const snap = info?.snapshot
+      const localVersion = info?.localKernelVersion || ''
+      const localBuild = info?.localBuild || ''
+
+      // 凭据页已加载的 KV 列表（带控制面 / 数据面项目名）
+      const selectedKv = $sel('kvSelect')?.value || ''
+      const option = kvOptions.find((o) => o.id === (snap?.kvNamespaceId || selectedKv))
+      // 本机已知的实例索引（KV 列表读取时由后端缓存到这里）
+      const known = (info as { instances?: Record<string, { kvTitle?: string; controlProject?: string; dataProject?: string; kernelVersion?: string; build?: string; at?: string }> })?.instances
+      const local = known ? known[snap?.kvNamespaceId || selectedKv] : undefined
+
+      // 部署实例：账号邮箱 · 控制面 / 数据面
+      // 三个来源依次兜底：本地快照 → 凭据页已加载的 KV 列表 → 本机实例索引。
+      // 老用户没有本地快照（那是本版本才写的），光看它只能显示账号邮箱。
+      const account = snap?.accountName || info?.accountName || detectedAccountLabel || ''
+      const control = snap?.controlProject || option?.controlProject || local?.controlProject || ''
+      const data = snap?.dataProject || option?.dataProject || local?.dataProject || ''
+      const instanceParts: string[] = []
+      if (account) instanceParts.push(account)
+      if (control || data) instanceParts.push((control || '?') + ' / ' + (data || '?'))
+      renderDeployInstance(
+        instanceParts.length > 0 ? instanceParts.join(' · ') : '尚未选择账号（凭据页检测账号后自动显示）',
+        instanceParts.length > 0
+      )
+
+      // 内核版本：本程序内置 + 最近一次部署
+      //
+      // ⚠️ 已经点过「检查部署状态」时**不要**用本地信息覆盖检测结果 ——
+      // 那会把「当前已部署 / 最新发布」冲掉，用户点了按钮却看不到变化。
+      if (deployChecked) {
+        return
+      }
+      const localText =
+        '本程序内置 ' + (localVersion ? 'v' + localVersion : '未知') + (localBuild ? ' · ' + localBuild : '')
+      const lastVersion = snap?.kernelVersion || local?.kernelVersion
+      const lastBuild = snap?.build || local?.build
+      const lastText = lastVersion
+        ? '最近部署 v' + lastVersion + (lastBuild ? ' · ' + lastBuild : '')
+        : ''
+      renderKernelInfo(
+        [localText, lastText].filter(Boolean).join(' ｜ '),
+        true,
+        '本程序内置 = 当前桌面版自带的内核产物；最近部署 = 本机留档的上一次部署记录'
+      )
+    } catch {
+      renderDeployInstance('读取本地部署记录失败', false)
+      renderKernelInfo('读取失败', false, '')
+    }
+  }
+
   async function loadRuntimeStatus(): Promise<void> {
+    // 本机版本（真实值，不用「运行中」这种没有信息量的说法）
     try {
       const st = await window.cfpilot.serviceStatus()
       $text('rtLocal').textContent =
-        '运行中 · 端口 ' + st.port + ' · 已运行 ' + fmtUptime(st.uptimeSeconds)
+        '运行中 · 端口 ' + st.port + ' · 已运行 ' + fmtUptime(st.uptimeSeconds) + (st.version ? ' · v' + st.version : '')
     } catch {
       $text('rtLocal').textContent = '读取失败'
     }
     try {
-      const dep = await window.cfpilot.checkDeployed()
-      $text('rtDeploy').textContent = dep.hasDeploy
-        ? (dep.controlProject || '?') + ' / ' + (dep.dataProject || '?')
-        : '尚未部署'
-      // 用 state 而不是版本号：build 是内容指纹（hash-hash），对用户没有意义
-      const stateText: Record<string, string> = {
-        latest: '已是最新',
-        outdated: '线上版本较旧，可更新',
-        blocked: '部署被平台标记，需处理',
-        none: '尚未部署',
-      }
-      $text('rtKernel').textContent = stateText[dep.state] || dep.state || '—'
-    } catch {
-      $text('rtDeploy').textContent = '读取失败'
-      $text('rtKernel').textContent = '—'
-    }
-    try {
       const env = await window.cfpilot.checkEnvironment()
-      $text('rtEnv').textContent = env.clean
-        ? '未发现干扰因素'
-        : (env.findings || []).length + ' 项提示'
+      const findings = env.findings || []
+      // 显示**实际问题**，而不是"N 项提示"；过长时用横向滚动展示
+      const text = findings.length ? findings.join('；') : '未发现干扰因素'
+      $text('rtEnv').textContent = text
+      const wrap = document.getElementById('rtEnvWrap')
+      if (wrap) {
+        wrap.title = text
+        setupMarquee(wrap, $text('rtEnv'))
+      }
     } catch {
       $text('rtEnv').textContent = '读取失败'
     }
+    await loadLocalDeployInfo()
   }
 
   function bindRuntime(): void {
-    const refresh = document.getElementById('btnRtRefresh')
-    if (refresh) {
-      refresh.addEventListener('click', () => {
-        void loadRuntimeStatus()
-      })
-    }
+    // 「刷新」按钮已移除：刷新职责由「检查部署状态」接管。
     const analytics = document.getElementById('btnRtAnalytics')
     if (analytics) {
       analytics.addEventListener('click', () => {
@@ -537,7 +676,8 @@
         log('已切换到「新建账户」模式，粘贴 Token 后点「添加并保存」')
         resetAccountContext()
         updateProfileMode()
-        $text('detHint').textContent = '填好 Token 并「添加并保存」后会自动检测账号。'
+        kvGuidance = '填好 Token 并「添加并保存」后会自动检测账号。'
+        updateKvHint()
         return
       }
 
@@ -564,7 +704,8 @@
         // 之后 refreshCredState 已经把该账户的 KV 选中了
         await detectAccountAndGuide()
       } else {
-        $text('detHint').textContent = '该账户还没填 Token，请粘贴后点「修改并保存」。'
+        kvGuidance = '该账户还没填 Token，请粘贴后点「修改并保存」。'
+        updateKvHint()
       }
     })
 
@@ -653,10 +794,13 @@
     log('检测账号…')
     try {
       const result = await window.cfpilot.detectAccount()
-      $text('detAccount').textContent =
-        result.accountName ? result.accountName + '（' + result.accountId + '）' : '—'
+      // 「目标账号」不再单独占一行：可读标识并入 KV 提示。
+      detectedAccountLabel = result.accountName
+        ? result.accountName + '（' + result.accountId + '）'
+        : result.accountId || ''
       if (!result.accountId) {
-        $text('detHint').textContent = '没能读到账号，请检查 Token 权限是否正确。'
+        kvGuidance = '没能读到账号，请检查 Token 权限是否正确。'
+        updateKvHint()
         showCredAlert(
           'danger',
           '没能读到账号：请确认 Token 带有 <code>Account / Account Settings / Read</code> 权限。'
@@ -680,7 +824,8 @@
       await autoPickKvByInstances()
     } catch (err) {
       log('检测账号失败：' + (err instanceof Error ? err.message : String(err)), 'err')
-      $text('detHint').textContent = '检测失败，请检查网络与 Token。'
+      kvGuidance = '检测失败，请检查网络与 Token。'
+      updateKvHint()
       showCredAlert('danger', '检测失败：请检查网络与 Token。')
     }
   }
@@ -694,10 +839,10 @@
    */
   async function autoPickKvByInstances(): Promise<void> {
     const instances = kvOptions.filter((o) => o.ownership === 'instance')
-    const hint = $text('detHint')
 
     if (instances.length === 0) {
-      hint.textContent = '这个账号下还没有部署过 CFPilot，去「部署」页部署一次即可。'
+      kvGuidance = '这个账号下还没有部署过 CFPilot，去「部署」页部署一次即可。'
+      updateKvHint()
       showCredAlert('danger', '未检查到CFPilot 实例，请到「部署」页全新部署。')
       log('该账号下没有已部署实例，请到「部署」页全新部署', 'warn')
       return
@@ -706,14 +851,14 @@
     if (instances.length === 1) {
       const only = instances[0]
       $sel('kvSelect').value = only.id
-      updateKvHint()
       try {
         // 选中即保存：唯一实例没有歧义，不该再让用户点一次「保存」
         await window.cfpilot.saveCredentials({ kvNamespaceId: only.id })
       } catch {
         /* 保存失败不阻断：下拉框当前值仍会用于本次部署 */
       }
-      hint.textContent = '已自动选中该账号下唯一的 CFPilot 实例。'
+      kvGuidance = '已自动选中该账号下唯一的 CFPilot 实例。'
+      updateKvHint()
       showCredAlert(
         'ok',
         '已自动选中唯一的 CFPilot 实例 <code>' + escapeHtml(only.title) + '</code>，KV 已保存。'
@@ -723,7 +868,8 @@
     }
 
     // ≥2 个：绝不替用户选 —— 选错会让所有功能作用到错的实例上
-    hint.textContent = '检测到多个 CFPilot 实例，请从下方选择本次使用的 KV。'
+    kvGuidance = '检测到 ' + instances.length + ' 个 CFPilot 实例，请从下方选择本次使用的 KV。'
+    updateKvHint()
     showCredAlert(
       'danger',
       '检测到 <b>' + instances.length + '</b> 个 CFPilot 实例，请在下方选择 KV：<br>' +
@@ -738,6 +884,14 @@
     const active = profiles.find((p) => p.active)
     return Boolean(active?.hasToken)
   }
+
+  /**
+   * 最近一次「检查部署状态」的结果。
+   *
+   * 有了它，本地快照就不再覆盖检测结果 ——
+   * 否则用户点了按钮，内核版本行却还是本地留档，看起来就是「点了没反应」。
+   */
+  let deployChecked: DeployStatusLike | null = null
 
   function bindCredentials(): void {
     /**
@@ -1022,28 +1176,24 @@
          * —— 受理响应里根本没有 ok 字段，于是每次点部署都先闪一句
          * 「❌ 部署失败：」，几秒后才被 SSE 纠正，看起来像「先失败又莫名成功」。
          */
-        const status = document.getElementById('deployStatus')!
+        // 「当前部署状态」卡已并入「运行状态」卡，这里只在日志里给出进度。
         if (result.started) {
-          status.textContent = '⏳ 部署进行中…（进度见下方日志）'
-          log('部署已开始，进度与最终结果会实时推送')
+          log('⏳ 部署进行中…（进度见下方日志）')
         } else if (result.ok === false || result.error) {
-          status.textContent = '❌ 部署失败：' + (result.error ?? '')
-          log('── 部署失败 ──', 'err')
+          log('❌ 部署失败：' + (result.error ?? ''), 'err')
         } else {
           // 成功时**不再重复打印**面板地址与密码。
           //
           // 部署向导本身在结束时就会打印一次「控制面 / 数据面 / UUID / WS 路径 /
           // 面板密码」的汇总块，这里再打一遍等于同一份信息出现两次，
           // 反而让人怀疑是不是部署了两次。只补一句结束标记即可。
-          status.textContent = '✅ 部署完成'
-          log('── 部署成功（详细信息见上方汇总）──', 'ok')
+          log('✅ 部署完成', 'ok')
           // 部署成功后自动刷新状态：版本已同步，按钮应回到「已是最新」
           const select = $sel('kvSelect')
           await window.cfpilot.checkDeployed(select.value || undefined)
         }
       } catch (err) {
         log('部署异常：' + (err instanceof Error ? err.message : String(err)), 'err')
-        document.getElementById('deployStatus')!.textContent = '❌ 部署异常'
       } finally {
         setBusy(false)
       }
@@ -1068,6 +1218,11 @@
           // 理论上不会发生（赋值在本函数执行早期完成）
           log('内部错误：状态渲染器未初始化', 'err')
         }
+        // 「检查部署状态」同时接管刷新职责：本地服务、环境提示一起更新。
+        //
+        // ⚠️ 顺序很重要：先渲染检测结果，再刷本地信息；
+        // 本地信息**不会**覆盖内核版本行（deployChecked 已记录本次结果）。
+        void loadRuntimeStatus()
       } catch (err) {
         log('检查失败：' + (err instanceof Error ? err.message : String(err)), 'err')
       } finally {
@@ -1077,23 +1232,20 @@
 
 
     /**
-     * 显示部署清单里保存的面板凭据。
+     * 显示部署清单里保存的面板凭据（**弹窗**）。
      *
      * Cloudflare 平台上的环境变量是**加密的**（页面只显示 `****`），
      * 所以部署完成后如果没记下面板密码，用户就再也拿不回来，面板进不去。
      *
      * 这里的值从**本机部署清单**（KV 里的 CFP_DEPLOY_MANIFEST）读取，
      * 不依赖云端变量的可见性。
+     *
+     * 用弹窗而不是常驻面板：密码 / UUID 属于敏感信息，
+     * 常驻在页面上容易被截图或旁观泄露，点开才加载、关闭即消失。
      */
     document.getElementById('btnShowCreds')?.addEventListener('click', async () => {
-      const box = document.getElementById('credBox')
-      if (!box) return
-
-      // 已经展开就收起（切换行为，避免重复请求）
-      if (!box.hidden) {
-        box.hidden = true
-        return
-      }
+      const modal = document.getElementById('credModal')
+      if (!modal) return
 
       const select = $sel('kvSelect')
       try {
@@ -1110,7 +1262,7 @@
         set('credPanelPw', r.panelPassword ?? '')
         set('credUuid', r.uuid ?? '')
         set('credWsPath', r.wsPath ?? '')
-        box.hidden = false
+        modal.hidden = false
 
         // 自动复制到剪贴板
         //
@@ -1131,6 +1283,20 @@
       } catch (err) {
         log('读取面板凭据失败：' + (err instanceof Error ? err.message : String(err)), 'err')
       }
+    })
+
+    // 关闭弹窗：按钮、点遮罩、按 Esc 都可关
+    const closeCredModal = (): void => {
+      const modal = document.getElementById('credModal')
+      if (modal) modal.hidden = true
+    }
+    document.getElementById('btnCredClose')?.addEventListener('click', closeCredModal)
+    document.getElementById('credModal')?.addEventListener('click', (event) => {
+      // 点遮罩空白处关闭（点在内容里不关）
+      if (event.target === event.currentTarget) closeCredModal()
+    })
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') closeCredModal()
     })
 
     // 复制全部凭据到剪贴板
@@ -2709,18 +2875,28 @@
      * 项目名与子域不保证一致（用户可自定义子域）。
      * 域名走「自动识别域名」按钮读真实 subdomain / 自定义域名。
      */
-    // 赋值给前面声明的引用：让「检查状态」按钮也能调用同一个渲染逻辑
+    // 赋值给前面声明的引用：让「检查部署状态」按钮也能调用同一个渲染逻辑
     applyDeployStatus = (status: DeployStatusLike): void => {
-      const el = document.getElementById('deployStatus')
-      const box = document.getElementById('deployStateBox')
       const btn = document.getElementById('btnDeploy') as HTMLButtonElement | null
       const hint = document.getElementById('deployActionHint')
-      if (!el || !box || !btn) return
+      const tip = document.getElementById('rtTip')
+      if (!btn) return
+
+      // 记住这次检测结果：本地快照不再覆盖它（否则点了按钮看不到变化）。
+      deployChecked = status
 
       const setBtn = (label: string, primary: boolean): void => {
         btn.textContent = label
         btn.classList.toggle('btn-primary', primary)
         btn.classList.toggle('btn-ghost', !primary)
+      }
+
+      /** 运行状态卡片底部的提示（升级建议等）。 */
+      const setTip = (text: string, warn = false): void => {
+        if (!tip) return
+        tip.textContent = text
+        tip.style.color = warn ? 'var(--warn)' : ''
+        tip.style.fontWeight = warn ? '600' : ''
       }
 
       if (status.state === 'blocked') {
@@ -2744,21 +2920,21 @@
           },
         }
         const g = guide[status.reason ?? 'no-token']!
-        el.innerHTML =
-          '<span class="badge warn">需要先完成设置</span><br>' +
-          '<b>' + escapeHtml(g.title) + '</b><br>' +
-          escapeHtml(g.body) +
-          '<br><span style="color:var(--muted)">👉 ' + escapeHtml(g.action) + '</span>'
+        setTip(
+          '👉 ' + g.title + '：' + g.body + ' ' + g.action,
+          true
+        )
+        renderKernelInfo('无法检测线上状态（需先完成设置）', false, '缺少前置条件时无法读取线上部署状态')
         setBtn('开始部署', true)
         btn.disabled = false
-        if (hint) hint.textContent = '完成上面的设置后，回来再点一次「检查状态」。'
+        if (hint) hint.textContent = '完成上面的设置后，回来再点一次「检查部署状态」。'
         return
       }
       btn.disabled = false
 
       if (!status.hasDeploy) {
-        el.innerHTML =
-          '这个 KV 里<b>还没有部署记录</b> —— 点下面的按钮会创建新的控制面与数据面项目。'
+        setTip('当前选中的 KV 里还没有部署记录 —— 点下面的「开始首次部署」即可创建实例。')
+        renderKernelInfo('尚未部署', false, '这个 KV 里没有部署记录')
         setBtn('开始首次部署', true)
         if (hint) hint.textContent = '首次部署会生成新的 UUID、WS 路径与面板密码，请存好。'
         return
@@ -2784,106 +2960,56 @@
         syncDataPlaneUI()
       }
 
-      const instance =
-        '<b>' + escapeHtml(status.controlProject ?? '?') + '</b> / <b>' +
-        escapeHtml(status.dataProject ?? '?') + '</b>'
-      const deployedAt = status.at
-        ? '<br><span style="color:var(--muted)">上次部署：' + escapeHtml(status.at) + '</span>'
-        : ''
+      // 部署实例与内核版本统一渲染到「运行状态」卡片（见 renderDeployInstance / renderKernelInfo）。
 
       /**
-       * 内核版本三行表。
+       * 检查过状态后的内核版本行。
        *
-       * ## 为什么是三行、为什么必须换名字
+       * 两个版本来自**两个不同的地方**，名字必须唯一（早期挤在一行，
+       * 出现过两个「线上」，用户没法判断该不该更新）：
        *
-       * 三个版本来自**三个不同的地方**，早期挤在一行里，于是出现了两个「线上」：
-       * 第一行指的是 Cloudflare 上正在跑的那份，第二行其实指的是 GitHub 上发布的最新版
-       * —— 同名不同义，用户根本没法判断该不该更新（2026-10-31 报障）。
-       *
-       * 现在拆成三行，名字各自唯一：
-       *
-       *   已部署      ← Cloudflare 上这个实例正在运行的（现状）
-       *   最新发布    ← GitHub Release 上的最新内核（目标，可升级到它）
-       *   本程序内置  ← 当前这个桌面版自带的内核产物（点部署会传它）
-       *
-       * 每行都带 tooltip 说明来源，避免再出现「线上是哪个线上」的问题。
+       *   当前已部署 ← Cloudflare 上这个实例正在跑的（现读数据面版本端点）
+       *   最新发布   ← GitHub Release 上的最新内核（可升级到它）
        */
-      const versionTable = (): string => {
-        const row = (label: string, tip: string, value: string, dim = false): string =>
-          '<div class="verrow">' +
-          '<span class="verlabel" title="' + escapeHtml(tip) + '">' + label + '</span>' +
-          '<span class="verval' + (dim ? ' dim' : '') + '">' + value + '</span>' +
-          '</div>'
+      const deployedText =
+        '当前已部署 ' +
+        (status.kernelVersion ? 'v' + status.kernelVersion : '版本未知') +
+        (status.build ? ' · ' + status.build : '')
+      const latestText = status.remoteKernelVersion
+        ? '最新发布 v' + status.remoteKernelVersion
+        : status.kernelRemoteError
+          ? '最新发布查询失败'
+          : ''
+      // 「可升级」单独着色加粗 —— 用户一眼就知道该不该点更新。
+      const kernelHtml =
+        escapeHtml(deployedText) +
+        (latestText ? ' ｜ ' + escapeHtml(latestText) : '') +
+        (status.kernelUpdatable ? ' <span class="rt-upg">可升级</span>' : '')
+      renderKernelInfo(
+        [deployedText, latestText].filter(Boolean).join(' ｜ ') + (status.kernelUpdatable ? ' 可升级' : ''),
+        status.kernelUpdatable === true,
+        '当前已部署 = Cloudflare 上正在运行的内核；最新发布 = GitHub 上的最新内核',
+        kernelHtml
+      )
 
-        const parts: string[] = []
-
-        // 1) 已部署：Cloudflare 上正在跑的（语义版本 · 构建指纹）
-        const deployedParts: string[] = []
-        if (status.kernelVersion) deployedParts.push(escapeHtml(status.kernelVersion))
-        if (status.build) deployedParts.push('<span class="dim">' + escapeHtml(status.build) + '</span>')
-        parts.push(
-          row(
-            '已部署',
-            'Cloudflare 上这个实例当前正在运行的内核（现读数据面的版本端点，读不到才用部署记录）',
-            deployedParts.length > 0 ? deployedParts.join(' · ') : '未记录',
-            deployedParts.length === 0
-          )
-        )
-
-        // 2) 最新发布：GitHub 上的最新内核
-        if (status.remoteKernelVersion || status.kernelRemoteError) {
-          const hasNewer =
-            !!status.remoteKernelVersion &&
-            !!status.kernelVersion &&
-            status.remoteKernelVersion !== status.kernelVersion
-          parts.push(
-            row(
-              '最新发布',
-              'GitHub Release 上发布的最新内核；比「已部署」新时可以用「更新部署」升级',
-              status.remoteKernelVersion
-                ? escapeHtml(status.remoteKernelVersion) +
-                    (hasNewer ? '<span class="vertag">可升级</span>' : '')
-                : '<span class="dim">查询失败</span>'
-            )
-          )
-        }
-
-        // 3) 本程序内置：这个桌面版自带的内核产物
-        const localParts: string[] = []
-        if (status.localKernelVersion) localParts.push(escapeHtml(status.localKernelVersion))
-        if (status.localBuild) localParts.push('<span class="dim">' + escapeHtml(status.localBuild) + '</span>')
-        parts.push(
-          row(
-            '本程序内置',
-            '当前这个桌面版自带的内核产物；点「部署 / 更新」上传的就是它',
-            localParts.length > 0 ? localParts.join(' · ') : '读取失败',
-            localParts.length === 0
-          )
-        )
-
-        return '<div class="vertable">' + parts.join('') + '</div>'
-      }
-
-      /**
-       * 「内核可更新」提示。
-       *
-       * 远程内核比线上新时出现 —— 告诉用户点哪个按钮。
-       */
-      const kernelUpdateHint = (): string => {
-        if (!status.kernelUpdatable) return ''
-        const target = status.remoteKernelVersion ? '（可更新到 ' + escapeHtml(status.remoteKernelVersion) + '）' : ''
-        return (
-          '<br><span style="color:var(--warn)">👉 GitHub 上发布了更新的内核' + target +
-          '，点下面的「更新部署」即可升级 —— <b>不需要升级本程序</b></span>'
-        )
-      }
+      // 部署实例：项目名（检查时才知道的更准）+ 部署时间
+      const instanceText =
+        (status.controlProject || '?') + ' / ' + (status.dataProject || '?') +
+        (status.at ? '（' + status.at + '）' : '')
+      renderDeployInstance(instanceText, true)
 
       if (status.state === 'latest') {
-        el.innerHTML =
-          '<span class="badge ok">已是最新</span><br>' +
-          '实例：' + instance +
-          versionTable() + kernelUpdateHint() + deployedAt
         setBtn('重新部署', false)
+        if (status.kernelUpdatable) {
+          setTip(
+            '👉 GitHub 上发布了更新的内核（可更新到 ' +
+              (status.remoteKernelVersion || '最新版') +
+              '），点下面的「更新现有部署」即可升级 —— 不需要升级本程序。',
+            true
+          )
+        } else {
+          setTip('当前已部署的内核已是最新发布版本，无需更新。')
+        }
         if (hint) {
           hint.textContent = status.kernelUpdatable
             ? '「已部署」与「本程序内置」一致，但 GitHub 上有更新的内核 —— 点「重新部署」会升到最新版。'
@@ -2895,12 +3021,8 @@
       // 三种子情况分开表达，绝不让用户看到 `unknown` 这种占位符
       if (!status.build) {
         // 已部署的内核读不到版本（早期部署的，或数据面探测不到且清单里没记）
-        el.innerHTML =
-          '<span class="badge warn">建议更新</span><br>' +
-          '实例：' + instance +
-          '<br>读不到「已部署」内核的版本号（较早版本部署的，或数据面暂时探测不到）' +
-          versionTable() + kernelUpdateHint() + deployedAt
         setBtn('更新并记录版本', true)
+        setTip('读不到「已部署」内核的版本号（较早版本部署的，或数据面暂时探测不到）—— 更新一次即可写入版本号。', true)
         if (hint) {
           hint.textContent =
             '更新一次即可写入版本号，之后就能正常比对。会沿用原 UUID 与 WS 路径。'
@@ -2910,23 +3032,24 @@
 
       if (!status.localBuild) {
         // 本地读不到版本 —— 通常是产物缺失
-        el.innerHTML =
-          '<span class="badge err">本地产物异常</span><br>' +
-          '实例：' + instance +
-          versionTable() +
-          '<br>但<b>读不到「本程序内置」的内核版本</b> —— 应用内的内核产物可能缺失' +
-          deployedAt
         setBtn('重新部署', false)
+        setTip('读不到「本程序内置」的内核版本 —— 应用内的内核产物可能缺失，请重新安装。', true)
         if (hint) hint.textContent = '请重新安装或联系维护者；直接部署可能上传不完整的产物。'
         return
       }
 
       // 正常差异：已部署的比本程序内置的旧
-      el.innerHTML =
-        '<span class="badge warn">可更新</span><br>' +
-        '实例：' + instance +
-        versionTable() + kernelUpdateHint() + deployedAt
       setBtn('更新到最新内核', true)
+      if (status.kernelUpdatable) {
+        setTip(
+          '👉 GitHub 上发布了更新的内核（可更新到 ' +
+            (status.remoteKernelVersion || '最新版') +
+            '），点下面的「更新现有部署」即可升级 —— 不需要升级本程序。',
+          true
+        )
+      } else {
+        setTip('「已部署」与「本程序内置」不是同一份产物，点下面的「更新到最新内核」即可对齐。')
+      }
       if (hint) {
         hint.textContent =
           '「已部署」与「本程序内置」不是同一份产物，更新会换成后者。沿用原 UUID 与 WS 路径，客户端订阅地址不用改。'
@@ -2944,21 +3067,18 @@
     window.cfpilot.onDeployStatus((event) => {
       const s = event as CFPilotDeployStatus & DeployStatusLike
       if (typeof s.ok === 'boolean') {
-        const line = document.getElementById('deployStatus')
-        if (line) {
-          line.textContent = s.ok ? '✅ 部署完成' : '❌ 部署失败：' + (s.error ?? '')
-        }
         log(s.ok ? '── 部署成功（详细信息见上方汇总）──' : '── 部署失败 ──', s.ok ? 'ok' : 'err')
-        // 部署结束后状态卡片会过时（版本、项目名都变了），静默刷新一次
+        // 部署结束后运行状态会过时（版本、项目名都变了），静默刷新一次
         if (s.ok) {
           const select = $sel('kvSelect')
           void window.cfpilot
             .checkDeployed(select.value || undefined)
             .then((st) => {
               if (applyDeployStatus) applyDeployStatus(st as DeployStatusLike)
+              void loadRuntimeStatus()
             })
             .catch(() => {
-              /* 状态刷新失败不影响部署结果，用户可手动点「检查状态」 */
+              /* 状态刷新失败不影响部署结果，用户可手动点「检查部署状态」 */
             })
         }
         return

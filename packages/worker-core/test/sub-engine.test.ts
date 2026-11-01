@@ -280,6 +280,40 @@ describe('内置优选库', () => {
   })
 })
 
+describe('collectNodes 自定义优选域名库', () => {
+  it('与内置库互补下发并保留内置随机数量', async () => {
+    const result = await collectNodes(
+      { ...config, poolOfficial: false, poolDomain: true, domainCount: 3 },
+      '',
+      { domainPool: ['custom-a.example.test', 'custom-b.example.test'] }
+    )
+    const domains = result.groups.find((group) => group.key === 'domain')!.entries.map((entry) => entry.ip)
+    expect(domains).toHaveLength(5)
+    expect(domains).toEqual(expect.arrayContaining(['custom-a.example.test', 'custom-b.example.test']))
+  })
+
+  it('重复域名只保留一条', async () => {
+    const result = await collectNodes(
+      { ...config, poolOfficial: false, poolDomain: true, domainCount: 2 },
+      '',
+      { domainPool: ['custom-a.example.test', 'CUSTOM-A.EXAMPLE.TEST', 'custom-b.example.test'] }
+    )
+    const domains = result.groups.find((group) => group.key === 'domain')!.entries.map((entry) => entry.ip)
+    expect(domains).toHaveLength(4)
+    expect(new Set(domains.map((domain) => domain.toLowerCase())).size).toBe(4)
+  })
+
+  it('只有自定义库时也能下发', async () => {
+    const result = await collectNodes(
+      { ...config, poolOfficial: false, poolDomain: true, domainCount: 1 },
+      '',
+      { domainPool: ['custom-a.example.test', 'custom-b.example.test'] }
+    )
+    const domains = result.groups.find((group) => group.key === 'domain')!.entries.map((entry) => entry.ip)
+    expect(domains).toEqual(expect.arrayContaining(['custom-a.example.test', 'custom-b.example.test']))
+  })
+})
+
 describe('collectNodes 零配置兜底', () => {
   it('三个来源都未勾选时自动给 20 官方 IP + 10 优选域名', async () => {
     const result = await collectNodes(

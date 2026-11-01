@@ -783,6 +783,11 @@
       return get('/api/service/status')
     },
 
+    /** 纯本地的部署信息（内置内核 + 最近一次部署留档），不联网、不用 Token。 */
+    getLocalDeployInfo: function () {
+      return get('/api/deploy/local')
+    },
+
     setServicePort: function (port) {
       return post('/api/service/port', { port: port })
     },

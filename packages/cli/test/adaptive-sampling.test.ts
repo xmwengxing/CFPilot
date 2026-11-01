@@ -26,41 +26,30 @@ describe('自适应采样（实验性）', () => {
   it('开启后学习到的成功率会影响网段分配', async () => {
     // 104.16.1.0/24 历史上一直失败 → 权重下降；104.24.0.0/24 一直成功 → 权重上升。
     const profile = normalizeNetworkProfile({ isp: 'ct', region: '福建', access: 'fixed', family: 'ipv4' })
-    const store: ProfileStoreDocument = {
-      version: 1,
-      profiles: { [profile.id]: profile },
-      observations: {
-        bad: {
-          profileId: profile.id,
-          prefix: '104.16.1.0/24',
-          stage: 'ws',
-          attempts: 100,
-          successes: 0,
-          failures: { timeout: 100 },
-          updatedAt: Date.now(),
-        },
-        good: {
-          profileId: profile.id,
-          prefix: '104.24.0.0/24',
-          stage: 'ws',
-          attempts: 100,
-          successes: 100,
-          failures: {},
-          updatedAt: Date.now(),
-        },
-      },
+    const observations: ProfileStoreDocument['observations'] = {}
+    // 池子要够大：集中度上限是「每个 /24 最多取 候选数 × 5%」，
+    // 网段太少时上限会把两边都卡成一样多，权重就看不出差别了。
+    const good: string[] = [], bad: string[] = []
+    for (let index = 0; index < 64; index++) {
+      const goodPrefix = `104.24.${index}.0/24`
+      const badPrefix = `104.16.${index}.0/24`
+      good.push(goodPrefix)
+      bad.push(badPrefix)
+      observations[`g${index}`] = { profileId: profile.id, prefix: goodPrefix, stage: 'ws', attempts: 100, successes: 100, failures: {}, updatedAt: Date.now() }
+      observations[`b${index}`] = { profileId: profile.id, prefix: badPrefix, stage: 'ws', attempts: 100, successes: 0, failures: { timeout: 100 }, updatedAt: Date.now() }
     }
+    const store: ProfileStoreDocument = { version: 1, profiles: { [profile.id]: profile }, observations }
     const picked = await resolveCandidates({
-      cidr: ['104.16.1.0/24', '104.24.0.0/24'],
-      sample: 400,
+      cidr: [...good, ...bad],
+      sample: 4000,
       seed: 7,
       family: 'v4',
       profile: store,
       adaptiveSampling: { profileId: profile.id, explorationRate: 0.1 },
     })
-    const good = picked.filter((ip) => ip.startsWith('104.24.')).length
-    const bad = picked.filter((ip) => ip.startsWith('104.16.')).length
-    expect(good).toBeGreaterThan(bad)
+    const goodCount = picked.filter((ip) => ip.startsWith('104.24.')).length
+    const badCount = picked.filter((ip) => ip.startsWith('104.16.')).length
+    expect(goodCount).toBeGreaterThan(badCount * 3)
   })
 
   it('零权重网段默认不进候选，显式开启探索才会出现', async () => {

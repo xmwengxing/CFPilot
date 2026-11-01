@@ -43,7 +43,10 @@ func (s *Server) historyStore() *history.Store {
 //
 // networkProfileID 记录本次使用的网络档案（实验性自适应采样开启时才有值）：
 // 不同档案的历史**不混合**，否则「某运营商的结论」会污染其他网络环境。
-func (s *Server) saveScanHistory(source, host, wsPath, probePath string, skipSpeed bool, entries []scan.Entry, networkProfileID string) string {
+//
+// stats / adaptive / exploreRate 记录本轮的分阶段统计与是否启用了自适应采样，
+// 供「自适应效果」A/B 对照使用。
+func (s *Server) saveScanHistory(source, host, wsPath, probePath string, skipSpeed bool, entries []scan.Entry, networkProfileID string, stats *history.ScanStats, adaptive bool, exploreRate float64) string {
 	if len(entries) == 0 {
 		return ""
 	}
@@ -58,6 +61,9 @@ func (s *Server) saveScanHistory(source, host, wsPath, probePath string, skipSpe
 		Source:           source,
 		Entries:          history.FromScanEntries(entries),
 		NetworkProfileID: networkProfileID,
+		Stats:            stats,
+		Adaptive:         adaptive,
+		ExploreRate:      exploreRate,
 	}
 	if err := st.Save(sess); err != nil {
 		s.logLevel("保存优选历史失败："+err.Error(), "warn")

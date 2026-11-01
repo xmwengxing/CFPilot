@@ -26,7 +26,10 @@ import { postResults, fetchScannerToken } from './callback'
 import { resolveCandidates } from './candidates'
 import {
   loadNetworkProfile,
+  mergeProfileStores,
+  desktopProfileStorePath,
   normalizeNetworkProfile,
+  normalizeRegion,
   saveNetworkProfile,
   updateNetworkProfile,
   type ProfileStoreDocument,
@@ -120,9 +123,21 @@ function normalizeAccess(raw: string | undefined): string {
 async function loadAdaptiveContext(args: ParsedArgs): Promise<AdaptiveContext> {
   const file = join(configDirPath(), 'network-profiles.json')
   const isp = normalizeIsp(flagString(args, 'isp'))
-  const region = (flagString(args, 'region') ?? '').trim().slice(0, 32)
+  const region = normalizeRegion(flagString(args, 'region') ?? '').slice(0, 32)
   const access = normalizeAccess(flagString(args, 'access'))
-  const store = await loadNetworkProfile(file, `${isp}-${region}-${access}`)
+  let store = await loadNetworkProfile(file, `${isp}-${region}-${access}`)
+  // 桌面版的档案库也读进来：两端档案 ID 算法一致，样本应当互通。
+  const desktopFile = desktopProfileStorePath()
+  if (desktopFile) {
+    try {
+      const desktopStore = await loadNetworkProfile(desktopFile, '')
+      if (Object.keys(desktopStore.observations).length > 0) {
+        store = mergeProfileStores(store, desktopStore)
+      }
+    } catch {
+      /* 桌面版档案读不到就只用 CLI 自己的 */
+    }
+  }
   const profile = normalizeNetworkProfile({ isp, region, access, family: 'ipv4', source: 'manual' })
   store.profiles[profile.id] = { ...profile, updatedAt: Date.now() }
   return { file, store, profileId: profile.id }
@@ -178,11 +193,11 @@ async function saveAdaptiveObservations(args: ParsedArgs, observations: ScanObse
     observations.map((observation) => ({
       ip: observation.ip,
       ok: observation.ok,
+      stage: observation.stage ?? 'ws',
       latencyMs: observation.latencyMs,
       speedMBps: observation.speedMBps,
       at: now,
       profileId: context.profileId,
-      stage: 'ws',
     })),
     now,
   )

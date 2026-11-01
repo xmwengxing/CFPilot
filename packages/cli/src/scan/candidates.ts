@@ -12,12 +12,10 @@ import {
   expandCidrs,
   fetchCloudflareCidrs,
   readIpFile,
-  cidrWeight,
-  parseCidr,
-  IPV4_CIDR_WEIGHTS,
 } from './ip-ranges'
 import { isPublicAddress } from './net-env'
-import { sampleExploreExploit, type AdaptiveSamplingOptions, type ProfileStoreDocument, type SamplingCandidate } from './network-profile'
+import { adaptivePool } from './candidates_adaptive'
+import type { AdaptiveSamplingOptions, ProfileStoreDocument } from './network-profile'
 
 /** 地址族：仅 IPv4 / 仅 IPv6 / 两者都要 */
 export type IpFamily = 'v4' | 'v6' | 'both'
@@ -137,13 +135,12 @@ export async function resolveCandidates(opts: CandidateOptions = {}): Promise<st
   if (!opts.profile) return expandCidrs(cidrs, { sample, seed, neutral })
   const random = seededRandom(seed)
   const adaptive: AdaptiveSamplingOptions = { limit: sample > 0 ? sample : DEFAULT_CANDIDATE_SAMPLE, random, ...opts.adaptiveSampling }
-  const candidates = adaptivePool(cidrs, adaptive.limit, adaptive.includeZeroWeight === true, neutral, random, opts.profile, {
+  return adaptivePool(cidrs, adaptive.limit, adaptive.includeZeroWeight === true, neutral, random, opts.profile, {
     explorationRate: adaptive.explorationRate,
     now: adaptive.now,
     halfLifeMs: adaptive.halfLifeMs,
     profileId: adaptive.profileId,
-  })
-  return sampleExploreExploit(candidates, opts.profile, adaptive).map((item) => item.ip)
+  }).map((item) => item.ip)
 }
 
 function seededRandom(seed: number): () => number {
@@ -157,180 +154,6 @@ function seededRandom(seed: number): () => number {
 }
 
 /**
- * 网段分配的先验参数。
- *
- * 对应「全局先验成功率 70%，折算成 8 个虚拟样本」：
- * 平滑公式 P = (S + 5.6) / (N + 8)。
- *
- * 样本少时权重靠近先验，样本多时真实数据占主导。
- */
-const LEARN_PRIOR_ALPHA = 5.6
-const LEARN_PRIOR_BETA = 2.4
-const LEARN_PRIOR_TOTAL = LEARN_PRIOR_ALPHA + LEARN_PRIOR_BETA
-
-interface SegmentObservation {
-  attempts: number
-  successes: number
-  decay: number
-}
-
-/** 汇总落在该网段内的历史观测（按 /24 桶、同一网络档案）。 */
-function segmentObservation(
-  segment: { family: 4 | 6; start: bigint; end: bigint },
-  store: ProfileStoreDocument | undefined,
-  profileId: string,
-  now: number,
-  halfLifeMs: number,
-): SegmentObservation | undefined {
-  if (!store || segment.family !== 4 || !profileId) return undefined
-  // 同一前缀可能有多个阶段的观测，取「尝试最多」的那一段作为代表
-  // （阶段优先 ws > tls > tcp，因为协议验证更能代表「这个 IP 能不能用」）。
-  const best = new Map<string, { stage: string; attempts: number }>()
-  for (const observation of Object.values(store.observations)) {
-    if (observation.profileId !== profileId) continue
-    const parsed = parseCidr(observation.prefix)
-    if (!parsed || parsed.family !== 4) continue
-    if (parsed.base < segment.start || parsed.base + parsed.size > segment.end) continue
-    const current = best.get(observation.prefix)
-    const rank = (stage: string): number => (stage === 'ws' ? 3 : stage === 'tls' ? 2 : 1)
-    if (!current || observation.attempts > current.attempts || (observation.attempts === current.attempts && rank(observation.stage) > rank(current.stage))) {
-      best.set(observation.prefix, { stage: observation.stage, attempts: observation.attempts })
-    }
-  }
-  if (best.size === 0) return undefined
-  let attempts = 0
-  let successes = 0
-  let updated = 0
-  for (const observation of Object.values(store.observations)) {
-    if (observation.profileId !== profileId) continue
-    const picked = best.get(observation.prefix)
-    if (!picked || picked.stage !== observation.stage) continue
-    const parsed = parseCidr(observation.prefix)
-    if (!parsed || parsed.family !== 4) continue
-    if (parsed.base < segment.start || parsed.base + parsed.size > segment.end) continue
-    attempts += observation.attempts
-    successes += observation.successes
-    if (observation.updatedAt > updated) updated = observation.updatedAt
-  }
-  if (attempts <= 0) return undefined
-  const age = Math.max(0, now - updated)
-  const decay = 2 ** (-age / Math.max(1, halfLifeMs))
-  return { attempts, successes, decay }
-}
-
-/**
- * 网段的有效权重：静态权重与学习到的成功率做 Beta 平滑。
- *
- * 与桌面版（internal/scan/adaptive_sampling.go 的 DynamicPrefixWeight）一致：
- *   W = (static × prior + successes × decay) / (prior + attempts × decay)
- *
- * 零静态权重的网段**保持 0**：它只参与探索，不参与利用，
- * 否则「某个网段在这个网络里一直失败」的结论会被历史慢慢磨平。
- */
-function effectiveSegmentWeight(staticWeight: number, observation?: SegmentObservation): number {
-  if (staticWeight <= 0) return 0
-  if (!observation) return staticWeight
-  const numerator = staticWeight * LEARN_PRIOR_TOTAL + observation.successes * observation.decay
-  const denominator = LEARN_PRIOR_TOTAL + observation.attempts * observation.decay
-  if (denominator <= 0) return staticWeight
-  return Math.max(0.02, Math.min(1, numerator / denominator))
-}
-
-/**
- * 自适应池：按「网段大小 × 学习到的权重」分配预算，并保留固定比例的探索。
- *
- * 与桌面版（internal/scan/adaptive_sampling.go）语义一致：
- *   - 零静态权重的网段**只**在探索预算里出现；
- *   - 学习到的成功率影响**网段分配**（不只是结果重排）；
- *   - 固定探索比例保证历史结论不会永久锁死采样池。
- */
-function adaptivePool(
-  cidrs: string[],
-  limit: number,
-  includeZero: boolean,
-  neutral: boolean,
-  random: () => number,
-  store?: ProfileStoreDocument,
-  options?: { explorationRate?: number; now?: number; halfLifeMs?: number; profileId?: string },
-): SamplingCandidate[] {
-  type Interval = { family: 4 | 6; start: bigint; end: bigint }
-  const ranges = cidrs.map(parseCidr).filter((item): item is NonNullable<ReturnType<typeof parseCidr>> => item !== null)
-    .map((item): Interval => ({ family: item.family, start: item.base, end: item.base + item.size }))
-    .sort((a, b) => a.family - b.family || (a.start < b.start ? -1 : a.start > b.start ? 1 : 0))
-  const merged: Interval[] = []
-  for (const range of ranges) {
-    const previous = merged.at(-1)
-    if (previous && previous.family === range.family && range.start <= previous.end) previous.end = previous.end > range.end ? previous.end : range.end
-    else merged.push({ ...range })
-  }
-  const format = (value: bigint, family: 4 | 6): string => family === 4
-    ? [24n, 16n, 8n, 0n].map((shift) => ((value >> shift) & 255n).toString()).join('.')
-    : Array.from({ length: 8 }, (_, index) => ((value >> BigInt(112 - index * 16)) & 65535n).toString(16)).join(':')
-  const boundaries = Object.keys(IPV4_CIDR_WEIGHTS).map(parseCidr).filter((item): item is NonNullable<ReturnType<typeof parseCidr>> => item !== null).flatMap((item) => [item.base, item.base + item.size])
-  const now = options?.now ?? Date.now()
-  const halfLife = options?.halfLifeMs ?? 7 * 24 * 60 * 60 * 1000
-  const segments: Array<Interval & { staticWeight: number; weight: number; used: Set<bigint> }> = []
-  for (const range of merged) {
-    const cuts = [...new Set([range.start, ...(range.family === 4 ? boundaries.filter((point) => point > range.start && point < range.end) : []), range.end])].sort((a, b) => a < b ? -1 : a > b ? 1 : 0)
-    for (let index = 0; index < cuts.length - 1; index++) {
-      const start = cuts[index]!, end = cuts[index + 1]!
-      const staticWeight = range.family === 4 ? cidrWeight(`${format(start, 4)}/32`) : 1
-      if (staticWeight === 0 && !includeZero) continue
-      const observation = segmentObservation({ family: range.family, start, end }, store, options?.profileId ?? '', now, halfLife)
-      const weight = neutral && staticWeight > 0 ? 1 : effectiveSegmentWeight(staticWeight, observation)
-      segments.push({ family: range.family, start, end, staticWeight, weight, used: new Set() })
-    }
-  }
-  if (segments.length === 0) return []
-
-  const target = Math.max(0, Math.min(DEFAULT_CANDIDATE_SAMPLE * 4, Math.ceil(limit) * 4))
-  const explorationRate = Math.min(1, Math.max(0, options?.explorationRate ?? 0.2))
-  const exploreBudget = Math.min(target, Math.round(target * explorationRate))
-  const exploitBudget = target - exploreBudget
-
-  const out: SamplingCandidate[] = []
-  const drawFrom = (segment: (typeof segments)[number], count: number): void => {
-    const size = segment.end - segment.start
-    if (size <= 0n) return
-    let taken = 0
-    // 桶内地址有限（一个 /24 只有 256 个），抽满后必须停下：
-    // 否则「offset 已在 used 里」的回绕会永远转下去。
-    for (let attempt = 0; attempt < count * 8 && taken < count; attempt++) {
-      if (BigInt(segment.used.size) >= size) break
-      let value = 0n
-      for (let word = 0; word < (segment.family === 4 ? 1 : 4); word++) value = (value << 32n) | BigInt(Math.floor(random() * 4294967296))
-      let offset = value % size
-      // 回绕查找空闲地址，最多转一圈。
-      for (let probe = 0n; probe < size && segment.used.has(offset); probe++) {
-        offset = (offset + 1n) % size
-      }
-      if (segment.used.has(offset)) break
-      segment.used.add(offset)
-      out.push({ ip: format(segment.start + offset, segment.family), staticWeight: segment.staticWeight })
-      taken++
-    }
-  }
-
-  // 探索预算：按地址空间均匀覆盖（零权重网段只在这里出现）。
-  const totalSize = segments.reduce((sum, segment) => sum + (segment.end - segment.start), 0n)
-  if (exploreBudget > 0 && totalSize > 0n) {
-    for (const segment of segments) {
-      const share = Number(((segment.end - segment.start) * BigInt(exploreBudget)) / totalSize)
-      if (share > 0) drawFrom(segment, share)
-    }
-  }
-
-  // 利用预算：按「网段大小 × 学习到的权重」分配。
-  const totalWeight = segments.reduce((sum, segment) => sum + Number(segment.end - segment.start) * segment.weight, 0)
-  if (exploitBudget > 0 && totalWeight > 0) {
-    for (const segment of segments) {
-      if (segment.weight <= 0) continue
-      const share = Math.floor((Number(segment.end - segment.start) * segment.weight * exploitBudget) / totalWeight)
-      if (share > 0) drawFrom(segment, share)
-    }
-  }
-  return out
-}
 
 /** 动态随机种子：让每次运行的采样子集都不同 */
 export function randomSeed(): number {

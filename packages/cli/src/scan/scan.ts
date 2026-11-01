@@ -218,9 +218,11 @@ export interface ScanEntry {
 export interface ScanObservation {
   /** 候选 IP */
   ip: string
-  /** 协议验证是否通过（WS101 + 内容校验） */
+  /** 该阶段是否通过 */
   ok: boolean
-  /** TCP 建连耗时（毫秒） */
+  /** 观测来自哪个阶段：tcp / tls / ws / speed */
+  stage?: 'tcp' | 'tls' | 'ws' | 'speed'
+  /** 建连 / 握手耗时（毫秒） */
   latencyMs: number
   /** 稳态下行速度（MB/s）；未测速或测速失败时为空 */
   speedMBps?: number
@@ -927,13 +929,28 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
 
   // ---- 观测（实验性：供网络档案学习）----
   //
-  // 记录**每个进入阶段二的候选**的结论：协议验证是否通过、TCP 建连耗时。
-  // 未进入阶段二的候选不记录 —— 没探测过就没有证据。
-  const observations: ScanObservation[] = probeResults.map((r) => ({
-    ip: r.ip,
-    ok: r.probe.ok && r.probe.pongVerified !== false,
-    latencyMs: r.latency,
-  }))
+  // 三个阶段都记录：阶段一（TCP）、阶段一之二（TLS）、阶段二（WS）。
+  //
+  // 为什么不能只记 WS：最该被学到的结论是「这个网段根本连不上」，
+  // 只记 WS 的话，TCP 层失败的网段永远学不到，权重也就永远错。
+  const observations: ScanObservation[] = []
+  // 阶段一：TCP 建连
+  for (const item of tcpResults) {
+    observations.push({ ip: item.ip, ok: item.ok, stage: 'tcp', latencyMs: item.latency })
+  }
+  // 阶段一之二：TLS 握手
+  for (const item of tlsResults) {
+    observations.push({ ip: item.ip, ok: item.tls.tlsMs > 0, stage: 'tls', latencyMs: item.tls.tlsMs })
+  }
+  // 阶段二：WS 101 + 内容校验
+  for (const item of probeResults) {
+    observations.push({
+      ip: item.ip,
+      ok: item.probe.ok && item.probe.pongVerified !== false,
+      stage: 'ws',
+      latencyMs: item.latency,
+    })
+  }
   // 测速成功的候选补上速度（档案里的速度是「这个 IP 在本机有多快」）。
   const speedByIp = new Map<string, number>()
   for (const item of speedResults) {

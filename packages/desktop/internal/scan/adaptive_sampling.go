@@ -32,8 +32,10 @@ func (o AdaptiveSamplingOptions) withDefaults() AdaptiveSamplingOptions {
 	o.ExplorationRatio = math.Min(1, finitePositive(o.ExplorationRatio, 0.2))
 	o.MinWeight = math.Min(1, finitePositive(o.MinWeight, 0.02))
 	o.MaxPrefixShare = math.Min(1, finitePositive(o.MaxPrefixShare, 0.05))
-	o.PriorAlpha = finitePositive(o.PriorAlpha, 1)
-	o.PriorBeta = finitePositive(o.PriorBeta, 1)
+	// 先验参数对照 CLI 的 LEARN_PRIOR_ALPHA / LEARN_PRIOR_BETA：
+	// 「全局先验成功率 70%，折算成 8 个虚拟样本」，平滑公式 P = (S + 5.6) / (N + 8)。
+	o.PriorAlpha = finitePositive(o.PriorAlpha, 5.6)
+	o.PriorBeta = finitePositive(o.PriorBeta, 2.4)
 	if o.HalfLife <= 0 {
 		o.HalfLife = 7 * 24 * time.Hour
 	}
@@ -41,6 +43,44 @@ func (o AdaptiveSamplingOptions) withDefaults() AdaptiveSamplingOptions {
 		o.Now = time.Now()
 	}
 	return o
+}
+
+// LearnedPrefixWeight 返回某个前缀在当前档案下的学习后权重。
+//
+// 与 CLI 的 learnedPrefixWeight（packages/cli/src/scan/candidates_adaptive.ts）一一对应：
+// 阶段优先 ws > tls > tcp（同阶段取较新）→ 只取该前缀自己的观测 →
+// Beta 平滑 → 钳位到 [MinWeight, 1]。
+//
+// 两端必须一致：同一份档案在两端算出不同权重，历史就失去意义。
+func LearnedPrefixWeight(prefix string, observations []PrefixObservation, profileID string, options AdaptiveSamplingOptions) float64 {
+	o := options.withDefaults()
+	static := CIDRWeight(prefix)
+	var best *PrefixObservation
+	rank := func(stage string) int {
+		switch stage {
+		case "ws":
+			return 3
+		case "tls":
+			return 2
+		case "tcp":
+			return 1
+		}
+		return 0
+	}
+	for i := range observations {
+		v := observations[i]
+		if v.ProfileID != profileID || v.Prefix != prefix || v.Stage == "speed" {
+			continue
+		}
+		if !validObservation(v) || v.UpdatedAt.After(o.Now) || v.Attempts <= 0 {
+			continue
+		}
+		if best == nil || rank(v.Stage) > rank(best.Stage) || (rank(v.Stage) == rank(best.Stage) && v.UpdatedAt.After(best.UpdatedAt)) {
+			copied := v
+			best = &copied
+		}
+	}
+	return DynamicPrefixWeight(static, best, o)
 }
 
 // DynamicPrefixWeight 用 Beta 先验平滑已完成阶段的成功率。
@@ -103,6 +143,33 @@ type adaptiveBucket struct {
 	weight float64
 	used   int
 	order  []uint32
+}
+
+// ExploreBudget 返回一轮采样中留给「均匀探索」的配额。
+//
+// 对照 CLI 的 exploreBudget —— 两端必须一致，
+// 否则同一个探索比例在两端会变成不同的配额。
+func ExploreBudget(count int, explorationRatio float64) int {
+	if count <= 0 {
+		return 0
+	}
+	ratio := math.Min(1, math.Max(0, explorationRatio))
+	return int(math.Ceil(float64(count) * ratio))
+}
+
+// PrefixCap 返回同一个 /24 家族最多可取的候选数。
+//
+// 对照 CLI 的 prefixCap。
+func PrefixCap(count int, share float64) int {
+	if count <= 0 {
+		return 1
+	}
+	ratio := math.Min(1, math.Max(0, share))
+	cap := int(math.Ceil(float64(count) * ratio))
+	if cap < 1 {
+		return 1
+	}
+	return cap
 }
 
 // SampleAdaptiveCandidates 将预算拆为探索与利用，并在 /24 粒度限制集中度。
@@ -229,11 +296,8 @@ func SampleAdaptiveCandidates(opt SampleOptions) []string {
 	if count > total {
 		count = total
 	}
-	capPerPrefix := int(math.Ceil(float64(count) * options.MaxPrefixShare))
-	if capPerPrefix < 1 {
-		capPerPrefix = 1
-	}
-	explore := int(math.Ceil(float64(count) * options.ExplorationRatio))
+	capPerPrefix := PrefixCap(count, options.MaxPrefixShare)
+	explore := ExploreBudget(count, options.ExplorationRatio)
 	out := make([]string, 0, count)
 	weights := make([]float64, len(buckets))
 	for len(out) < count {

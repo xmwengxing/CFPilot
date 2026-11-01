@@ -252,6 +252,8 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 	stats := map[string]int{
 		"candidates": len(opt.Candidates),
 	}
+	// 整轮耗时的计时起点（A/B 对照要比较两轮是否可比）。
+	startedAt := time.Now()
 
 	// ================= 阶段一：TCP 握手初筛 =================
 	report(Progress{Stage: "tcp", Total: len(opt.Candidates), Message: "阶段一：TCP 握手初筛"})
@@ -551,6 +553,9 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 
 	stats["speedOk"] = len(speedResults)
 	stats["final"] = len(entries)
+	// 候选总数与整轮耗时：A/B 对照要靠它们判断两轮是否可比。
+	stats["candidates"] = len(opt.Candidates)
+	stats["elapsedMs"] = int(time.Since(startedAt).Milliseconds())
 
 	report(Progress{Stage: "speed", Done: len(stage3), Total: len(stage3),
 		Message: fmt.Sprintf("完成：%d 个可用节点", len(entries))})

@@ -674,6 +674,35 @@
     /* 可升级提示：加粗 + 警示色（与「已是最新」区分开） */
     .rt-upg { font-weight: 700; color: var(--warn); }
 
+    /* 实验性功能：当前状态卡 + 档案列表 */
+    .exp-status {
+      margin-bottom: 12px; padding: 10px 12px;
+      border: 1px solid var(--border); border-radius: 8px;
+      background: rgba(255, 255, 255, 0.02);
+      font-size: 12.5px; line-height: 1.7;
+    }
+    .exp-status .t-title { font-weight: 600; color: var(--text-main); }
+    .exp-status .t-warn { color: var(--warn); }
+    .exp-status .t-ok { color: var(--ok); }
+    .exp-profiles { margin-top: 14px; }
+    .exp-profiles-title { font-size: 12.5px; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; }
+    .exp-profile {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 0; border-bottom: 1px dashed var(--border);
+      font-size: 12.5px;
+    }
+    .exp-profile .p-name { flex: 1 1 auto; min-width: 0; }
+    .exp-profile .p-meta { color: var(--text-muted); font-size: 12px; }
+    .exp-profile .p-cur { color: var(--ok); font-size: 11.5px; }
+
+    /* A/B 对照表 */
+    .effect-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    .effect-table th, .effect-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: right; }
+    .effect-table th:first-child, .effect-table td:first-child { text-align: left; }
+    .effect-table th { color: var(--text-secondary); font-weight: 600; }
+    .effect-table .good { color: var(--ok); font-weight: 600; }
+    .effect-table .bad { color: var(--err); font-weight: 600; }
+
     /* 弹窗：敏感信息点开才显示，关闭即消失 */
     .modal-mask {
       position: fixed; inset: 0; z-index: 1000;
@@ -1541,6 +1570,13 @@
             <details class="fold" style="margin-top:12px" id="expFold">
               <summary>实验性功能（默认关闭）</summary>
               <div class="fold-body">
+                <!--
+                  当前状态：让用户看得见「现在用的是哪个档案、学到了多少」。
+                  没有这块，开了开关也像什么都没发生。
+                -->
+                <div class="exp-status" id="expStatus">
+                  <span class="muted">正在读取网络档案状态…</span>
+                </div>
                 <label class="switch-box">
                   <span class="sw-info">
                     <span class="sw-title">自适应网段权重（按网络档案学习）</span>
@@ -1581,6 +1617,12 @@
                 <div class="btn-row" style="margin-top:10px">
                   <button class="btn btn-ghost" id="btnExpSave">保存实验性设置</button>
                   <span class="tip" id="expHint"></span>
+                </div>
+
+                <!-- 档案管理：地区写法不同会分裂出多个档案，这里可以清理/修正 -->
+                <div class="exp-profiles" id="expProfiles" hidden>
+                  <div class="exp-profiles-title">本机网络档案</div>
+                  <div id="expProfileList"></div>
                 </div>
               </div>
             </details>
@@ -1649,6 +1691,8 @@
               <button class="btn btn-ghost" id="btnCopyResult">复制结果</button>
               <button class="btn btn-primary" id="btnPushToPanel" disabled>回填面板</button>
             </div>
+            <!-- 本轮是否用了自适应采样（实验性），由后端在 scan-result 里带回 -->
+            <p class="tip" id="scanAdaptiveNote" hidden style="margin:8px 0 0"></p>
 
             <!--
               两个按钮的分工说明
@@ -1677,6 +1721,28 @@
               <thead><tr><th>#</th><th>地址</th><th>机房</th><th>TLS握手(ms)</th><th>TCP(ms)</th><th>下行(MB/s)</th><th>质量报告</th></tr></thead>
               <tbody></tbody>
             </table>
+          </div>
+
+          <!--
+            自适应效果对照（A/B）
+
+            跨省、跨运营商的样本拿不到，但**同一网络环境下的开/关对照**随时能做：
+            同样的档案、同样的域名，一轮开一轮关，比较阶段通过率与可用节点数。
+            这是把实验能力转成正式功能前唯一可靠的验收依据。
+          -->
+          <div class="card">
+            <h2><span class="dot"></span>🧪 自适应效果对照</h2>
+            <p class="desc">
+              同一档案、同一域名下「开启 / 关闭」自适应采样的分阶段通过率对照。
+              <b>至少各跑一轮</b>才有参考价值。
+            </p>
+            <div id="adaptiveEffect">
+              <p class="history-empty">加载中…</p>
+            </div>
+            <div class="btn-row" style="margin-top: 10px; align-items: center">
+              <button class="btn btn-ghost" id="btnEffectRefresh">刷新对照</button>
+              <span class="tip" id="effectHint"></span>
+            </div>
           </div>
 
           <!--

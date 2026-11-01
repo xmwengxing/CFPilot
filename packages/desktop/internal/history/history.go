@@ -75,6 +75,26 @@ type LastTest struct {
 	WithSpeed bool    `json:"withSpeed,omitempty"`
 }
 
+// ScanStats 是一次优选的分阶段统计。
+//
+// ## 为什么必须留档
+//
+// 「自适应采样到底有没有用」只能在**同一网络环境**下做 A/B 对照才答得准：
+// 同样的档案、同样的域名，一轮开、一轮关，比较阶段通过率与最终可用节点数。
+// 没有这些数字，用户只能凭感觉判断，等于没有反馈。
+type ScanStats struct {
+	// Candidates 是进入阶段一的候选数。
+	Candidates int `json:"candidates"`
+	// TCPOK / TLSOK / WSOK 是各阶段通过数。
+	TCPOK int `json:"tcpOk"`
+	TLSOK int `json:"tlsOk"`
+	WSOK  int `json:"wsOk"`
+	// SpeedOK 是最终产出的可用节点数。
+	SpeedOK int `json:"speedOk"`
+	// ElapsedMs 是整轮耗时（毫秒）。
+	ElapsedMs int64 `json:"elapsedMs,omitempty"`
+}
+
 // Session 是一次优选会话。
 type Session struct {
 	ID               string  `json:"id"`
@@ -86,6 +106,12 @@ type Session struct {
 	Source           string  `json:"source"` // "local" | "quick"
 	Entries          []Entry `json:"entries"`
 	NetworkProfileID string  `json:"networkProfileId,omitempty"`
+	// Stats 是本轮的分阶段统计（A/B 对照用）。
+	Stats *ScanStats `json:"stats,omitempty"`
+	// Adaptive 为 true 表示本轮启用了自适应采样。
+	Adaptive bool `json:"adaptive,omitempty"`
+	// ExploreRate 是本轮的探索比例（0~1）。
+	ExploreRate float64 `json:"exploreRate,omitempty"`
 }
 
 // FromScanEntries 把 scan.Entry 列表转成持久化用的 Entry 列表。

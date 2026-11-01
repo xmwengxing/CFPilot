@@ -707,6 +707,26 @@
       return post('/api/experimental', params || {})
     },
 
+    /** 列出网络档案（含样本量与当前档案）。 */
+    listExperimentalProfiles: function () {
+      return get('/api/experimental/profiles')
+    },
+
+    /** 重命名网络档案（改维度 → 档案 ID 变化，观测一并迁移）。 */
+    renameExperimentalProfile: function (params) {
+      return call('PUT', '/api/experimental/profiles', params || {})
+    },
+
+    /** 删除网络档案及其观测。 */
+    deleteExperimentalProfile: function (id) {
+      return call('DELETE', '/api/experimental/profiles?id=' + encodeURIComponent(id || ''))
+    },
+
+    /** 自适应效果 A/B 对照（同一档案、同一域名下的开/关对照）。 */
+    getAdaptiveEffect: function (profileId) {
+      return get('/api/scan/adaptive-effect?profileId=' + encodeURIComponent(profileId || ''))
+    },
+
     /** 删除一条优选历史会话 */
     deleteScanHistory: function (id) {
       return call('DELETE', '/api/scan/history?id=' + encodeURIComponent(id || ''))

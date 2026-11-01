@@ -29,12 +29,63 @@ type NetworkProfile struct {
 	Family     string  `json:"family"`
 	Source     string  `json:"source"`
 	Confidence float64 `json:"confidence"`
+	// LastUsedAt 是这个档案最近一次被优选使用的时间。
+	//
+	// 用途：换网络环境后如果忘了改档案，历史结论会误导采样；
+	// 界面据此提示「该档案已很久没用，可能已换网络」。
+	LastUsedAt time.Time `json:"lastUsedAt,omitempty"`
+}
+
+// NormalizeRegion 归一化地区名。
+//
+// ## 为什么必须归一化
+//
+// 档案 ID 由「运营商 + 地区 + 接入方式 + 地址族」哈希得到。
+// 如果地区是自由文本，`福建` / ` 福建` / `福建省` / `闽` 会算出**四个不同档案**，
+// 历史样本被切碎，学习效果几乎为零。
+//
+// ## 规则（必须与 CLI 的实现逐字节一致）
+//
+// 1. 去掉首尾空白（含全角空格）与内部空白；
+// 2. 去掉结尾的行政区后缀（特别行政区 / 自治区 / 省 / 市）；
+// 3. 单字简称映射成标准名（闽 → 福建）。
+//
+// ⚠️ 任何改动都要同步 packages/cli/src/scan/network-profile.ts 的 normalizeRegion，
+// 否则两端的档案 ID 会分叉。
+func NormalizeRegion(raw string) string {
+	text := strings.TrimSpace(raw)
+	// 全角空格也要去掉
+	text = strings.ReplaceAll(text, "\u3000", "")
+	text = strings.ReplaceAll(text, " ", "")
+	text = strings.ReplaceAll(text, "\t", "")
+	if text == "" {
+		return ""
+	}
+	for _, suffix := range []string{"特别行政区", "自治区", "省", "市"} {
+		if len(text) > len(suffix) && strings.HasSuffix(text, suffix) {
+			text = strings.TrimSuffix(text, suffix)
+			break
+		}
+	}
+	if alias, ok := regionAliases[text]; ok {
+		text = alias
+	}
+	return text
+}
+
+// regionAliases 是单字简称 → 标准地区名。
+var regionAliases = map[string]string{
+	"闽": "福建", "粤": "广东", "京": "北京", "沪": "上海", "津": "天津", "渝": "重庆",
+	"浙": "浙江", "苏": "江苏", "鲁": "山东", "豫": "河南", "冀": "河北", "湘": "湖南",
+	"鄂": "湖北", "皖": "安徽", "赣": "江西", "桂": "广西", "云": "云南", "贵": "贵州",
+	"川": "四川", "晋": "山西", "陕": "陕西", "甘": "甘肃", "青": "青海", "宁": "宁夏",
+	"新": "新疆", "藏": "西藏", "蒙": "内蒙古", "港": "香港", "澳": "澳门", "台": "台湾",
 }
 
 // NewNetworkProfile 对稳定的网络维度生成 ID，避免识别来源变化导致档案分裂。
 func NewNetworkProfile(p NetworkProfile) NetworkProfile {
 	p.ISP = strings.TrimSpace(p.ISP)
-	p.Region = strings.TrimSpace(p.Region)
+	p.Region = NormalizeRegion(p.Region)
 	p.Access = strings.ToLower(strings.TrimSpace(p.Access))
 	p.Family = strings.ToLower(strings.TrimSpace(p.Family))
 	if p.Family == "" {
@@ -123,6 +174,51 @@ func observationKey(profileID, prefix string) string { return profileID + "|" + 
 func stageObservationKey(profileID, prefix, stage string) string {
 	return observationKey(profileID, prefix) + "|" + stage
 }
+
+// StageObservationKey 返回「档案 + 前缀 + 阶段」的统计键。
+func StageObservationKey(profileID, prefix, stage string) string {
+	return stageObservationKey(profileID, prefix, stage)
+}
+
+// ObservationByKey 按统计键取一条观测。
+func (s *ProfileStore) ObservationByKey(key string) (PrefixObservation, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o, ok := s.Observations[key]
+	return o, ok
+}
+
+// MergeObservation 写入一条观测（已存在时按 UpdatedAt 取较新的一条）。
+func (s *ProfileStore) MergeObservation(o PrefixObservation) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Observations == nil {
+		s.Observations = make(map[string]PrefixObservation)
+	}
+	key := stageObservationKey(o.ProfileID, o.Prefix, o.Stage)
+	if old, ok := s.Observations[key]; ok && !o.UpdatedAt.After(old.UpdatedAt) {
+		return
+	}
+	s.Observations[key] = o
+}
+
+// TouchProfile 记录档案最近一次被使用的时间。
+func (s *ProfileStore) TouchProfile(profileID string, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.Profiles[profileID]
+	if !ok {
+		return
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	if at.After(p.LastUsedAt) {
+		p.LastUsedAt = at
+		s.Profiles[profileID] = p
+	}
+}
+
 func (s *ProfileStore) PutProfile(p NetworkProfile) NetworkProfile {
 	p = NewNetworkProfile(p)
 	s.mu.Lock()
@@ -220,6 +316,61 @@ func (s *ProfileStore) ForProfile(profileID string) []PrefixObservation {
 		return stageObservationKey(out[i].ProfileID, out[i].Prefix, out[i].Stage) < stageObservationKey(out[j].ProfileID, out[j].Prefix, out[j].Stage)
 	})
 	return out
+}
+
+// AllObservations 返回全部档案的观测（档案管理界面要用）。
+func (s *ProfileStore) AllObservations() []PrefixObservation {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]PrefixObservation, 0, len(s.Observations))
+	for _, o := range s.Observations {
+		failures := make(map[string]float64, len(o.Failures))
+		for k, v := range o.Failures {
+			failures[k] = v
+		}
+		o.Failures = failures
+		out = append(out, o)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return stageObservationKey(out[i].ProfileID, out[i].Prefix, out[i].Stage) < stageObservationKey(out[j].ProfileID, out[j].Prefix, out[j].Stage)
+	})
+	return out
+}
+
+// RenameProfile 把档案改成新维度，并把它的观测迁移到新 ID。
+//
+// 维度变了 → ID 必然变；观测不迁移就会丢样本。
+func (s *ProfileStore) RenameProfile(oldID string, next NetworkProfile) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Profiles == nil {
+		s.Profiles = make(map[string]NetworkProfile)
+	}
+	if s.Observations == nil {
+		s.Observations = make(map[string]PrefixObservation)
+	}
+	delete(s.Profiles, oldID)
+	s.Profiles[next.ID] = next
+	for key, o := range s.Observations {
+		if o.ProfileID != oldID {
+			continue
+		}
+		delete(s.Observations, key)
+		o.ProfileID = next.ID
+		s.Observations[stageObservationKey(next.ID, o.Prefix, o.Stage)] = o
+	}
+}
+
+// DeleteProfile 删除档案及其全部观测。
+func (s *ProfileStore) DeleteProfile(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.Profiles, id)
+	for key, o := range s.Observations {
+		if o.ProfileID == id {
+			delete(s.Observations, key)
+		}
+	}
 }
 
 func (s *ProfileStore) validate() error {

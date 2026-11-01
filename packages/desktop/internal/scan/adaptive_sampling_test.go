@@ -14,11 +14,14 @@ func TestDynamicPrefixWeight(t *testing.T) {
 	good := PrefixObservation{SampleCount: 100, TCPAttempts: 100, TCPSuccess: 100, WSAttempts: 20, WSSuccess: 20, LastTestAt: now}
 	bad := good
 	bad.WSSuccess = 0
-	if DynamicPrefixWeight(0.2, &good, options) <= 0.8 {
-		t.Fatal("真实 WS 成功应提高利用权重")
+	// 先验是 8 个虚拟样本（对照 CLI 的 LEARN_PRIOR_ALPHA / BETA）：
+	// 真实 WS 成功应把权重抬到静态权重之上。
+	if w := DynamicPrefixWeight(0.2, &good, options); w <= 0.5 || w <= 0.2 {
+		t.Fatalf("真实 WS 成功应提高利用权重：%v", w)
 	}
-	if DynamicPrefixWeight(0.9, &bad, options) >= 0.2 {
-		t.Fatal("WS 失败不能被 TCP 成功掩盖")
+	// WS 失败不能被 TCP 成功掩盖：权重必须明显低于静态权重。
+	if w := DynamicPrefixWeight(0.9, &bad, options); w >= 0.45 {
+		t.Fatalf("WS 失败不能被 TCP 成功掩盖：%v", w)
 	}
 	stale := bad
 	stale.LastTestAt = now.Add(-70 * 24 * time.Hour)
@@ -131,7 +134,9 @@ func TestDynamicStageWeightHalfLife(t *testing.T) {
 	now := time.Now().UTC()
 	v := PrefixObservation{ProfileID: "a", Prefix: "104.16.1.0/24", Stage: "ws", Attempts: 10, Successes: 10, Failures: map[string]float64{}, UpdatedAt: now.Add(-time.Hour)}
 	got := DynamicPrefixWeight(0.2, &v, AdaptiveSamplingOptions{Now: now, HalfLife: time.Hour})
-	want := (0.2*2 + 5) / 7
+	// 半衰期 1 小时、观测发生在 1 小时前 → 衰减系数 0.5；
+	// 先验为 8 个虚拟样本（对照 CLI 的 LEARN_PRIOR_ALPHA / BETA）。
+	want := (0.2*8 + 10*0.5) / (8 + 10*0.5)
 	if math.Abs(got-want) > 1e-9 {
 		t.Fatalf("未使用真实半衰期：%v / %v", got, want)
 	}

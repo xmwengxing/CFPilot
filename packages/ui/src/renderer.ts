@@ -933,8 +933,18 @@
       // 而且那个按钮很容易误触，每点一次就在账号下多一个命名空间，
       // 白白消耗免费额度。所以按钮也一并移除了。
       const select = $sel('kvSelect')
+      const mode = readMode()
       let kvId = select.value
-      if (!kvId) {
+      if (mode === 'fresh') {
+        // 全新部署 = 再开一套实例：**忽略**「Cloudflare 凭据」页选中的 KV，
+        // 由后端新建一个独占的命名空间。
+        //
+        // 内核的 KV 键是全局平铺的（CONFIG / PANEL_PATH / ADMIN_PW_HASH …），
+        // 没有实例前缀。拿已有实例的 KV 跑全新部署，等于把新的 UUID / WS 路径 /
+        // 面板密码写进原实例的 CONFIG → 原实例的客户端节点全部失效，且无任何报错。
+        kvId = ''
+        log('全新部署：将新建独立的 KV 命名空间（不使用「凭据」页选中的 KV）')
+      } else if (!kvId) {
         log('还没有 KV 命名空间，正在自动创建…')
         if (!currentAccountId) {
           log('请先点「检测账号」再部署（自动建 KV 需要账号 ID）', 'warn')
@@ -979,7 +989,7 @@
       try {
         const result = await window.cfpilot.runDeploy(
           {
-            mode: readMode(),
+            mode,
             force: $('optForce').checked,
             forceKv: $('optForceKv').checked,
             newCredentials: $('optNewCred').checked,
@@ -997,15 +1007,35 @@
           },
           kvId
         )
-        const status = document.getElementById('deployStatus')!
-        status.textContent = result.ok ? '✅ 部署完成' : '❌ 部署失败：' + (result.error ?? '')
+        // 全新部署时后端会新建 KV：把下拉框切过去，否则界面还显示旧实例的 KV
+        if (result.kvNamespaceId) {
+          await loadKvOptions()
+          $sel('kvSelect').value = result.kvNamespaceId
+          log(`已新建 KV：${result.kvTitle ?? result.kvNamespaceId}`, 'ok')
+        }
 
-        // 成功时**不再重复打印**面板地址与密码。
-        //
-        // 部署向导本身在结束时就会打印一次「控制面 / 数据面 / UUID / WS 路径 /
-        // 面板密码」的汇总块，这里再打一遍等于同一份信息出现两次，
-        // 反而让人怀疑是不是部署了两次。只补一句结束标记即可。
-        if (result.ok) {
+        /**
+         * 异步部署：这个响应只表示「已受理」，不是结果。
+         *
+         * Go 版把部署放到后台 goroutine 跑，接口立即返回 `{started:true}`，
+         * 最终成败走 SSE 的 deploy-status 事件。原先这里无条件读 `result.ok`
+         * —— 受理响应里根本没有 ok 字段，于是每次点部署都先闪一句
+         * 「❌ 部署失败：」，几秒后才被 SSE 纠正，看起来像「先失败又莫名成功」。
+         */
+        const status = document.getElementById('deployStatus')!
+        if (result.started) {
+          status.textContent = '⏳ 部署进行中…（进度见下方日志）'
+          log('部署已开始，进度与最终结果会实时推送')
+        } else if (result.ok === false || result.error) {
+          status.textContent = '❌ 部署失败：' + (result.error ?? '')
+          log('── 部署失败 ──', 'err')
+        } else {
+          // 成功时**不再重复打印**面板地址与密码。
+          //
+          // 部署向导本身在结束时就会打印一次「控制面 / 数据面 / UUID / WS 路径 /
+          // 面板密码」的汇总块，这里再打一遍等于同一份信息出现两次，
+          // 反而让人怀疑是不是部署了两次。只补一句结束标记即可。
+          status.textContent = '✅ 部署完成'
           log('── 部署成功（详细信息见上方汇总）──', 'ok')
           // 部署成功后自动刷新状态：版本已同步，按钮应回到「已是最新」
           const select = $sel('kvSelect')
@@ -1543,7 +1573,10 @@
           //   2. 用户不必理解令牌机制，看到结果再决定要不要回填
           noCallback: true,
         })
-        if (!result.ok) {
+        // 同上：Go 版异步执行，`started` 阶段的响应里没有 ok 字段
+        if (result.started) {
+          $('scanOut').textContent = '正在优选…（进度见下方日志）'
+        } else if (result.ok === false || result.error) {
           $('scanOut').textContent = '优选失败：' + (result.error ?? '')
         }
       } catch (err) {
@@ -2503,8 +2536,36 @@
     }
 
     // 事件入口：部署完成后主进程 / SSE 推送状态时也走同一个渲染函数
-    window.cfpilot.onDeployStatus((status) => {
-      if (applyDeployStatus) applyDeployStatus(status as DeployStatusLike)
+    //
+    // ⚠️ 这个通道推两种东西，必须先区分：
+    //   1. 一次部署的**最终结果** `{ok, error?}` —— 只更新状态行；
+    //   2. 部署状态的**快照** `{hasDeploy, state, …}` —— 交给状态卡渲染。
+    //
+    // 混在一起处理的话，结果事件没有 state 字段，会被当成快照渲染成
+    // 「可更新」这类错误结论；反过来快照事件也没有 ok 字段。
+    window.cfpilot.onDeployStatus((event) => {
+      const s = event as CFPilotDeployStatus & DeployStatusLike
+      if (typeof s.ok === 'boolean') {
+        const line = document.getElementById('deployStatus')
+        if (line) {
+          line.textContent = s.ok ? '✅ 部署完成' : '❌ 部署失败：' + (s.error ?? '')
+        }
+        log(s.ok ? '── 部署成功（详细信息见上方汇总）──' : '── 部署失败 ──', s.ok ? 'ok' : 'err')
+        // 部署结束后状态卡片会过时（版本、项目名都变了），静默刷新一次
+        if (s.ok) {
+          const select = $sel('kvSelect')
+          void window.cfpilot
+            .checkDeployed(select.value || undefined)
+            .then((st) => {
+              if (applyDeployStatus) applyDeployStatus(st as DeployStatusLike)
+            })
+            .catch(() => {
+              /* 状态刷新失败不影响部署结果，用户可手动点「检查状态」 */
+            })
+        }
+        return
+      }
+      if (s.state && applyDeployStatus) applyDeployStatus(s)
     })
 
     window.cfpilot.onScanResult((payload) => {

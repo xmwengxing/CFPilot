@@ -199,16 +199,38 @@ export class WindowMeter {
     return this.peak
   }
 
-  /** 结算一个窗口：慢启动期内只丢弃，不记峰值/稳态 */
+  /**
+   * 结算一个窗口：慢启动期内只丢弃，不记峰值/稳态。
+   *
+   * 两处口径细节（都会让稳态**偏低**，方向单一，必须排除）：
+   *
+   * 1. **空窗不计时**：链路中途停顿（个别连接已结束、其余在等数据）时，
+   *    把停顿时间算进分母等于把「没有测到」当成「测到很慢」。
+   * 2. **跨界窗口只折算边界之后的部分**：预热结束前后各占一半的窗口若整窗计入，
+   *    预热期的慢速样本会以整窗权重拉低稳态（反之也可能抬高）。
+   */
   private settle(now: number): void {
     const dt = (now - this.windowStart) / 1000
     if (dt <= 0) return
     const bytes = this.windowBytes
+    const windowStart = this.windowStart
     this.windowBytes = 0
     this.windowStart = now
-    if (now - this.startedAt < this.warmupMs) return
-    this.steadyBytes += bytes
-    this.steadySeconds += dt
+
+    // 1. 空窗：不计字节也不计时间
+    if (bytes === 0) return
+
+    // 2. 跨预热边界：按边界之后的时长等比折算该窗口的字节
+    const warmupEnd = this.startedAt + this.warmupMs
+    const effectiveStart = Math.max(windowStart, warmupEnd)
+    const effectiveSeconds = (now - effectiveStart) / 1000
+    if (effectiveSeconds <= 0) return
+    const share = effectiveSeconds / dt
+    const effectiveBytes = bytes * share
+
+    this.steadyBytes += effectiveBytes
+    this.steadySeconds += effectiveSeconds
+    // 窗口内平均速率不受折算影响（分子分母同比缩小）
     const speed = bytes / dt / 1024 / 1024
     if (speed > this.peak) this.peak = speed
   }
@@ -713,7 +735,10 @@ export function measureThroughput(options: ThroughputOptions): Promise<Throughpu
     minBytes = 32 * 1024,
   } = options
 
-  const connCount = Math.max(1, Math.min(8, connections))
+  // 上限 16：与 Go 版 `maxMeasureConnections` 保持一致。
+  // 自建探针端点不限速（第三方公开测速地址在 32 条以上会回 429），
+  // 跨境链路上吞吐近似按连接数线性增长，8 → 16 实测翻倍。
+  const connCount = Math.max(1, Math.min(16, connections))
 
   return new Promise((resolve) => {
     const started = Date.now()

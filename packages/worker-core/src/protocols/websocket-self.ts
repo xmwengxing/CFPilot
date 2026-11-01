@@ -26,6 +26,7 @@ import { parseVlessBuffer, VLESS_COMMAND_UDP } from '../protocols/vless'
 import { parseTrojanBuffer, TROJAN_COMMAND_UDP } from '../protocols/trojan'
 import { DnsUdpSession } from './udp-dns'
 import { concatBytes } from '../protocols/stream'
+import { UplinkQueue } from './uplink-queue'
 import { dial, type DialResult } from '../outbound/dial'
 import { TrafficMeter } from '../budget'
 import { classifyDialFailure, explainDialFailure, type DialFailure } from '../outbound/route'
@@ -264,6 +265,13 @@ export async function handleWebSocket(
   let established = false
   let dialed: DialResult | null = null
   let writer: WritableStreamDefaultWriter<Uint8Array> | null = null
+  /**
+   * 上行写入串行链（见 `uplink-queue.ts`）。
+   *
+   * 常规路径的写入本身按调用顺序入队，但**换出站**时「重放 + 补写缓存」
+   * 与「切换期间新到的帧」会互相插队 —— 必须全部走同一条链。
+   */
+  const uplink = new UplinkQueue()
   /** 握手截止定时器（**唯一一个**：绝不在每帧里新建） */
   let handshakeTimer: ReturnType<typeof setTimeout> | null = null
   /** 下行 reader（清理时需要 cancel，否则读任务挂到运行时超时） */
@@ -540,18 +548,22 @@ export async function handleWebSocket(
     closeWith(1009, reason)
   }
 
-  /** 上行：客户端 → 出站 */
+  /** 上行：客户端 → 出站（经串行链，顺序 = 调用顺序） */
   const pumpUp = async (bytes: Uint8Array): Promise<void> => {
-    if (!writer) return
+    const target = writer
+    if (!target) return
     try {
-      await writer.write(bytes)
+      // 执行时若 writer 已被换掉（反代重拨），就跳过这一段：
+      // 重拨只在「下行未收到任何字节」时发生，此时 `retained` 包含上述全部字节，
+      // 新连接会整体重放它们 —— 再写一遍就是重复发送。
+      await uplink.write(() => (writer === target ? target : null), bytes)
     } catch {
       cleanup()
     }
   }
 
   /**
-   * 把「拨号 / 反代重拨期间」暂存的上行补写到**当前**出站。
+   * 把「拨号 / 反代重拨期间」暂存的上行补写到指定出站。
    *
    * ## 为什么必须有
    *
@@ -560,18 +572,22 @@ export async function handleWebSocket(
    * 这些字节会**永远留在 buffer 里**：出站再也收不到它们，
    * 客户端等不到响应，表现为「切换反代之后隧道静默挂起，直到超时变 -1」。
    *
-   * `establish()` 里只在首次建连后补写过一次，重拨路径不走那里，
-   * 因此需要这个独立入口。
+   * ## 为什么只能在串行链内部调用
+   *
+   * 本函数是「重放 + 补写」那个队列任务的一部分，直接写传入的 writer 而不走
+   * `pumpUp`：再入队会排到自己后面，`await` 就永远等不到（自死锁）。
    *
    * 补写前先 `retain` —— 新通路同样可能是假活（见 `retained` 注释），
    * 重放数据必须完整，不能只重放首次建连前的那些。
    */
-  const flushPendingUplink = async (): Promise<void> => {
-    if (!writer || buffer.byteLength === 0) return
+  const drainPendingUplink = async (
+    target: WritableStreamDefaultWriter<Uint8Array>
+  ): Promise<void> => {
+    if (buffer.byteLength === 0) return
     const pending = buffer
     buffer = new Uint8Array(0)
     retain(pending)
-    await pumpUp(pending)
+    await target.write(pending)
   }
 
   /** 解析协议头 */
@@ -878,11 +894,14 @@ export async function handleWebSocket(
           timeoutMs: DIAL_TIMEOUT_MS,
           // 反代路径不做 DoH 解析（入口已是解析好的 IP）
           resolvePreferred: false,
+          // 反代入口不是用户目标，不走目标地址策略（见 outbound/guard.ts）
+          skipTargetPolicy: true,
         })
         if (!socket) continue
 
         dialed = socket
-        writer = socket.writable.getWriter()
+        const nextWriter = socket.writable.getWriter()
+        writer = nextWriter
 
         // 反代是「按 SNI 转发」的第三方服务器。
         //
@@ -893,21 +912,26 @@ export async function handleWebSocket(
         // 重放首字节确认前的全部上行（TLS ClientHello / HTTP 首包等）。
         // ⚠️ 不在这里清空 —— 要等新通路的下行首字节确认后再释放（pumpDown）；
         // 多个反代入口依次尝试时，每个都能拿到完整的重放数据。
-        if (retained.length > 0) {
-          let total = 0
-          for (const c of retained) total += c.byteLength
-          const replay = new Uint8Array(total)
-          let off = 0
-          for (const c of retained) {
-            replay.set(c, off)
-            off += c.byteLength
-          }
-          await writer.write(replay)
+        let replayBytes = 0
+        for (const chunk of retained) replayBytes += chunk.byteLength
+        const replay = new Uint8Array(replayBytes)
+        let replayOffset = 0
+        for (const chunk of retained) {
+          replay.set(chunk, replayOffset)
+          replayOffset += chunk.byteLength
         }
 
-        // 重拨期间客户端继续发的帧暂存在 buffer 里 —— 这里补写，
-        // 否则它们会一直留在 buffer 中等待一个永远不会到来的 establish。
-        await flushPendingUplink()
+        // ⚠️ 重放与补写必须**在同一个队列任务里**完成。
+        //
+        // 拆成两个 await 时，重放写入期间到达的帧会看到 `writer` 已就绪而
+        // 直接排队，随后补写的旧缓存帧反而排在它后面 —— 上行顺序变成
+        // 「重放, 新帧, 旧缓存帧」，TLS 分片一换序就是 bad_record_mac。
+        await uplink.run(async () => {
+          if (replay.byteLength > 0) await nextWriter.write(replay)
+          // 重拨期间客户端继续发的帧暂存在 buffer 里 —— 这里补写，
+          // 否则它们会一直留在 buffer 中等待一个永远不会到来的 establish。
+          await drainPendingUplink(nextWriter)
+        })
 
         recordDiagnostics(
           `${targetInfo.hostname}:${targetInfo.port}`,

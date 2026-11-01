@@ -84,10 +84,20 @@ export async function httpConnect(
       if (remaining <= 0) {
         throw new Error(`HTTP 代理握手超时（${HANDSHAKE_TIMEOUT_MS}ms 无响应）`)
       }
-      const filled = await Promise.race([
-        stream.fill(),
-        new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), remaining)),
-      ])
+      let timer: ReturnType<typeof setTimeout> | null = null
+      let filled: number | null | 'timeout'
+      try {
+        filled = await Promise.race([
+          stream.fill(),
+          new Promise<'timeout'>((r) => {
+            timer = setTimeout(() => r('timeout'), remaining)
+          }),
+        ])
+      } finally {
+        // 成功路径同样要清：响应头可能跨多次 fill，每次都留一个定时器
+        // 会让 isolate 多存活数秒并持有闭包引用。
+        if (timer) clearTimeout(timer)
+      }
       if (filled === 'timeout') {
         throw new Error(`HTTP 代理握手超时（${HANDSHAKE_TIMEOUT_MS}ms 无响应）`)
       }

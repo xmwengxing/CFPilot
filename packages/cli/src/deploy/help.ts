@@ -30,7 +30,7 @@ ${NAME} deploy —— 双面部署（控制面 Pages + 数据面 Pages/Workers�
                          Worker 的「域」标签页添加。**工具不会替你绑定域名**。
                          不填则用 *.workers.dev（多数网络直连不可访问，节点会连不上）
   --panel-path <path>    面板访问路径（默认随机）
-  --mode <mode>          部署模式：auto（默认，自动判断）/ fresh（强制首次）/ update（强制更新）
+  --mode <mode>          部署模式：auto（默认，自动判断）/ fresh（全新部署，自动新建 KV）/ update（强制更新）
   --force                忽略版本检查，强制重新部署
   --force-kv             跳过 KV 归属校验（明知该 KV 属于别的实例仍然继续）
   --resolve-preferred=false

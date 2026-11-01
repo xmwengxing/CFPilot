@@ -41,9 +41,18 @@ interface CFPilotProfileView {
 }
 
 interface CFPilotDeployStatus {
-  hasDeploy: boolean
+  /**
+   * 部署结束事件才带的最终结论。
+   *
+   * 同一个通道既推「状态快照」（hasDeploy/state/…），
+   * 也推「一次部署的最终结果」（ok/error），所以两者都必须是可空的。
+   */
+  ok?: boolean
+  /** 部署失败原因（ok=false 时） */
+  error?: string
+  hasDeploy?: boolean
   /** 结论：none 未部署 / outdated 可更新 / latest 已是最新 / blocked 前置条件不满足 */
-  state: 'none' | 'outdated' | 'latest' | 'blocked'
+  state?: 'none' | 'outdated' | 'latest' | 'blocked'
   /** 阻塞原因（state=blocked 时才有） */
   reason?: 'no-token' | 'no-account' | 'no-kv'
   /** 线上（KV 清单）的构建版本 */
@@ -175,8 +184,29 @@ interface Window {
         panelPassword?: string
       },
       kvNamespaceId?: string    ): Promise<{
-      ok: boolean
+      /**
+       * 部署是否已成功完成。
+       *
+       * ⚠️ 可空：Go 版把部署放到后台执行，接口**立即返回** `{started:true}`
+       * 且不带 ok —— 最终结果走 SSE 的 deploy-status 事件。
+       */
+      ok?: boolean
+      /**
+       * 后端已受理、正在后台执行。
+       *
+       * 为 true 时不要按 `ok` 判断成败：那一刻既没成功也没失败。
+       */
+      started?: boolean
       error?: string
+      /**
+       * 全新部署时后端**新建**的 KV 命名空间 ID（其余模式不带）。
+       *
+       * 全新部署 = 再开一套实例，不能复用凭据页选中的 KV ——
+       * 内核的 KV 键全局平铺，复用会把新凭据写进原实例的 CONFIG。
+       */
+      kvNamespaceId?: string
+      /** 全新部署时新建的 KV 名称 */
+      kvTitle?: string
       /** 控制面面板完整地址（含面板路径） */
       panelUrl?: string
       /** 面板密码（首次部署时随机生成） */
@@ -249,7 +279,14 @@ interface Window {
       scanToken?: string
       /** 自定义回填地址（留空由 host 推导） */
       callbackUrl?: string
-    }): Promise<{ ok: boolean; count?: number; copyable?: string; error?: string }>
+    }): Promise<{
+      /** 同上：Go 版异步执行时只返回 `started`，结果走 SSE 的 scan-result */
+      ok?: boolean
+      started?: boolean
+      count?: number
+      copyable?: string
+      error?: string
+    }>
     /** 自动识别数据面域名（优先自定义域名，回落 pages.dev） */
     detectScanHost(): Promise<{
       ok: boolean

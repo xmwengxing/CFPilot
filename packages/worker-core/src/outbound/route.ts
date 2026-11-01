@@ -27,6 +27,8 @@
  * 完整实验记录见 docs/self-developed-dataplane-design.md §1。
  */
 
+import { isTargetBlockedError } from './guard'
+
 /** Cloudflare 官方网段（用于判定「这个 IP 连回 CF 自己」） */
 const CF_IPV4_RANGES: ReadonlyArray<readonly [string, number]> = [
   ['104.16.0.0', 13], // 104.16.0.0/13
@@ -360,6 +362,8 @@ export function groupCandidates(candidates: RouteCandidate[]): CandidateGroups {
 export type DialFailureKind =
   /** 被 Cloudflare 拒绝：目标在 CF 自家网段，或目标不可达 */
   | 'blocked'
+  /** 被本地策略拦截：环回 / 私网 / 链路本地 / 元数据地址（见 `outbound/guard.ts`） */
+  | 'policy'
   /** 超时 */
   | 'timeout'
   /** 其它错误 */
@@ -386,6 +390,11 @@ export function classifyDialFailure(
   candidate: string
 ): DialFailure {
   const message = err instanceof Error ? err.message : String(err)
+  // ⚠️ 策略拦截必须排在「被平台拒绝」之前：两者文案都含「拒绝 / 不可达」类词汇，
+  // 但处理方式完全不同 —— 前者换个目标或配代理，后者要换第三方落地。
+  if (isTargetBlockedError(err)) {
+    return { kind: 'policy', message, candidate }
+  }
   if (/proxy request failed|cannot connect to the specified address|TCP Loop/i.test(message)) {
     return { kind: 'blocked', message, candidate }
   }
@@ -403,6 +412,12 @@ export function explainDialFailure(failure: DialFailure): string {
         `出站被 Cloudflare 拒绝（${failure.candidate}）：${failure.message}\n` +
         '  常见原因：目标地址在 Cloudflare 自家网段（Worker 不能主动连回 CF 自己的入口）。\n' +
         '  → 换一个第三方 IP，或改用代理落地。'
+      )
+    case 'policy':
+      return (
+        `出站被策略拒绝（${failure.candidate}）：${failure.message}\n` +
+        '  目标属于环回 / 内网 / 链路本地 / 保留地址，Worker 直连无法到达。\n' +
+        '  → 要访问局域网设备，请配置落地代理（由代理侧建连）。'
       )
     case 'timeout':
       return (

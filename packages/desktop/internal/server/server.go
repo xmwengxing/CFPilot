@@ -292,6 +292,9 @@ func (s *Server) routes() http.Handler {
 	// 优选 / 环境检测 API
 	s.registerScanRoutes(mux)
 
+	// 实验性功能开关（默认全部关闭）
+	s.registerExperimentalRoutes(mux)
+
 	// 检查更新 API
 	s.registerUpdateRoutes(mux)
 

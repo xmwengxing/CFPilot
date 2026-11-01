@@ -125,6 +125,15 @@ type Options struct {
 	// ⚠️ 与 CLI 的 --no-speed 语义一致（packages/cli/src/scan/scan.ts）。
 	SkipSpeed bool
 
+	// ProbeObserver 在每个候选完成一次阶段探测后被调用一次。
+	//
+	// 用途：把真实成败喂给**网络档案**，让下一轮采样能按本机网络情况调整权重
+	// （实验性能力，默认不启用）。
+	//
+	// ⚠️ 回调在扫描 goroutine 内同步执行，必须轻量、不能阻塞。
+	// stage 取值：tcp / tls / ws；latencyMs 只在成功时有意义。
+	ProbeObserver func(ip, stage string, ok bool, latencyMs int64)
+
 	// Progress 接收进度回调（可为 nil）
 	Progress func(Progress)
 }
@@ -148,6 +157,15 @@ type Entry struct {
 	Latency int64   `json:"latency"`
 	TLSMs   int64   `json:"tlsMs"`
 	Speed   float64 `json:"speed"`
+	// TCPMs 是阶段一 TCP 建连耗时（毫秒）。
+	//
+	// 之前没有保留这个值，导致质量报告里的「TCP 耗时」永远是「未执行」——
+	// 数据其实在扫描时就拿到了，只是没带进结果条目。
+	TCPMs int64 `json:"tcpMs"`
+	// PeakSpeed 是阶段三测速的**窗口峰值**（MB/s），只作诊断展示。
+	//
+	// 对外排序仍用稳态速度（Speed）：真机实测单窗口突发能把峰值翻倍。
+	PeakSpeed float64 `json:"peakSpeed,omitempty"`
 }
 
 // Summary 是扫描结果。
@@ -261,6 +279,21 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 		return &Summary{Entries: []Entry{}, Stats: stats}, nil
 	}
 
+	// TCP 建连耗时留档：阶段一的原始观测，质量报告要展示它。
+	//
+	// ⚠️ 只保留 TCP **成功**的候选 —— 失败样本的耗时是「超时时长」而不是网络延迟，
+	// 混进报告会给出误导性的数字。
+	tcpMsOf := make(map[string]int64, len(tcpResults))
+	for _, r := range tcpResults {
+		if r.OK {
+			tcpMsOf[r.IP] = r.Latency
+		}
+		// 把阶段一的真实成败交给网络档案（实验性）。
+		if opt.ProbeObserver != nil {
+			opt.ProbeObserver(r.IP, "tcp", r.OK, r.Latency)
+		}
+	}
+
 	// ================= 阶段一之二：TLS 握手筛选 =================
 	//
 	// -1 的根因修复：只过 TCP 不够。
@@ -295,6 +328,9 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 		for attempt := 0; attempt < opt.Retries; attempt++ {
 			r = ProbeTLS(ctx, t.IP, opt.Port, opt.Host, msDuration(opt.TLSTimeoutMs))
 			if r.OK {
+				if opt.ProbeObserver != nil {
+					opt.ProbeObserver(r.IP, "tls", true, r.TLSMs)
+				}
 				return r, true
 			}
 			if ctx.Err() != nil {
@@ -303,6 +339,9 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 			if isTimeoutError(r.Error) {
 				break
 			}
+		}
+		if opt.ProbeObserver != nil {
+			opt.ProbeObserver(r.IP, "tls", false, 0)
 		}
 		return r, false
 	}, func(done int) {
@@ -355,11 +394,17 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 				if len(wantCountries) > 0 && wantCountries[strings.ToUpper(last.Colo)] {
 					matchedCount++
 				}
+				if opt.ProbeObserver != nil {
+					opt.ProbeObserver(last.IP, "ws", true, last.Latency)
+				}
 				return last, true
 			}
 			if ctx.Err() != nil {
 				return last, false
 			}
+		}
+		if opt.ProbeObserver != nil {
+			opt.ProbeObserver(last.IP, "ws", false, 0)
 		}
 		return last, false
 	}, func(done int) {
@@ -428,6 +473,7 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 				Latency: r.Latency,
 				TLSMs:   tlsMsOf[r.IP],
 				Speed:   0,
+				TCPMs:   tcpMsOf[r.IP],
 			})
 		}
 		sort.Slice(entries, func(i, j int) bool { return entries[i].Latency < entries[j].Latency })
@@ -487,6 +533,9 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 			TLSMs:   tlsMsOf[sr.ws.IP],
 			// ⚠️ 对外报**稳态值**，不是窗口峰值（峰值只作诊断）。
 			Speed: sr.dl.SteadyMBps,
+			// 峰值留档给质量报告展示，不参与排序。
+			PeakSpeed: sr.dl.PeakMBps,
+			TCPMs:     tcpMsOf[sr.ws.IP],
 		})
 	}
 

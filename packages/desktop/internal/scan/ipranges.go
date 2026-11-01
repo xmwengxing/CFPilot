@@ -224,6 +224,10 @@ type SampleOptions struct {
 	Seed int64
 	// Neutral 为 true 时忽略权重、按网段大小等比采样（只保留权重 0 的不可达段）
 	Neutral bool
+	// Adaptive 非 nil 时启用网络档案的 /24 探索/利用采样；nil 保留现有采样语义。
+	Adaptive     *AdaptiveSamplingOptions
+	ProfileID    string
+	Observations []PrefixObservation
 }
 
 // SampleCandidates 从 Cloudflare 网段里加权采样候选 IP。
@@ -235,6 +239,9 @@ type SampleOptions struct {
 // 用「最大余数法」把小数预算分配成整数，保证总数正好等于 Count，
 // 且每个有权重的网段至少拿到 1 个（否则高权重的小网段会被大网段挤掉）。
 func SampleCandidates(opt SampleOptions) []string {
+	if opt.Adaptive != nil {
+		return SampleAdaptiveCandidates(opt)
+	}
 	pool := opt.CIDRs
 	if len(pool) == 0 {
 		pool = BuiltinIPv4CIDRs

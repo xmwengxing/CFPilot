@@ -692,6 +692,21 @@
         })
     },
 
+    /** 读取已有证据的单 IP 质量报告，不触发检测。 */
+    getIPQualityReport: function (params) {
+      return get('/api/scan/quality-report?sessionId=' + encodeURIComponent(params.sessionId || '') + '&ip=' + encodeURIComponent(params.ip || '') + '&port=' + encodeURIComponent(params.port || 443))
+    },
+
+    /** 读取实验性功能开关（默认全部关闭）。 */
+    getExperimental: function () {
+      return get('/api/experimental')
+    },
+
+    /** 保存实验性功能开关。 */
+    saveExperimental: function (params) {
+      return post('/api/experimental', params || {})
+    },
+
     /** 删除一条优选历史会话 */
     deleteScanHistory: function (id) {
       return call('DELETE', '/api/scan/history?id=' + encodeURIComponent(id || ''))

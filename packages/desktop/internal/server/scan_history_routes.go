@@ -40,23 +40,30 @@ func (s *Server) historyStore() *history.Store {
 }
 
 // saveScanHistory 把一次成功的优选写入历史（失败只记日志，不影响主流程）。
-func (s *Server) saveScanHistory(source, host, wsPath, probePath string, skipSpeed bool, entries []scan.Entry) {
+//
+// networkProfileID 记录本次使用的网络档案（实验性自适应采样开启时才有值）：
+// 不同档案的历史**不混合**，否则「某运营商的结论」会污染其他网络环境。
+func (s *Server) saveScanHistory(source, host, wsPath, probePath string, skipSpeed bool, entries []scan.Entry, networkProfileID string) string {
 	if len(entries) == 0 {
-		return
+		return ""
 	}
 	st := s.historyStore()
 	sess := history.Session{
-		At:        time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
-		Host:      host,
-		WSPath:    wsPath,
-		ProbePath: probePath,
-		SkipSpeed: skipSpeed,
-		Source:    source,
-		Entries:   history.FromScanEntries(entries),
+		ID:               history.NewSessionID(),
+		At:               time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		Host:             host,
+		WSPath:           wsPath,
+		ProbePath:        probePath,
+		SkipSpeed:        skipSpeed,
+		Source:           source,
+		Entries:          history.FromScanEntries(entries),
+		NetworkProfileID: networkProfileID,
 	}
 	if err := st.Save(sess); err != nil {
 		s.logLevel("保存优选历史失败："+err.Error(), "warn")
+		return ""
 	}
+	return sess.ID
 }
 
 // handleScanHistory 读取 / 删除优选历史。
@@ -169,7 +176,7 @@ func (s *Server) handleScanReTest(w http.ResponseWriter, r *http.Request) {
 
 	// 把复测结论写回历史会话（找得到才写；失败不影响响应）
 	if sid := strings.TrimSpace(req.SessionID); sid != "" {
-		if err := s.historyStore().UpdateEntryLastTest(sid, results); err != nil {
+		if err := s.historyStore().UpdateEntryTests(sid, results, req.WithSpeed); err != nil {
 			s.logLevel("写回复测结论失败："+err.Error(), "warn")
 		}
 	}

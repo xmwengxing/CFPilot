@@ -53,6 +53,7 @@ func (s *Server) registerScanRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/scan/quick", s.guard(s.handleScanQuick))
 	// 优选历史（读取 / 删除）与单 IP 复测
 	mux.HandleFunc("/api/scan/history", s.guard(s.handleScanHistory))
+	mux.HandleFunc("/api/scan/quality-report", s.guard(s.handleIPQualityReport))
 	mux.HandleFunc("/api/scan/re-test", s.guard(s.handleScanReTest))
 }
 
@@ -129,12 +130,15 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(req.Candidates) != "" {
 		candidates = scan.ParseCandidateList(req.Candidates)
 	}
+	// 实验性：开启自适应采样时按本机网络档案调整网段权重。
+	// 上下文要在生成候选与结束保存之间保持同一份（观测是在扫描过程中写入的）。
+	adaptive := s.prepareAdaptive()
 	if len(candidates) == 0 {
 		sample := req.Sample
 		if sample <= 0 {
 			sample = 500
 		}
-		candidates = scan.SampleCandidates(scan.SampleOptions{Count: sample, Neutral: len(req.Countries) > 0})
+		candidates = s.sampleCandidates(adaptive, sample, len(req.Countries) > 0)
 	}
 	if len(candidates) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "未能生成候选 IP"})
@@ -182,6 +186,8 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 		SpeedDurationMs:  req.SpeedDurationMs,
 		SpeedBytes:       req.SpeedBytes,
 		Top:              req.Top,
+		// 实验性：把每个候选的真实成败喂给网络档案（未开启时为 nil）。
+		ProbeObserver: s.observer(adaptive),
 		Progress: func(p scan.Progress) {
 			// ⚠️ **必须节流**。
 			//
@@ -249,6 +255,9 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 				"latency": e.Latency,
 				"tlsMs":   e.TLSMs,
 				"speed":   e.Speed,
+				// TCP 建连耗时与测速峰值：界面「TCP(ms)」列与质量报告要用。
+				"tcpMs":     e.TCPMs,
+				"peakSpeed": e.PeakSpeed,
 			})
 		}
 
@@ -302,7 +311,11 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 		//
 		// 放在 publish 之前：界面收到 scan-result 后刷新历史列表时，
 		// 本次会议已经在文件里了。
-		s.saveScanHistory("local", host, opt.WSPath, opt.ProbePath, req.SkipSpeed, sum.Entries)
+		sessionID := s.saveScanHistory("local", host, opt.WSPath, opt.ProbePath, req.SkipSpeed, sum.Entries, adaptive.profileID)
+		payload["sessionId"] = sessionID
+
+		// 实验性：把本轮观测写回网络档案（未开启时不做任何事）。
+		s.saveAdaptive(adaptive)
 
 		s.events.publish("scan-result", payload)
 	}()

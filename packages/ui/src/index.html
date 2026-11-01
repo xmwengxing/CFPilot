@@ -851,6 +851,66 @@
     }
     .h-del:hover { color: var(--err, #f87171); }
 
+    /* IP 质量报告：左右分栏 + 竖向分隔条，避免信息纵向拉得太长 */
+    .quality-layout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0 20px;
+      margin-top: 10px;
+    }
+    .quality-col { min-width: 0; }
+    .quality-col + .quality-col {
+      border-left: 1px solid var(--border);
+      padding-left: 20px;
+    }
+    @media (max-width: 900px) {
+      .quality-layout { grid-template-columns: 1fr; }
+      .quality-col + .quality-col { border-left: none; padding-left: 0; border-top: 1px solid var(--border); padding-top: 12px; }
+    }
+    .quality-group-title {
+      display: block;
+      font-weight: 600;
+      font-size: 12.5px;
+      color: var(--text-secondary);
+      margin: 10px 0 4px;
+    }
+    .quality-row {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      padding: 3px 0;
+      border-bottom: 1px dashed var(--border);
+      font-size: 13px;
+    }
+    .quality-row .q-label {
+      cursor: help;
+      color: var(--text-secondary);
+      min-width: 96px;
+      border-bottom: 1px dotted var(--border-focus);
+    }
+    .quality-row .q-value { font-variant-numeric: tabular-nums; font-weight: 600; }
+    .quality-row .q-note { color: var(--text-muted); font-size: 12px; }
+    .quality-good { color: var(--ok); }
+    .quality-warn { color: var(--warn); }
+    .quality-bad { color: var(--err); }
+    .quality-tip {
+      position: fixed;
+      z-index: 9999;
+      max-width: 320px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: var(--bg-elevated, #111827);
+      border: 1px solid var(--border-focus);
+      color: var(--text-main);
+      font-size: 12px;
+      line-height: 1.55;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+      pointer-events: none;
+    }
+    .quality-tip b { color: var(--text-main); }
+    .quality-tip .t-row { display: block; }
+    .quality-tip .t-key { color: var(--text-muted); }
+
     /* 优选流程说明（默认折叠的 details） */
     details.flow-note {
       border: 1px solid var(--border);
@@ -1437,6 +1497,63 @@
             </label>
 
             <!--
+              实验性功能（默认全部关闭）
+
+              这里的能力会**改变优选行为**，因此默认关闭、由用户显式开启：
+                · 自适应网段权重：按本机当前网络档案的历史成败调整网段采样权重，
+                  并保留固定比例的探索预算，避免历史结论永久锁死采样池。
+
+              不同网络档案的历史**互不混用**（档案 ID 参与统计），
+              所以换运营商/地区/接入方式时不会把旧结论带过来。
+            -->
+            <details class="fold" style="margin-top:12px" id="expFold">
+              <summary>实验性功能（默认关闭）</summary>
+              <div class="fold-body">
+                <label class="switch-box">
+                  <span class="sw-info">
+                    <span class="sw-title">自适应网段权重（按网络档案学习）</span>
+                    <span class="sw-desc">根据本机网络环境的历史成败调整网段采样权重，并保留探索预算</span>
+                  </span>
+                  <input type="checkbox" id="optAdaptive" />
+                  <span class="switch"></span>
+                </label>
+                <div class="row" style="margin-top:10px">
+                  <div class="field">
+                    <label for="optExpIsp">运营商</label>
+                    <select id="optExpIsp">
+                      <option value="other">其他 / 不确定</option>
+                      <option value="ct">中国电信</option>
+                      <option value="cu">中国联通</option>
+                      <option value="cm">中国移动</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="optExpRegion">地区（可选）</label>
+                    <input type="text" id="optExpRegion" placeholder="如：福建" maxlength="32" />
+                  </div>
+                </div>
+                <div class="row">
+                  <div class="field">
+                    <label for="optExpAccess">接入类型</label>
+                    <select id="optExpAccess">
+                      <option value="fixed">固定宽带 / 有线</option>
+                      <option value="mobile">移动网络（4G/5G）</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="optExpExplore">探索比例（%）</label>
+                    <input type="number" id="optExpExplore" value="20" min="5" max="100" />
+                    <p class="tip">· 探索比例越高，越不容易被历史结论锁死；默认 20%</p>
+                  </div>
+                </div>
+                <div class="btn-row" style="margin-top:10px">
+                  <button class="btn btn-ghost" id="btnExpSave">保存实验性设置</button>
+                  <span class="tip" id="expHint"></span>
+                </div>
+              </div>
+            </details>
+
+            <!--
               已移除两个控件：
 
               1. 「不回填面板，只输出列表」勾选框
@@ -1491,7 +1608,12 @@
           <div class="card">
             <h2><span class="dot"></span>📋 优选结果</h2>
             <div class="result-box" id="scanOut">暂无结果，填写上方参数后点击「开始优选」</div>
+            <div id="scanProgressWrap" hidden style="margin-top:8px">
+              <div style="height:8px;border-radius:999px;background:var(--border);overflow:hidden"><i id="scanProgressBar" style="display:block;height:100%;width:0%;border-radius:999px;background:var(--accent);transition:width .25s ease"></i></div>
+              <p class="tip" id="scanProgressStage" style="margin:5px 0 0"></p>
+            </div>
             <div class="btn-row" style="margin-top: 10px">
+              <p class="tip" id="scanProgressText" style="margin:0 2px 0 0"></p>
               <button class="btn btn-ghost" id="btnCopyResult">复制结果</button>
               <button class="btn btn-primary" id="btnPushToPanel" disabled>回填面板</button>
             </div>
@@ -1504,21 +1626,23 @@
               放到点击「回填面板」时才现取，既不会超时，用户也没有学习成本
               —— 他只管在拿到结果后按一下按钮。
             -->
-            <div class="note" style="margin-top: 12px">
-              <b>两个按钮的区别</b><br /><br />
-              <b>复制结果</b> —— 将这批 IP 复制，自行粘贴到 Web 面板的
-              「手动优选 IP」框中。<br />
-              <span class="muted">不需要令牌，离线可用；适合只需留存备份、或不希望工具联网的情况。</span><br /><br />
-              <b>回填面板</b> —— 自动登录控制面面板，将这批 IP 直接写入，
-              之后订阅即可使用。<br />
-              <span class="muted">后台会自动向面板申请临时令牌，<b>10 分钟内有效</b>，
-              用完即弃。申请令牌会使用部署时设置的面板密码。</span>
-            </div>
+            <details class="fold" style="margin-top: 12px">
+              <summary>两个按钮的区别</summary>
+              <div class="note">
+                <b>复制结果</b> —— 将这批 IP 复制，自行粘贴到 Web 面板的
+                「手动优选 IP」框中。<br />
+                <span class="muted">不需要令牌，离线可用；适合只需留存备份、或不希望工具联网的情况。</span><br /><br />
+                <b>回填面板</b> —— 自动登录控制面面板，将这批 IP 直接写入，
+                之后订阅即可使用。<br />
+                <span class="muted">后台会自动向面板申请临时令牌，<b>10 分钟内有效</b>，
+                用完即弃。申请令牌会使用部署时设置的面板密码。</span>
+              </div>
+            </details>
 
             <!-- 回填进度 / 结果反馈 -->
             <p class="tip" id="pushHint" style="margin-top: 8px"></p>
             <table id="scanTable" hidden>
-              <thead><tr><th>#</th><th>地址</th><th>机房</th><th>TLS握手(ms)</th><th>TCP(ms)</th><th>下行(MB/s)</th></tr></thead>
+              <thead><tr><th>#</th><th>地址</th><th>机房</th><th>TLS握手(ms)</th><th>TCP(ms)</th><th>下行(MB/s)</th><th>质量报告</th></tr></thead>
               <tbody></tbody>
             </table>
           </div>

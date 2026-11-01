@@ -365,6 +365,15 @@ interface Window {
       sessions: ScanHistorySession[]
       error?: string
     }>
+    /** 从本地历史聚合质量报告，不触发额外检测。 */
+    getIPQualityReport(params: { sessionId: string; ip: string; port: number }): Promise<{ ok: boolean; report?: IPQualityReport; error?: string }>
+    /**
+     * 实验性功能开关（默认全部关闭）。
+     *
+     * 这些能力会改变优选行为，必须由用户显式开启才生效。
+     */
+    getExperimental(): Promise<{ ok: boolean; experimental?: ExperimentalSettings; error?: string }>
+    saveExperimental(params: ExperimentalSettings): Promise<{ ok: boolean; experimental?: ExperimentalSettings; error?: string }>
     /** 删除一条优选历史会话 */
     deleteScanHistory(id: string): Promise<{ ok: boolean; error?: string }>
     /**
@@ -503,7 +512,13 @@ interface ScanHistoryEntry {
   latency: number
   tlsMs: number
   speed: number
+  /** TCP 建连耗时（ms）；旧历史没有该字段时为空 */
+  tcpMs?: number
+  /** 测速窗口峰值（MB/s）；旧历史没有该字段时为空 */
+  peakSpeed?: number
   lastTest?: ScanHistoryLastTest
+  tests?: ScanHistoryLastTest[]
+  qualityReport?: IPQualityReport
 }
 
 /** 优选历史：一次优选会话的留底 */
@@ -518,6 +533,44 @@ interface ScanHistorySession {
   /** "local"（本地真连接优选）| "quick"（一键优选） */
   source: string
   entries: ScanHistoryEntry[]
+}
+
+type QualityFieldStatus = 'available' | 'not_run' | 'not_implemented' | 'failed' | 'stale'
+
+/**
+ * 实验性功能开关。
+ *
+ * 默认全部关闭；开启后优选会按本机网络档案的历史表现调整网段权重，
+ * 并保留固定比例的探索预算。
+ */
+interface ExperimentalSettings {
+  /** 自适应网段权重（按网络档案学习） */
+  adaptiveSampling: boolean
+  /** 探索预算比例（0~1）；利用 = 1 - 探索 */
+  exploreRatio: number
+  /** 运营商：ct 电信 / cu 联通 / cm 移动 / other */
+  isp: string
+  /** 地区（粗粒度，可留空） */
+  region: string
+  /** 接入类型：fixed 固网 / mobile 移动网络 */
+  access: string
+}
+interface IPQualityReport {
+  version: number
+  generatedAt: string
+  ip: string
+  port: number
+  colo: string
+  city: string
+  source: string
+  networkProfileId: string
+  basic: { tcpMs: number | null; status: QualityFieldStatus }
+  protocol: { tlsMs: number | null; wsOk: boolean | null; pongOk: boolean | null; realTunnelOk: boolean | null }
+  performance: { speedMBps: number | null; peakMBps: number | null; stabilityP95: number | null; jitter: number | null }
+  egress: { transport?: string; remoteIp?: string; observedAt?: string; ageMs?: number; egressKind?: string; colo?: string; status: 'observed' | 'not-run' | 'failed' | 'stale' }
+  compatibility: { status: string; targets: Array<{ urlLabel: string; status: 'ok' | 'challenge' | 'forbidden' | 'rate_limited' | 'tls_error' | 'timeout' | 'not_run'; httpStatus?: number; challengeHeader?: string; ms?: number; expectedContentOk?: boolean; error?: string }> }
+  history: { firstSeen: string; lastSeen: string; testCount: number; successRate: number; trend: Array<{ at: string; sessionId: string; kind: 'scan' | 'retest'; ok: boolean; latencyMs: number | null; tlsMs: number | null; speedMBps: number | null; tcpMs?: number | null }> }
+  fields: Array<{ name: string; status: QualityFieldStatus; value?: unknown; reason?: string }>
 }
 
 /** 单 IP 复测结果（分层：TCP → TLS → WS101，可选测速） */

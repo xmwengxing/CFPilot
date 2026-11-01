@@ -25,6 +25,26 @@ import (
 //     实测不与常见开发工具冲突。
 const DefaultPort = 19726
 
+// ExperimentalSettings 是**实验性功能**的开关与参数。
+//
+// 这些能力默认全部关闭：开启它们会改变候选生成策略，
+// 必须由用户显式选择才生效（AGENTS.md 要求实验能力默认关闭）。
+type ExperimentalSettings struct {
+	// AdaptiveSampling 开启「按网络档案自适应网段权重」。
+	//
+	// 开启后，优选会参考**本机当前网络档案**的历史成败记录调整网段采样权重，
+	// 并保留固定比例的探索预算，避免历史结论永久锁死采样池。
+	AdaptiveSampling bool `json:"adaptiveSampling"`
+	// ExploreRatio 是探索预算比例（0~1），利用比例 = 1 - 探索。
+	ExploreRatio float64 `json:"exploreRatio"`
+	// ISP 是运营商（ct / cu / cm / other）。
+	ISP string `json:"isp"`
+	// Region 是地区（粗粒度即可，如「福建」；可留空）。
+	Region string `json:"region"`
+	// Access 是接入类型（fixed 固网 / mobile 移动网络）。
+	Access string `json:"access"`
+}
+
 // DesktopSettings 是桌面版自己的服务设置（与凭据分开存）。
 type DesktopSettings struct {
 	// Port 是本地服务监听端口。
@@ -44,6 +64,8 @@ type DesktopSettings struct {
 	AllowLAN bool `json:"allowLan"`
 	// KeepRunningInTray 决定关掉浏览器页面后是否继续在托盘驻留。
 	KeepRunningInTray bool `json:"keepRunningInTray"`
+	// Experimental 是实验性功能开关（默认全部关闭）。
+	Experimental ExperimentalSettings `json:"experimental"`
 }
 
 // LoopbackHost 是仅本机可访问的监听地址。
@@ -59,6 +81,8 @@ func DefaultSettings() DesktopSettings {
 		Host:              LoopbackHost,
 		AllowLAN:          false,
 		KeepRunningInTray: true,
+		// 实验性功能默认全关，探索比例给一个中性初值。
+		Experimental: ExperimentalSettings{ExploreRatio: 0.2, Access: "fixed"},
 	}
 }
 

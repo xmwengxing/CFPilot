@@ -18,12 +18,16 @@
 package history
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/scan"
@@ -46,8 +50,14 @@ type Entry struct {
 	Latency int64   `json:"latency"`
 	TLSMs   int64   `json:"tlsMs"`
 	Speed   float64 `json:"speed"`
+	// TCPMs 是优选时阶段一测得的 TCP 建连耗时（毫秒）。
+	TCPMs int64 `json:"tcpMs,omitempty"`
+	// PeakSpeed 是优选时测速的窗口峰值（MB/s），只作诊断展示。
+	PeakSpeed float64 `json:"peakSpeed,omitempty"`
 	// LastTest 是最近一次复测的状态（可为空，表示从未复测过）。
-	LastTest *LastTest `json:"lastTest,omitempty"`
+	LastTest      *LastTest      `json:"lastTest,omitempty"`
+	Tests         []LastTest     `json:"tests,omitempty"`
+	QualityReport *QualityReport `json:"qualityReport,omitempty"`
 }
 
 // LastTest 是某条 IP 的最近一次复测结论。
@@ -58,20 +68,24 @@ type LastTest struct {
 	WSOK  bool    `json:"wsOk"`  // 复测时 WS101 是否通过
 	Colo  string  `json:"colo"`  // 复测时识别到的机房码（可能与当初不同）
 	Speed float64 `json:"speed"` // 复测时的下行速度（仅复测带测速时有）
-	OK    bool    `json:"ok"`    // 复测三层是否全过
-	Error string  `json:"error,omitempty"`
+	// PeakSpeed 是复测测速的窗口峰值（MB/s）。
+	PeakSpeed float64 `json:"peakSpeed,omitempty"`
+	OK        bool    `json:"ok"` // 复测三层是否全过
+	Error     string  `json:"error,omitempty"`
+	WithSpeed bool    `json:"withSpeed,omitempty"`
 }
 
 // Session 是一次优选会话。
 type Session struct {
-	ID        string  `json:"id"`
-	At        string  `json:"at"` // ISO 时间
-	Host      string  `json:"host"`
-	WSPath    string  `json:"wsPath"`
-	ProbePath string  `json:"probePath"`
-	SkipSpeed bool    `json:"skipSpeed"`
-	Source    string  `json:"source"` // "local" | "quick"
-	Entries   []Entry `json:"entries"`
+	ID               string  `json:"id"`
+	At               string  `json:"at"` // ISO 时间
+	Host             string  `json:"host"`
+	WSPath           string  `json:"wsPath"`
+	ProbePath        string  `json:"probePath"`
+	SkipSpeed        bool    `json:"skipSpeed"`
+	Source           string  `json:"source"` // "local" | "quick"
+	Entries          []Entry `json:"entries"`
+	NetworkProfileID string  `json:"networkProfileId,omitempty"`
 }
 
 // FromScanEntries 把 scan.Entry 列表转成持久化用的 Entry 列表。
@@ -79,17 +93,23 @@ func FromScanEntries(in []scan.Entry) []Entry {
 	out := make([]Entry, 0, len(in))
 	for _, e := range in {
 		out = append(out, Entry{
-			IP:      e.IP,
-			Port:    e.Port,
-			Colo:    e.Colo,
-			City:    scan.ColoNameOf(e.Colo),
-			Latency: e.Latency,
-			TLSMs:   e.TLSMs,
-			Speed:   e.Speed,
+			IP:        e.IP,
+			Port:      e.Port,
+			Colo:      e.Colo,
+			City:      scan.ColoNameOf(e.Colo),
+			Latency:   e.Latency,
+			TLSMs:     e.TLSMs,
+			Speed:     e.Speed,
+			TCPMs:     e.TCPMs,
+			PeakSpeed: e.PeakSpeed,
 		})
 	}
 	return out
 }
+
+// NewSessionID 返回一条历史会话的唯一标识。
+// 调用方可在保存前生成，以便把会话 ID 同步给实时结果事件。
+func NewSessionID() string { return newID() }
 
 // Store 是历史库。持有目录与容量上限。
 type Store struct {
@@ -117,22 +137,58 @@ func defaultDir() string {
 
 func (s *Store) path() string { return filepath.Join(s.dir, fileName) }
 
-// Load 读取全部会话（按时间倒序：最新在前）。文件不存在时返回空列表。
+const SchemaVersion = 1
+const maxHistoryBytes = 8 << 20
+const maxRetestSamples = 30
+
+var historyMu sync.Mutex
+
+type document struct {
+	Version  int       `json:"version"`
+	Sessions []Session `json:"sessions"`
+}
+
+// Load 兼容旧数组；任何新写入都使用版本化 envelope。
 func (s *Store) Load() ([]Session, error) {
-	raw, err := os.ReadFile(s.path())
+	historyMu.Lock()
+	defer historyMu.Unlock()
+	return s.load()
+}
+
+func (s *Store) load() ([]Session, error) {
+	file, err := os.Open(s.path())
 	if os.IsNotExist(err) {
 		return []Session{}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, maxHistoryBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxHistoryBytes {
+		return nil, fmt.Errorf("历史文件超过容量限制")
+	}
 	var list []Session
+	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 {
 		return []Session{}, nil
 	}
-	if err := json.Unmarshal(raw, &list); err != nil {
-		// 损坏不阻塞：当空库处理
-		return []Session{}, nil
+	if raw[0] == '[' {
+		if err := json.Unmarshal(raw, &list); err != nil {
+			return nil, fmt.Errorf("历史文件格式无效")
+		}
+	} else {
+		var doc document
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			return nil, fmt.Errorf("历史文件格式无效")
+		}
+		if doc.Version != SchemaVersion || doc.Sessions == nil {
+			return nil, fmt.Errorf("历史文件版本或结构不兼容")
+		}
+		list = doc.Sessions
 	}
 	// 倒序：最新在前
 	sort.SliceStable(list, func(i, j int) bool {
@@ -143,6 +199,8 @@ func (s *Store) Load() ([]Session, error) {
 
 // Save 写入一条新会话：插到最前、按容量裁剪、原子落盘。
 func (s *Store) Save(sess Session) error {
+	historyMu.Lock()
+	defer historyMu.Unlock()
 	if sess.ID == "" {
 		sess.ID = newID()
 	}
@@ -152,25 +210,26 @@ func (s *Store) Save(sess Session) error {
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return err
 	}
-	list, _ := s.Load() // 读不到就用空
+	list, err := s.load()
+	if err != nil {
+		return err
+	}
 	list = append([]Session{sess}, list...)
 	if len(list) > s.cap {
 		list = list[:s.cap]
 	}
-	raw, err := json.MarshalIndent(list, "", "  ")
-	if err != nil {
-		return err
+	for i := range list[0].Entries {
+		e := &list[0].Entries[i]
+		e.QualityReport, _ = BuildQualityReport(list, list[0].ID, e.IP, e.Port, time.Now().UTC())
 	}
-	tmp := s.path() + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path())
+	return s.write(list)
 }
 
 // Delete 删除指定 id 的会话。
 func (s *Store) Delete(id string) error {
-	list, err := s.Load()
+	historyMu.Lock()
+	defer historyMu.Unlock()
+	list, err := s.load()
 	if err != nil {
 		return err
 	}
@@ -183,15 +242,7 @@ func (s *Store) Delete(id string) error {
 	if len(kept) == len(list) {
 		return nil // 没有可删的，直接返回
 	}
-	raw, err := json.MarshalIndent(kept, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := s.path() + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path())
+	return s.write(kept)
 }
 
 // UpdateEntryLastTest 把某会话里某个 IP:Port 的最近一次复测结论写回去。
@@ -199,7 +250,13 @@ func (s *Store) Delete(id string) error {
 // 多选项复测时，前端把每个 IP 的复测结果传回来，这里按 ip+port 定位条目更新。
 // 找不到对应条目时忽略（不应发生，因为目标本就来自该会话）。
 func (s *Store) UpdateEntryLastTest(id string, results []scan.IPTestResult) error {
-	list, err := s.Load()
+	return s.UpdateEntryTests(id, results, false)
+}
+
+func (s *Store) UpdateEntryTests(id string, results []scan.IPTestResult, withSpeed bool) error {
+	historyMu.Lock()
+	defer historyMu.Unlock()
+	list, err := s.load()
 	if err != nil {
 		return err
 	}
@@ -225,26 +282,64 @@ func (s *Store) UpdateEntryLastTest(id string, results []scan.IPTestResult) erro
 		if !ok {
 			continue
 		}
-		e.LastTest = &LastTest{
-			At:    at,
-			TCPMs: r.TCPMs,
-			TLSMs: r.TLSMs,
-			WSOK:  r.WSOK,
-			Colo:  r.Colo,
-			Speed: r.Speed,
-			OK:    r.OK,
-			Error: r.Error,
+		if len(e.Tests) == 0 && e.LastTest != nil {
+			e.Tests = append(e.Tests, *e.LastTest)
 		}
+		e.LastTest = &LastTest{
+			At:        at,
+			TCPMs:     r.TCPMs,
+			TLSMs:     r.TLSMs,
+			WSOK:      r.WSOK,
+			Colo:      r.Colo,
+			Speed:     r.Speed,
+			PeakSpeed: r.PeakSpeed,
+			OK:        r.OK,
+			Error:     r.Error,
+			WithSpeed: withSpeed,
+		}
+		e.Tests = append(e.Tests, *e.LastTest)
+		if len(e.Tests) > maxRetestSamples {
+			e.Tests = e.Tests[len(e.Tests)-maxRetestSamples:]
+		}
+		e.QualityReport, _ = BuildQualityReport(list, id, e.IP, e.Port, time.Now().UTC())
 	}
-	raw, err := json.MarshalIndent(list, "", "  ")
+	return s.write(list)
+}
+
+func (s *Store) write(list []Session) error {
+	if list == nil {
+		list = []Session{}
+	}
+	raw, err := json.MarshalIndent(document{Version: SchemaVersion, Sessions: list}, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := s.path() + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	if len(raw) > maxHistoryBytes {
+		return fmt.Errorf("历史文件超过容量限制")
+	}
+	if err := os.MkdirAll(s.dir, 0700); err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path())
+	file, err := os.CreateTemp(s.dir, ".scan-history-*")
+	if err != nil {
+		return err
+	}
+	name := file.Name()
+	defer os.Remove(name)
+	if err = file.Chmod(0600); err == nil {
+		_, err = file.Write(raw)
+	}
+	if err == nil {
+		err = file.Sync()
+	}
+	closeErr := file.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Rename(name, s.path())
 }
 
 // ---------- 内部工具 ----------

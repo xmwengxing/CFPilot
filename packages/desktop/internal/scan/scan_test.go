@@ -406,6 +406,17 @@ func TestRunEndToEnd(t *testing.T) {
 	if e.TLSMs < 0 {
 		t.Errorf("TLS 耗时不应为负，实际 %d", e.TLSMs)
 	}
+	// TCP 耗时与测速峰值必须随结果一起带出来：
+	// 质量报告要靠它们取值，缺了只能显示「未执行」。
+	if e.TCPMs < 0 {
+		t.Errorf("TCP 耗时不应为负，实际 %d", e.TCPMs)
+	}
+	if e.PeakSpeed < 0 {
+		t.Errorf("测速峰值不应为负，实际 %f", e.PeakSpeed)
+	}
+	if e.PeakSpeed > 0 && e.PeakSpeed < e.Speed {
+		t.Errorf("峰值不应低于稳态值：peak=%f steady=%f", e.PeakSpeed, e.Speed)
+	}
 }
 
 // 缺域名要报错（优选必须知道用哪个域名做 SNI）。

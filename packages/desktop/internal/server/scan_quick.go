@@ -221,7 +221,9 @@ func (s *Server) RunQuickScanFor(ctx context.Context, profile *store.Profile, on
 	// 采样 1500 而不是更多：一键优选是**后台任务**，
 	// 用户等的是结果不是覆盖率；而且网络被限速时
 	// 大样本会显著拉长耗时（自适应并发会退到低并发跑完整批次）。
-	candidates := scan.SampleCandidates(scan.SampleOptions{Count: 1500})
+	// 实验性：开启自适应采样时按本机网络档案调整网段权重。
+	adaptive := s.prepareAdaptive()
+	candidates := s.sampleCandidates(adaptive, 1500, false)
 	if len(candidates) == 0 {
 		return QuickScanResult{OK: false, Error: "未能生成候选 IP"}
 	}
@@ -243,6 +245,8 @@ func (s *Server) RunQuickScanFor(ctx context.Context, profile *store.Profile, on
 		Candidates: candidates,
 		SkipSpeed:  true, // 一键优选不测速：要的是「可用」，不是「快」
 		Top:        8,    // 与 CLI / 界面的默认 top 一致（2026-10-28 起 15 → 8）
+		// 实验性：把真实成败喂给网络档案（未开启时为 nil）。
+		ProbeObserver: s.observer(adaptive),
 		// 一键优选要跑一分多钟，没有进度用户会以为卡住了。
 		// 逐候选事件先喂给进度回调（托盘实时标题），日志再走节流。
 		Progress: func(p scan.Progress) {
@@ -272,7 +276,9 @@ func (s *Server) RunQuickScanFor(ctx context.Context, profile *store.Profile, on
 	s.logf(fmt.Sprintf("扫描完成，%d 个可用节点", len(summary.Entries)))
 
 	// ---- 4.5 写入优选历史（与本地真连接优选共用同一份留底）----
-	s.saveScanHistory("quick", host, wsPath, scan.ProbeDefaultPath, true, summary.Entries)
+	s.saveScanHistory("quick", host, wsPath, scan.ProbeDefaultPath, true, summary.Entries, adaptive.profileID)
+	// 实验性：把本轮观测写回网络档案。
+	s.saveAdaptive(adaptive)
 
 	// ---- 5. 回填面板 ----
 	//

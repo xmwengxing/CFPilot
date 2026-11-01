@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/history"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/scan"
 )
 
@@ -33,10 +34,38 @@ type adaptiveContext struct {
 	enabled bool
 	// profileID 是本次使用的网络档案 ID（空表示未启用）。
 	profileID string
+	// profileLabel 是档案的可读名称（界面提示用）。
+	profileLabel string
 	// store 是本机档案库（历史观测）。
 	store *scan.ProfileStore
 	// path 是档案库文件路径。
 	path string
+}
+
+// exploreRateOf 返回当前设置的探索比例（未启用时返回 0）。
+func (s *Server) exploreRateOf() float64 {
+	settings := normalizeExperimental(s.Settings().Experimental)
+	if !settings.AdaptiveSampling {
+		return 0
+	}
+	return settings.ExploreRatio
+}
+
+// historyStats 把扫描统计转成历史用的分阶段统计。
+//
+// 没有统计（例如历史文件来自旧版本）时返回 nil —— 不能用 0 冒充「统计为 0」。
+func historyStats(sum *scan.Summary) *history.ScanStats {
+	if sum == nil || len(sum.Stats) == 0 {
+		return nil
+	}
+	return &history.ScanStats{
+		Candidates: sum.Stats["candidates"],
+		TCPOK:      sum.Stats["tcpOk"],
+		TLSOK:      sum.Stats["tlsOk"],
+		WSOK:       sum.Stats["wsOk"],
+		SpeedOK:    sum.Stats["speedOk"],
+		ElapsedMs:  int64(sum.Stats["elapsedMs"]),
+	}
 }
 
 // profileStorePath 返回档案库文件路径。
@@ -44,6 +73,58 @@ type adaptiveContext struct {
 // 放在凭据目录旁边，和历史会话一样属于「本机数据」。
 func (s *Server) profileStorePath() string {
 	return filepath.Join(s.store.DirPath(), "scan-profiles.json")
+}
+
+// cliProfileStorePath 是 CLI 侧的档案库路径。
+//
+// CLI 与桌面版是两套程序，但**档案 ID 算法完全一致**，
+// 所以两边的样本应该能互相看到（同一网络环境下学习可以叠加）。
+// 桌面版以自己的文件为主，把 CLI 文件里的观测合并进来。
+func (s *Server) cliProfileStorePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".cfpilot", "network-profiles.json")
+}
+
+// loadProfileStore 读取档案库，并合并 CLI 侧的样本。
+//
+// 合并规则：同一「档案 + 前缀 + 阶段」取**较新**的一条（UpdatedAt 大的胜出）。
+// 读不到或损坏时返回空档案（调用方会退化成原有采样）。
+func (s *Server) loadProfileStore() *scan.ProfileStore {
+	primary := s.profileStorePath()
+	store, err := scan.LoadProfileStore(primary)
+	if err != nil {
+		s.logLevel("网络档案读取失败："+err.Error(), "warn")
+		store = scan.NewProfileStore()
+	}
+	cliPath := s.cliProfileStorePath()
+	if cliPath == "" || cliPath == primary {
+		return store
+	}
+	cliStore, err := scan.LoadProfileStore(cliPath)
+	if err != nil || cliStore == nil {
+		return store
+	}
+	merged := 0
+	for _, o := range cliStore.AllObservations() {
+		key := scan.StageObservationKey(o.ProfileID, o.Prefix, o.Stage)
+		existing, ok := store.ObservationByKey(key)
+		if !ok || o.UpdatedAt.After(existing.UpdatedAt) {
+			store.MergeObservation(o)
+			merged++
+		}
+	}
+	for _, p := range cliStore.Profiles {
+		if _, ok := store.Profiles[p.ID]; !ok {
+			store.Profiles[p.ID] = p
+		}
+	}
+	if merged > 0 {
+		s.logLevel("已合并 CLI 网络档案的 "+itoa(merged)+" 条观测", "info")
+	}
+	return store
 }
 
 // prepareAdaptive 准备自适应采样上下文。
@@ -56,14 +137,7 @@ func (s *Server) prepareAdaptive() adaptiveContext {
 		return adaptiveContext{}
 	}
 	path := s.profileStorePath()
-	store, err := scan.LoadProfileStore(path)
-	if err != nil || store == nil {
-		// 档案损坏时不静默丢弃历史：改名留档，从空档案开始。
-		if err != nil {
-			_ = renameAside(path)
-		}
-		store = scan.NewProfileStore()
-	}
+	store := s.loadProfileStore()
 	profile := store.PutProfile(scan.NetworkProfile{
 		ISP:    settings.ISP,
 		Region: settings.Region,
@@ -72,10 +146,11 @@ func (s *Server) prepareAdaptive() adaptiveContext {
 		Source: "manual",
 	})
 	return adaptiveContext{
-		enabled:   true,
-		profileID: profile.ID,
-		store:     store,
-		path:      path,
+		enabled:      true,
+		profileID:    profile.ID,
+		profileLabel: profileLabel(profile),
+		store:        store,
+		path:         path,
 	}
 }
 
@@ -112,6 +187,8 @@ func (s *Server) saveAdaptive(ctx adaptiveContext) {
 	if !ctx.enabled || ctx.store == nil {
 		return
 	}
+	// 记录「这次用过」：界面据此提示档案是否已过时（换了网络却没改档案）。
+	ctx.store.TouchProfile(ctx.profileID, time.Now().UTC())
 	if err := ctx.store.Save(ctx.path); err != nil {
 		s.logLevel("保存网络档案失败："+err.Error(), "warn")
 	}

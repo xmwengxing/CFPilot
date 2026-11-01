@@ -1,0 +1,73 @@
+{
+  "_comment": "跨语言一致性夹具：CLI（packages/cli/src/scan/candidates_adaptive.ts）与桌面版（packages/desktop/internal/scan/adaptive_sampling.go）必须对同一份输入算出同一组权重。改动任何一端的算法，先改这里的期望值并让两端同时通过。",
+  "profileId": "parity-profile",
+  "now": "2026-01-08T00:00:00Z",
+  "halfLifeHours": 168,
+  "observations": [
+    {
+      "prefix": "104.16.1.0/24",
+      "stage": "ws",
+      "attempts": 100,
+      "successes": 0,
+      "updatedAt": "2026-01-07T00:00:00Z"
+    },
+    {
+      "prefix": "104.24.0.0/24",
+      "stage": "ws",
+      "attempts": 100,
+      "successes": 100,
+      "updatedAt": "2026-01-07T00:00:00Z"
+    },
+    {
+      "prefix": "103.22.200.0/24",
+      "stage": "ws",
+      "attempts": 100,
+      "successes": 100,
+      "updatedAt": "2026-01-07T00:00:00Z"
+    },
+    {
+      "prefix": "104.16.5.0/24",
+      "stage": "tcp",
+      "attempts": 100,
+      "successes": 0,
+      "updatedAt": "2026-01-07T00:00:00Z"
+    },
+    {
+      "prefix": "104.16.5.0/24",
+      "stage": "ws",
+      "attempts": 2,
+      "successes": 2,
+      "updatedAt": "2026-01-07T00:00:00Z"
+    },
+    {
+      "prefix": "104.16.6.0/24",
+      "stage": "ws",
+      "attempts": 100,
+      "successes": 0,
+      "updatedAt": "2025-12-25T00:00:00Z"
+    }
+  ],
+  "prefixes": [
+    "104.16.1.0/24",
+    "104.24.0.0/24",
+    "172.64.1.0/24",
+    "103.22.200.0/24",
+    "104.16.5.0/24",
+    "104.16.6.0/24"
+  ],
+  "contract": {
+    "sampleCount": 4000,
+    "explorationRate": 0.1,
+    "maxPrefixShare": 0.05,
+    "exploreBudget": 400,
+    "capPerPrefix": 200
+  },
+  "expectedWeights": {
+    "104.16.1.0/24": 0.073042783,
+    "104.24.0.0/24": 0.995942068,
+    "172.64.1.0/24": 0.55,
+    "103.22.200.0/24": 0,
+    "104.16.5.0/24": 0.91846259,
+    "104.16.6.0/24": 0.218181818
+  }
+}

@@ -54,6 +54,8 @@ func (s *Server) registerScanRoutes(mux *http.ServeMux) {
 	// 优选历史（读取 / 删除）与单 IP 复测
 	mux.HandleFunc("/api/scan/history", s.guard(s.handleScanHistory))
 	mux.HandleFunc("/api/scan/quality-report", s.guard(s.handleIPQualityReport))
+	// 自适应效果 A/B 对照（同一档案、同一域名下的开/关对照）
+	mux.HandleFunc("/api/scan/adaptive-effect", s.guard(s.handleAdaptiveEffect))
 	mux.HandleFunc("/api/scan/re-test", s.guard(s.handleScanReTest))
 }
 
@@ -311,8 +313,16 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 		//
 		// 放在 publish 之前：界面收到 scan-result 后刷新历史列表时，
 		// 本次会议已经在文件里了。
-		sessionID := s.saveScanHistory("local", host, opt.WSPath, opt.ProbePath, req.SkipSpeed, sum.Entries, adaptive.profileID)
+		stats := historyStats(sum)
+		sessionID := s.saveScanHistory("local", host, opt.WSPath, opt.ProbePath, req.SkipSpeed, sum.Entries, adaptive.profileID, stats, adaptive.enabled, s.exploreRateOf())
 		payload["sessionId"] = sessionID
+		// 标注本轮是否用了自适应采样（界面据此提示，样本也据此做 A/B 对照）。
+		payload["adaptive"] = map[string]any{
+			"enabled":      adaptive.enabled,
+			"profileId":    adaptive.profileID,
+			"profileLabel": adaptive.profileLabel,
+			"exploreRate":  s.exploreRateOf(),
+		}
 
 		// 实验性：把本轮观测写回网络档案（未开启时不做任何事）。
 		s.saveAdaptive(adaptive)

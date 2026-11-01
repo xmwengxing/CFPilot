@@ -372,8 +372,44 @@ interface Window {
      *
      * 这些能力会改变优选行为，必须由用户显式开启才生效。
      */
-    getExperimental(): Promise<{ ok: boolean; experimental?: ExperimentalSettings; error?: string }>
+    getExperimental(): Promise<{
+      ok: boolean
+      experimental?: ExperimentalSettings
+      /** 当前档案状态（样本量、是否够用、是否久未使用） */
+      profile?: ExperimentalProfileStatus
+      /** 全部档案（管理界面用） */
+      profiles?: ExperimentalProfileStatus[]
+      error?: string
+    }>
     saveExperimental(params: ExperimentalSettings): Promise<{ ok: boolean; experimental?: ExperimentalSettings; error?: string }>
+    /** 列出网络档案（含样本量与当前档案）。 */
+    listExperimentalProfiles(): Promise<{ ok: boolean; profiles?: ExperimentalProfileStatus[]; error?: string }>
+    /** 重命名网络档案（改维度 → 档案 ID 变化，观测一并迁移）。 */
+    renameExperimentalProfile(params: {
+      id: string
+      isp: string
+      region: string
+      access: string
+    }): Promise<{ ok: boolean; error?: string }>
+    /** 删除网络档案及其观测。 */
+    deleteExperimentalProfile(id: string): Promise<{ ok: boolean; error?: string }>
+    /** 自适应效果 A/B 对照（同一档案、同一域名下的开/关对照）。 */
+    getAdaptiveEffect(profileId?: string): Promise<{
+      ok: boolean
+      profileId?: string
+      profile?: string
+      enabled?: AdaptiveEffectSide
+      disabled?: AdaptiveEffectSide
+      notice?: string
+      recent?: Array<{
+        at: string
+        adaptive: boolean
+        tcpRate: number
+        wsRate: number
+        nodes: number
+      }>
+      error?: string
+    }>
     /** 删除一条优选历史会话 */
     deleteScanHistory(id: string): Promise<{ ok: boolean; error?: string }>
     /**
@@ -594,6 +630,52 @@ interface ExperimentalSettings {
   region: string
   /** 接入类型：fixed 固网 / mobile 移动网络 */
   access: string
+}
+
+/**
+ * 一个网络档案的状态。
+ *
+ * 档案 ID 由「运营商 + 地区 + 接入方式 + 地址族」哈希得到，
+ * 不同档案的历史互不混用。
+ */
+interface ExperimentalProfileStatus {
+  id: string
+  /** 可读名称，如「中国电信 · 福建 · 固定宽带」 */
+  label: string
+  isp: string
+  region: string
+  access: string
+  /** 是否是当前设置正在使用的档案 */
+  current: boolean
+  /** 各阶段（tcp / tls / ws）的累计样本 */
+  stages: Record<string, { attempts: number; successes: number }>
+  /** 有观测记录的前缀（/24）数量 */
+  prefixCount: number
+  lastUpdated?: string
+  lastUsedAt?: string
+  /** 样本是否足以影响权重 */
+  enoughSamples: boolean
+  /** 一句话说明（样本不足 / 久未使用 / 正常） */
+  notice: string
+  /** 距离上次使用过去的天数 */
+  idleDays: number
+}
+
+/** A/B 对照的一侧（开启或关闭）。 */
+interface AdaptiveEffectSide {
+  /** 参与统计的轮数 */
+  runs: number
+  /** 平均候选数 */
+  avgCandidates: number
+  /** 阶段通过率（0~1） */
+  tcpRate: number
+  tlsRate: number
+  wsRate: number
+  /** 平均可用节点数 */
+  avgNodes: number
+  /** 平均耗时（毫秒） */
+  avgElapsedMs: number
+  lastAt?: string
 }
 interface IPQualityReport {
   version: number

@@ -1652,6 +1652,8 @@
     copyable: string
     sessionId?: string
     skippedSpeed?: boolean
+    /** 本轮是否启用了自适应采样（实验性） */
+    adaptive?: { enabled: boolean; profileId?: string; profileLabel?: string; exploreRate?: number }
   }): void {
     const out = $('scanOut')
     out.textContent = payload.copyable || '（没有结果）'
@@ -1724,6 +1726,24 @@
           ? '上方是本次结果。需要让订阅用上这些 IP 就点「回填面板」。'
           : ''
     }
+
+    // 本轮是否用了自适应采样（实验性）：写清楚，用户才知道这批结果是怎么采出来的。
+    const note = document.getElementById('scanAdaptiveNote')
+    if (note) {
+      const adaptive = payload.adaptive
+      if (adaptive && adaptive.enabled) {
+        note.hidden = false
+        note.textContent =
+          '本轮启用了自适应采样（档案：' +
+          (adaptive.profileLabel || adaptive.profileId || '未命名') +
+          '，探索比例 ' +
+          Math.round((adaptive.exploreRate || 0) * 100) +
+          '%）。本次观测已写回该档案，下一轮会据此调整网段权重。'
+      } else {
+        note.hidden = true
+        note.textContent = ''
+      }
+    }
   }
 
   /**
@@ -1789,10 +1809,135 @@
       if (explore) explore.value = String(Math.round((settings.exploreRatio || 0.2) * 100))
     }
 
+    /** 渲染「当前档案状态」：档案名、样本量、能不能用。 */
+    const renderProfileStatus = (profile?: ExperimentalProfileStatus, profiles?: ExperimentalProfileStatus[]): void => {
+      const box = document.getElementById('expStatus')
+      if (!box) return
+      box.replaceChildren()
+      if (!profile || !profile.id) {
+        const line = document.createElement('div')
+        line.className = 'muted'
+        if (profiles && profiles.length > 0) {
+          // 档案存在但开关没开 —— 要说清是「没启用」，不是「没有档案」
+          line.textContent =
+            '自适应采样当前未启用（本机已有 ' + profiles.length + ' 个档案）。打开开关并保存后，下一轮优选开始按档案调整网段权重。'
+        } else {
+          line.textContent = '尚未建立网络档案：打开「自适应网段权重」并保存后开始优选，这里会显示学习到的样本。'
+        }
+        box.appendChild(line)
+        return
+      }
+      const title = document.createElement('div')
+      title.className = 't-title'
+      title.textContent = '当前档案：' + profile.label
+      box.appendChild(title)
+
+      const stages = profile.stages || {}
+      const parts: string[] = []
+      for (const [stage, stat] of Object.entries(stages)) {
+        if (!stat || stat.attempts <= 0) continue
+        parts.push(stage + ' ' + stat.successes + '/' + stat.attempts)
+      }
+      const meta = document.createElement('div')
+      meta.className = 'muted'
+      meta.textContent =
+        '样本：' + (parts.length ? parts.join(' · ') : '暂无') +
+        ' · 覆盖网段 ' + profile.prefixCount +
+        (profile.lastUpdated ? ' · 最近更新 ' + fmtHistoryTime(profile.lastUpdated) : '')
+      box.appendChild(meta)
+
+      const notice = document.createElement('div')
+      notice.className = profile.enoughSamples ? 't-ok' : 't-warn'
+      notice.textContent = profile.notice
+      box.appendChild(notice)
+    }
+
+    /** 渲染档案列表（管理：删除 / 修正地区）。 */
+    const renderProfileList = (profiles: ExperimentalProfileStatus[]): void => {
+      const wrap = document.getElementById('expProfiles')
+      const list = document.getElementById('expProfileList')
+      if (!wrap || !list) return
+      wrap.hidden = profiles.length === 0
+      list.replaceChildren()
+      for (const profile of profiles) {
+        const row = document.createElement('div')
+        row.className = 'exp-profile'
+        const name = document.createElement('span')
+        name.className = 'p-name'
+        name.textContent = profile.label
+        const meta = document.createElement('span')
+        meta.className = 'p-meta'
+        const stages = profile.stages || {}
+        let attempts = 0
+        for (const stat of Object.values(stages)) attempts += stat?.attempts || 0
+        meta.textContent = '样本 ' + Math.round(attempts) + ' · 网段 ' + profile.prefixCount
+        row.appendChild(name)
+        row.appendChild(meta)
+        if (profile.current) {
+          const cur = document.createElement('span')
+          cur.className = 'p-cur'
+          cur.textContent = '当前'
+          row.appendChild(cur)
+        }
+        const fix = document.createElement('button')
+        fix.type = 'button'
+        fix.className = 'btn btn-ghost'
+        fix.textContent = '修正地区'
+        fix.addEventListener('click', () => {
+          const next = window.prompt('修改地区（留空表示不区分地区）', profile.region || '')
+          if (next === null) return
+          void window.cfpilot
+            .renameExperimentalProfile({
+              id: profile.id,
+              isp: profile.isp,
+              region: next.trim(),
+              access: profile.access,
+            })
+            .then(() => {
+              log('档案已更新', 'ok')
+              void refreshProfiles()
+            })
+            .catch((err) => log('修改档案失败：' + (err instanceof Error ? err.message : String(err)), 'err'))
+        })
+        row.appendChild(fix)
+        const del = document.createElement('button')
+        del.type = 'button'
+        del.className = 'btn btn-ghost'
+        del.textContent = '删除'
+        del.addEventListener('click', () => {
+          if (!window.confirm('删除档案「' + profile.label + '」及其全部观测样本？')) return
+          void window.cfpilot
+            .deleteExperimentalProfile(profile.id)
+            .then(() => {
+              log('档案已删除', 'ok')
+              void refreshProfiles()
+            })
+            .catch((err) => log('删除档案失败：' + (err instanceof Error ? err.message : String(err)), 'err'))
+        })
+        row.appendChild(del)
+        list.appendChild(row)
+      }
+    }
+
+    /** 重新读取档案状态与列表。 */
+    const refreshProfiles = async (): Promise<void> => {
+      try {
+        const res = await window.cfpilot.getExperimental()
+        if (res && res.ok) {
+          renderProfileStatus(res.profile, res.profiles)
+          renderProfileList(res.profiles || [])
+        }
+      } catch {
+        /* 读不到就不显示状态，不影响其它功能 */
+      }
+    }
+
     void window.cfpilot
       .getExperimental()
       .then((res) => {
         if (res && res.ok && res.experimental) fill(res.experimental)
+        renderProfileStatus(res?.profile, res?.profiles)
+        renderProfileList(res?.profiles || [])
       })
       .catch(() => {
         /* 读不到开关时保持界面默认（关闭）即可 */
@@ -1818,7 +1963,80 @@
         hint.textContent = res && res.ok ? '已保存（下次优选生效）' : res?.error || '保存失败'
       }
       if (res && res.ok && res.experimental) fill(res.experimental)
+      void refreshProfiles()
     })
+  }
+
+  /**
+   * 自适应效果 A/B 对照面板。
+   *
+   * 跨省样本拿不到，但同网络环境下「开 / 关」各跑一轮就能对照：
+   * 阶段通过率与最终可用节点数是唯一能自证收益的指标。
+   */
+  function bindAdaptiveEffect(): void {
+    const box = document.getElementById('adaptiveEffect')
+    const hint = document.getElementById('effectHint')
+    const refresh = document.getElementById('btnEffectRefresh')
+
+    const pct = (value: number): string => (value * 100).toFixed(1) + '%'
+
+    const load = async (): Promise<void> => {
+      if (!box) return
+      try {
+        const res = await window.cfpilot.getAdaptiveEffect()
+        if (!res || !res.ok) {
+          box.replaceChildren()
+          const line = document.createElement('p')
+          line.className = 'history-empty'
+          line.textContent = res?.error || '暂时无法读取对照数据'
+          box.appendChild(line)
+          return
+        }
+        const enabled = res.enabled
+        const disabled = res.disabled
+        box.replaceChildren()
+        if (!enabled || !disabled || (enabled.runs === 0 && disabled.runs === 0)) {
+          const line = document.createElement('p')
+          line.className = 'history-empty'
+          line.textContent = '还没有可对照的记录：开启与关闭自适应各跑一轮优选后，这里会给出分阶段通过率对比。'
+          box.appendChild(line)
+        } else {
+          const table = document.createElement('table')
+          table.className = 'effect-table'
+          const rows: string[] = []
+          rows.push(
+            '<tr><th>指标</th><th>开启自适应</th><th>关闭自适应</th></tr>',
+            '<tr><td>轮数</td><td>' + enabled.runs + '</td><td>' + disabled.runs + '</td></tr>',
+            '<tr><td>平均候选</td><td>' + enabled.avgCandidates.toFixed(0) + '</td><td>' + disabled.avgCandidates.toFixed(0) + '</td></tr>',
+            '<tr><td>阶段一通过率</td><td>' + pct(enabled.tcpRate) + '</td><td>' + pct(disabled.tcpRate) + '</td></tr>',
+            '<tr><td>阶段二通过率</td><td>' + pct(enabled.wsRate) + '</td><td>' + pct(disabled.wsRate) + '</td></tr>',
+            '<tr><td>平均可用节点</td><td>' + enabled.avgNodes.toFixed(1) + '</td><td>' + disabled.avgNodes.toFixed(1) + '</td></tr>',
+            '<tr><td>平均耗时</td><td>' + Math.round(enabled.avgElapsedMs / 1000) + ' 秒</td><td>' + Math.round(disabled.avgElapsedMs / 1000) + ' 秒</td></tr>'
+          )
+          table.innerHTML = rows.join('')
+          box.appendChild(table)
+          if (res.profile) {
+            const line = document.createElement('p')
+            line.className = 'tip'
+            line.style.marginTop = '8px'
+            line.textContent = '档案：' + res.profile
+            box.appendChild(line)
+          }
+        }
+        if (hint) hint.textContent = res.notice || ''
+      } catch (err) {
+        if (box) {
+          box.replaceChildren()
+          const line = document.createElement('p')
+          line.className = 'history-empty'
+          line.textContent = '读取失败：' + (err instanceof Error ? err.message : String(err))
+          box.appendChild(line)
+        }
+      }
+    }
+
+    refresh?.addEventListener('click', () => void load())
+    void load()
   }
 
   function bindScan(): void {
@@ -3392,6 +3610,7 @@
     bindScan()
     bindHistory()
     bindExperimental()
+    bindAdaptiveEffect()
     bindLogs()
       bindUpdater()
     bindPush()

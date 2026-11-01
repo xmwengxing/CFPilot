@@ -276,7 +276,7 @@ func (s *Server) RunQuickScanFor(ctx context.Context, profile *store.Profile, on
 	s.logf(fmt.Sprintf("扫描完成，%d 个可用节点", len(summary.Entries)))
 
 	// ---- 4.5 写入优选历史（与本地真连接优选共用同一份留底）----
-	s.saveScanHistory("quick", host, wsPath, scan.ProbeDefaultPath, true, summary.Entries, adaptive.profileID)
+	s.saveScanHistory("quick", host, wsPath, scan.ProbeDefaultPath, true, summary.Entries, adaptive.profileID, historyStats(summary), adaptive.enabled, s.exploreRateOf())
 	// 实验性：把本轮观测写回网络档案。
 	s.saveAdaptive(adaptive)
 

@@ -58,6 +58,8 @@ func normalizeExperimental(in config.ExperimentalSettings) config.ExperimentalSe
 
 func (s *Server) registerExperimentalRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/experimental", s.guard(s.handleExperimental))
+	// 档案管理（列表 / 重命名 / 删除）
+	mux.HandleFunc("/api/experimental/profiles", s.guard(s.handleExperimentalProfiles))
 }
 
 // handleExperimental 读取 / 保存实验性功能开关。
@@ -67,9 +69,14 @@ func (s *Server) registerExperimentalRoutes(mux *http.ServeMux) {
 func (s *Server) handleExperimental(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		current, list := s.profileStatus()
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":           true,
 			"experimental": normalizeExperimental(s.Settings().Experimental),
+			// 当前档案状态（样本量、是否够用、是否久未使用）
+			"profile": current,
+			// 全部档案（管理界面用）
+			"profiles": list,
 		})
 	case http.MethodPost:
 		var body experimentalRequest

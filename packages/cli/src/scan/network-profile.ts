@@ -2,7 +2,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, open, rename, unlink, writeFile } from 'node:fs/promises'
 import { isIP } from 'node:net'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { parseCidr } from './ip-ranges'
 
 export type FailureClass = 'timeout' | 'refused' | 'unreachable' | 'reset' | 'tls' | 'alpn' | 'dns' | 'http' | 'content' | 'cancelled' | 'unknown'
@@ -112,8 +112,38 @@ function canonicalPrefix(value: unknown): string {
   const prefix = networkBucket(parts[0]!)
   return prefix.endsWith(`/${parts[1]}`) ? prefix : ''
 }
+/**
+ * 地区归一化。
+ *
+ * 必须与桌面版（packages/desktop/internal/scan/profile.go 的 NormalizeRegion）
+ * **逐字节一致**：档案 ID 由「运营商 + 地区 + 接入方式 + 地址族」哈希得到，
+ * 两端算法不同就会算出两个档案 ID，样本无法互相看到。
+ *
+ * 规则：去空白 → 去结尾行政区后缀 → 单字简称映射成标准名。
+ */
+export function normalizeRegion(raw: string): string {
+  let value = text(raw).replace(/[\u3000\s]+/g, '')
+  if (!value) return ''
+  for (const suffix of ['特别行政区', '自治区', '省', '市']) {
+    if (value.length > suffix.length && value.endsWith(suffix)) {
+      value = value.slice(0, -suffix.length)
+      break
+    }
+  }
+  return REGION_ALIASES[value] ?? value
+}
+
+/** 单字简称 → 标准地区名（与桌面版保持一致）。 */
+const REGION_ALIASES: Record<string, string> = {
+  闽: '福建', 粤: '广东', 京: '北京', 沪: '上海', 津: '天津', 渝: '重庆',
+  浙: '浙江', 苏: '江苏', 鲁: '山东', 豫: '河南', 冀: '河北', 湘: '湖南',
+  鄂: '湖北', 皖: '安徽', 赣: '江西', 桂: '广西', 云: '云南', 贵: '贵州',
+  川: '四川', 晋: '山西', 陕: '陕西', 甘: '甘肃', 青: '青海', 宁: '宁夏',
+  新: '新疆', 藏: '西藏', 蒙: '内蒙古', 港: '香港', 澳: '澳门', 台: '台湾',
+}
+
 export function normalizeNetworkProfile(input: Partial<NetworkProfile>, now = Date.now()): NetworkProfile {
-  const isp = text(input.isp), region = text(input.region), access = text(input.access).toLowerCase(), family = text(input.family).toLowerCase() || 'ipv4'
+  const isp = text(input.isp), region = normalizeRegion(text(input.region)), access = text(input.access).toLowerCase(), family = text(input.family).toLowerCase() || 'ipv4'
   const id = createHash('sha256').update(JSON.stringify([isp.toLowerCase(), region.toLowerCase(), access, family])).digest('hex').slice(0, 32)
   return { id, isp, region, access, family, source: text(input.source), confidence: Math.min(1, count(input.confidence)), updatedAt: time(input.updatedAt, time(now)) }
 }
@@ -163,48 +193,13 @@ export function updateNetworkProfile(store: ProfileStoreDocument, observations: 
   return capStore(next)
 }
 
-/** 失败与成功一起衰减回静态先验，避免一次路由故障永久封锁前缀。 */
-export function sampleExploreExploit(candidates: readonly SamplingCandidate[], store: ProfileStoreDocument, options: SamplingOptions): SamplingCandidate[] {
-  const limit = finite(options.limit) ? Math.max(0, Math.floor(options.limit)) : 0
-  if (!limit) return []
-  const draw = (): number => Math.min(1 - Number.EPSILON, Math.max(0, (options.random ?? Math.random)()))
-  const pool = [...new Map(candidates.filter((item) => item.staticWeight !== 0 || options.includeZeroWeight === true).map((item) => [item.ip, item])).values()]
-  const rate = finite(options.explorationRate) ? Math.min(1, Math.max(0, options.explorationRate)) : 0.2
-  const exploreCount = Math.min(pool.length, limit, Math.ceil(limit * rate))
-  const byBucket = new Map<string, SamplingCandidate[]>()
-  for (const candidate of pool) {
-    const key = networkBucket(candidate.ip) || candidate.ip
-    byBucket.set(key, [...(byBucket.get(key) ?? []), candidate])
-  }
-  const selected: SamplingCandidate[] = [], used = new Set<string>()
-  const take = (item: SamplingCandidate): void => { if (!used.has(item.ip)) { selected.push(item); used.add(item.ip) } }
-  if (options.includeZeroWeight && exploreCount > 0) {
-    const zero = pool.filter((item) => item.staticWeight === 0)
-    if (zero.length) take(zero[Math.floor(draw() * zero.length)]!)
-  }
-  const buckets = [...byBucket.keys()]
-  for (let index = buckets.length - 1; index > 0; index--) {
-    const other = Math.floor(draw() * (index + 1))
-    ;[buckets[index], buckets[other]] = [buckets[other]!, buckets[index]!]
-  }
-  while (selected.length < exploreCount && buckets.length) {
-    const key = buckets.shift()!, list = byBucket.get(key)!.filter((item) => !used.has(item.ip))
-    if (!list.length) continue
-    take(list[Math.floor(draw() * list.length)]!)
-    if (list.length > 1) buckets.push(key)
-  }
-  const profileId = selectedProfile(store, options.profileId), now = time(options.now, Date.now())
-  const scored = pool.filter((item) => !used.has(item.ip) && item.staticWeight !== 0).map((candidate) => {
-    const prefix = networkBucket(candidate.ip)
-    const stages = profileId ? STAGES.map((stage) => store.observations[observationKey(profileId, prefix, stage)]).filter((item): item is PrefixObservation => !!item && item.attempts > 0) : []
-    const observation = stages.at(-1)
-    const prior = finite(candidate.staticWeight) ? Math.min(1, Math.max(0.02, candidate.staticWeight)) : 0.2
-    const decay = observation ? decayAt(observation.updatedAt, now, options.halfLifeMs ?? DEFAULT_HALF_LIFE) : 0
-    const score = (prior * 2 + (observation?.successes ?? 0) * decay) / (2 + (observation?.attempts ?? 0) * decay)
-    return { candidate, score: score + (finite(candidate.score) ? candidate.score * 0.001 : 0) }
-  }).sort((a, b) => b.score - a.score)
-  return [...selected, ...scored.map((item) => item.candidate)].slice(0, limit)
-}
+/**
+ * 采样内核**不在这里** —— 见 candidates_adaptive.ts 的 adaptivePool
+ * （唯一权威实现，桌面版 internal/scan/adaptive_sampling.go 与它一一对应）。
+ *
+ * 早前这里还有第二套「按分数排序取前 N」的采样逻辑，与内核语义冲突：
+ * 同一份档案在两端会得出不同的候选。现在只保留一套实现。
+ */
 
 function sanitizeObservation(raw: unknown, profiles: Record<string, NetworkProfile>): PrefixObservation | undefined {
   if (!record(raw)) return undefined
@@ -292,4 +287,31 @@ export async function saveNetworkProfile(file: string, store: ProfileStoreDocume
     await writeFile(temporary, `${JSON.stringify(sanitized, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
     await rename(temporary, file)
   } finally { await unlink(temporary).catch(() => {}) }
+}
+
+/**
+ * 合并另一个档案库（同一网络环境下两套程序的样本应当互通）。
+ *
+ * 桌面版把档案存在 `~/.cfpilot-gui/scan-profiles.json`，CLI 存在
+ * `~/.cfpilot/network-profiles.json` —— 档案 ID 算法一致，所以样本可以合并。
+ * 合并规则：同一「档案 + 前缀 + 阶段」取较新的一条。
+ */
+export function mergeProfileStores(base: ProfileStoreDocument, extra: ProfileStoreDocument): ProfileStoreDocument {
+  const profiles = { ...base.profiles }
+  for (const [id, profile] of Object.entries(extra.profiles)) {
+    if (!profiles[id]) profiles[id] = profile
+  }
+  const observations = { ...base.observations }
+  for (const [key, item] of Object.entries(extra.observations)) {
+    const previous = observations[key]
+    if (!previous || item.updatedAt > previous.updatedAt) observations[key] = item
+  }
+  return capStore({ version: 1, profiles, observations })
+}
+
+/** 桌面版的档案库路径（CLI 读它以共享样本）。 */
+export function desktopProfileStorePath(): string {
+  const home = process.env.USERPROFILE || process.env.HOME || ''
+  if (!home) return ''
+  return join(home, '.cfpilot-gui', 'scan-profiles.json')
 }

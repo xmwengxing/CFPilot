@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyFailureDetailed, createNetworkProfile, loadNetworkProfile, networkBucket, normalizeNetworkProfile, OBSERVATION_CAPACITY, sampleExploreExploit, saveNetworkProfile, updateNetworkProfile } from '../src/scan/network-profile'
+import { classifyFailureDetailed, createNetworkProfile, loadNetworkProfile, mergeProfileStores, networkBucket, normalizeNetworkProfile, normalizeRegion, OBSERVATION_CAPACITY, saveNetworkProfile, updateNetworkProfile } from '../src/scan/network-profile'
+import { adaptivePool, learnedPrefixWeight } from '../src/scan/candidates_adaptive'
 import { resolveCandidates } from '../src/scan/candidates'
 import { expandCidrs } from '../src/scan/ip-ranges'
 const observation = (store: ReturnType<typeof createNetworkProfile>) => Object.values(store.observations)[0]!
@@ -17,8 +18,36 @@ describe('本地网络档案', () => {
     expect(networkBucket('edge.example')).toBe('')
     expect(normalizeNetworkProfile({ isp: ' ISP ', region: ' CN ', access: 'WiFi', confidence: 2 }).id).toBe(normalizeNetworkProfile({ isp: 'isp', region: 'cn', access: 'wifi', source: 'manual' }).id)
   })
-  it('失败分类提供稳定类型和重试建议', () => {
-    expect(classifyFailureDetailed('socket timed out')).toMatchObject({ kind: 'timeout', retryable: true })
+  it('地区归一化：不同写法落到同一个档案', () => {
+    expect(normalizeRegion('福建')).toBe('福建')
+    expect(normalizeRegion(' 福建 ')).toBe('福建')
+    expect(normalizeRegion('福建省')).toBe('福建')
+    expect(normalizeRegion('闽')).toBe('福建')
+    expect(normalizeRegion('内蒙古自治区')).toBe('内蒙古')
+    expect(normalizeRegion('')).toBe('')
+    // 不同写法必须得到同一个档案 ID，否则历史被切碎
+    expect(normalizeNetworkProfile({ isp: 'ct', region: '福建省', access: 'fixed', family: 'ipv4' }).id)
+      .toBe(normalizeNetworkProfile({ isp: 'ct', region: '闽', access: 'fixed', family: 'ipv4' }).id)
+  })
+  it('合并另一个档案库的样本（桌面版与 CLI 互通）', () => {
+    const base = updateNetworkProfile(createNetworkProfile('ct-福建-fixed', 1000), [
+      { ip: '104.16.1.1', ok: true, stage: 'ws', at: 1000 },
+    ], 1000)
+    const extra = updateNetworkProfile(createNetworkProfile('ct-广东-fixed', 2000), [
+      { ip: '104.16.2.1', ok: true, stage: 'ws', at: 2000 },
+    ], 2000)
+    const merged = mergeProfileStores(base, extra)
+    expect(Object.keys(merged.profiles).length).toBe(2)
+    expect(Object.keys(merged.observations).length).toBe(2)
+    // 同键时取较新的一条（updatedAt 更晚的那条胜出）
+    const newer = updateNetworkProfile(base, [
+      { ip: '104.16.1.1', ok: false, stage: 'ws', at: 5000 },
+    ], 5000)
+    const merged2 = mergeProfileStores(base, newer)
+    const sameKey = Object.values(merged2.observations).find((item) => item.prefix === '104.16.1.0/24')!
+    expect(sameKey.updatedAt).toBe(5000)
+  })
+  it('失败分类提供稳定类型和重试建议', () => {    expect(classifyFailureDetailed('socket timed out')).toMatchObject({ kind: 'timeout', retryable: true })
     expect(classifyFailureDetailed('ECONNREFUSED')).toMatchObject({ kind: 'refused', retryable: false })
     expect(classifyFailureDetailed('', 503)).toMatchObject({ kind: 'http', retryable: true })
   })
@@ -44,18 +73,31 @@ describe('本地网络档案', () => {
   })
   it('失败历史随半衰期回到静态先验，零探索严格生效', () => {
     const store = updateNetworkProfile(createNetworkProfile('wifi', 0), Array.from({ length: 100 }, () => ({ ip: '104.16.1.1', ok: false, at: 0 })), 0)
-    const candidates = [{ ip: '104.16.1.9', staticWeight: 0.9 }, { ip: '104.16.2.9', staticWeight: 0.2 }]
-    expect(sampleExploreExploit(candidates, store, { limit: 1, explorationRate: 0, now: 0 })[0]!.ip).toBe('104.16.2.9')
-    expect(sampleExploreExploit(candidates, store, { limit: 1, explorationRate: 0, now: 100000, halfLifeMs: 1000 })[0]!.ip).toBe('104.16.1.9')
+    const profileId = Object.keys(store.profiles)[0]!
+    // 104.16.1.0/24 静态权重 0.9，被历史判死后权重应明显低于没有历史的 104.24.0.0/24（0.95）
+    const fresh = learnedPrefixWeight('104.16.1.0/24', store, profileId, 0, 1000)
+    const clean = learnedPrefixWeight('104.24.0.0/24', store, profileId, 0, 1000)
+    expect(fresh).toBeLessThan(clean / 5)
+    // 半衰期过后历史淡出 → 权重回到静态先验
+    const faded = learnedPrefixWeight('104.16.1.0/24', store, profileId, 100000, 1000)
+    expect(faded).toBeGreaterThan(fresh)
+    expect(faded).toBeCloseTo(0.9, 6)
   })
   it('零权重只占显式探索预算且不会重复抽样', () => {
-    const candidates = [{ ip: '104.16.1.1', staticWeight: 0 }, { ip: '104.16.2.1', staticWeight: 1 }]
     const profile = createNetworkProfile('wifi', 0)
-    expect(sampleExploreExploit(candidates, profile, { limit: 2, random: () => 0 })).toEqual([candidates[1]])
-    const selected = sampleExploreExploit([...candidates, candidates[0]!], profile, { limit: 3, explorationRate: 1, includeZeroWeight: true, random: () => 0 })
-    expect(new Set(selected.map((item) => item.ip)).size).toBe(selected.length)
-    expect(selected).toHaveLength(2)
-    expect(sampleExploreExploit(candidates, profile, { limit: 2, explorationRate: 0, includeZeroWeight: true })).toEqual([candidates[1]])
+    const profileId = Object.keys(profile.profiles)[0]!
+    // 103.22.200.0/24 在权重表里是 0（实测 TCP 层就不通）
+    const zero = '103.22.200.0/24'
+    const picked = adaptivePool([zero, '104.16.2.0/24'], 2, false, false, () => 0, profile, {
+      explorationRate: 0, now: 0, profileId,
+    })
+    expect(picked.every((item) => !item.ip.startsWith('103.22.'))).toBe(true)
+
+    const explored = adaptivePool([zero, '104.16.2.0/24'], 2, true, false, () => 0, profile, {
+      explorationRate: 1, now: 0, profileId,
+    })
+    expect(new Set(explored.map((item) => item.ip)).size).toBe(explored.length)
+    expect(explored).toHaveLength(2)
   })
   it('只写统一 envelope 并完成原子保存往返', async () => {
     const file = await temporary(), store = updateNetworkProfile(createNetworkProfile('wifi', 1), [{ ip: '104.16.1.1', ok: true, at: 1 }], 1)
@@ -94,8 +136,12 @@ describe('本地网络档案', () => {
     const store = updateNetworkProfile(createNetworkProfile('wifi', 0), [{ ip: '104.16.1.1', ok: true, at: 0 }], 0)
     const other = Object.values(createNetworkProfile('other', 0).profiles)[0]!
     store.profiles[other.id] = other
-    const candidates = [{ ip: '104.16.2.2' }, { ip: '104.16.1.2' }]
-    expect(sampleExploreExploit(candidates, store, { limit: 1, explorationRate: 0, now: 0 })[0]).toBe(candidates[0])
+    // 只用「wifi」档案的历史：104.16.1.0/24 有成功记录，权重应高于无记录的 104.16.2.0/24
+    const profileId = Object.keys(store.profiles).find((id) => id !== other.id)!
+    const picked = adaptivePool(['104.16.1.0/24', '104.16.2.0/24'], 1, false, false, () => 0, store, {
+      explorationRate: 0, now: 0, profileId,
+    })
+    expect(picked[0]!.ip.startsWith('104.16.1.')).toBe(true)
   })
 })
 
@@ -107,7 +153,8 @@ describe('自适应候选集', () => {
   it('自适应合并重叠网段、保留小网段范围且填满有限容量', async () => {
     const opts = { cidr: ['104.16.1.0/30', '104.16.1.0/31', '104.16.1.0/30'], sample: 20, seed: 42, profile: createNetworkProfile('wifi', 0) }
     const selected = await resolveCandidates(opts)
-    expect(selected.sort()).toEqual(['104.16.1.0', '104.16.1.1', '104.16.1.2', '104.16.1.3'])
+    // 与桌面版一致：剔除 .0 与 .255 结尾的地址（网络号 / 广播号的通用规则）
+    expect(selected.sort()).toEqual(['104.16.1.1', '104.16.1.2', '104.16.1.3'])
     expect(await resolveCandidates(opts)).toEqual(await resolveCandidates(opts))
   })
   it('零权重网段必须显式开启探索且不占利用预算', async () => {

@@ -241,15 +241,15 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 		// 转成界面期望的形态
 		entries := make([]map[string]any, 0, len(sum.Entries))
 		for _, e := range sum.Entries {
-		entries = append(entries, map[string]any{
-			"ip":      e.IP,
-			"port":    e.Port,
-			"colo":    e.Colo,
-			"city":    scan.ColoNameOf(e.Colo),
-			"latency": e.Latency,
-			"tlsMs":   e.TLSMs,
-			"speed":   e.Speed,
-		})
+			entries = append(entries, map[string]any{
+				"ip":      e.IP,
+				"port":    e.Port,
+				"colo":    e.Colo,
+				"city":    scan.ColoNameOf(e.Colo),
+				"latency": e.Latency,
+				"tlsMs":   e.TLSMs,
+				"speed":   e.Speed,
+			})
 		}
 
 		payload := map[string]any{

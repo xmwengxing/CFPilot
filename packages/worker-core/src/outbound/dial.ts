@@ -27,6 +27,7 @@
  */
 import { socks5Connect } from './socks5'
 import { httpConnect } from './http-proxy'
+import { blockedTarget, TargetBlockedError } from './guard'
 import { isIpv4 } from '../protocols/address'
 import { resolveEndpointIps } from './doh'
 import { collectRelayEndpoints, RELAY_BATCH_SIZE, type RelayPoolOptions } from './relay'
@@ -131,6 +132,14 @@ export interface DialOptions {
    * 排查时完全没有线索（这正是归档代码陷入死循环的直接原因）。
    */
   onFailure?: (failure: DialFailure) => void
+  /**
+   * 跳过目标地址策略（SSRF 黑名单）。
+   *
+   * 只有「拨号的对象不是用户目标」时才置位 —— 反代入口就是这种：
+   * 它是我们自己选的落地服务器，不是客户端请求的目的地。
+   * 普通目标一律走策略判定（见 `outbound/guard.ts`）。
+   */
+  skipTargetPolicy?: boolean
 }
 
 export interface DialResult {
@@ -664,6 +673,16 @@ export async function dial(options: DialOptions): Promise<DialResult> {
   const proxies = options.proxies ?? []
   const concurrent = options.concurrent ?? true
 
+  // 目标地址策略：命中且完全没有代理时**立即失败**。
+  //
+  // 不这样做就要先花一次 DoH 解析 + 一轮 5s 超时才得到「连不上」——
+  // 而这类目标在 Worker 上永远连不上（见 outbound/guard.ts 的边界说明）。
+  // 配了代理则继续：局域网目标需要由代理侧建连，拦在这里会让功能直接不可用。
+  if (!options.skipTargetPolicy && proxies.length === 0) {
+    const blocked = blockedTarget(options.hostname)
+    if (blocked) throw new TargetBlockedError(options.hostname, blocked)
+  }
+
   // 总预算：DoH 解析与连接竞速共用同一个截止时间
   const budgetMs = options.budgetMs ?? DEFAULT_DIAL_BUDGET_MS
   const deadline = Date.now() + budgetMs
@@ -761,6 +780,12 @@ export async function dial(options: DialOptions): Promise<DialResult> {
     const connectTimeout = Math.max(200, Math.min(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, remaining))
     const attemptOptions: DialOptions = { ...options, timeoutMs: connectTimeout }
     try {
+      // 目标地址策略：只拦直连 / 优选 IP。代理与反代入口不受影响 ——
+      // 「用落地代理回家里的 NAS」是合法用法，拦掉就等于功能不可用。
+      if (!options.skipTargetPolicy && candidate.source !== 'proxy' && candidate.source !== 'relay') {
+        const blocked = blockedTarget(candidate.host)
+        if (blocked) throw new TargetBlockedError(candidate.host, blocked)
+      }
       if (candidate.source === 'proxy' && candidate.via) {
         // 代理候选：连代理，由代理转发到**原始目标**
         return await dialViaProxy(attemptOptions, {

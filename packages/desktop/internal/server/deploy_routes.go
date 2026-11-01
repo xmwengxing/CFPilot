@@ -82,6 +82,54 @@ func resolveKVNamespaceID(requested, profileKV string) string {
 	return strings.TrimSpace(profileKV)
 }
 
+// freshKvPrefix 是「全新部署」自动新建的 KV 名称前缀（与 CLI 的 cfpilot-kv- 一致）。
+const freshKvPrefix = "cfpilot-kv-"
+
+// resolveDeployKv 决定本次部署**实际使用**的 KV 命名空间 ID。
+//
+// 规则：
+//   - 全新部署（mode=fresh）→ **忽略**请求 / 账户里选中的 KV，新建一个独占的
+//   - 其余情况          → 请求里指定的优先，留空回落到账户里保存的
+//
+// 返回的第二个值非空表示本次新建了 KV（界面据此刷新下拉框）。
+//
+// ## 为什么全新部署必须自建 KV
+//
+// 内核在 KV 里的键是**全局平铺**的（CONFIG / PANEL_PATH / ADMIN_PW_HASH …），
+// 没有实例前缀。拿一个已有实例的 KV 去跑「全新部署」，等于把新的
+// UUID / WS 路径 / 面板密码写进原实例的 CONFIG —— 原实例的所有客户端
+// 节点立刻失效，而且全程没有任何报错。
+//
+// 归属校验（deploy.assertKvOwnership）能拦下这种写入，但那是**兜底**：
+// 用户点「全新部署」的意图本来就是「再开一套」，还要求他先去凭据页
+// 手动新建并选中一个 KV，等于把内部约束摊给用户。这里直接建好。
+func (s *Server) resolveDeployKv(
+	ctx context.Context,
+	client *cfapi.Client,
+	profile *store.Profile,
+	mode, requested string,
+) (string, string, error) {
+	if strings.EqualFold(strings.TrimSpace(mode), "fresh") {
+		title := freshKvPrefix + shortRandom(8)
+		ns, err := client.CreateKVNamespace(ctx, profile.AccountID, title)
+		if err != nil {
+			return "", "", fmt.Errorf("全新部署需要新建 KV 命名空间，但创建失败：%w", err)
+		}
+		s.logLevel("全新部署：已新建 KV 命名空间 "+ns.Title+"（"+ns.ID+"）", "ok")
+		// 顺手写进当前账户：否则后续「检查状态 / 取凭据」还指着上一个实例
+		if _, e := s.store.SaveActive(store.Patch{KVNamespaceID: &ns.ID}); e != nil {
+			s.logLevel("保存 KV 选择失败："+e.Error(), "warn")
+		}
+		return ns.ID, ns.Title, nil
+	}
+
+	id := resolveKVNamespaceID(requested, profile.KVNamespaceID)
+	if id == "" {
+		return "", "", errors.New("尚未选择 KV 命名空间，请到「Cloudflare 凭据」页刷新 KV 列表并选一个")
+	}
+	return id, "", nil
+}
+
 // deploySkipSameVersion 判断本次部署是否跳过「线上版本与本地相同」的部署。
 //
 // 规则：
@@ -163,14 +211,12 @@ func (s *Server) handleDeployRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	kvID := strings.TrimSpace(req.KVNamespaceID)
-	if kvID == "" {
-		kvID = strings.TrimSpace(profile.KVNamespaceID)
-	}
-	if kvID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error": "尚未选择 KV 命名空间，请到「Cloudflare 凭据」页刷新 KV 列表并选一个",
-		})
+	// KV 解析：**全新部署会新建一个**，其余情况沿用请求 / 账户里选的（见 resolveDeployKv）
+	kvCtx, cancelKv := context.WithTimeout(context.Background(), 25*time.Second)
+	kvID, freshKvTitle, kvErr := s.resolveDeployKv(kvCtx, s.newCFClient(profile.CfToken), profile, req.Mode, req.KVNamespaceID)
+	cancelKv()
+	if kvErr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": kvErr.Error()})
 		return
 	}
 
@@ -319,10 +365,16 @@ func (s *Server) handleDeployRun(w http.ResponseWriter, r *http.Request) {
 		s.events.publish("deploy-status", payload)
 	}()
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"started": true,
 		"note":    "部署已开始，进度会通过 SSE 实时推送",
-	})
+	}
+	// 全新部署自建的 KV：回给界面，让它把下拉框切到这个新命名空间
+	if freshKvTitle != "" {
+		resp["kvNamespaceId"] = kvID
+		resp["kvTitle"] = freshKvTitle
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // loadKernelArtifacts 读取「应该用于部署」的内核产物（control.js / dataplane.js）。

@@ -28,14 +28,23 @@ async function readWithTimeout(
   label: string
 ): Promise<Uint8Array | null> {
   const deadline = Date.now() + timeoutMs
-  const result = await Promise.race([
-    stream.readExactly(n),
-    new Promise<null>((r) => setTimeout(() => r(null), Math.max(1, deadline - Date.now()))),
-  ])
-  if (result === null) {
-    throw new Error(`${label}超时（${timeoutMs}ms 无响应）`)
+  let timer: ReturnType<typeof setTimeout> | null = null
+  try {
+    const result = await Promise.race([
+      stream.readExactly(n),
+      new Promise<null>((r) => {
+        timer = setTimeout(() => r(null), Math.max(1, deadline - Date.now()))
+      }),
+    ])
+    if (result === null) {
+      throw new Error(`${label}超时（${timeoutMs}ms 无响应）`)
+    }
+    return result
+  } finally {
+    // 成功路径也要清：一次握手要读 4~6 次，不清就会留下 4~6 个悬挂定时器，
+    // 让 isolate 多存活数秒并一直持有闭包引用。
+    if (timer) clearTimeout(timer)
   }
-  return result
 }
 
 /**
@@ -105,8 +114,11 @@ export async function socks5Connect(
       const lenByte = await readWithTimeout(stream, 1, timeoutMs, 'SOCKS5 响应')
       if (!lenByte) throw new Error('SOCKS5 响应截断')
       await readWithTimeout(stream, lenByte[0]!, timeoutMs, 'SOCKS5 响应')
-    } else if (atyp === 0x04) await stream.readExactly(16)
-    else throw new Error('SOCKS5 响应地址类型非法')
+    } else if (atyp === 0x04) {
+      // IPv6 绑定地址同样是 16 字节 —— 早期这里裸读，没有超时，
+      // 代理在此时停住会挂到运行时超时。
+      await readWithTimeout(stream, 16, timeoutMs, 'SOCKS5 响应')
+    } else throw new Error('SOCKS5 响应地址类型非法')
     await readWithTimeout(stream, 2, timeoutMs, 'SOCKS5 响应') // 端口
 
     return stream.release()

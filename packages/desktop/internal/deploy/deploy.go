@@ -847,9 +847,9 @@ func (d *Deployer) writeManifest(ctx context.Context, old *Manifest, eff effecti
 		DataCustomDomain: customDomain,
 		// 部署形态：更新时靠它识别「用户是否改过数据面形态」
 		DataPlaneMode: d.result.DataPlaneMode,
-		Build:            build,
-		KernelVersion:    kernelVersion,
-		At:               time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		Build:         build,
+		KernelVersion: kernelVersion,
+		At:            time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
 		Credentials: Credentials{
 			PanelPath:      eff.panelPath,
 			PanelPassword:  eff.panelPassword,

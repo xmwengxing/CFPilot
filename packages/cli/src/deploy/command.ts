@@ -246,9 +246,29 @@ export async function runDeployCommand(args: ParsedArgs): Promise<void> {
     return
   }
 
+  /* ---------------- 部署模式（必须在 KV 解析之前） ---------------- */
+
+  const mode = (flagString(args, 'mode') || 'auto') as 'auto' | 'fresh' | 'update'
+  if (!['auto', 'fresh', 'update'].includes(mode)) {
+    process.stderr.write(`✗ --mode 只接受 auto / fresh / update，收到：${mode}\n`)
+    process.exitCode = 1
+    return
+  }
+
   /* ---------------- KV 解析：定位本次要部署的实例 ---------------- */
 
-  const forceNewKv = flagBool(args, 'new-kv')
+  // 全新部署 = 再开一套实例 → KV 必须**新建**，忽略 --kv
+  //
+  // 内核在 KV 里的键是全局平铺的（CONFIG / PANEL_PATH / ADMIN_PW_HASH …），
+  // 没有实例前缀。拿已有实例的 KV 跑全新部署，等于把新的 UUID / WS 路径 /
+  // 面板密码写进原实例的 CONFIG —— 原实例的客户端节点全部失效，且没有报错。
+  // 与桌面版「部署页 → 全新部署」同语义（那里也忽略凭据页选中的 KV）。
+  if (mode === 'fresh' && kvId) {
+    process.stdout.write(`· 全新部署会新建独立 KV，已忽略 --kv ${kvId}\n`)
+    kvId = ''
+  }
+
+  const forceNewKv = flagBool(args, 'new-kv') || mode === 'fresh'
   const existing = await listCfPilotNamespaces(client, resolvedAccount)
 
   if (!kvId && !forceNewKv) {
@@ -285,20 +305,15 @@ export async function runDeployCommand(args: ParsedArgs): Promise<void> {
   } else if (!kvId && forceNewKv) {
     // 显式要求新建实例
     const title = flagString(args, 'kv-title') || `cfpilot-kv-${Date.now().toString(36)}`
-    process.stdout.write(`创建新的 KV 命名空间（--new-kv）：${title}\n`)
+    process.stdout.write(
+      `创建新的 KV 命名空间（${mode === 'fresh' ? '全新部署' : '--new-kv'}）：${title}\n`
+    )
     const ns = await client.createKvNamespace(resolvedAccount, title)
     kvId = ns.id
     process.stdout.write(`✓ KV 已创建：${ns.id}\n`)
     if (existing.length > 0) {
       process.stdout.write(`· 账号下现有 ${existing.length} 个实例，本次为第 ${existing.length + 1} 个\n`)
     }
-  }
-
-  const mode = (flagString(args, 'mode') || 'auto') as 'auto' | 'fresh' | 'update'
-  if (!['auto', 'fresh', 'update'].includes(mode)) {
-    process.stderr.write(`✗ --mode 只接受 auto / fresh / update，收到：${mode}\n`)
-    process.exitCode = 1
-    return
   }
 
   // 数据面部署形态：不传 = 沿用清单（旧清单按 pages 处理）

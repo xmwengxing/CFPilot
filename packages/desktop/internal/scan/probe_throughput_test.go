@@ -294,6 +294,36 @@ func TestMeasureThroughputHonorsTotalBudget(t *testing.T) {
 	}
 }
 
+// 空窗口不能被算进稳态分母：链路中途停顿不是「测到很慢」。
+func TestWindowMeterSkipsEmptyWindows(t *testing.T) {
+	start := time.Unix(0, 0)
+	m := newWindowMeter(start, 0, 500*time.Millisecond)
+	m.add(1024 * 1024) // 1MB / 0.5s = 2 MB/s
+	m.tick(start.Add(500 * time.Millisecond))
+	m.tick(start.Add(time.Second)) // 空窗
+
+	_, steady, _ := m.finish(start.Add(time.Second))
+	if steady < 1.8 || steady > 2.2 {
+		t.Errorf("空窗不应稀释稳态（期望 ≈2 MB/s），实际 %.2f", steady)
+	}
+}
+
+// 跨预热边界的窗口只按边界之后的时长参与加权（与 CLI 同一口径）。
+func TestWindowMeterStraddlingWarmup(t *testing.T) {
+	start := time.Unix(0, 0)
+	m := newWindowMeter(start, time.Second, 600*time.Millisecond)
+	m.tick(start.Add(600 * time.Millisecond)) // 空窗
+	m.add(1258291)                            // 600~1200ms：≈2 MB/s
+	m.tick(start.Add(1200 * time.Millisecond))
+	m.add(125829) // 1200~1800ms：≈0.2 MB/s
+
+	_, steady, _ := m.finish(start.Add(1800 * time.Millisecond))
+	// 整窗计入（旧口径）≈1.1；只折算边界之后（新口径）≈0.65
+	if steady < 0.55 || steady > 0.75 {
+		t.Errorf("跨界窗口应只折算预热之后的部分（期望 ≈0.65 MB/s），实际 %.2f", steady)
+	}
+}
+
 // windowMeter 的纯逻辑测试：钉住「稳态 / 峰值 / 快速链路兜底」三个口径。
 //
 // 曲线取自真机（3 条并行连接、400ms 窗口）的逐窗速率，

@@ -376,12 +376,13 @@ type windowMeter struct {
 	window    time.Duration
 
 	// mu 保护共享计数：多条连接会并发 add，ticker 会并发 settle。
-	mu            sync.Mutex
-	windowBytes   int64
-	windowStart   time.Time
-	peak          float64
-	total         int64
-	steadyBytes   int64
+	mu          sync.Mutex
+	windowBytes int64
+	windowStart time.Time
+	peak        float64
+	total       int64
+	// steadyBytes 用浮点：跨界窗口按时间比例折算后不再是整数。
+	steadyBytes   float64
 	steadySeconds float64
 }
 
@@ -439,7 +440,7 @@ func (m *windowMeter) finish(now time.Time) (total int64, steadyMBps, peakMBps f
 	total = m.total
 	peakMBps = m.peak
 	if m.steadySeconds > 0 {
-		steadyMBps = float64(m.steadyBytes) / 1024 / 1024 / m.steadySeconds
+		steadyMBps = m.steadyBytes / 1024 / 1024 / m.steadySeconds
 	} else {
 		// 整段都在预热期：退回峰值，绝不能报 0（否则会被当成「测速失败」）。
 		steadyMBps = m.peak
@@ -448,20 +449,40 @@ func (m *windowMeter) finish(now time.Time) (total int64, steadyMBps, peakMBps f
 }
 
 // settleLocked 结算一个窗口：慢启动期内只丢弃，不记峰值 / 稳态。
+//
+// 与 CLI 一致的两处口径细节（都会让稳态偏低，方向单一，必须排除）：
+//  1. 空窗不计时：链路中途停顿的时间不能算进分母；
+//  2. 跨界窗口只折算预热边界之后的部分，否则预热期样本会以整窗权重
+//     参与稳态加权。
 func (m *windowMeter) settleLocked(now time.Time) {
 	dt := now.Sub(m.windowStart).Seconds()
 	if dt <= 0 {
 		return
 	}
 	n := m.windowBytes
+	windowStart := m.windowStart
 	m.windowBytes = 0
 	m.windowStart = now
-	// 与 CLI 一致：按「窗口结束时刻」判断是否还在预热期。
-	if now.Sub(m.startedAt) < m.warmup {
+
+	// 1. 空窗
+	if n == 0 {
 		return
 	}
-	m.steadyBytes += n
-	m.steadySeconds += dt
+
+	// 2. 跨预热边界：按边界之后的时长等比折算
+	warmupEnd := m.startedAt.Add(m.warmup)
+	effectiveStart := windowStart
+	if effectiveStart.Before(warmupEnd) {
+		effectiveStart = warmupEnd
+	}
+	effectiveSeconds := now.Sub(effectiveStart).Seconds()
+	if effectiveSeconds <= 0 {
+		return
+	}
+	share := effectiveSeconds / dt
+	m.steadyBytes += float64(n) * share
+	m.steadySeconds += effectiveSeconds
+	// 窗口内平均速率不受折算影响（分子分母同比缩小）
 	speed := float64(n) / 1024 / 1024 / dt
 	if speed > m.peak {
 		m.peak = speed

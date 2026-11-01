@@ -92,6 +92,35 @@ describe('WindowMeter（测速口径）', () => {
     expect(meter.peakMBps).toBeGreaterThan(0)
   })
 
+  it('空窗口不计入稳态分母（链路中途停顿不能被当成「测得很慢」）', () => {
+    const startAt = 0
+    const meter = new WindowMeter({ startedAt: startAt, warmupMs: 0, windowMs: 500 })
+    meter.add(1024 * 1024) // 第 1 个窗口：1MB / 0.5s = 2 MB/s
+    meter.tick(500)
+    meter.tick(1000) // 第 2 个窗口：0 字节（停顿），不能累加 0.5s
+    meter.finish(1000)
+
+    // 旧口径：1MB / 1s = 1 MB/s；新口径：1MB / 0.5s = 2 MB/s
+    expect(meter.steadyMBps).toBeGreaterThan(1.8)
+    expect(meter.steadyMBps).toBeLessThan(2.2)
+  })
+
+  it('跨预热边界的窗口只按边界之后的时长参与加权', () => {
+    const startAt = 0
+    // 预热 1000ms、窗口 600ms：第 2 个窗口（600~1200）正好跨边界
+    const meter = new WindowMeter({ startedAt: startAt, warmupMs: 1000, windowMs: 600 })
+    meter.tick(600) // 空窗
+    meter.add(Math.round(1.2 * 1024 * 1024)) // 600~1200：2 MB/s
+    meter.tick(1200)
+    meter.add(Math.round(0.12 * 1024 * 1024)) // 1200~1800：0.2 MB/s
+    meter.finish(1800)
+
+    // 整窗计入（旧口径）：(1.2 + 0.12) / (0.6 + 0.6) ≈ 1.1
+    // 只折算边界之后（新口径）：(0.4 + 0.12) / (0.2 + 0.6) ≈ 0.65
+    expect(meter.steadyMBps).toBeGreaterThan(0.55)
+    expect(meter.steadyMBps).toBeLessThan(0.75)
+  })
+
   it('实测曲线（真机 3 流 400ms 窗口）报稳态 ≈1.1 而非峰值 2.46', () => {
     const startAt = 0
     const meter = new WindowMeter({ startedAt: startAt, warmupMs: 1000, windowMs: 400 })

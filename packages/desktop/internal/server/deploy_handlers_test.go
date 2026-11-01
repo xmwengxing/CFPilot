@@ -19,7 +19,9 @@ package server
 // httptest 服务器（见 Server.SetCFAPIBase）。
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -38,6 +40,8 @@ type fakeCF struct {
 	seenKV []string
 	// seenToken 记录请求带的 Token。
 	seenToken []string
+	// createdKvTitles 记录被新建的 KV 命名空间名称。
+	createdKvTitles []string
 }
 
 func newFakeCF() *fakeCF {
@@ -58,6 +62,24 @@ func (f *fakeCF) handler(t *testing.T) http.HandlerFunc {
 			list := f.accounts[token]
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": list})
+			return
+		}
+
+		// ---- 新建 KV ----
+		// 路径：/accounts/{acc}/storage/kv/namespaces（无尾部段）
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/storage/kv/namespaces") {
+			var body struct {
+				Title string `json:"title"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			f.createdKvTitles = append(f.createdKvTitles, body.Title)
+			id := fmt.Sprintf("kv-new-%d", len(f.createdKvTitles))
+			f.kv[id] = map[string]string{}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"result":  map[string]string{"id": id, "title": body.Title},
+			})
 			return
 		}
 
@@ -320,6 +342,94 @@ func TestDeploySkipSameVersion(t *testing.T) {
 		if got := deploySkipSameVersion(tc.mode, tc.force); got != tc.want {
 			t.Errorf("%s：期望 %v，实际 %v", tc.name, tc.want, got)
 		}
+	}
+}
+
+// ---------- 全新部署必须自建 KV ----------
+
+// 「全新部署」= 再开一套实例，KV 必须**新建**。
+//
+// 旧行为：直接沿用「凭据」页选中的 KV（或账户里保存的那个），
+// 直到归属校验判成 occupied 才报错 —— 用户点「全新部署」后
+// 被要求先去凭据页手动新建并选中一个 KV，把内部约束摊给了用户。
+// 更糟的是勾选「强制覆盖」就会把新凭据写进原实例的 CONFIG，
+// 原实例的客户端节点全部失效。
+func TestResolveDeployKvFreshCreatesNew(t *testing.T) {
+	f := newFakeCF()
+	f.kv["kv-existing"] = map[string]string{
+		"CFP_DEPLOY_MANIFEST": manifestJSON("control-existing", "PASSWORD-EXISTING"),
+	}
+	cfSrv := httptest.NewServer(f.handler(t))
+	t.Cleanup(cfSrv.Close)
+
+	s, _ := newTestServer(t)
+	s.SetCFAPIBase(cfSrv.URL)
+	st := newEmptyStore(t)
+	if _, err := st.Create("a", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SaveActive(store.Patch{
+		CfToken:       ptr("cfat_testtoken"),
+		AccountID:     ptr("acc123"),
+		KVNamespaceID: ptr("kv-existing"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s.SetStore(st)
+
+	profile, err := s.store.Active()
+	if err != nil || profile == nil {
+		t.Fatalf("取当前账户失败：%v", err)
+	}
+
+	// 界面照旧传了选中的 KV，全新部署必须忽略它
+	id, title, err := s.resolveDeployKv(
+		context.Background(), s.newCFClient("cfat_testtoken"), profile, "fresh", "kv-existing")
+	if err != nil {
+		t.Fatalf("全新部署应自建 KV，实际报错：%v", err)
+	}
+	if id == "kv-existing" {
+		t.Fatal("全新部署复用了凭据页选中的 KV —— 会覆盖原实例的 CONFIG")
+	}
+	if !strings.HasPrefix(title, freshKvPrefix) || title == freshKvPrefix {
+		t.Errorf("新建 KV 名称应以 %q 开头，实际 %q", freshKvPrefix, title)
+	}
+	if len(f.createdKvTitles) != 1 {
+		t.Fatalf("应调用 1 次建 KV，实际 %d 次", len(f.createdKvTitles))
+	}
+	if f.createdKvTitles[0] != title {
+		t.Errorf("建 KV 用的名称 %q 与返回值 %q 不一致", f.createdKvTitles[0], title)
+	}
+
+	// 建完要写回账户，否则后续「检查状态 / 取凭据」还指着旧实例
+	active, err := s.store.Active()
+	if err != nil || active == nil {
+		t.Fatalf("取当前账户失败：%v", err)
+	}
+	if active.KVNamespaceID != id {
+		t.Errorf("新 KV 未写回账户：期望 %q，实际 %q", id, active.KVNamespaceID)
+	}
+}
+
+// 非全新部署沿用请求 / 账户里的 KV，**不**要建新的。
+func TestResolveDeployKvReusesSelection(t *testing.T) {
+	s, _ := newTestServer(t)
+	client := s.newCFClient("cfat_testtoken")
+	profile := &store.Profile{CfToken: "cfat_testtoken", AccountID: "acc123", KVNamespaceID: "kv-profile"}
+
+	id, title, err := s.resolveDeployKv(context.Background(), client, profile, "auto", "kv-selected")
+	if err != nil || id != "kv-selected" || title != "" {
+		t.Errorf("auto 模式应用请求里选的 KV，实际 id=%q title=%q err=%v", id, title, err)
+	}
+
+	id, title, err = s.resolveDeployKv(context.Background(), client, profile, "update", "  ")
+	if err != nil || id != "kv-profile" || title != "" {
+		t.Errorf("update 模式留空应回落到账户里的 KV，实际 id=%q title=%q err=%v", id, title, err)
+	}
+
+	_, _, err = s.resolveDeployKv(context.Background(), client, &store.Profile{}, "auto", "")
+	if err == nil {
+		t.Error("两边都没给 KV 时应报错，不能静默部署到一个不存在的命名空间")
 	}
 }
 

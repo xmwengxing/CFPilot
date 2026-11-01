@@ -35,10 +35,10 @@ var versionProbePaths = []string{"/__version", "/__cfp_version"}
 //
 // 数据面的 `versionResponse()` 返回的是：
 //
-//	{"build": "<git短hash>-<源码哈希>", "version": "0.12.5"}
+//		{"build": "<git短hash>-<源码哈希>", "version": "0.12.5"}
 //
-//   - `Build`   精确到源码内容，用于判断「线上与本地是不是同一份产物」
-//   - `Version` 人读的语义版本，用于显示与判断「谁更新」
+//	  - `Build`   精确到源码内容，用于判断「线上与本地是不是同一份产物」
+//	  - `Version` 人读的语义版本，用于显示与判断「谁更新」
 //
 // 早期这里把两者当成了同一个东西（优先取 `version`），于是拿 semver
 // 去和本地 build 指纹比对 —— **永远不相等**，状态卡永远显示「建议更新」。

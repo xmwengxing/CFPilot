@@ -438,6 +438,46 @@ interface Window {
       keepInTray: boolean
       settingsFile: string
       pid: number
+      /** 本程序版本号（如 0.13.6），用于「运行状态」展示真实版本 */
+      version?: string
+    }>
+    /**
+     * 纯本地的部署信息（不联网、不用 Token）。
+     *
+     * 常态下「运行状态」卡片只读它：内置内核版本 + 最近一次部署的本地留档。
+     */
+    getLocalDeployInfo(): Promise<{
+      ok: boolean
+      snapshot?: {
+        kvNamespaceId?: string
+        kvTitle?: string
+        controlProject?: string
+        controlSubdomain?: string
+        dataProject?: string
+        dataSubdomain?: string
+        kernelVersion?: string
+        build?: string
+        at?: string
+        accountId?: string
+        accountName?: string
+        dataPlaneMode?: string
+      }
+      localKernelVersion?: string
+      localBuild?: string
+      accountId?: string
+      accountName?: string
+      /** 本机已知的实例索引（KV 命名空间 ID → 名称与项目名） */
+      instances?: Record<string, {
+        kvTitle?: string
+        controlProject?: string
+        dataProject?: string
+        controlSubdomain?: string
+        dataSubdomain?: string
+        kernelVersion?: string
+        build?: string
+        at?: string
+      }>
+      error?: string
     }>
     saveCredentials(input: {
       cfToken?: string

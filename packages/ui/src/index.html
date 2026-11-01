@@ -645,12 +645,56 @@
     .cred-alert.ok { background: var(--ok-bg); border-color: rgba(16, 185, 129, 0.45); color: var(--ok); }
     body.light .cred-alert .msg code { background: rgba(0, 0, 0, 0.06); }
 
-    /* 检测结果区块：与「检测账号」同卡片，用分隔线隔开 */
-    .det-box {
-      margin-top: 14px; padding-top: 12px;
-      border-top: 1px dashed var(--border);
+    /* 运行状态：左右分栏，中间竖线，避免整块占满页面宽度 */
+    .rt-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px;
     }
-    .det-box .kv-row { margin-bottom: 6px; }
+    .rt-col { min-width: 0; }
+    .rt-col + .rt-col { border-left: 1px solid var(--border); padding-left: 20px; }
+    @media (max-width: 900px) {
+      .rt-grid { grid-template-columns: 1fr; }
+      .rt-col + .rt-col { border-left: none; padding-left: 0; border-top: 1px solid var(--border); padding-top: 10px; }
+    }
+    /* 长文本横向滚动：信息不折行、不撑宽状态框
+       位移量 = 内容宽度 − 容器宽度（--mq-delta，由脚本测量后写入）。
+       用它而不是 translateX(-100%)：后者按元素自身宽度位移，
+       会把整段文本一次性滑出容器 —— 看起来就是「滚到一半消失了」。 */
+    .rt-marquee { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; display: block; min-width: 0; }
+    .rt-marquee > span { display: inline-block; }
+    .rt-marquee.scroll > span { animation: rt-scroll 24s linear infinite; }
+    @keyframes rt-scroll {
+      0% { transform: translateX(0); }
+      15% { transform: translateX(0); }
+      85% { transform: translateX(calc(-1 * var(--mq-delta, 0px))); }
+      100% { transform: translateX(calc(-1 * var(--mq-delta, 0px))); }
+    }
+    .rt-marquee.scroll:hover > span { animation-play-state: paused; }
+    /* 运行状态里的关键信息：加粗 + 轻微高亮，扫一眼就能看到 */
+    .rt-hl { font-weight: 600; color: var(--text-main); }
+    /* 可升级提示：加粗 + 警示色（与「已是最新」区分开） */
+    .rt-upg { font-weight: 700; color: var(--warn); }
+
+    /* 弹窗：敏感信息点开才显示，关闭即消失 */
+    .modal-mask {
+      position: fixed; inset: 0; z-index: 1000;
+      background: rgba(0, 0, 0, 0.45);
+      display: flex; align-items: center; justify-content: center;
+      padding: 24px;
+    }
+    .modal-mask[hidden] { display: none; }
+    .modal-box {
+      width: min(560px, 100%);
+      max-height: 84vh; overflow: auto;
+      background: var(--bg-elevated, #111827);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md, 12px);
+      box-shadow: 0 18px 50px rgba(0, 0, 0, 0.4);
+      padding: 16px;
+    }
+    .modal-head {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 12px;
+    }
 
     /* --------------------------------------------------------------
        终端块 / 键值行 / 表格 / 进度条
@@ -669,7 +713,7 @@
       margin-bottom: 8px; font-size: 12.5px;
     }
     body.light .kv-row { background: rgba(15, 23, 42, 0.02); }
-    .kv-row .k { color: var(--text-secondary); }
+    .kv-row .k { color: var(--text-secondary); flex: 0 0 auto; white-space: nowrap; }
     .kv-row .v {
       font-family: ui-monospace, Menlo, monospace; font-size: 12px;
       color: var(--text-main); text-align: right; word-break: break-all;
@@ -1049,13 +1093,11 @@
               <button class="btn btn-primary" id="btnDetect">检测账号</button>
             </div>
 
-            <div class="det-box">
-              <div class="kv-row"><span class="k">目标账号</span><span class="v" id="detAccount">—</span></div>
-              <p class="tip" id="detHint">选择账户后会自动检测。检测到已部署实例会自动选中对应的 KV。</p>
-              <!-- 醒目提示：未检测到实例 / 检测到多个实例（选错 KV 会让所有功能作用到错的实例上） -->
-              <div class="cred-alert" id="credAlert" hidden>
-                <span class="ico"></span><span class="msg"></span>
-              </div>
+            <!--
+              醒目提示：未检测到实例 / 检测到多个实例（选错 KV 会让所有功能作用到错的实例上）
+            -->
+            <div class="cred-alert" id="credAlert" hidden style="margin-top:12px">
+              <span class="ico"></span><span class="msg"></span>
             </div>
 
             <div class="field" style="margin-top:14px">
@@ -1067,8 +1109,8 @@
                 <button class="btn btn-ghost" id="btnKvRefresh">刷新 KV 列表</button>
               </div>
               <p class="tip" id="kvHint">
-                一个 KV 命名空间仅对应一对 CFPilot 部署实例（数据面 + 控制面）。
-                选中后立即生效，无需额外保存。
+                选择账户后会自动检测账号与实例；检测到已部署实例会自动选中对应的 KV。
+                一个 KV 命名空间仅对应一对 CFPilot 部署实例（数据面 + 控制面），选中后立即生效。
               </p>
             </div>
           </div>
@@ -1150,58 +1192,48 @@
           -->
           <div class="card">
             <h2><span class="dot"></span>📈 运行状态</h2>
-            <p class="kv-row" style="margin:0 0 6px">
-              <span class="k">本地服务</span><span class="v" id="rtLocal">—</span>
-            </p>
-            <p class="kv-row" style="margin:0 0 6px">
-              <span class="k">部署实例</span><span class="v" id="rtDeploy">—</span>
-            </p>
-            <p class="kv-row" style="margin:0 0 6px">
-              <span class="k">内核版本</span><span class="v" id="rtKernel">—</span>
-            </p>
-            <p class="kv-row" style="margin:0">
-              <span class="k">环境提示</span><span class="v" id="rtEnv">—</span>
-            </p>
+            <div class="rt-grid">
+              <div class="rt-col">
+                <p class="kv-row" style="margin:0 0 6px">
+                  <span class="k">本地服务</span><span class="v" id="rtLocal">—</span>
+                </p>
+                <p class="kv-row" style="margin:0">
+                  <span class="k">环境提示</span><span class="v rt-marquee" id="rtEnvWrap"><span id="rtEnv">—</span></span>
+                </p>
+              </div>
+              <div class="rt-col">
+                <p class="kv-row" style="margin:0 0 6px">
+                  <span class="k">部署实例</span><span class="v rt-marquee" id="rtDeployWrap"><span id="rtDeploy">—</span></span>
+                </p>
+                <p class="kv-row" style="margin:0">
+                  <span class="k">内核版本</span><span class="v rt-marquee" id="rtKernelWrap"><span id="rtKernel">—</span></span>
+                </p>
+              </div>
+            </div>
             <div class="btn-row" style="margin-top:12px">
-              <button class="btn btn-ghost" id="btnRtRefresh">刷新</button>
+              <button class="btn btn-primary" id="btnCheck">检查部署状态</button>
+              <button class="btn btn-ghost" id="btnShowCreds">查看面板凭据</button>
               <button class="btn btn-ghost" id="btnRtAnalytics">打开 Cloudflare 控制台</button>
             </div>
-            <p class="tip" style="margin-top:8px">
-              请求量、错误率与配额以 Cloudflare 控制台为准 —— Pages 不向 Worker 暴露账号级计量。
+            <p class="tip" id="rtTip" style="margin-top:8px">
+              常态只读取**本机**信息（内置内核 + 最近一次部署留档），不会调用 Token；
+              点「检查部署状态」才会连 Cloudflare 比对线上版本。
             </p>
           </div>
 
-          <!-- 状态卡：先看「现在是什么情况」，再看怎么操作 -->
-          <div class="card">
-            <h2><span class="dot"></span>📌 当前部署状态</h2>
-            <p class="kv-row" style="margin:0 0 6px">
-              <span class="k">命名空间</span><span class="v" id="deployKv">—</span>
-            </p>
-            <div id="deployStateBox">
-              <p class="tip" id="deployStatus" style="margin:8px 0 0">
-                点击下方「检查状态」读取线上部署情况。
-              </p>
-            </div>
-            <div class="btn-row" style="margin-top:12px">
-              <button class="btn btn-ghost" id="btnCheck">检查状态</button>
-              <button class="btn btn-ghost" id="btnShowCreds">查看面板凭据</button>
-            </div>
-            <p class="tip" style="margin-top:8px">
-              会读取该 KV 中的部署记录，并现读数据面的版本端点，得到三样东西：<br>
-              <b>已部署</b>（Cloudflare 上正在跑的）· <b>最新发布</b>（GitHub 上的最新内核）·
-              <b>本程序内置</b>（当前程序自带的产物）。<br>
-              「已部署」与「本程序内置」一致说明无需更新，不一致即可一键更新。
-            </p>
+          <!--
+            面板凭据弹窗
 
-            <!--
-              面板凭据面板（默认隐藏，点「查看面板凭据」展开）
-
-              为什么需要：Cloudflare 平台上的环境变量是加密的（只显示 ****），
-              密码一旦未记录便无法找回，面板将无法登录。
-              这里的值从**本机部署清单**读取（KV 里的 CFP_DEPLOY_MANIFEST），
-              不依赖云端变量的可见性。
-            -->
-            <div id="credBox" hidden style="margin-top:12px">
+            为什么用弹窗而不是常驻面板：面板密码 / UUID / WS 路径是**敏感信息**，
+            常驻在页面上既容易被误看，也会随页面截图泄露。
+            改成点开才加载、关闭即消失，用完即焚。
+          -->
+          <div class="modal-mask" id="credModal" hidden>
+            <div class="modal-box">
+              <div class="modal-head">
+                <strong>面板凭据</strong>
+                <button class="btn btn-ghost" id="btnCredClose">关闭</button>
+              </div>
               <div class="note" style="border-left-color: var(--primary)">
                 <p class="kv-row" style="margin: 0 0 6px">
                   <span class="k">面板地址</span><span class="v" id="credPanelUrl">—</span>

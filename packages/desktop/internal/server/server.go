@@ -153,13 +153,23 @@ func (s *Server) Start() error {
 		}
 		return fmt.Errorf("无法监听 %s：%w", addr, err)
 	}
-	s.listener = ln
-	s.httpSrv = &http.Server{
+	// ⚠️ 服务实例必须先落到局部变量再交给 goroutine。
+	//
+	// 早前这里直接 `go func() { s.httpSrv.Serve(ln) }()`：
+	// goroutine 读的是**字段** s.httpSrv，而 Stop() 会把它置为 nil。
+	// 于是「启动后立刻停止」时，goroutine 可能读到 nil → 空指针 panic，
+	// 直接把整个进程带走（托盘、服务、日志一起消失）。
+	// CI 上表现为 internal/server 测试随机崩溃（2026-11-01 v0.13.6 发布时命中）。
+	srv := &http.Server{
 		Handler:           s.routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	s.mu.Lock()
+	s.listener = ln
+	s.httpSrv = srv
+	s.mu.Unlock()
 	go func() {
-		if err := s.httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("[cfpilot] 服务异常退出：%v", err)
 		}
 	}()

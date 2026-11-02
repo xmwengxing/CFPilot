@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -726,6 +727,13 @@ func (s *Server) doPanelCallback(ctx context.Context, host string, entries []sca
 	lines := make([]string, 0, len(entries))
 	for _, e := range entries {
 		lines = append(lines, fmt.Sprintf("%s:%d#%s", scan.FormatHost(e.IP), e.Port, coloTag(e.Colo)))
+	}
+
+	// KV 写配额日风控：回填会写一次面板的 KV（本地优选池）。
+	// 本地按官方上限的十分之一封顶（100 次/天）。
+	if ok, used, limit := s.claimDailyWrite(1); !ok {
+		s.logLevel("· 跳过回填：已达本地 KV 写配额上限（"+strconv.Itoa(used)+"/"+strconv.Itoa(limit)+" 次/天）", "warn")
+		return
 	}
 
 	s.logLevel("正在回填到面板："+url, "info")

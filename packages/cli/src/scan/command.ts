@@ -548,8 +548,13 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
     // 并发连接数：跨境链路上单条 TCP 受丢包 / 拥塞窗口限制。
     // 2026-10-28 直连实测同一个 IP：1 条 0.12 MB/s、3 条 0.47、8 条 1.15、16 条 2.22 ——
     // 用 3 条会系统性低估 2~4 倍。默认 8 条，贴近浏览器/客户端的真实多连接行为。
-    speedConnections: flagNumber(args, 'speed-conns', 8),
-    speedDurationMs: flagNumber(args, 'speed-duration', 6000),
+    //
+    // ⚠️ 上限收窄到 8：实测（2026-11-02）并发 32 条、每条 5MiB 保持 6 秒也零失败，
+    // 说明并发本身不会被平台卸载；但连接数越多，单轮流量越大（30 候选 × 8 连接 ≈ 1.2GB/轮），
+    // 所以按「够用且不过量」封顶。与桌面版一致（maxMeasureConnections = 8）。
+    speedConnections: Math.min(8, Math.max(1, flagNumber(args, 'speed-conns', 8))),
+    // 测速时长：默认 6 秒，上限 10 秒（同样按流量收窄）。
+    speedDurationMs: Math.min(10000, Math.max(2000, flagNumber(args, 'speed-duration', 6000))),
     // 真实隧道校验（可选）：给了凭据才会跑
     uuid: flagString(args, 'uuid'),
     trojanPassword: flagString(args, 'trojan-password'),

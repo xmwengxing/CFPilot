@@ -293,7 +293,18 @@ const (
 	// defMeasureTimeoutMs 是兜底的整体预算（正常调用方都会显式传）。
 	defMeasureTimeoutMs = 20000
 	// maxMeasureConnections 是单次测量的连接数上限。
-	maxMeasureConnections = 16
+	//
+	// 为什么收窄到 8（原来是 16）：
+	// 实测（2026-11-02）并发 1~32 条、每条 5MiB 保持 6 秒，**零失败**，
+	// 说明并发本身不会触发平台卸载；但连接数越多，
+	// 单轮优选的流量与平台侧压力越大（30 候选 × 16 连接 ≈ 2.4GB/轮）。
+	// 所以上限按"够用且不过量"取 8，与 CLI 的 --speed-conns 上限一致。
+	maxMeasureConnections = 8
+	// maxMeasureDurationMs 是单次测量的时长上限（毫秒）。
+	//
+	// 同样按"够用且不过量"收窄：默认 6 秒，上限 10 秒。
+	// 时长越长流量越大（8 连接 × 10 秒 ≈ 每候选 40MiB+）。
+	maxMeasureDurationMs = 10000
 )
 
 // DownloadResult 是测速结果。
@@ -548,6 +559,9 @@ func MeasureThroughput(ctx context.Context, opt MeasureOptions) DownloadResult {
 	duration := opt.Duration
 	if duration <= 0 {
 		duration = defMeasureDurationMs * time.Millisecond
+	}
+	if duration > maxMeasureDurationMs*time.Millisecond {
+		duration = maxMeasureDurationMs * time.Millisecond
 	}
 	warmup := opt.Warmup
 	if warmup <= 0 {

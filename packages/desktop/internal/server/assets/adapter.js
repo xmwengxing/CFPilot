@@ -727,6 +727,15 @@
       return get('/api/scan/adaptive-effect?profileId=' + encodeURIComponent(profileId || ''))
     },
 
+    /**
+     * 账号用量与额度。
+     *
+     * 默认**只读缓存**（不发 Cloudflare 请求）；refresh=true 才真正重新采集一次。
+     */
+    getUsage: function (refresh) {
+      return get('/api/usage' + (refresh ? '?refresh=1' : ''))
+    },
+
     /** 删除一条优选历史会话 */
     deleteScanHistory: function (id) {
       return call('DELETE', '/api/scan/history?id=' + encodeURIComponent(id || ''))

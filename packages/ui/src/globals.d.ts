@@ -410,6 +410,16 @@ interface Window {
       }>
       error?: string
     }>
+    /**
+     * 账号用量与额度。
+     *
+     * 默认**只读缓存**（不发 Cloudflare 请求）；refresh=true 才真正重新采集一次。
+     */
+    getUsage(refresh?: boolean): Promise<{
+      ok: boolean
+      usage?: UsageSnapshot
+      error?: string
+    }>
     /** 删除一条优选历史会话 */
     deleteScanHistory(id: string): Promise<{ ok: boolean; error?: string }>
     /**
@@ -676,6 +686,83 @@ interface AdaptiveEffectSide {
   /** 平均耗时（毫秒） */
   avgElapsedMs: number
   lastAt?: string
+}
+
+/** 某一天的用量。 */
+interface UsagePoint {
+  workersRequests: number
+  kvReads: number
+  kvWrites: number
+  kvDeletes: number
+  workersErrors: number
+  workersSubrequests: number
+}
+
+/** 账号用量与额度快照。 */
+interface UsageSnapshot {
+  ok: boolean
+  error?: string
+  accountId?: string
+  /** 套餐：free / paid */
+  plan?: string
+  generatedAt?: string
+  /** 数据已过期（被风控或缓存兜底） */
+  stale: boolean
+  /** 本地风控拦截了本次刷新 */
+  throttled: boolean
+  notice?: string
+  /** 缓存时长（秒） */
+  ttlSec: number
+  nextRefreshAt?: string
+
+  limits: {
+    plan: string
+    /** 官方套餐名（如 Cloudflare Free Plan） */
+    planName?: string
+    workersRequests: number
+    kvReads: number
+    kvWrites: number
+    kvStorageBytes: number
+    unlimitedWorkers: boolean
+    unlimitedKvOps: boolean
+    unlimitedKvStorage: boolean
+  }
+  ratelimit: {
+    /** 官方响应头给出的剩余调用次数 */
+    remoteRemaining: number
+    remoteLimit: number
+    remoteWindowSec: number
+    /** 本地风控的剩余次数 */
+    localRemaining: number
+    localLimit: number
+    localBlocked: boolean
+    localWindowSec: number
+  }
+
+  /** 时间轴（UTC 日期） */
+  days: string[]
+  /** 与 days 对齐的每日用量 */
+  series: UsagePoint[]
+
+  today: UsagePoint
+  yesterday: UsagePoint
+  average: UsagePoint
+  storage: { bytes: number; keyCount: number }
+  /** 调用状态分布（success / exceededResources / loadShed …） */
+  statusCounts: Record<string, number>
+  /** 每个脚本 × 每种状态的次数（悬浮提示用） */
+  statusByScript?: Record<string, Record<string, number>>
+  /** 按脚本的消耗排行 */
+  scripts: Array<{ name: string; requests: number; errors: number; cfpilot?: boolean }>
+  /** 本地 KV 写配额日风控：今日已用与上限 */
+  dailyWriteUsed?: number
+  dailyWriteLimit?: number
+  /** 账号里的部署实例（Pages / Worker），标出哪些是本工具的 */
+  instances?: Array<{ name: string; kind: 'pages' | 'worker'; cfpilot: boolean }>
+  /** 属于本工具 Worker 的请求数（Pages 形态则为 0） */
+  cfpilotWorkerRequests?: number
+  /** 这份统计的覆盖范围说明 */
+  scopeNote?: string
 }
 interface IPQualityReport {
   version: number

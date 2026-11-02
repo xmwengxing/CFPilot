@@ -2039,6 +2039,440 @@
     void load()
   }
 
+  /**
+   * 「用量 / 额度」弹窗。
+   *
+   * ## 数据从哪来
+   *
+   * 后端在**检测账号 / 切换账户**时已经在后台采集过一次，
+   * 所以打开弹窗只读缓存（不花 API 调用），点「刷新」才真正重新采集。
+   *
+   * ## 图表怎么画
+   *
+   * 全部用 SVG 手绘（界面零依赖，不引图表库）：
+   *   - 日额度总览 → 横向条形（长度=占用比例，颜色随比例变化）
+   *   - 7 天趋势   → 折线 + 上限参考线
+   */
+  function bindUsage(): void {
+    const modal = document.getElementById('usageModal')
+    const notice = document.getElementById('usageNotice')
+    const loading = document.getElementById('usageLoading')
+    const grid = document.getElementById('usageGrid')
+    const openBtn = document.getElementById('btnUsage')
+    const closeBtn = document.getElementById('btnUsageClose')
+    const refreshBtn = document.getElementById('btnUsageRefresh')
+
+    const close = (): void => {
+      if (modal) modal.hidden = true
+      hideTip()
+    }
+
+    // ---- 悬浮气泡（折线图数据点 + 文字说明共用） ----
+    const tip = document.createElement('div')
+    tip.className = 'usage-tip'
+    tip.hidden = true
+    document.body.appendChild(tip)
+
+    const showTip = (text: string, event: MouseEvent): void => {
+      tip.textContent = text
+      tip.hidden = false
+      const pad = 12
+      const rect = tip.getBoundingClientRect()
+      let x = event.clientX + pad
+      let y = event.clientY + pad
+      if (x + rect.width > window.innerWidth - 8) x = event.clientX - rect.width - pad
+      if (y + rect.height > window.innerHeight - 8) y = event.clientY - rect.height - pad
+      tip.style.left = Math.max(8, x) + 'px'
+      tip.style.top = Math.max(8, y) + 'px'
+    }
+    const hideTip = (): void => {
+      tip.hidden = true
+    }
+
+    /**
+     * 画折线图。
+     *
+     * ## 为什么 Y 轴不按上限缩放
+     *
+     * 按上限缩放会把曲线压成一条直线（用量几千、上限十万 → 全贴在底部，
+     * 完全看不出趋势）。所以这里**按数据自身最大值缩放**，
+     * 上限只在「用量已经接近上限」（≥30%）时画成参考线，
+     * 否则改成图下一行文字说明 —— 既能看趋势，也不丢上限信息。
+     */
+    const drawLine = (
+      svg: SVGSVGElement | null,
+      values: number[],
+      labels: string[],
+      cap: number,
+      color: string,
+      capNoteId: string,
+      unit: string
+    ): void => {
+      if (!svg) return
+      const w = 320
+      const h = Number(svg.getAttribute('viewBox')?.split(' ')[3] ?? 140)
+      const padL = 34
+      const padR = 6
+      const padT = 8
+      const padB = 18
+      const innerW = w - padL - padR
+      const innerH = h - padT - padB
+      const dataMax = Math.max(...values, 1)
+      const showCap = cap > 0 && dataMax >= cap * 0.3
+      const max = showCap ? Math.max(cap, dataMax) : dataMax * 1.15
+      const x = (index: number): number =>
+        padL + (values.length <= 1 ? innerW / 2 : (innerW * index) / (values.length - 1))
+      const y = (value: number): number => padT + innerH - (innerH * value) / max
+      const parts: string[] = []
+      for (let step = 0; step <= 2; step++) {
+        const value = (max * step) / 2
+        const gy = y(value)
+        parts.push(`<line x1="${padL}" y1="${gy}" x2="${w - padR}" y2="${gy}" stroke="var(--border)" stroke-width="1"/>`)
+        parts.push(
+          `<text x="${padL - 4}" y="${gy + 3}" font-size="8" fill="var(--text-muted)" text-anchor="end">${formatUsageNumber(value)}</text>`
+        )
+      }
+      if (showCap) {
+        parts.push(
+          `<line x1="${padL}" y1="${y(cap)}" x2="${w - padR}" y2="${y(cap)}" stroke="var(--warn)" stroke-width="1" stroke-dasharray="4 3"/>`
+        )
+      }
+      const points = values.map((value, index) => `${x(index).toFixed(1)},${y(value).toFixed(1)}`)
+      parts.push(`<polyline fill="none" stroke="${color}" stroke-width="1.8" points="${points.join(' ')}"/>`)
+      values.forEach((value, index) => {
+        parts.push(`<circle cx="${x(index).toFixed(1)}" cy="${y(value).toFixed(1)}" r="2.6" fill="${color}"/>`)
+      })
+      if (labels.length > 0) {
+        parts.push(
+          `<text x="${padL}" y="${h - 5}" font-size="8" fill="var(--text-muted)">${labels[0] ?? ''}</text>`
+        )
+        const last = labels[labels.length - 1] ?? ''
+        parts.push(
+          `<text x="${w - padR}" y="${h - 5}" font-size="8" fill="var(--text-muted)" text-anchor="end">${last}</text>`
+        )
+      }
+      svg.innerHTML = parts.join('')
+      // 上限说明：没画参考线时（用量远低于上限）用文字补一句，别让上限凭空消失。
+      const note = document.getElementById(capNoteId)
+      if (note) {
+        note.textContent =
+          cap > 0 && !showCap ? `日上限 ${formatUsageNumber(cap)}，远高于当前用量` : ''
+      }
+
+      // ---- 悬浮气泡：显示日期与用量 ----
+      const hit = (event: MouseEvent): void => {
+        const box = svg.getBoundingClientRect()
+        const ratio = (event.clientX - box.left) / box.width
+        const index = Math.round(ratio * (values.length - 1))
+        if (index < 0 || index >= values.length) {
+          hideTip()
+          return
+        }
+        const day = labels[index] ?? ''
+        const lines = [`${day}　${formatUsageNumber(values[index]!)} ${unit}`]
+        if (cap > 0) {
+          const percent = cap > 0 ? (values[index]! / cap) * 100 : 0
+          lines.push(`占日上限 ${percent.toFixed(1)}%`)
+        }
+        showTip(lines.join('\n'), event)
+      }
+      svg.onmousemove = hit
+      svg.onmouseleave = hideTip
+    }
+
+    const render = (snapshot: UsageSnapshot): void => {
+      const limits = snapshot.limits
+      const today = snapshot.today
+      const pct = (used: number, cap: number): number => (cap > 0 ? (used / cap) * 100 : 0)
+
+      // ---- 1) 日额度总览（横向条形） ----
+      const bars = document.getElementById('usageBars')
+      if (bars) {
+        bars.replaceChildren()
+        const rows: Array<{ label: string; used: number; cap: number; unlimited: boolean }> = [
+          { label: 'Workers 请求', used: today.workersRequests, cap: limits.workersRequests, unlimited: limits.unlimitedWorkers },
+          { label: 'KV 读', used: today.kvReads, cap: limits.kvReads, unlimited: limits.unlimitedKvOps },
+          { label: 'KV 写', used: today.kvWrites, cap: limits.kvWrites, unlimited: limits.unlimitedKvOps },
+          {
+            label: 'KV 存储',
+            used: snapshot.storage.bytes,
+            cap: limits.kvStorageBytes,
+            unlimited: limits.unlimitedKvStorage,
+          },
+        ]
+        for (const row of rows) {
+          const ratio = pct(row.used, row.cap)
+          const level = ratio >= 80 ? 'danger' : ratio >= 50 ? 'warn' : ''
+          const line = document.createElement('div')
+          line.className = 'usage-bar-row'
+          const name = document.createElement('span')
+          name.textContent = row.label
+          const track = document.createElement('span')
+          track.className = 'usage-bar-track'
+          const fill = document.createElement('i')
+          fill.className = 'usage-bar-fill ' + level
+          fill.style.width = Math.max(1, Math.min(100, ratio)) + '%'
+          track.appendChild(fill)
+          const num = document.createElement('span')
+          num.className = 'usage-num'
+          num.textContent = row.unlimited
+            ? formatUsageNumber(row.used)
+            : `${formatUsageNumber(row.used)} / ${formatUsageNumber(row.cap)}`
+          const percent = document.createElement('span')
+          percent.className = 'usage-pct ' + level
+          percent.textContent = row.unlimited ? '—' : ratio.toFixed(1) + '%'
+          line.appendChild(name)
+          line.appendChild(track)
+          line.appendChild(num)
+          line.appendChild(percent)
+          bars.appendChild(line)
+        }
+      }
+
+      // ---- 2) Workers 请求 7 天 ----
+      const days = snapshot.days ?? []
+      const labels = days.map((d) => d.slice(5))
+      drawLine(
+        document.getElementById('usageChartWorkers') as SVGSVGElement | null,
+        (snapshot.series ?? []).map((p) => p.workersRequests),
+        labels,
+        limits.unlimitedWorkers ? 0 : limits.workersRequests,
+        'var(--accent)',
+        'usageCapWorkers',
+        '次请求'
+      )
+      // ---- 3) KV 读 / 写 7 天 ----
+      drawLine(
+        document.getElementById('usageChartKvRead') as SVGSVGElement | null,
+        (snapshot.series ?? []).map((p) => p.kvReads),
+        labels,
+        limits.unlimitedKvOps ? 0 : limits.kvReads,
+        'var(--accent)',
+        'usageCapKvRead',
+        '次读'
+      )
+      drawLine(
+        document.getElementById('usageChartKvWrite') as SVGSVGElement | null,
+        (snapshot.series ?? []).map((p) => p.kvWrites),
+        labels,
+        limits.unlimitedKvOps ? 0 : limits.kvWrites,
+        'var(--ok)',
+        'usageCapKvWrite',
+        '次写'
+      )
+
+      // ---- 4) 其它额度（文字） ----
+      const facts = document.getElementById('usageFacts')
+      if (facts) {
+        facts.replaceChildren()
+        const rate = snapshot.ratelimit
+        const status = snapshot.statusCounts ?? {}
+        const over = status.exceededResources ?? 0
+        const shed = status.loadShed ?? 0
+        const rows: Array<[string, string, string]> = [
+          ['套餐', limits.planName || (limits.plan === 'paid' ? 'Paid' : 'Free'), ''],
+          [
+            'KV 存储',
+            `${formatUsageBytes(snapshot.storage.bytes)} / ${limits.unlimitedKvStorage ? '无限制' : formatUsageBytes(limits.kvStorageBytes)}（${snapshot.storage.keyCount} 个键）`,
+            '',
+          ],
+          [
+            'API 调用速率',
+            rate.remoteLimit > 0
+              ? `官方剩余 ${rate.remoteRemaining}/${rate.remoteLimit}（${rate.remoteWindowSec} 秒窗口）`
+              : '未取到官方速率信息',
+            '',
+          ],
+          [
+            '本地调用风控',
+            rate.localBlocked
+              ? `已达上限，已停止调用（每 ${Math.round(rate.localWindowSec / 60)} 分钟最多 ${rate.localLimit} 次）`
+              : `剩余 ${rate.localRemaining}/${rate.localLimit}（每 ${Math.round(rate.localWindowSec / 60)} 分钟）`,
+            rate.localBlocked ? 'err' : '',
+          ],
+          [
+            '本地 KV 写风控',
+            snapshot.dailyWriteLimit
+              ? `今日已用 ${snapshot.dailyWriteUsed ?? 0}/${snapshot.dailyWriteLimit} 次（官方上限的十分之一）`
+              : '未启用',
+            snapshot.dailyWriteLimit && (snapshot.dailyWriteUsed ?? 0) >= snapshot.dailyWriteLimit ? 'err' : '',
+          ],
+          [
+            '资源超限次数',
+            `${over} 次${over > 0 ? '（Worker 触到 CPU/内存上限）' : ''}`,
+            over > 0 ? 'warn' : '',
+          ],
+          ['平台卸载次数', `${shed} 次${shed > 0 ? '（负载偏高被卸载）' : ''}`, shed > 0 ? 'warn' : ''],
+        ]
+        const scripts = snapshot.scripts ?? []
+        if (scripts.length > 0) {
+          rows.push([
+            '消耗排行',
+            scripts
+              .slice(0, 3)
+              .map((s) => `${s.name}${s.cfpilot ? '（本工具）' : ''} ${formatUsageNumber(s.requests)}`)
+              .join('，'),
+            '',
+          ])
+        }
+        // 实例清单：说清楚哪些是本工具的、哪些形态不计入统计。
+        const instances = snapshot.instances ?? []
+        const mine = instances.filter((i) => i.cfpilot)
+        if (mine.length > 0) {
+          rows.push([
+            '本工具实例',
+            mine.map((i) => `${i.name}（${i.kind === 'pages' ? 'Pages' : 'Worker'}）`).join('，'),
+            '',
+          ])
+        }
+        if (snapshot.cfpilotWorkerRequests) {
+          rows.push([
+            '本工具请求',
+            `${formatUsageNumber(snapshot.cfpilotWorkerRequests)} 次（Worker 形态）`,
+            '',
+          ])
+        }
+        for (const [key, value, level] of rows) {
+          const k = document.createElement('span')
+          k.className = 'k'
+          k.textContent = key
+          const v = document.createElement('span')
+          v.className = 'v ' + level
+          v.textContent = value
+          // 「资源超限」悬浮显示每个 Worker 的次数；「平台卸载」解释概念
+          if (key === '资源超限次数') {
+            v.classList.add('tipable')
+            v.onmousemove = (event: MouseEvent) => {
+              const byScript = snapshot.statusByScript ?? {}
+              const lines: string[] = []
+              for (const [script, statuses] of Object.entries(byScript)) {
+                const count = statuses.exceededResources ?? 0
+                if (count > 0) lines.push(`${script}：${count} 次`)
+              }
+              showTip(
+                (lines.length
+                  ? '各 Worker 的资源超限次数：\n' + lines.join('\n')
+                  : '没有 Worker 触到资源上限。') +
+                  '\n\n注意：这是**账号下所有 Worker** 的合计，\n不一定是本工具的实例（Pages 形态不计入此表）。',
+                event
+              )
+            }
+            v.onmouseleave = hideTip
+          }
+          if (key === '平台卸载次数') {
+            v.classList.add('tipable')
+            v.onmousemove = (event: MouseEvent) =>
+              showTip(
+                '平台卸载（loadShed）：Cloudflare 主动把请求挡在 Worker 外面。\n' +
+                  '常见于账号下某个 Worker 瞬时负载过高、或请求量突增。\n' +
+                  '被卸载的请求不会进入 Worker（不计入 Worker 的 CPU），\n' +
+                  '但客户端会拿到错误响应 —— 表现为「偶发连不上」。',
+                event
+              )
+            v.onmouseleave = hideTip
+          }
+          facts.appendChild(k)
+          facts.appendChild(v)
+        }
+      }
+
+      // ---- 5) 注意事项 ----
+      const tips = document.getElementById('usageTips')
+      if (tips) {
+        tips.replaceChildren()
+        const items: string[] = [
+          'KV 写配额最紧张（Free 每天 1000 次写）：部署与回填尽量别在同一天反复操作。',
+          'Workers 请求按 UTC 0 点重置，看趋势请以「自然日」为准。',
+          '「资源超限」出现说明 Worker 触到了 CPU / 内存上限（Free 单请求 10ms CPU）—— 面板接口要留 CPU 预算。',
+          `用量查询是只读的，不消耗产品额度；只会占用 API 调用速率（本地每 ${Math.round((snapshot.ratelimit.localWindowSec || 300) / 60)} 分钟最多 ${snapshot.ratelimit.localLimit || 120} 次，达到即停止刷新）。`,
+        ]
+        const candidates: Array<[string, number]> = [
+          ['Workers 请求', pct(today.workersRequests, limits.workersRequests)],
+          ['KV 读', pct(today.kvReads, limits.kvReads)],
+          ['KV 写', pct(today.kvWrites, limits.kvWrites)],
+        ]
+        const worst = candidates.sort((a, b) => b[1] - a[1])[0]
+        if (worst && worst[1] >= 50) {
+          items.unshift(`当前占用最高的是「${worst[0]}」，已达日上限的 ${worst[1].toFixed(1)}%。`)
+        }
+        if (snapshot.throttled) {
+          items.unshift('本地调用风控已触发，已停止向 Cloudflare 发起请求。')
+        }
+        for (const text of items) {
+          const li = document.createElement('li')
+          li.textContent = text
+          tips.appendChild(li)
+        }
+      }
+
+      if (notice) {
+        const parts: string[] = []
+        if (snapshot.scopeNote) parts.push(snapshot.scopeNote)
+        if (snapshot.notice) parts.push(snapshot.notice)
+        if (snapshot.generatedAt) {
+          parts.push('采集于 ' + snapshot.generatedAt.replace('T', ' ').replace('Z', ' UTC'))
+        }
+        notice.textContent = parts.join(' · ') || '用量数据已就绪'
+      }
+    }
+
+    const load = async (refresh: boolean): Promise<void> => {
+      if (notice) notice.textContent = refresh ? '正在重新采集…' : '读取中…'
+      // 采集期间显示加载态：后台可能正在向 Cloudflare 请求，
+      // 别让用户对着旧数据以为"点了没反应"。
+      if (loading) loading.hidden = false
+      if (grid) grid.hidden = true
+      try {
+        const res = await window.cfpilot.getUsage(refresh)
+        if (!res || !res.ok || !res.usage) {
+          if (notice) notice.textContent = res?.error || '暂时无法读取用量数据'
+          if (loading) loading.hidden = true
+          if (grid) grid.hidden = false
+          return
+        }
+        render(res.usage)
+        if (loading) loading.hidden = true
+        if (grid) grid.hidden = false
+      } catch (err) {
+        if (notice) {
+          notice.textContent = '读取失败：' + (err instanceof Error ? err.message : String(err))
+        }
+        if (loading) loading.hidden = true
+        if (grid) grid.hidden = false
+      }
+    }
+
+    openBtn?.addEventListener('click', () => {
+      if (modal) modal.hidden = false
+      void load(false)
+    })
+    closeBtn?.addEventListener('click', close)
+    refreshBtn?.addEventListener('click', () => void load(true))
+    modal?.addEventListener('click', (event) => {
+      if (event.target === event.currentTarget) close()
+    })
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && modal && !modal.hidden) close()
+    })
+  }
+
+  /** 把大数字压成易读的短格式（1.2 万 / 3.4 亿）。 */
+  function formatUsageNumber(value: number): string {
+    const n = Number(value) || 0
+    if (Math.abs(n) >= 1e8) return (n / 1e8).toFixed(2) + ' 亿'
+    if (Math.abs(n) >= 1e4) return (n / 1e4).toFixed(2) + ' 万'
+    return String(Math.round(n))
+  }
+
+  /** 把字节数压成易读的短格式。 */
+  function formatUsageBytes(value: number): string {
+    const n = Number(value) || 0
+    if (n >= 1 << 30) return (n / (1 << 30)).toFixed(2) + ' GB'
+    if (n >= 1 << 20) return (n / (1 << 20)).toFixed(2) + ' MB'
+    if (n >= 1 << 10) return (n / (1 << 10)).toFixed(1) + ' KB'
+    return n + ' B'
+  }
+
   function bindScan(): void {
     document.getElementById('btnScan')!.addEventListener('click', async () => {
       const host = $('optHost').value.trim()
@@ -3611,6 +4045,7 @@
     bindHistory()
     bindExperimental()
     bindAdaptiveEffect()
+    bindUsage()
     bindLogs()
       bindUpdater()
     bindPush()

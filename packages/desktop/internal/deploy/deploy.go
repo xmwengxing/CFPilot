@@ -92,6 +92,16 @@ type Options struct {
 	WSPath         string
 	ScannerToken   string
 
+	// ClaimWrites 是「KV 写配额」的本地日风控闸门（可选）。
+	//
+	// 部署一次会写 KV 两次（部署清单 + CONFIG）。
+	// Cloudflare 免费版每个账号每天只有 1000 次 KV 写，
+	// 本地闸门按官方上限的**十分之一**（100 次/天）封顶，
+	// 避免程序出 bug 时把当天配额写光（写配额用光后，回填与面板保存会直接 500）。
+	//
+	// 约定：返回 ok=false 时**不写**，并把原因原样返回给用户。
+	ClaimWrites func(n int) (ok bool, used int, limit int)
+
 	// ---- 功能开关 ----
 	//
 	// ⚠️ 默认值必须与 CLI 一致（AGENTS.md §2.2：CLI 是部署语义的权威实现）。
@@ -862,6 +872,12 @@ func (d *Deployer) writeManifest(ctx context.Context, old *Manifest, eff effecti
 	if err != nil {
 		return err
 	}
+	// KV 写配额日风控（官方上限的十分之一）。
+	if d.opt.ClaimWrites != nil {
+		if ok, used, limit := d.opt.ClaimWrites(1); !ok {
+			return fmt.Errorf("已达本地 KV 写配额上限（%d/%d 次/天），已停止写入；官方上限的十分之一，留些余量给面板日常保存", used, limit)
+		}
+	}
 	return d.client.SetKVValue(ctx, d.opt.AccountID, d.opt.KVNamespaceID, ManifestKey, string(raw))
 }
 
@@ -911,6 +927,12 @@ func (d *Deployer) writeEffectiveConfig(ctx context.Context, eff effective) erro
 		return err
 	}
 	d.log("· 正在写入 KV 配置（CONFIG 键）…")
+	// KV 写配额日风控（官方上限的十分之一）。
+	if d.opt.ClaimWrites != nil {
+		if ok, used, limit := d.opt.ClaimWrites(1); !ok {
+			return fmt.Errorf("已达本地 KV 写配额上限（%d/%d 次/天），已停止写入；官方上限的十分之一，留些余量给面板日常保存", used, limit)
+		}
+	}
 	if err := d.client.SetKVValue(ctx, d.opt.AccountID, d.opt.KVNamespaceID, ConfigKey, string(raw)); err != nil {
 		return err
 	}

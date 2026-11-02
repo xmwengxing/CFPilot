@@ -703,6 +703,57 @@
     .effect-table .good { color: var(--ok); font-weight: 600; }
     .effect-table .bad { color: var(--err); font-weight: 600; }
 
+    /* 用量/额度弹窗 */
+    .usage-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+    .usage-box {
+      border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px;
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .usage-box h3 { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: var(--text-main); }
+    .usage-box .sub { margin: 0 0 10px; font-size: 11.5px; color: var(--text-secondary); }
+    .usage-chart { width: 100%; display: block; }
+    .usage-bar-row { display: grid; grid-template-columns: 84px 1fr auto 52px; gap: 8px; align-items: center; margin-bottom: 7px; font-size: 12px; }
+    .usage-bar-track { height: 12px; border-radius: 999px; background: var(--border); overflow: hidden; }
+    .usage-bar-fill { display: block; height: 100%; border-radius: 999px; background: var(--accent); }
+    .usage-bar-fill.warn { background: var(--warn); }
+    .usage-bar-fill.danger { background: var(--err); }
+    .usage-num { font-variant-numeric: tabular-nums; color: var(--text-secondary); white-space: nowrap; }
+    .usage-pct { font-variant-numeric: tabular-nums; font-weight: 600; text-align: right; color: var(--text-main); }
+    .usage-pct.warn { color: var(--warn); }
+    .usage-pct.danger { color: var(--err); }
+    .usage-kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12.5px; line-height: 1.8; }
+    .usage-kv .k { color: var(--text-secondary); }
+    .usage-kv .v { color: var(--text-main); word-break: break-all; }
+    .usage-kv .v.warn { color: var(--warn); font-weight: 600; }
+    .usage-kv .v.err { color: var(--err); font-weight: 600; }
+    .usage-tips { margin: 0; padding-left: 18px; font-size: 12px; line-height: 1.9; color: var(--text-secondary); }
+    .usage-tips li { margin-bottom: 2px; }
+    .usage-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11.5px; color: var(--text-secondary); margin-top: 6px; }
+    .usage-legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+    .usage-cap { margin: 2px 0 0; font-size: 11px; color: var(--text-muted); }
+
+    /* 用量弹窗：加载态与悬浮气泡 */
+    .usage-loading {
+      display: flex; align-items: center; gap: 10px;
+      padding: 26px 0; font-size: 13px; color: var(--text-secondary);
+    }
+    .usage-loading[hidden] { display: none; }
+    .spinner {
+      width: 14px; height: 14px; border-radius: 50%;
+      border: 2px solid var(--border); border-top-color: var(--accent);
+      animation: usage-spin .8s linear infinite;
+    }
+    @keyframes usage-spin { to { transform: rotate(360deg); } }
+    .usage-tip {
+      position: fixed; z-index: 1200; pointer-events: none;
+      max-width: 320px; padding: 8px 10px; border-radius: 8px;
+      background: var(--bg-elevated, #111827); color: var(--text-main);
+      border: 1px solid var(--border); box-shadow: 0 10px 30px rgba(0, 0, 0, .35);
+      font-size: 12px; line-height: 1.7; white-space: pre-line;
+    }
+    .usage-tip[hidden] { display: none; }
+    .tipable { cursor: help; border-bottom: 1px dotted var(--text-muted); }
+
     /* 弹窗：敏感信息点开才显示，关闭即消失 */
     .modal-mask {
       position: fixed; inset: 0; z-index: 1000;
@@ -1120,6 +1171,7 @@
 
             <div class="btn-row">
               <button class="btn btn-primary" id="btnDetect">检测账号</button>
+              <button class="btn btn-ghost" id="btnUsage">用量/额度</button>
             </div>
 
             <!--
@@ -1199,6 +1251,7 @@
               · Account / Pages / <b>Edit</b> —— 建/删 Pages 项目、上传内核、绑 KV、配环境变量<br>
               <b>可选</b><br>
               · Account / Account API Tokens / <b>Read</b> —— 仅用于显示 Token 有效期<br>
+              · Account / Account Analytics / <b>Read</b> —— 仅用于「用量/额度」面板（查已用量）<br>
               · Zone / Zone / <b>Read</b>（+ Zone / DNS / <b>Edit</b>）—— 仅绑定自定义域名时需要<br><br>
               <span class="muted">
                 <b>不需要</b>：Developer Platform 下的 Workers Scripts / Workers Routes，
@@ -1214,10 +1267,11 @@
           <!--
             运行状态卡
 
-            为什么不做「账号级用量监控」：
-            Pages 不向 Worker 暴露账号级计量，而 GraphQL 的字段随平台版本漂移、
-            且不支持内省（写死字段名迟早失效）。所以这里只展示**本地可确证**的运行信息，
-            平台侧请求量与配额以 Cloudflare 控制台为准，给一个直达入口。
+            这里只展示**本地可确证**的运行信息（服务状态、环境干扰、本机部署记录）。
+
+            账号级用量另放在凭据页的「用量/额度」弹窗：
+            平台侧计量要走 GraphQL 分析接口（需要 Account Analytics Read 权限），
+            与本页的本地信息不是一回事，所以不混在一起。
           -->
           <div class="card">
             <h2><span class="dot"></span>📈 运行状态</h2>
@@ -1286,6 +1340,7 @@
               </div>
             </div>
           </div>
+
 
           <div class="card">
             <h2><span class="dot"></span>🚀 部署 / 更新</h2>
@@ -1531,16 +1586,18 @@
             <div class="row">
               <div class="field">
                 <label>测速连接数</label>
-                <input type="number" id="optSpeedConns" value="3" min="1" max="8" />
+                <input type="number" id="optSpeedConns" value="8" min="1" max="8" />
                 <p class="tip">
-                  · 建议 <b>3</b>，单条 TCP 连接受拥塞窗口限制，测不满真实带宽
+                  · 建议 <b>8</b>：单条 TCP 受拥塞窗口限制，会系统性低估带宽（实测 1 条 0.12、3 条 0.47、8 条 1.15 MB/s）<br>
+                  · 上限 8：实测并发 32 条也不会被平台卸载，但连接越多流量越大
                 </p>
               </div>
               <div class="field">
                 <label>测速时长（秒）</label>
-                <input type="number" id="optSpeedDur" value="6" min="2" max="30" />
+                <input type="number" id="optSpeedDur" value="6" min="2" max="10" />
                 <p class="tip">
-                  · 建议 <b>5~8</b>，过短会被 TCP 慢启动拉低（前 1 秒的样本会被丢弃）
+                  · 建议 <b>6</b>，过短会被 TCP 慢启动拉低（前 1 秒的样本会被丢弃）<br>
+                  · 流量 ≈ 时长 × 速率 × 连接数：一轮约 1GB，流量敏感时调小它或勾选「跳过测速」
                 </p>
               </div>
             </div>
@@ -1937,6 +1994,71 @@
       </div>
     </div>
   </div>
+          <!--
+            用量 / 额度弹窗
+
+            数据来自 Cloudflare 分析接口（只读，不消耗产品额度）。
+            打开弹窗只读缓存；点「刷新」才真正重新采集一次。
+          -->
+          <div class="modal-mask" id="usageModal" hidden>
+            <div class="modal-box" style="width: min(920px, 100%)">
+              <div class="modal-head">
+                <strong>账号用量 / 额度</strong>
+                <div class="btn-row" style="margin:0">
+                  <button class="btn btn-ghost" id="btnUsageRefresh">刷新</button>
+                  <button class="btn btn-ghost" id="btnUsageClose">关闭</button>
+                </div>
+              </div>
+              <p class="tip" id="usageNotice" style="margin:0 0 12px">读取中…</p>
+              <div class="usage-loading" id="usageLoading" hidden>
+                <span class="spinner"></span><span>正在向 Cloudflare 采集用量…</span>
+              </div>
+              <div class="usage-grid" id="usageGrid" hidden>
+                <!-- 1) 各项日额度总览（柱状条） -->
+                <div class="usage-box">
+                  <h3>日额度总览（今日）</h3>
+                  <p class="sub">按当日上限折算的占用比例</p>
+                  <div id="usageBars"></div>
+                </div>
+                <!-- 2) Workers 请求配额 7 天 -->
+                <div class="usage-box">
+                  <h3>Workers 请求（近 7 天）</h3>
+                  <p class="sub">每日请求数与日上限参考线</p>
+                  <svg class="usage-chart" id="usageChartWorkers" viewBox="0 0 320 140" preserveAspectRatio="none"></svg>
+                  <p class="usage-cap" id="usageCapWorkers"></p>
+                  <div class="usage-legend">
+                    <span><i style="background:var(--accent)"></i>每日请求</span>
+                    <span><i style="background:var(--warn)"></i>日上限</span>
+                  </div>
+                </div>
+                <!-- 3) KV 读 / 写 7 天 -->
+                <div class="usage-box">
+                  <h3>KV 读 / 写（近 7 天）</h3>
+                  <p class="sub">读与写分开看 —— 写配额比读紧张得多</p>
+                  <svg class="usage-chart" id="usageChartKvRead" viewBox="0 0 320 110" preserveAspectRatio="none"></svg>
+                  <p class="usage-cap" id="usageCapKvRead"></p>
+                  <svg class="usage-chart" id="usageChartKvWrite" viewBox="0 0 320 110" preserveAspectRatio="none"></svg>
+                  <p class="usage-cap" id="usageCapKvWrite"></p>
+                  <div class="usage-legend">
+                    <span><i style="background:var(--accent)"></i>读</span>
+                    <span><i style="background:var(--ok)"></i>写</span>
+                    <span><i style="background:var(--warn)"></i>日上限</span>
+                  </div>
+                </div>
+                <!-- 4) 其它额度（文字） -->
+                <div class="usage-box">
+                  <h3>其它额度与状态</h3>
+                  <p class="sub">存储、调用速率、资源超限与消耗排行</p>
+                  <div class="usage-kv" id="usageFacts"></div>
+                </div>
+                <!-- 5) 建议 -->
+                <div class="usage-box" style="grid-column: 1 / -1">
+                  <h3>注意事项</h3>
+                  <ul class="usage-tips" id="usageTips"></ul>
+                </div>
+              </div>
+            </div>
+          </div>
 
   <script src="./renderer.js"></script>
 </body>

@@ -507,6 +507,18 @@ interface Window {
         accountId?: string
         accountName?: string
         dataPlaneMode?: string
+        /**
+         * 数据面的**权威节点域名**（按当前账号在平台上的真实绑定解析）。
+         *
+         * 不用清单里记的值 —— 清单可能已被写脏（串号事故）。
+         */
+        nodeHost?: string
+        /** nodeHost 的来源：Worker 自定义域名 / workers.dev 兜底 / Pages 自定义域名 … */
+        nodeHostSource?: string
+        /** 读不到节点域名时的提示 */
+        nodeHostWarning?: string
+        /** 清单里记的值与平台实际不一致（已按平台实际值为准） */
+        nodeHostStale?: boolean
       }
       localKernelVersion?: string
       localBuild?: string

@@ -395,22 +395,29 @@ func (s *Server) handleScanDetectHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 优先自定义域名
-	host := m.DataCustomDomain
-	source := "自定义域名"
-	if host == "" {
-		host = normalizePagesHost(m.DataSubdomain)
-		source = "pages.dev 子域名"
-	}
-	if host == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "清单里没有可用的数据面域名"})
+	// 节点域名：**以平台上的真实绑定为准**（清单可能已被写脏）。
+	//
+	// 真机事故（2026-11-02）：清单里的 dataCustomDomain 是另一个账号的域名，
+	// 照着它回填 → 用户看不出填错 → 更新部署再次写坏 DATA_HOST。
+	hostCtx, cancelHost := nodeHostContext(ctx)
+	nodeHost := s.resolveNodeHost(hostCtx, client, profile.AccountID, &m)
+	cancelHost()
+
+	if nodeHost.Host == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": nodeHost.Warning,
+		})
 		return
 	}
 
-	s.logf(fmt.Sprintf("识别到数据面域名：%s（来源：%s）", host, source))
+	s.logf(fmt.Sprintf("识别到数据面域名：%s（来源：%s）", nodeHost.Host, nodeHost.Source))
+	if nodeHost.Stale {
+		s.logf("⚠ 部署清单里记的数据面域名（" + nodeHost.ManifestValue + "）与平台实际绑定的不一致，已按平台实际值为准")
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"host":   host,
-		"source": source,
+		"host":   nodeHost.Host,
+		"source": nodeHost.Source,
+		"stale":  nodeHost.Stale,
 	})
 }
 

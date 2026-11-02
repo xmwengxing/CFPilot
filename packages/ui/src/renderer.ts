@@ -2636,12 +2636,13 @@
           const host = await window.cfpilot.detectScanHost()
           if (host.ok && host.host) {
             $('optHost').value = host.host
-            if (host.source === 'custom') {
+            const source = host.source ?? ''
+            if (source.includes('自定义域名')) {
               log(`已填入自定义域名：${host.host}`, 'ok')
             } else {
-              log(`已填入 pages.dev 域名：${host.host}`, 'warn')
+              log(`已填入 ${host.host}（来源：${source || '未知'}）`, 'warn')
               log('该实例没有绑定自定义域名。建议绑定后再优选——', 'warn')
-              log('pages.dev 生产链接在部分网络环境会被阻断，测出来的结果不可信。', 'warn')
+              log('workers.dev / pages.dev 生产链接在部分网络环境会被阻断，测出来的结果不可信。', 'warn')
             }
           } else {
             log('识别域名失败：' + (host.error ?? '未知错误'), 'err')
@@ -3613,11 +3614,28 @@
         return
       }
 
-      // 回填节点域名：换形态时最怕「以为没填就丢了域名」，显示出来比让用户猜强。
-      // 只在输入框为空时填，绝不覆盖用户已经输入的内容。
+      // 回填节点域名：**用平台上的真实绑定覆盖**，不是"只在为空时填"。
+      //
+      // ⚠️ 真机事故（2026-11-02）：填的是**另一个账号**的域名，
+      // 用户根本没察觉填错 → 点「更新部署」→ 又写坏一次 DATA_HOST → 节点全 -1。
+      //
+      // 现在这个值来自后端对**当前账号**的实时查询（Worker 绑定 / workers.dev 兜底），
+      // 每次「检查部署状态」都会覆盖一次，用户看到的就是当前账号真实的节点域名。
       const hostInput = document.getElementById('dataHost') as HTMLInputElement | null
-      if (hostInput && !hostInput.value.trim() && status.customDomain) {
-        hostInput.value = status.customDomain
+      const nodeHost = (status as { nodeHost?: string; nodeHostSource?: string; nodeHostWarning?: string }).nodeHost ?? ''
+      const nodeHostSource = (status as { nodeHostSource?: string }).nodeHostSource ?? ''
+      const nodeHostWarning = (status as { nodeHostWarning?: string }).nodeHostWarning ?? ''
+      if (hostInput && nodeHost) {
+        hostInput.value = nodeHost
+        const hostTip = document.getElementById('dataHostHint')
+        if (hostTip) {
+          hostTip.textContent = '来源：' + nodeHostSource + '（每次「检查部署状态」都会按平台实际绑定刷新）'
+        }
+      } else if (hostInput && nodeHostWarning) {
+        const hostTip = document.getElementById('dataHostHint')
+        if (hostTip) {
+          hostTip.textContent = '⚠ ' + nodeHostWarning.replace(/\n/g, ' ')
+        }
       }
 
       // 回填数据面形态（只在用户本次没手动改过时）。

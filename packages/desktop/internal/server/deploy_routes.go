@@ -626,7 +626,24 @@ func (s *Server) handleDeployCheck(w http.ResponseWriter, r *http.Request) {
 		DataPlaneMode:    m.DataPlaneMode,
 	})
 
-	writeJSON(w, http.StatusOK, buildDeployStatusResponse(&m, state, localBuild, remoteBuild, ks))
+	// 节点域名：**以平台上的真实绑定为准**（清单可能已被写脏）。
+	//
+	// 真机事故（2026-11-02）：清单里的 dataCustomDomain 是另一个账号的域名，
+	// 照着它回填输入框 → 用户看不出填错 → 更新部署再次写坏。
+	hostCtx, cancelHost := nodeHostContext(ctx)
+	nodeHost := s.resolveNodeHost(hostCtx, client, profile.AccountID, &m)
+	cancelHost()
+	// 清单被写脏时顺手修正，让它自愈（只在不一致时写一次 KV）。
+	repairCtx, cancelRepair := nodeHostContext(ctx)
+	s.repairManifestNodeHost(repairCtx, client, profile.AccountID, kvID, &m, nodeHost)
+	cancelRepair()
+
+	resp := buildDeployStatusResponse(&m, state, localBuild, remoteBuild, ks)
+	resp["nodeHost"] = nodeHost.Host
+	resp["nodeHostSource"] = nodeHost.Source
+	resp["nodeHostWarning"] = nodeHost.Warning
+	resp["nodeHostStale"] = nodeHost.Stale
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // kernelStatus 是内核版本的对比结果。

@@ -63,6 +63,17 @@ func resolveNodeHost(dataHost, devHost string) string {
 }
 
 // workersDevHost 计算 Worker 的生产域名。
+// WorkersDevHost 拼出 Worker 的 workers.dev 生产域名。
+//
+// 账号没注册 workers.dev 子域时退回 `<name>.workers.dev` ——
+// 否则会出现 `name..workers.dev` 这种畸形域名。
+//
+// 导出给服务端的「检查部署状态 / 自动识别」用：
+// 那里也要能算出同一个兜底域名（两端必须一致）。
+func WorkersDevHost(name, subdomain string) string {
+	return workersDevHost(name, subdomain)
+}
+
 func workersDevHost(name, subdomain string) string {
 	sub := strings.TrimSpace(subdomain)
 	if sub == "" {

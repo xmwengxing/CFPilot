@@ -408,20 +408,25 @@ export class CloudflareClient {
   }
 
   /**
-   * 开启 / 关闭脚本的 workers.dev 子域路由。
+   * 开启 / 关闭脚本的 workers.dev 子域路由与预览链接。
    *
    * 注意：Worker 上传成功后该路由默认是关闭的，必须显式传 enabled: true，
    * 否则 https://<name>.<sub>.workers.dev/ 会一直返回「There is nothing here yet」。
+   *
+   * ⚠️ enabled 与 previewsEnabled 是**两个独立开关**：
+   * 真机事故（2026-11-02）—— 数据面绑了自定义域名后，
+   * workers.dev 的生产链接与预览链接必须**都关掉**，否则节点全部 -1。
    */
   async putScriptSubdomain(
     accountId: string,
     scriptName: string,
-    enabled = true
+    enabled = true,
+    previewsEnabled = false
   ): Promise<ScriptSubdomain> {
     return await this.request(
       'POST',
       `/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(scriptName)}/subdomain`,
-      { enabled }
+      { enabled, previews_enabled: previewsEnabled }
     )
   }
 

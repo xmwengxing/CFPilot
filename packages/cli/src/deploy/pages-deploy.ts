@@ -1255,6 +1255,8 @@ export async function deployPagesSplit(
       name: dataName,
       code: dataCode,
       dataHost: options.dataHost,
+      // 控制面项目名：用于校验节点域名没有串到控制面 / 别的 Worker 上。
+      controlProject: result.control.name,
       bindings: workersBindings,
       log,
       warnings,

@@ -979,14 +979,32 @@ func (c *Client) GetWorkersSubdomain(ctx context.Context, accountID string) (str
 	return out.Subdomain, nil
 }
 
-// PutScriptSubdomain 开启 / 关闭脚本的 workers.dev 路由。
+// PutScriptSubdomain 开启 / 关闭脚本的 workers.dev 路由与预览链接。
 //
 // 上传成功后该路由默认是关闭的，必须显式开启，
 // 否则 https://<name>.<sub>.workers.dev 一直返回「There is nothing here yet」。
-func (c *Client) PutScriptSubdomain(ctx context.Context, accountID, scriptName string, enabled bool) error {
+//
+// ⚠️ enabled 与 previewsEnabled 是**两个独立开关**：
+// 真机事故（2026-11-02）—— 数据面绑了自定义域名后，
+// workers.dev 的生产链接与预览链接必须**都关掉**，否则节点全部 -1。
+func (c *Client) PutScriptSubdomain(ctx context.Context, accountID, scriptName string, enabled bool, previewsEnabled bool) error {
 	return c.doJSON(ctx, http.MethodPost,
 		fmt.Sprintf("/accounts/%s/workers/scripts/%s/subdomain", accountID, url.PathEscape(scriptName)),
-		map[string]bool{"enabled": enabled}, nil)
+		map[string]bool{"enabled": enabled, "previews_enabled": previewsEnabled}, nil)
+}
+
+// GetScriptSubdomain 读取脚本的 workers.dev 路由与预览链接开关。
+func (c *Client) GetScriptSubdomain(ctx context.Context, accountID, scriptName string) (enabled bool, previewsEnabled bool, err error) {
+	var out struct {
+		Enabled         bool `json:"enabled"`
+		PreviewsEnabled bool `json:"previews_enabled"`
+	}
+	if err = c.doJSON(ctx, http.MethodGet,
+		fmt.Sprintf("/accounts/%s/workers/scripts/%s/subdomain", accountID, url.PathEscape(scriptName)),
+		nil, &out); err != nil {
+		return false, false, err
+	}
+	return out.Enabled, out.PreviewsEnabled, nil
 }
 
 // ListWorkerDomains 列出账号下全部 Worker 自定义域名绑定。

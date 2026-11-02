@@ -342,10 +342,8 @@
         <button class="ghost sm" data-goto="sub">更多订阅选项 →</button>
       </div>
       <p class="hint">
-        一个链接通吃：客户端会按自己的 User-Agent 自动拿到对应格式 ——
-        <b>v2rayN / v2rayNG / Shadowrocket / NekoBox</b> 拿 Base64 分享链接，
-        <b>Clash / Mihomo / Clash Verge</b> 拿 YAML，<b>Sing-box</b> 拿 JSON。
-        识别不出客户端类型时回落到 Base64（最通用）。
+        通吃链接：客户端 User-Agent 自动获取对应格式 ——
+        识别不出类型时回落到 Base64（通用）。
       </p>
       <div class="field" style="margin-bottom:0">
         <div class="row nowrap">
@@ -391,15 +389,15 @@
     <div class="card">
       <h2><span class="dot"></span>节点池来源编排</h2>
       <p class="hint">
-        三种节点来源支持自由组合，系统按 <b>官方优选 IP → 优选域名 → 手动与本地优选 IP</b> 顺序合并去重。
-        若三项均未勾选，系统将自动生成 <b>20 个官方优选 IP + 10 个优选域名</b> 作为兜底，确保订阅始终可用。<br>
-        另有一种<b>独立来源</b>：<b>远程第三方优选订阅源</b>（TXT 列表 / CSV 测速表）——
-        在「出站与高级」页配置，<b>不受本页三个勾选项影响</b>，配了就生效。
+        · 三种节点来源自由组合，系统按 <b>官方优选 IP → 优选域名 → 手动指定 IP</b> 顺序合并去重。<br>
+        · 若三项均未勾选，系统将自动生成 <b>20 个官方优选 IP + 10 个优选域名</b> 确保订阅始终可用。<br>
+        · <b>独立来源</b>：<b>远程第三方优选订阅源</b>（TXT 列表 / CSV 测速表）——
+        「出站与高级」页填写，<b>不受本页三个勾选项影响</b>，配置即生效。
       </p>
 
       <!-- 来源 1：官方优选 -->
       <div class="source" id="src-official">
-        <label class="chk"><input type="checkbox" id="poolOfficial" /> 官方 Anycast 随机优选 IP</label>
+        <label class="chk"><input type="checkbox" id="poolOfficial" /> 1. 官方 Anycast 随机优选 IP</label>
         <div class="desc">从 Cloudflare 官方发布的 IPv4 网段中按权重随机抽样生成，避免固定静态 IP 表失效。</div>
         <div class="src-body">
           <div class="grid">
@@ -413,7 +411,7 @@
 
       <!-- 来源 2：优选域名 -->
       <div class="source" id="src-domain">
-        <label class="chk"><input type="checkbox" id="poolDomain" /> 优选 CNAME 域名库</label>
+        <label class="chk"><input type="checkbox" id="poolDomain" /> 2. 优选 CNAME 域名库</label>
         <div class="desc">通过接入 Cloudflare 的知名高可用域名动态解析边缘 IP（客户端实际握手 SNI 与 Host 仍保持为您的数据面域名）。</div>
         <div class="src-body">
           <div class="grid">
@@ -436,7 +434,7 @@
 
       <!-- 来源 3：手动与本地优选 -->
       <div class="source" id="src-manual">
-        <label class="chk"><input type="checkbox" id="poolManual" /> 本地真连接优选池 & 手动指定 IP</label>
+        <label class="chk"><input type="checkbox" id="poolManual" /> 3. 手动指定 IP</label>
         <div class="desc">包含「本地真连接优选器」自动回填的实测 IP（最高优先级）以及下方手动录入的静态节点。</div>
         <div class="src-body">
           <div class="field">
@@ -495,7 +493,8 @@
     <div class="card">
       <h2><span class="dot"></span>本地真连接优选器（True-Connect Scanner）</h2>
       <p class="hint">
-        以您的<b>数据面专属域名</b>作为 TLS SNI 与 HTTP Host，在本机直接对候选 IP 进行 TCP、TLS 及 WebSocket 101 握手实测，并将通过验证的高速 IP 自动回填至「本地真连接池」。
+        · 以<b>数据面专属域名</b>作为 TLS SNI 与 HTTP Host，在本机进行 TCP、TLS 及 WebSocket 101 握手实测，并将高速 IP 回填至「本地真连接池」。
+        · 不熟悉命令行的新手建议下载 CFPilot 部署工具执行优选 IP。
       </p>
 
       <div class="row" style="margin:16px 0;padding:12px 14px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.25);border-radius:10px">
@@ -706,11 +705,11 @@
           <label class="check-pill"><input type="checkbox" id="cfgVarTrojan" /> Trojan + WebSocket</label>
         </div>
         <p class="tip">
-          订阅仅会为上方勾选的协议形态生成节点（未勾选形态不会生成冗余节点）。若勾选 Trojan 或 XHTTP，请确保下方对应的服务端入站开关处于启用状态。
-          <br>一个形态都没勾时，后端会回落到最通用的 VLESS + WebSocket（保证订阅不为空）。
+          订阅仅会为上方勾选的协议形态生成节点。若勾选 Trojan 或 XHTTP，请确保下方对应的服务端入站开关处于启用状态。
+          <br>全部未勾选，后端会回落到 VLESS + WebSocket（保证订阅不为空）。
           <br>⚠️ <b>XHTTP 实测在 Cloudflare 边缘会被直接拦截</b>：标准 Xray 客户端发的请求头是
           <code class="inline">Content-Type: application/grpc</code>，Cloudflare 对这个类型直接回 <b>403</b>
-          （请求根本到不了数据面），因此勾选 XHTTP 生成的节点在客户端里基本都是 <b>-1</b>。
+          （请求根本到不了数据面），因此勾选 XHTTP 生成的节点目前全部为 <b>-1</b>。
           只有能把 Content-Type 改成 <code class="inline">application/octet-stream</code> 等类型的客户端才可能通。
         </p>
       </div>
@@ -756,7 +755,7 @@
           <p class="tip">支持 https:// 与 #sni=。</p>
         </div>
         <div class="field">
-          <label>专用 ProxyIP 池（每行一条 host:port）</label>
+          <label>ProxyIP 池</label>
           <textarea id="cfgProxyIp" class="mono" placeholder="1.2.3.4:443"></textarea>
           <p class="tip">每行一个 host:port。</p>
         </div>
@@ -766,14 +765,14 @@
           <p class="tip">用于 Cloudflare 网段目标。</p>
         </div>
         <div class="field">
-          <label>NAT64 转换前缀（用于 IPv6 出站回退）</label>
+          <label>NAT64 转换前缀</label>
           <input id="cfgNat64" class="mono" placeholder="64:ff9b::" />
           <p class="tip">IPv6 出站回退前缀。</p>
         </div>
         <div class="field">
-          <label>客户端 TLS 指纹伪装（uTLS Fingerprint）</label>
+          <label>客户端 TLS 指纹伪装</label>
           <input id="cfgFingerprint" class="mono" placeholder="chrome" />
-          <p class="tip">填写 chrome 等指纹名。</p>
+          <p class="tip">uTLS Fingerprint 指纹名。</p>
         </div>
       </div>
 

@@ -1196,7 +1196,7 @@
               <b>必需（三项，分类都是 Account）</b><br>
               · Account / Account Settings / <b>Read</b> —— 读取账号列表（<code>GET /accounts</code>）<br>
               · Account / Workers KV Storage / <b>Edit</b> —— 建 KV、读写部署清单与 <code>CONFIG</code><br>
-              · Account / Pages / <b>Edit</b> —— 建/删 Pages 项目、上传内核、绑 KV、配环境变量<br><br>
+              · Account / Pages / <b>Edit</b> —— 建/删 Pages 项目、上传内核、绑 KV、配环境变量<br>
               <b>可选</b><br>
               · Account / Account API Tokens / <b>Read</b> —— 仅用于显示 Token 有效期<br>
               · Zone / Zone / <b>Read</b>（+ Zone / DNS / <b>Edit</b>）—— 仅绑定自定义域名时需要<br><br>
@@ -1301,11 +1301,9 @@
                 <label class="chk"><input type="radio" name="mode" value="fresh" /> 全新部署</label>
               </div>
               <p class="tip">
-                <b>自动判断</b>：KV 有记录则更新，无则新建；<b>更新现有部署</b>：沿用原部署值；<b>全新部署</b>：生成全新实例。
-                <br>⚠ <b>全新部署会新建一个独立的 KV</b>，不使用「凭据」页选中的那个 ——
-                一个 KV 只能承载一个实例。会覆盖原 KV 的是<b>更新部署</b>：
-                勾选「重新生成凭据」后，新的 UUID 与 WS 路径会写进原 KV，
-                <b>原实例的客户端节点将全部失效</b>。
+                <b>自动判断</b>：KV 有记录则启动「更新现有部署」，没有则启动「全新部署」。
+                <br>⚠ <b>全新部署会新建一个 KV，忽略「凭据」页 KV 选择，自动填写新参数</b>。
+                <br>⚠ <b>更新现有部署会复用「凭据」页 KV 选择，复用所有原参数</b>。
               </p>
             </div>
 
@@ -1333,7 +1331,7 @@
             </div>
 
             <div class="field">
-              <label>面板密码（可选，建议手动填写）</label>
+              <label>面板密码（可选，首次部署建议手动填写）</label>
               <input
                 type="password"
                 id="deployPanelPassword"
@@ -1471,8 +1469,8 @@
                   <button class="btn btn-ghost" id="btnAutoDetect" style="flex:0 0 auto">自动识别</button>
                 </div>
                 <p class="tip">
-                  · <b>workers部署请使用自定义域名！</b>，<code>*.workers.dev</code> 生产链接网络阻断<br>
-                  · 点击「自动识别」：优先填入数据面自定义域名，否则填入 workers.dev / pages.dev
+                  · <b>workers 部署请使用自定义域名！</b><code>*.workers.dev</code> 生产链路网络阻断<br>
+                  · 「自动识别」：优先填入数据面自定义域名，否则填入 workers.dev / pages.dev
                 </p>
               </div>
               <div class="field">
@@ -1508,7 +1506,7 @@
                 <input type="number" id="optTop" value="8" min="1" max="100" />
                 <p class="tip">
                   · 建议 <b>10~20</b>，节点过多只会稀释分流质量没有实际意义<br>
-                  · 端口固定 <b>443</b> —— 其它端口请在 Web 面板中配置
+                  · 端口固定 <b>443</b> —— 订阅启用多端口请在 Web 面板中勾选
                 </p>
               </div>
             </div>
@@ -1525,7 +1523,6 @@
                 <label>测速地址（可选）</label>
                 <input type="text" id="optProbePath" placeholder="留空 = 自动" />
                 <p class="tip">
-                  · <b>留空即可</b>，工具自动决定：<br>
                   · 自定义则强制使用指定地址（大文件测试可自行填写）
                 </p>
               </div>
@@ -1790,20 +1787,28 @@
             <div class="links">
               <b>首次部署流程</b><br>
               1. 在「凭据」页填写 Token 并保存，「当前使用」中选中账号（系统识别到暂无CFPilot实例）<br>
-              2. 切换到「部署」页，选择「自动判断」，输入面板密码，点击「开始部署」<br>
-              3. 在「优选」页点击自动识别，其他保持默认后开始优选，优选结束点击「回填面板」或复制结果<br>
-              5. 优选 IP 可能失效，节点不稳定时可再次执行优选，无需每日进行<br>
-			  Web 面板：点击「查看面板凭据」，复制地址到浏览器打开，在「节点来源」页「手动指定 IP」中粘贴以上结果<br><br>
-              <b>更新升级</b><br>
-              1. 在「凭据」页「当前使用」中选中账号（系统自动识别现有实例）<br>
-			  2. 唯一CFPilot实例：「部署」页点击「检查状态」，提示版本差异，点击「更新到最新内核」按钮<br>
-			  3. 多CFPilot实例：「凭据」页选择本次部署使用的 KV，其他同上<br>
-              <b>订阅地址、面板密码、面板路径、WS 路径、UUID均保持不变</b>。<br><br>
+              2. 切换到「部署」页，选择「自动判断」，输入面板密码（不填则随机），点击「开始部署」<br>
+			  · 运行日志显示部署成功后的相关信息，请手动保存备查<br><br>
+			  <b>Web 面板</b><br>
+			  1. 查看运行日志或点击「查看面板凭据」获取面板地址，浏览器中打开，输入登录密码进入控制台<br>
+			  2. 「运行概览」页点击「复制订阅链接」，导入代理工具即可遨游全球网络<br>
+			  · 默认分配 30 个节点 = 优选域名 10 个 + 官方优选 IP 20 个<br><br>
+			  <b>优选 IP</b><br>
+			  1. 在「优选」页点击自动识别，其他保持默认，点击「开始优选」，等待优选结果<br>
+			  2. 「回填面板」：自动获取临时 Token 并填入面板并保存，订阅直接生效<br>
+			  3. 「复制结果」：Web 面板打开「节点来源」，手动指定 IP 中粘贴结果，保存并应用<br>
+			  · ⚠️「回填面板」<b>将清空原有的手动指定 IP</b>，增选请使用「复制结果」<br>
+              · 优选 IP 稳定且短期不会失效，无需每日优选；节点测试延迟 -1 请再次测试<br><br>
+              <b>升级内核</b><br>
+              1. 在「凭据」页「当前使用」中选中账号（系统自动识别 CFPilot 实例）<br>
+			  2. 唯一 CFPilot 实例：「部署」页点击「检查状态」，提示版本差异，点击「更新到最新内核」按钮<br>
+			  3. 多 CFPilot 实例：「凭据」页选择本次部署使用的 KV，其他同上<br>
+              <b>· 订阅地址、面板密码、面板路径、WS 路径、UUID 均保持不变</b><br><br>
               <b>关于 CFPilot</b><br>
               CFPilot 采用双项目部署一对实例：控制面（Web 面板）+ 数据面（流量转发），
-              实测稳定无 1101、无8000119，支持在触发 CF 限制时进行无损更新部署<br>
-              不建议在同一账户下部署多个 CFPilot 实例；若确需部署：创建新的 KV，选择该 KV 后部署第二对实例<br>
-              <b>本项目已支持数据面 Workers 形式部署</b>
+              实测稳定无1101、无8000119，支持在触发 CF 限制时进行无损更新部署<br>
+              不建议在同一账户下部署多个 CFPilot 实例；若确有需求：创建新的 KV，选择该 KV 后部署第二对<br>
+              <b>本项目已支持数据面 Workers 形式部署（新手建议使用默认 Pages）</b>
             </div>
           </div>
 
@@ -1823,13 +1828,13 @@
 
           <div class="card">
             <h2><span class="dot"></span>⬆️ 检查更新 <span class="badge info" id="updateBadge">未检查</span></h2>
-            <p class="desc">从 GitHub Releases 获取最新版本并就地替换本程序。</p>
+            <p class="desc">从 GitHub Releases 获取最新版本并下载安装包到程序目录下的 updates 文件夹，请退出程序后手动替换。</p>
             <div class="btn-row">
               <button class="btn btn-ghost" id="btnCheckUpdate">检查更新</button>
-              <button class="btn btn-primary" id="btnUpdate" disabled>下载并安装</button>
+              <button class="btn btn-primary" id="btnUpdate" disabled>下载安装包</button>
             </div>
             <p class="tip" id="updateHint" style="margin-top:10px">
-              没有新版本时会提示当前版本。更新将在你确认后重启程序完成替换。
+              没有新版本时会提示当前版本。下载完成后按提示替换旧程序即可。
             </p>
             <div class="progress" id="updateProgressWrap" hidden><i id="updateBar"></i></div>
             <p class="tip" id="updateProgressText" style="margin-top:6px" hidden></p>

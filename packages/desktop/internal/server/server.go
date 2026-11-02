@@ -72,6 +72,9 @@ type Server struct {
 	update updateState
 	// cfBase 覆盖 Cloudflare API 根地址（测试用；生产恒为空 → 走官方地址）
 	cfBase string
+	// usage 是用量查询的缓存与本地调用风控（首次使用时创建）
+	usage     *usageState
+	usageOnce sync.Once
 }
 
 // New 创建一个服务实例（不启动监听）。
@@ -292,6 +295,9 @@ func (s *Server) routes() http.Handler {
 
 	// 账户与凭据 API
 	s.registerCredRoutes(mux)
+
+	// 账号用量与额度（只读；需要 Account Analytics Read 权限）
+	mux.HandleFunc("/api/usage", s.guard(s.handleUsage))
 
 	// SSE 事件推送（日志 / 部署状态 / 扫描结果）
 	s.registerEventRoutes(mux)

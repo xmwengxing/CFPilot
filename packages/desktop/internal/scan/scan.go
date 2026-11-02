@@ -105,13 +105,16 @@ type Options struct {
 	ProbeTimeoutMs   int
 	SpeedLimit       int
 	SpeedConcurrency int
-	// SpeedConnections 是每个候选的并发连接数（0 = 默认 3）。
+	// SpeedConnections 是每个候选的并发连接数（0 = 默认 8）。
 	//
 	// 阶段三的「并发」有两层，别混淆：
 	//   - SpeedConcurrency：**候选之间**并行（默认 1 串行，带宽共享）；
-	//   - SpeedConnections：**同一个候选**开几条 TCP 流（默认 3，单流填不满链路）。
+	//   - SpeedConnections：**同一个候选**开几条 TCP 流（默认 8，单流填不满链路）。
+	//
+	// 实测同一个 IP：1 条 0.12 MB/s、3 条 0.47、8 条 1.15、16 条 2.22 ——
+	// 用 1~3 条会系统性低估 2~4 倍。上限 8（与 CLI 的 --speed-conns 一致）。
 	SpeedConnections int
-	// SpeedDurationMs 是单次测量时长（0 = 默认 6000ms），不含整体预算。
+	// SpeedDurationMs 是单次测量时长（0 = 默认 6000ms，上限 10000ms），不含整体预算。
 	SpeedDurationMs int
 	SpeedTimeoutMs  int
 	SpeedBytes      int

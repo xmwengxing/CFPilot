@@ -263,6 +263,8 @@ func (s *Server) handleProfileSwitch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	// 换了账户 → 后台重新采集一次账号用量（弹窗里直接有数据）。
+	s.primeUsageCache()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "activeId": activeID})
 }
 

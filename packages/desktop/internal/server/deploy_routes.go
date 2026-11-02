@@ -320,6 +320,9 @@ func (s *Server) handleDeployRun(w http.ResponseWriter, r *http.Request) {
 	//   - Force  ：强制重新部署（哪怕线上版本与本地相同）
 	opt.SkipSameVersion = deploySkipSameVersion(req.Mode, req.Force)
 	opt.Log = func(m string) { s.logf(m) }
+	// KV 写配额日风控：部署一次要写两次 KV（清单 + CONFIG）。
+	// 本地按官方上限的十分之一封顶，防止程序 bug 把当天写配额打光。
+	opt.ClaimWrites = s.claimDailyWrite
 
 	// 异步执行：接口立即返回，进度走 SSE
 	go func() {
@@ -923,6 +926,9 @@ func (s *Server) handleAccountDetect(w http.ResponseWriter, r *http.Request) {
 			}); e != nil {
 				s.logLevel("保存账号信息失败："+e.Error(), "warn")
 			}
+			// 顺手在后台采集一次账号用量：点开「用量/额度」时直接有数据，
+			// 不用临时再花一次 API 调用（后台任务，不阻塞本次响应）。
+			s.primeUsageCache()
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"accountId":   acc.ID,

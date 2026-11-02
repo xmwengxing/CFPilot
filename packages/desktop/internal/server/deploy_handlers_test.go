@@ -101,6 +101,41 @@ func (f *fakeCF) handler(t *testing.T) http.HandlerFunc {
 			}
 		}
 
+		// ---- GraphQL 分析接口与订阅（用量采集用） ----
+		//
+		// 检测账号后端会**在后台**采集一次用量，走的就是这两个接口；
+		// 不实现它们会让后台请求落到下面的「未处理的路由」而让用例失败。
+		if strings.HasSuffix(r.URL.Path, "/graphql") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"viewer": map[string]any{
+						"accounts": []map[string]any{{}},
+					},
+				},
+			})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/subscriptions") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"result": []map[string]any{
+					{"rate_plan": map[string]any{"id": "free", "public_name": "Cloudflare Free Plan"}},
+				},
+			})
+			return
+		}
+		// Pages 项目 / Worker 脚本清单（用量采集用来标出哪些实例是本工具的）
+		if strings.HasSuffix(r.URL.Path, "/pages/projects") || strings.HasSuffix(r.URL.Path, "/workers/scripts") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"result":  []map[string]any{},
+			})
+			return
+		}
+
 		t.Errorf("未处理的路由：%s %s", r.Method, r.URL.Path)
 		w.WriteHeader(http.StatusNotFound)
 	}

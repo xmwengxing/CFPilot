@@ -60,16 +60,24 @@ type fakeCF struct {
 	manifestInKV string
 	// envVars 记录控制面最后一次配置的 DATA_HOST
 	dataHost string
+	// subdomainSwitches 记录每个 Worker 的 workers.dev 开关（enabled / previews_enabled）
+	subdomainSwitches map[string]map[string]bool
+	// workerDomains 是账号下 Worker 的自定义域名绑定
+	workerDomains []struct {
+		service  string
+		hostname string
+	}
 }
 
 func newFakeCF() *fakeCF {
 	return &fakeCF{
-		deployCalls:     map[string]int{},
-		kvWrites:        map[string]string{},
-		kvSeed:          map[string]string{},
-		deployFailPlan:  map[string]int{},
-		existingProject: map[string]bool{},
-		subdomainOf:     map[string]string{},
+		deployCalls:       map[string]int{},
+		kvWrites:          map[string]string{},
+		kvSeed:            map[string]string{},
+		deployFailPlan:    map[string]int{},
+		existingProject:   map[string]bool{},
+		subdomainOf:       map[string]string{},
+		subdomainSwitches: map[string]map[string]bool{},
 	}
 }
 
@@ -250,6 +258,52 @@ func (f *fakeCF) handler(t *testing.T) http.HandlerFunc {
 				return
 			}
 			// 列项目
+			if r.Method == http.MethodGet {
+				ok([]any{})
+				return
+			}
+		}
+
+		// ---- Workers 数据面 ----
+		//
+		// 记录 workers.dev 的生产/预览开关与自定义域名绑定，
+		// 用来验证「绑了自定义域名就必须关掉 workers.dev 链接」。
+		if strings.Contains(path, "/workers/") {
+			// 开关：POST .../workers/scripts/{name}/subdomain
+			if strings.HasSuffix(path, "/subdomain") && r.Method == http.MethodPost {
+				var body map[string]bool
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				name := strings.Split(strings.TrimSuffix(path, "/subdomain"), "/")[len(strings.Split(strings.TrimSuffix(path, "/subdomain"), "/"))-1]
+				f.subdomainSwitches[name] = body
+				ok(map[string]any{"enabled": body["enabled"], "previews_enabled": body["previews_enabled"]})
+				return
+			}
+			// 账号的 workers.dev 子域
+			if strings.HasSuffix(path, "/workers/subdomain") && r.Method == http.MethodGet {
+				ok(map[string]any{"subdomain": "acctsub"})
+				return
+			}
+			// 账号下的自定义域名绑定
+			if strings.HasSuffix(path, "/workers/domains") && r.Method == http.MethodGet {
+				out := make([]map[string]any, 0, len(f.workerDomains))
+				for _, d := range f.workerDomains {
+					out = append(out, map[string]any{
+						"id": d.service, "hostname": d.hostname, "service": d.service, "enabled": true,
+					})
+				}
+				ok(out)
+				return
+			}
+			// 上传脚本
+			if strings.Contains(path, "/workers/scripts/") && (r.Method == http.MethodPut || r.Method == http.MethodPost) {
+				ok(map[string]any{"id": "wid", "etag": "e"})
+				return
+			}
+			if strings.Contains(path, "/workers/scripts/") && r.Method == http.MethodGet {
+				ok(map[string]any{"id": "wid", "etag": "e"})
+				return
+			}
+			// 其它 Workers 端点
 			if r.Method == http.MethodGet {
 				ok([]any{})
 				return

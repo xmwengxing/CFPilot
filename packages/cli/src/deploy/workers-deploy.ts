@@ -129,6 +129,10 @@ export interface WorkersDataPlaneOptions {
    * 并提示用户到 Worker 的「域」标签页添加。
    */
   dataHost?: string
+  /**
+   * 控制面项目名（用于校验节点域名没有串号 —— 控制面的域名不能当节点域名用）。
+   */
+  controlProject?: string
   bindings: ScriptBinding[]
   log: (message: string) => void
   warnings: string[]
@@ -144,7 +148,67 @@ export interface WorkersDataPlaneResult {
 }
 
 /**
- * 部署 Workers 数据面：上传脚本 → 开启 workers.dev 路由 → 返回节点域名。
+ * 检查填写的节点域名是否"串号"。
+ *
+ * 拦：控制面的自定义域名、账号里别的 Worker 的域名。
+ * 放行：还没绑定的域名（首次部署后用户自己去控制台绑的正常流程）。
+ *
+ * 返回空串表示没问题；否则返回一段可直接展示给用户的原因。
+ */
+async function findNodeHostClash(
+  client: CloudflareClient,
+  accountId: string,
+  controlProject: string,
+  dataPlaneName: string,
+  host: string
+): Promise<string> {
+  const target = host.trim().toLowerCase()
+  if (!target) return ''
+  // 0) 与数据面**已绑定**的域名必须一致（这条正好拦下真机事故）。
+  //
+  // 真机事故里：数据面早就绑了 data.shijingtian.dpdns.org，
+  // 而输入框里残留的是另一个域名 → 写进 DATA_HOST → 节点全部 -1。
+  // 数据面还没绑过任何域名时放行（首次部署的正常流程）。
+  try {
+    const domains = await client.listWorkerDomains(accountId)
+    const bound = domains.find((dm) => dm.service === dataPlaneName && dm.hostname)?.hostname
+    if (bound && bound.trim().toLowerCase() !== target) {
+      return (
+        `节点域名填的是 ${host}，但数据面 Worker 已绑定的自定义域名是 ${bound} —— 两者必须一致\n` +
+        '  → 填错的域名会被写进控制面 DATA_HOST，订阅节点会全部连不上；\n' +
+        '  → 若要换域名，请先到控制台解绑旧的、再绑定新的，然后填新的。'
+      )
+    }
+  } catch {
+    /* 读不到就跳过这项检查 */
+  }
+  try {
+    if (controlProject) {
+      const project = await client.getPagesProject(accountId, controlProject)
+      for (const domain of project.domains ?? []) {
+        if (domain.trim().toLowerCase() === target) {
+          return `节点域名 ${host} 是**控制面**的域名，不能用作数据面节点域名（控制面不转发代理流量，节点会全部连不上）`
+        }
+      }
+    }
+  } catch {
+    /* 读不到就跳过这项检查 */
+  }
+  try {
+    const domains = await client.listWorkerDomains(accountId)
+    for (const domain of domains) {
+      if (domain.service !== dataPlaneName && domain.hostname.trim().toLowerCase() === target) {
+        return `节点域名 ${host} 已绑定在账号里的另一个 Worker（${domain.service}）上，不能同时用作数据面节点域名`
+      }
+    }
+  } catch {
+    /* 读不到就跳过这项检查 */
+  }
+  return ''
+}
+
+/**
+ * 部署 Workers 数据面：上传脚本 → 调整 workers.dev 链接 → 返回节点域名。
  *
  * ## 节点域名从哪来
  *
@@ -153,11 +217,18 @@ export interface WorkersDataPlaneResult {
  *
  *   - 用户填了自定义域名 → 用它做节点域名（工具**不绑定**，只提示去「域」标签页添加）；
  *   - 没填 → 用 workers.dev 兜底，并显著告警。
+ *
+ * ## workers.dev 链接必须关掉（有自定义域名时）
+ *
+ * 真机事故（2026-11-02）：数据面绑了自定义域名后，
+ * workers.dev 的**生产链接与预览链接都要关掉**，否则订阅节点全部 -1。
+ * 详见下面注释。
  */
 export async function deployWorkersDataPlane(
   options: WorkersDataPlaneOptions
 ): Promise<WorkersDataPlaneResult> {
   const { client, accountId, name, log, warnings } = options
+  const dataHost = (options.dataHost ?? '').trim()
 
   log(`· 上传 Workers 数据面脚本 ${name}`)
   await client.uploadScript(accountId, name, {
@@ -167,15 +238,47 @@ export async function deployWorkersDataPlane(
     bindings: options.bindings,
   })
 
-  // 上传成功后 workers.dev 路由默认是关闭的，必须显式开启，
-  // 否则 https://<name>.<sub>.workers.dev 一直返回「There is nothing here yet」。
+  // workers.dev 的生产与预览链接：有自定义域名时**必须都关掉**。
+  //
+  // 真机事故（2026-11-02）：数据面绑了自定义域名后，
+  // 生产链接与预览链接都开着 → 订阅节点全部 -1。
+  //
+  // 判定依据有两个（任一成立就关）：
+  //   - 用户在部署参数里填了「数据面域名」→ 他的意图就是走自定义域名；
+  //   - 这个 Worker 确实绑了自定义域名（读 /workers/domains）。
+  //
+  // 没绑定自定义域名时反而要开着 —— 否则连一个能用的入口都没有。
+  let boundCustom = ''
   try {
-    await client.putScriptSubdomain(accountId, name, true)
-  } catch (err) {
-    warnings.push(
-      `开启 workers.dev 路由失败：${err instanceof Error ? err.message : String(err)}\n` +
-        '  → 到控制台 → Workers → 你的脚本 → 设置 → 域和路由 里手动开启即可。'
-    )
+    const domains = await client.listWorkerDomains(accountId)
+    const hit = domains.find((dm) => dm.service === name && dm.hostname)
+    if (hit?.hostname) boundCustom = hit.hostname
+  } catch {
+    /* 读不到就按「用户填了没填」判断 */
+  }
+
+  if (dataHost || boundCustom) {
+    try {
+      await client.putScriptSubdomain(accountId, name, false, false)
+      log('✅ 已关闭 workers.dev 的生产链接与预览链接（节点走自定义域名）')
+    } catch (err) {
+      warnings.push(
+        `关闭 workers.dev 链接失败：${err instanceof Error ? err.message : String(err)}\n` +
+          '  → 到控制台 → Workers → 你的脚本 → 设置 → 域和路由，把「生产」与「预览」都关掉，\n' +
+          '    否则节点会全部连不上（真机事故 2026-11-02）。'
+      )
+    }
+  } else {
+    // 上传成功后 workers.dev 路由默认是关闭的，必须显式开启，
+    // 否则 https://<name>.<sub>.workers.dev 一直返回「There is nothing here yet」。
+    try {
+      await client.putScriptSubdomain(accountId, name, true, false)
+    } catch (err) {
+      warnings.push(
+        `开启 workers.dev 路由失败：${err instanceof Error ? err.message : String(err)}\n` +
+          '  → 到控制台 → Workers → 你的脚本 → 设置 → 域和路由 里手动开启即可。'
+      )
+    }
   }
 
   let subdomain = ''
@@ -185,14 +288,34 @@ export async function deployWorkersDataPlane(
     /* 读不到就用裸名兜底 */
   }
   const devHost = workersDevHost(name, subdomain)
-  const dataHost = (options.dataHost ?? '').trim()
-  const host = resolveNodeHost(dataHost, devHost)
+  // 节点域名：用户填的优先；没填但 Worker 绑了自定义域名 → 用绑定的那个。
+  const host = dataHost ? resolveNodeHost(dataHost, devHost) : boundCustom || devHost
+
+  // ⚠️ 防线：填的域名不能是**控制面**或**账号里别的 Worker** 的域名。
+  //
+  // 真机事故（2026-11-02）：切换账户后「数据面域名」残留了上一个账号的值，
+  // 更新部署时写进控制面 DATA_HOST → 订阅节点全部 -1。
+  // 部署是写操作，这里加一道服务端校验，避免同类问题复发。
+  if (dataHost) {
+    const clash = await findNodeHostClash(client, accountId, options.controlProject ?? '', name, dataHost)
+    if (clash) {
+      throw new Error(
+        clash +
+          '\n  → 请改成数据面 Worker 自己的域名；确认是否切换过账户导致输入框残留。'
+      )
+    }
+  }
 
   if (dataHost) {
     warnings.push(
       `控制面的节点域名已设为 ${dataHost}（写入 DATA_HOST）。\n` +
         `  → 工具不会替你绑定域名，请到 Cloudflare 控制台 → Workers 和 Pages → ${name} → 「域」标签页 → 添加自定义域名，填 ${dataHost}\n` +
         '  → 没绑定之前，这个域名的流量到不了 Worker。'
+    )
+  } else if (boundCustom) {
+    warnings.push(
+      `控制面的节点域名已设为 ${boundCustom}（数据面已绑定的自定义域名，写入 DATA_HOST）。\n` +
+        '  → workers.dev 的生产与预览链接已关闭，节点只走这个自定义域名。'
     )
   } else {
     warnings.push(

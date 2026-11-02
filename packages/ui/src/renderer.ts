@@ -469,6 +469,16 @@
    * 清空部署页的输入框。
    *
    * 单独抽出来是因为除了「切换账户」，「新建账户模式」也要清同一批框。
+   *
+   * ⚠️ 这里**必须包含「数据面域名」（dataHost）**：
+   * 它决定控制面 DATA_HOST（订阅里节点的 sni/host）。
+   * 漏清的后果（2026-11-02 真机事故）：
+   * 账号 A 更新部署 → 表单里留下 A 的数据面域名 → 切到账号 B →
+   * 点「检查部署状态」不会覆盖已填内容 → 直接点「更新部署」→
+   * **A 的域名被写进 B 的控制面 DATA_HOST** → B 的节点全部 -1。
+   *
+   * 同理，「数据面部署形态」也是账号相关的：A 选了 Workers，
+   * 切到 B 后 B 也被悄悄按 Workers 部署。
    */
   function clearDeployFormFields(): void {
     for (const id of [
@@ -477,9 +487,20 @@
       'panelPath',
       'wsPath',
       'deployPanelPassword',
+      // 数据面域名：跨账号残留会写坏 DATA_HOST（见上面的说明）
+      'dataHost',
     ]) {
       const el = document.getElementById(id) as HTMLInputElement | null
       if (el) el.value = ''
+    }
+    // 数据面部署形态：回到默认（Pages），并允许「检查部署状态」按新账号的清单回填。
+    dataPlaneTouched = false
+    const planeRadio = document.querySelector(
+      'input[name="dataPlane"][value="pages"]'
+    ) as HTMLInputElement | null
+    if (planeRadio) {
+      planeRadio.checked = true
+      syncDataPlaneUI()
     }
   }
 

@@ -124,7 +124,7 @@ func (d *Deployer) preflightWorkersDataPlane(ctx context.Context) error {
 	return nil
 }
 
-// deployWorkersDataPlane 上传脚本 → 开启 workers.dev 路由 → 返回节点域名。
+// deployWorkersDataPlane 上传脚本 → 调整 workers.dev 链接 → 返回节点域名。
 //
 // ## 节点域名从哪来
 //
@@ -133,6 +133,17 @@ func (d *Deployer) preflightWorkersDataPlane(ctx context.Context) error {
 //
 //   - 用户填了自定义域名 → 用它做节点域名（工具**不绑定**，只提示去「域」标签页添加）；
 //   - 没填 → 用 workers.dev 兜底，并显著告警。
+//
+// ## workers.dev 链接必须关掉（有自定义域名时）
+//
+// 真机事故（2026-11-02）：数据面绑了自定义域名后，
+// workers.dev 的**生产链接与预览链接都要关掉**，否则订阅节点全部 -1。
+//
+// 判定依据有两个（任一成立就关）：
+//   - 用户在部署页填了「数据面域名」→ 他的意图就是走自定义域名；
+//   - 这个 Worker 确实绑了自定义域名（读 /workers/domains）。
+//
+// 没绑定自定义域名时反而要**开着** —— 否则连一个能用的入口都没有。
 func (d *Deployer) deployWorkersDataPlane(ctx context.Context, name string, eff effective) (string, error) {
 	d.log("· 上传 Workers 数据面脚本 " + name)
 	if err := d.client.UploadWorkerScript(
@@ -141,17 +152,51 @@ func (d *Deployer) deployWorkersDataPlane(ctx context.Context, name string, eff 
 		return "", err
 	}
 
-	// 上传成功后 workers.dev 路由默认关闭，必须显式开启，
-	// 否则 https://<name>.<sub>.workers.dev 一直返回「There is nothing here yet」。
-	if err := d.client.PutScriptSubdomain(ctx, d.opt.AccountID, name, true); err != nil {
-		d.warn(fmt.Sprintf("开启 workers.dev 路由失败：%v\n"+
-			"  → 到控制台 → Workers → 你的脚本 → 设置 → 域和路由 里手动开启即可。", err))
-	}
-
 	sub, _ := d.client.GetWorkersSubdomain(ctx, d.opt.AccountID)
 	devHost := workersDevHost(name, sub)
 	dataHost := strings.TrimSpace(d.opt.DataHost)
+
+	// 这个 Worker 已经绑了哪些自定义域名？
+	boundCustom := ""
+	if domains, err := d.client.ListWorkerDomains(ctx, d.opt.AccountID); err == nil {
+		for _, dm := range domains {
+			if dm.Service == name && dm.Hostname != "" {
+				boundCustom = dm.Hostname
+				break
+			}
+		}
+	}
+
+	// 有自定义域名（用户填了 / 已经绑了）→ 关掉 workers.dev 的生产与预览链接。
+	if dataHost != "" || boundCustom != "" {
+		if err := d.client.PutScriptSubdomain(ctx, d.opt.AccountID, name, false, false); err != nil {
+			d.warn(fmt.Sprintf("关闭 workers.dev 链接失败：%v\n"+
+				"  → 到控制台 → Workers → 你的脚本 → 设置 → 域和路由，把「生产」与「预览」都关掉，\n"+
+				"    否则节点会全部连不上（真机事故 2026-11-02）。", err))
+		} else {
+			d.log("✅ 已关闭 workers.dev 的生产链接与预览链接（节点走自定义域名）")
+		}
+	} else {
+		// 上传成功后 workers.dev 路由默认关闭，必须显式开启，
+		// 否则 https://<name>.<sub>.workers.dev 一直返回「There is nothing here yet」。
+		if err := d.client.PutScriptSubdomain(ctx, d.opt.AccountID, name, true, false); err != nil {
+			d.warn(fmt.Sprintf("开启 workers.dev 路由失败：%v\n"+
+				"  → 到控制台 → Workers → 你的脚本 → 设置 → 域和路由 里手动开启即可。", err))
+		}
+	}
+
+	// 节点域名：用户填的优先；没填但 Worker 绑了自定义域名 → 用绑定的那个。
 	host := resolveNodeHost(dataHost, devHost)
+	if dataHost == "" && boundCustom != "" {
+		host = boundCustom
+	}
+
+	// ⚠️ 写之前先校验域名没有"串号"（真机事故 2026-11-02 的最后一道防线）。
+	if dataHost != "" {
+		if err := d.checkNodeHostOwnership(ctx, name, dataHost); err != nil {
+			return "", err
+		}
+	}
 
 	if dataHost != "" {
 		d.warn(fmt.Sprintf(
@@ -159,6 +204,11 @@ func (d *Deployer) deployWorkersDataPlane(ctx context.Context, name string, eff 
 				"  → 工具不会替你绑定域名，请到 Cloudflare 控制台 → Workers 和 Pages → %s → 「域」标签页 → 添加自定义域名，填 %s\n"+
 				"  → 没绑定之前，这个域名的流量到不了 Worker。",
 			dataHost, name, dataHost))
+	} else if boundCustom != "" {
+		d.warn(fmt.Sprintf(
+			"控制面的节点域名已设为 %s（数据面已绑定的自定义域名，写入 DATA_HOST）。\n"+
+				"  → workers.dev 的生产与预览链接已关闭，节点只走这个自定义域名。",
+			boundCustom))
 	} else {
 		d.warn(fmt.Sprintf(
 			"未填写节点域名，控制面的 DATA_HOST 用的是 %s。\n"+
@@ -168,6 +218,79 @@ func (d *Deployer) deployWorkersDataPlane(ctx context.Context, name string, eff 
 	}
 
 	return host, nil
+}
+
+// checkNodeHostOwnership 校验填写的节点域名没有"串号"。
+//
+// ## 为什么需要这道防线
+//
+// 真机事故（2026-11-02）：切换账户后「数据面域名」输入框残留了上一个账号的值，
+// 更新部署时把它写进了控制面 DATA_HOST → 订阅节点的 sni/host 指向别的域名
+// → **节点全部 -1**。
+//
+// 界面侧已经修好（切账户清空输入框），但**部署是写操作**，
+// 这里再加一道服务端校验：写之前先确认这个域名确实是"给数据面用的"。
+//
+// ## 拦哪些、放行哪些
+//
+//   - 是**控制面**的域名 → 拦（控制面不转发代理流量，节点必然连不上）
+//   - 是账号里**别的 Worker** 的域名 → 拦（串到别的服务上去了）
+//   - 还没绑（用户准备部署完再去控制台绑） → **放行**（首次部署的正常流程）
+func (d *Deployer) checkNodeHostOwnership(ctx context.Context, dataPlaneName, host string) error {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return nil
+	}
+	// 0) 与数据面**已绑定**的域名必须一致（这条正好拦下真机事故）。
+	//
+	// 真机事故里：数据面早就绑了 data.shijingtian.dpdns.org，
+	// 而输入框里残留的是另一个域名 → 写进 DATA_HOST → 节点全部 -1。
+	//
+	// 数据面**还没绑过**任何域名时放行 —— 那是首次部署的正常流程
+	// （工具不绑域名，用户部署完自己去控制台绑）。
+	if bound, err := d.boundCustomDomain(ctx, dataPlaneName); err == nil && bound != "" && bound != host {
+		return fmt.Errorf(
+			"节点域名填的是 %s，但数据面 Worker 已绑定的自定义域名是 %s —— 两者必须一致\n"+
+				"  → 填错的域名会被写进控制面 DATA_HOST，订阅节点会全部连不上；\n"+
+				"  → 若要换域名，请先到控制台解绑旧的、再绑定新的，然后填新的。", host, bound)
+	}
+	// 1) 控制面的自定义域名
+	if d.result.Control.Name != "" {
+		if p, err := d.client.GetPagesProject(ctx, d.opt.AccountID, d.result.Control.Name); err == nil && p != nil {
+			for _, dm := range p.Domains {
+				if strings.EqualFold(strings.TrimSpace(dm), host) {
+					return fmt.Errorf(
+						"节点域名 %s 是**控制面**的域名，不能用作数据面节点域名（控制面不转发代理流量，节点会全部连不上）"+
+							"\n  → 请改成数据面 Worker 的域名；确认是否切换过账户导致输入框残留。", host)
+				}
+			}
+		}
+	}
+	// 2) 账号里别的 Worker 的域名
+	if domains, err := d.client.ListWorkerDomains(ctx, d.opt.AccountID); err == nil {
+		for _, dm := range domains {
+			if dm.Service != dataPlaneName && strings.EqualFold(strings.TrimSpace(dm.Hostname), host) {
+				return fmt.Errorf(
+					"节点域名 %s 已绑定在账号里的另一个 Worker（%s）上，不能同时用作数据面节点域名"+
+						"\n  → 请改成数据面 Worker 自己的域名；确认是否切换过账户导致输入框残留。", host, dm.Service)
+			}
+		}
+	}
+	return nil
+}
+
+// boundCustomDomain 返回某个 Worker 已绑定的自定义域名（没绑过则空串）。
+func (d *Deployer) boundCustomDomain(ctx context.Context, service string) (string, error) {
+	domains, err := d.client.ListWorkerDomains(ctx, d.opt.AccountID)
+	if err != nil {
+		return "", err
+	}
+	for _, dm := range domains {
+		if dm.Service == service && dm.Hostname != "" {
+			return strings.ToLower(strings.TrimSpace(dm.Hostname)), nil
+		}
+	}
+	return "", nil
 }
 
 // deleteWorkersDataPlane 删除 Workers 数据面（脚本一删，它上面的自定义域名绑定也随之释放）。

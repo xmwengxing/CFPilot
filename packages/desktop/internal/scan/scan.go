@@ -154,7 +154,12 @@ type Progress struct {
 
 // Entry 是一个优选结果。
 type Entry struct {
-	IP      string  `json:"ip"`
+	IP string `json:"ip"`
+	// Family 是地址族：`v4` / `v6`。
+	//
+	// 由 IP 字面量推导（含冒号 = IPv6），不单独存族相关结论 ——
+	// 备注里的 `IPv4_` / `IPv6_` 前缀也从它生成，两处永远一致。
+	Family  string  `json:"family"`
 	Port    int     `json:"port"`
 	Colo    string  `json:"colo"`
 	Latency int64   `json:"latency"`
@@ -453,13 +458,20 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 		}
 	}
 
-	// 按 101 延迟排序后截取进入测速
+	// 按 101 延迟排序后截取进入测速。
+	//
+	// ⚠️ 截断必须**按网段轮流**，不能直接切前 SpeedLimit 名：
+	// 延迟与机房强相关（同一网段 → 同一机房 → 相近延迟），
+	// 直接切会让「稍慢一点的网段」整批出局 —— 多样性在这一层就被吃掉了，
+	// 后面的 PickWithDiversity 再准也无济于事。
+	// 2026-11-03 实测（IPv6 侧 14 个活跃 48 位段、294 候选、120 进阶段二、
+	// 80 通过）：直接切时最终结果只剩 4 个段、其中一个段独占 12/30。
 	sort.Slice(wsFiltered, func(i, j int) bool {
 		return wsFiltered[i].Latency < wsFiltered[j].Latency
 	})
 	stage3 := wsFiltered
 	if len(stage3) > opt.SpeedLimit {
-		stage3 = stage3[:opt.SpeedLimit]
+		stage3 = pickWSDiverse(wsFiltered, opt.SpeedLimit)
 	}
 	stats["stage3Input"] = len(stage3)
 
@@ -473,6 +485,7 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 		for _, r := range stage3 {
 			entries = append(entries, Entry{
 				IP:      r.IP,
+				Family:  FamilyOf(r.IP),
 				Port:    opt.Port,
 				Colo:    r.Colo,
 				Latency: r.Latency,
@@ -532,6 +545,7 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 	for _, sr := range speedResults {
 		entries = append(entries, Entry{
 			IP:      sr.ws.IP,
+			Family:  FamilyOf(sr.ws.IP),
 			Port:    opt.Port,
 			Colo:    sr.ws.Colo,
 			Latency: sr.ws.Latency,
@@ -792,15 +806,26 @@ func isTimeoutError(errMsg string) bool {
 		strings.Contains(lower, "etimedout")
 }
 
-// PickWithDiversity 按 /16 轮流取前 top 条，保证结果覆盖多个网段。
+// PickWithDiversity 分族取前 top 条，并在**族内**按网段轮流，保证结果覆盖多个网段。
 //
-// ## 为什么（对照 CLI packages/cli/src/scan/scan.ts 的 pickWithDiversity）
+// ## 为什么必须分族（对照 CLI packages/cli/src/scan/scan.ts 的 pickWithDiversity）
 //
-// Cloudflare 的好 IP 高度集中在少数 /16（实测 104.16–104.19 占了大半）。
-// 直接切前 N 名经常得到「同一个 /16 的 N 个 IP」：它们走同一段路由、同一个入口，
-// 一旦那段拥塞或被 QoS，整批节点同时劣化，用户手上没有备选。
+// 不同地址族的成绩不能直接混排 —— v4 与 v6 走的是不同路径，
+// 按速度混在一起取前 N 会让某一族被完全挤掉
+// （实测 v4 通常更快，混排的结果就是 v6 一条都留不下）。
+// 两族都有时各取 round(top/2)；一族为空则另一族拿满。
 //
-// 轮流取（每轮从每个 /16 取当前最好的一条）既保住速度排序，又保证网段覆盖；
+// ## 族内的网段分散
+//
+// IPv4 按**前两段**（/16）轮流：Cloudflare 的好 IP 高度集中在少数 /16
+// （实测 104.16–104.19 占了大半），直接切前 N 名经常得到「同一个 /16 的 N 个 IP」，
+// 它们走同一段路由、同一个入口，一旦那段拥塞或被 QoS，整批节点同时劣化。
+//
+// IPv6 按 **48 位前缀**轮流 —— 实测同一 /48 内的地址等价（同机房），
+// 而不同 /48 落在不同机房（`2606:4700:3035`→AMS、`2606:4700:10`→FRA、
+// `2a06:98c1:3100`→SIN），不分散就会整批挤在一个机房。
+//
+// 轮流取（每轮从每个网段取当前最好的一条）既保住速度排序，又保证网段覆盖；
 // 桶内仍保持传入顺序（即速度降序）。只有一个网段时与直接截取完全一致。
 func PickWithDiversity(entries []Entry, top int) []Entry {
 	if top <= 0 {
@@ -809,21 +834,80 @@ func PickWithDiversity(entries []Entry, top int) []Entry {
 	if len(entries) <= top {
 		return entries
 	}
-
-	order := make([]string, 0, len(entries))
-	buckets := make(map[string][]Entry, len(entries))
+	v4 := make([]Entry, 0, len(entries))
+	v6 := make([]Entry, 0, len(entries))
 	for _, e := range entries {
-		key := ipv4Prefix16(e.IP)
+		if isIPv6Literal(e.IP) {
+			v6 = append(v6, e)
+		} else {
+			v4 = append(v4, e)
+		}
+	}
+	keyOf := func(e Entry) string { return entryBucketKey(e.IP) }
+	switch {
+	case len(v4) == 0:
+		return roundRobinBy(v6, top, keyOf)
+	case len(v6) == 0:
+		return roundRobinBy(v4, top, keyOf)
+	}
+	half := (top + 1) / 2 // 与 CLI 的 Math.round(top/2) 一致
+	return append(roundRobinBy(v4, half, keyOf), roundRobinBy(v6, half, keyOf)...)
+}
+
+// pickWSDiverse 对阶段二候选做同样的「分族 + 族内网段轮流」截断。
+//
+// 用在「101 通过 → 进入测速」这一刀上：延迟与机房强相关
+// （同一网段 → 同一机房 → 相近延迟），直接切前 N 名会让稍慢的网段整批出局。
+// 对照 CLI scan.ts 里对 stage2 的 pickWithDiversity 截断。
+func pickWSDiverse(items []WSResult, top int) []WSResult {
+	if top <= 0 || len(items) == 0 {
+		return nil
+	}
+	if len(items) <= top {
+		return items
+	}
+	v4 := make([]WSResult, 0, len(items))
+	v6 := make([]WSResult, 0, len(items))
+	for _, r := range items {
+		if isIPv6Literal(r.IP) {
+			v6 = append(v6, r)
+		} else {
+			v4 = append(v4, r)
+		}
+	}
+	keyOf := func(r WSResult) string { return entryBucketKey(r.IP) }
+	switch {
+	case len(v4) == 0:
+		return roundRobinBy(v6, top, keyOf)
+	case len(v6) == 0:
+		return roundRobinBy(v4, top, keyOf)
+	}
+	half := (top + 1) / 2
+	return append(roundRobinBy(v4, half, keyOf), roundRobinBy(v6, half, keyOf)...)
+}
+
+// roundRobinBy 按给定分桶键轮流取前 top 条（桶内保持原顺序）。
+func roundRobinBy[T any](items []T, top int, keyOf func(T) string) []T {
+	if top <= 0 || len(items) == 0 {
+		return nil
+	}
+	order := make([]string, 0, len(items))
+	buckets := make(map[string][]T, len(items))
+	for _, item := range items {
+		key := keyOf(item)
 		if _, ok := buckets[key]; !ok {
 			order = append(order, key)
 		}
-		buckets[key] = append(buckets[key], e)
+		buckets[key] = append(buckets[key], item)
 	}
 	if len(order) <= 1 {
-		return entries[:top]
+		if top >= len(items) {
+			return items
+		}
+		return items[:top]
 	}
 
-	out := make([]Entry, 0, top)
+	out := make([]T, 0, top)
 	for round := 0; len(out) < top; round++ {
 		picked := false
 		for _, key := range order {
@@ -841,6 +925,17 @@ func PickWithDiversity(entries []Entry, top int) []Entry {
 	}
 	return out
 }
+
+// entryBucketKey 结果条目的分桶键：IPv4 → 前两段（/16），IPv6 → 48 位前缀。
+func entryBucketKey(ip string) string {
+	if isIPv6Literal(ip) {
+		return IPv6Prefix48(ip)
+	}
+	return ipv4Prefix16(ip)
+}
+
+// isIPv6Literal 判断字面量是否为 IPv6（与 CLI 的 ip.includes(':') 同口径）。
+func isIPv6Literal(s string) bool { return strings.Contains(s, ":") }
 
 // ipv4Prefix16 取 IPv4 的前两段作为分桶键（如 104.16）。
 // IPv6 或格式异常时退回整串（等价于不参与多样性分桶）。

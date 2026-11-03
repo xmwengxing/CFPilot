@@ -39,15 +39,25 @@ type CallbackResult struct {
 
 // PostResults 把优选结果 POST 回面板。
 //
-// entries 是「可复制」格式的行（`IP:Port#COLO`），与 scanner-cli 一致。
-func PostResults(ctx context.Context, callbackURL, token string, entries []string, timeout time.Duration) CallbackResult {
+// entries 是「可复制」格式的行（`IP:Port#IPv4_SJC圣何塞_12_35.5`），与 CLI 一致。
+//
+// mode 是写入方式：
+//
+//	replace  （默认）清空面板优选池后写入
+//	append            保留池里已有的 IP，只补真正新的（「增量回填」）
+//
+// 空串按 replace 处理 —— 历史调用方不传时行为完全不变。
+func PostResults(ctx context.Context, callbackURL, token string, entries []string, mode string, timeout time.Duration) CallbackResult {
 	if timeout <= 0 {
 		timeout = 15 * time.Second
+	}
+	if mode != "append" {
+		mode = "replace"
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	body, err := json.Marshal(map[string]any{"ips": entries})
+	body, err := json.Marshal(map[string]any{"ips": entries, "mode": mode})
 	if err != nil {
 		return CallbackResult{Error: err.Error()}
 	}

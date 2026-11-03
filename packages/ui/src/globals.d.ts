@@ -279,6 +279,14 @@ interface Window {
       scanToken?: string
       /** 自定义回填地址（留空由 host 推导） */
       callbackUrl?: string
+      /**
+       * 地址族，默认 `auto`。
+       *
+       * auto = 后端先做 IPv6 环境预检（本机公网地址 + 默认路由 +
+       * 活跃段金丝雀连通），通了才让 IPv6 参与采样；不通则退回纯 IPv4
+       * 并在结果里给出「当前网络环境不具备 IPv6 测速条件」与排查建议。
+       */
+      family?: 'auto' | 'v4' | 'v6' | 'both'
     }): Promise<{
       /** 同上：Go 版异步执行时只返回 `started`，结果走 SSE 的 scan-result */
       ok?: boolean
@@ -312,10 +320,17 @@ interface Window {
      *
      * 服务端在回填那一刻才取临时令牌并写入，
      * 所以不会出现「优选耗时过长导致令牌过期」。
+     *
+     * @param mode `replace`（默认，清空后写入）/ `append`（保留已有的 IP，只补新的）
      */
-    pushScanResults(lines: string[]): Promise<{
+    pushScanResults(
+      lines: string[],
+      mode?: 'replace' | 'append'
+    ): Promise<{
       ok: boolean
       count?: number
+      /** append 模式下真正新增的条数（同 ip:port 已存在的不算） */
+      added?: number
       host?: string
       error?: string
     }>
@@ -469,7 +484,19 @@ interface Window {
       options: CFPilotKvOption[]
     }>
     createKvNamespace(accountId: string, title?: string): Promise<{ id: string; title: string } | null>
-    checkEnvironment(): Promise<{ clean: boolean; findings: string[] }>
+    /**
+     * 检测本机网络环境：代理干扰 + IPv6 环境预检。
+     *
+     * @param host 当前填写的数据面域名（可选）。带上它时 IPv6 预检能靠
+     *             该域名的 AAAA 找到「实测活跃的 48 位前缀」做金丝雀，
+     *             否则只能退回静态表里的前缀。
+     */
+    checkEnvironment(host?: string): Promise<{
+      clean: boolean
+      findings: string[]
+      /** IPv6 环境预检结论；未涉及 v6 时为 null */
+      ipv6?: IPv6EnvInfo | null
+    }>
     /**
      * 本地服务状态（桌面版自身的 HTTP 服务）。
      *
@@ -572,6 +599,20 @@ interface Window {
   }
 }
 
+/** IPv6 环境预检结论（后端在生成候选之前跑，只读、不写任何观测）。 */
+interface IPv6EnvInfo {
+  /** ok / no-address / no-route / no-internet */
+  status: string
+  address?: string
+  interfaceName?: string
+  hasDefaultRoute?: boolean | null
+  canaryTried?: number
+  canaryOk?: number
+  /** 固定以「当前网络环境不具备 IPv6 测速条件」开头（失败时） */
+  message?: string
+  advice?: string[]
+}
+
 interface CFPilotScanResult {
   entries: Array<{
     ip: string
@@ -586,6 +627,10 @@ interface CFPilotScanResult {
   copyable: string
   stats: Record<string, number>
   skippedSpeed?: boolean
+  /** 解析后的地址族（auto 已解析成 v4 或 both） */
+  family?: string
+  /** IPv6 环境预检结论；未涉及 v6 时为 null */
+  ipv6Env?: IPv6EnvInfo | null
 }
 
 /** 优选历史：某条 IP 的最近一次复测结论（可为空 = 从未复测） */

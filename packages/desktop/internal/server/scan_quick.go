@@ -223,11 +223,16 @@ func (s *Server) RunQuickScanFor(ctx context.Context, profile *store.Profile, on
 	// 大样本会显著拉长耗时（自适应并发会退到低并发跑完整批次）。
 	// 实验性：开启自适应采样时按本机网络档案调整网段权重。
 	adaptive := s.prepareAdaptive()
-	candidates := s.sampleCandidates(adaptive, 1500, false)
+	// 地址族：一键优选同样走 auto（预检通过才让 IPv6 参与）
+	family, ipv6Env, extraIPv6 := s.resolveFamily("", host)
+	candidates := s.sampleCandidates(adaptive, 1500, false, family, extraIPv6)
 	if len(candidates) == 0 {
 		return QuickScanResult{OK: false, Error: "未能生成候选 IP"}
 	}
-	s.logf(fmt.Sprintf("已生成 %d 个候选 IP", len(candidates)))
+	s.logf(fmt.Sprintf("已生成 %d 个候选 IP（地址族 %s）", len(candidates), family))
+	if ipv6Env != nil && ipv6Env.Status != scan.IPv6EnvOK {
+		s.logLevel(ipv6Env.Message, "warn")
+	}
 
 	// ---- 4. 扫描 ----
 	scanCtx, cancelScanRun := context.WithTimeout(scanCtx, 12*time.Minute)
@@ -293,9 +298,9 @@ func (s *Server) RunQuickScanFor(ctx context.Context, profile *store.Profile, on
 
 	lines := make([]string, 0, len(summary.Entries))
 	for _, e := range summary.Entries {
-		lines = append(lines, fmt.Sprintf("%s:%d#%s", e.IP, e.Port, coloTag(e.Colo)))
+		lines = append(lines, fmt.Sprintf("%s:%d#%s", scan.FormatHost(e.IP), e.Port, preferredRemark(e)))
 	}
-	pushRes := scan.PostResults(scanCtx, scan.DefaultCallbackURL(panelHost), tok.Token, lines, 20*time.Second)
+	pushRes := scan.PostResults(scanCtx, scan.DefaultCallbackURL(panelHost), tok.Token, lines, "replace", 20*time.Second)
 	if !pushRes.OK {
 		return QuickScanResult{OK: false, Error: "回填失败：" + pushRes.Error}
 	}

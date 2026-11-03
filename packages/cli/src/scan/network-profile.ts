@@ -55,6 +55,13 @@ export interface AdaptiveSamplingOptions {
   halfLifeMs?: number
   now?: number
   profileId?: string
+  /**
+   * 按地址族分的档案 ID（档案 ID 本身含地址族，两族天然不同）。
+   *
+   * 采样必须按族查各自的观测：只给一个 profileId 时，v6 的历史要么查不到，
+   * 要么错查成 v4 的。不传时回退到 `profileId`。
+   */
+  profileIds?: { v4?: string; v6?: string }
   /** 仅在探索预算中重新验证静态零权重网段；默认关闭。 */
   includeZeroWeight?: boolean
 }

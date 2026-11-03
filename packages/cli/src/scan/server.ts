@@ -16,8 +16,8 @@ import {
   DEFAULT_BRIDGE_SAMPLE,
   DEFAULT_CANDIDATE_SAMPLE,
   normalizeCandidateList,
-  resolveCandidates,
-  type IpFamily,
+  resolveCandidatePlan,
+  type FamilyChoice,
 } from './candidates'
 
 export const BRIDGE_VERSION = '0.2.0'
@@ -50,8 +50,8 @@ export interface StartScanRequest {
   cidr?: string | string[]
   /** 自动生成候选时的随机种子，默认 24301（相同种子结果可复现） */
   seed?: number
-  /** 自动生成候选时的地址族，默认 both */
-  family?: IpFamily
+  /** 自动生成候选时的地址族，默认 auto（按本机 IPv6 环境预检自动决定） */
+  family?: FamilyChoice
   /** 国家 / 地区过滤（可多选，如 ["HK","JP"]；空 / 不传 = 全量） */
   countries?: string[]
   /** 阶段二校验的 WebSocket 路径（对接第三方项目时填它自己的路径） */
@@ -72,6 +72,10 @@ export type CandidateSource = 'manual' | 'request' | 'generated'
 export interface CandidatePlan {
   candidates: string[]
   source: CandidateSource
+  /** 解析后的地址族（`auto` 已解析成 v4 或 both） */
+  family?: FamilyChoice
+  /** 候选生成结论，含 IPv6 预检提示；面板会把它打进扫描日志 */
+  note?: string
 }
 
 /** 采样数兜底：非正数或非法值回落到默认值，并限制上限避免一次拉爆候选量 */
@@ -88,8 +92,8 @@ function normalizeSeed(value: number | undefined): number | undefined {
   return undefined
 }
 
-function normalizeFamily(value: IpFamily | undefined): IpFamily | undefined {
-  return value === 'v4' || value === 'v6' || value === 'both' ? value : undefined
+function normalizeFamily(value: FamilyChoice | undefined): FamilyChoice | undefined {
+  return value === 'auto' || value === 'v4' || value === 'v6' || value === 'both' ? value : undefined
 }
 
 /**
@@ -104,20 +108,24 @@ export async function resolveScanCandidates(body: StartScanRequest): Promise<Can
   const requested = normalizeCandidateList(body.candidates)
   if (requested.length > 0) return { candidates: requested, source: 'request' }
 
-  const candidates = await resolveCandidates({
+  const plan = await resolveCandidatePlan({
     sample: normalizeSample(body.sample),
     cidr: body.cidr,
     seed: normalizeSeed(body.seed),
     family: normalizeFamily(body.family),
+    // 目标域名的 AAAA 是最可靠的活跃 IPv6 前缀来源（永远指向当下真正在用的段）
+    extraHosts: [body.host],
   })
-  return { candidates, source: 'generated' }
+  return { candidates: plan.candidates, source: 'generated', family: plan.family, note: plan.note }
 }
 
 /** 生成进度文案（面板会把 message 打到扫描日志里） */
 function describePlan(plan: CandidatePlan): string {
   if (plan.source === 'manual') return `使用面板手动指定的 ${plan.candidates.length} 个候选 IP`
   if (plan.source === 'request') return `使用请求携带的 ${plan.candidates.length} 个候选 IP`
-  return `已自动生成 ${plan.candidates.length} 个候选 IP`
+  // 自动分支带上「地址族怎么定的」：用户需要知道 IPv6 到底有没有参与
+  const note = plan.note ? `（${plan.note}）` : ''
+  return `已自动生成 ${plan.candidates.length} 个候选 IP${note}`
 }
 
 interface Job {

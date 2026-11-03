@@ -2,6 +2,7 @@ package scan
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -138,7 +139,18 @@ func validFailure(kind string) bool {
 func finiteNonnegative(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 }
 func validObservation(o PrefixObservation) bool {
 	_, n, err := net.ParseCIDR(o.Prefix)
-	if err != nil || n.IP.To4() == nil || IPv4Prefix24(n.IP.String()) != o.Prefix || !validStage(o.Stage) || o.ProfileID == "" || o.UpdatedAt.IsZero() || o.UpdatedAt.After(time.Now()) || !finiteNonnegative(o.Attempts) || !finiteNonnegative(o.Successes) || o.Successes > o.Attempts || !finiteNonnegative(o.LatencyMs) || !finiteNonnegative(o.SpeedMBps) {
+	if err != nil || !validStage(o.Stage) || o.ProfileID == "" || o.UpdatedAt.IsZero() || o.UpdatedAt.After(time.Now()) || !finiteNonnegative(o.Attempts) || !finiteNonnegative(o.Successes) || o.Successes > o.Attempts || !finiteNonnegative(o.LatencyMs) || !finiteNonnegative(o.SpeedMBps) {
+		return false
+	}
+	// 前缀必须是**该族的规范形态**：IPv4 → x.x.x.0/24，IPv6 → h1:h2:h3::/48。
+	//
+	// ⚠️ 早期这里写死 `n.IP.To4() == nil` 一律判无效 ——
+	// 于是 Go 侧的 IPv6 观测**一条都存不下来**，v6 的历史永远是空的。
+	if n.IP.To4() != nil {
+		if IPv4Prefix24(n.IP.String()) != o.Prefix {
+			return false
+		}
+	} else if IPv6Prefix48(o.Prefix) != o.Prefix {
 		return false
 	}
 	failures := 0.0
@@ -149,6 +161,48 @@ func validObservation(o PrefixObservation) bool {
 		failures += count
 	}
 	return failures <= o.Attempts-o.Successes+1e-9
+}
+
+// ObservationPrefix 取观测前缀：IPv4 → `x.x.x.0/24`，IPv6 → `h1:h2:h3::/48`。
+//
+// 域名、非法字面量、**非公网 IPv6**（文档段 / Teredo / 链路本地 / ULA）返回空串，
+// 它们不进入网络统计 —— 否则一次误输入就把「2001:db8 文档段」当成真实网段学进历史。
+// 对照 CLI 的 network-profile.ts `networkBucket()`：两族粒度必须一致，
+// 否则同一个 IP 在两端会记到不同的桶里，历史就对不上了。
+func ObservationPrefix(ip string) string {
+	if p := IPv4Prefix24(ip); p != "" {
+		return p
+	}
+	if !isPublicIPv6(ip) {
+		return ""
+	}
+	return IPv6Prefix48(ip)
+}
+
+// isPublicIPv6 判断是否公网全局单播 IPv6（`2000::/3`，并排除文档段与 Teredo）。
+//
+// 与 CLI 的 ipv6-env.ts `isGlobalUnicastIPv6()` 同口径：
+// `2001:db8::/32`（文档地址）与 `2001::/32`（Teredo）虽然落在 2000::/3 内，
+// 但不是可用的接入地址 —— 真机上被污染的 AAAA 就长成 `2001::1`。
+func isPublicIPv6(ip string) bool {
+	v := net.ParseIP(strings.TrimSpace(ip))
+	if v == nil || v.To4() != nil {
+		return false
+	}
+	b := v.To16()
+	if b == nil {
+		return false
+	}
+	if b[0]&0xe0 != 0x20 { // 2000::/3
+		return false
+	}
+	if b[0] == 0x20 && b[1] == 0x01 {
+		second := binary.BigEndian.Uint16(b[2:4])
+		if second == 0x0db8 || second == 0x0000 { // 2001:db8::/32 与 2001::/32
+			return false
+		}
+	}
+	return true
 }
 
 // IPv4Prefix24 只接受 IPv4 字面量；IPv6 与域名不混入 IPv4 统计桶。
@@ -239,7 +293,7 @@ func (s *ProfileStore) RecordProbe(profileID, ip, stage string, ok bool, at time
 	return s.RecordProbeResult(profileID, ip, stage, ok, failure, 0, 0, at)
 }
 func (s *ProfileStore) RecordProbeResult(profileID, ip, stage string, ok bool, failure string, latencyMs, speedMBps float64, at time.Time) bool {
-	prefix := IPv4Prefix24(ip)
+	prefix := ObservationPrefix(ip)
 	if prefix == "" || profileID == "" || !validStage(stage) || failure == "cancelled" || failure != "" && !validFailure(failure) || !finiteNonnegative(latencyMs) || !finiteNonnegative(speedMBps) {
 		return false
 	}

@@ -43,12 +43,19 @@ func (f *fakeUsageCF) handler(t *testing.T) http.HandlerFunc {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/graphql"):
 			f.graphQLCalls.Add(1)
+			// ⚠️ 日期必须**相对今天**生成，不能写死。
+			//
+			// 写死具体日期的后果：第二天开始 fixture 的「今日」就变成昨日，
+			// series[6]（今天）取不到数据，测试从那天起一直红。
+			// 服务端按 UTC 算「今天」（见 usage.go 的 time.Now().UTC()），这里同口径。
+			today := time.Now().UTC().Format("2006-01-02")
+			yesterday := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
 			workers := f.workers
 			if workers == nil {
 				workers = []map[string]any{
-					{"sum": map[string]any{"requests": 10, "errors": 1, "subrequests": 12}, "dimensions": map[string]any{"date": "2026-11-02", "scriptName": "vls", "status": "success"}},
-					{"sum": map[string]any{"requests": 3, "errors": 0, "subrequests": 0}, "dimensions": map[string]any{"date": "2026-11-02", "scriptName": "vls", "status": "exceededResources"}},
-					{"sum": map[string]any{"requests": 5, "errors": 0, "subrequests": 0}, "dimensions": map[string]any{"date": "2026-11-01", "scriptName": "vls", "status": "success"}},
+					{"sum": map[string]any{"requests": 10, "errors": 1, "subrequests": 12}, "dimensions": map[string]any{"date": today, "scriptName": "vls", "status": "success"}},
+					{"sum": map[string]any{"requests": 3, "errors": 0, "subrequests": 0}, "dimensions": map[string]any{"date": today, "scriptName": "vls", "status": "exceededResources"}},
+					{"sum": map[string]any{"requests": 5, "errors": 0, "subrequests": 0}, "dimensions": map[string]any{"date": yesterday, "scriptName": "vls", "status": "success"}},
 				}
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -57,12 +64,12 @@ func (f *fakeUsageCF) handler(t *testing.T) http.HandlerFunc {
 						"accounts": []map[string]any{{
 							"workersInvocationsAdaptive": workers,
 							"kvOperationsAdaptiveGroups": []map[string]any{
-								{"sum": map[string]any{"requests": 40}, "dimensions": map[string]any{"date": "2026-11-02", "actionType": "read"}},
-								{"sum": map[string]any{"requests": 7}, "dimensions": map[string]any{"date": "2026-11-02", "actionType": "write"}},
-								{"sum": map[string]any{"requests": 20}, "dimensions": map[string]any{"date": "2026-11-01", "actionType": "read"}},
+								{"sum": map[string]any{"requests": 40}, "dimensions": map[string]any{"date": today, "actionType": "read"}},
+								{"sum": map[string]any{"requests": 7}, "dimensions": map[string]any{"date": today, "actionType": "write"}},
+								{"sum": map[string]any{"requests": 20}, "dimensions": map[string]any{"date": yesterday, "actionType": "read"}},
 							},
 							"kvStorageAdaptiveGroups": []map[string]any{
-								{"max": map[string]any{"keyCount": 9, "byteCount": 432522}, "dimensions": map[string]any{"date": "2026-11-02"}},
+								{"max": map[string]any{"keyCount": 9, "byteCount": 432522}, "dimensions": map[string]any{"date": today}},
 							},
 						}},
 					},

@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -62,10 +63,17 @@ func (s *Server) registerScanRoutes(mux *http.ServeMux) {
 
 // scanRequest 是扫描请求体（字段与 Electron 版 ScanParams 对齐）。
 type scanRequest struct {
-	Host      string   `json:"host"`
-	WSPath    string   `json:"wsPath"`
-	ProbePath string   `json:"probePath"`
-	Sample    int      `json:"sample"`
+	Host      string `json:"host"`
+	WSPath    string `json:"wsPath"`
+	ProbePath string `json:"probePath"`
+	Sample    int    `json:"sample"`
+	// Family 是地址族：auto / v4 / v6 / both（空 = auto）。
+	//
+	// auto = 先做 IPv6 环境预检（本机公网地址 + 默认路由 + 活跃段金丝雀连通），
+	// 通了才让 IPv6 参与采样；不通则退回纯 IPv4 并给出
+	// 「当前网络环境不具备 IPv6 测速条件」与排查建议 —— 不会把一半预算
+	// 烧在必然超时的候选上（对照 CLI 的 --family）。
+	Family    string   `json:"family"`
 	Top       int      `json:"top"`
 	SkipSpeed bool     `json:"skipSpeed"`
 	Countries []string `json:"countries"`
@@ -136,12 +144,20 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 	// 实验性：开启自适应采样时按本机网络档案调整网段权重。
 	// 上下文要在生成候选与结束保存之间保持同一份（观测是在扫描过程中写入的）。
 	adaptive := s.prepareAdaptive()
+
+	// ---- 地址族解析（auto → v4 / both）----
+	//
+	// 顺序与 CLI 的 resolveCandidatePlan 一致：先查 AAAA 拿活跃前缀，
+	// 再做金丝雀预检，最后按结论决定 v6 参不参与。
+	// ⚠️ 预检**只读**：失败时既不生成 v6 候选，也不写任何负向观测。
+	family, ipv6Env, extraIPv6 := s.resolveFamily(req.Family, host)
+
 	if len(candidates) == 0 {
 		sample := req.Sample
 		if sample <= 0 {
 			sample = 500
 		}
-		candidates = s.sampleCandidates(adaptive, sample, len(req.Countries) > 0)
+		candidates = s.sampleCandidates(adaptive, sample, len(req.Countries) > 0, family, extraIPv6)
 	}
 	if len(candidates) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "未能生成候选 IP"})
@@ -210,7 +226,13 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	s.logf(fmt.Sprintf("开始优选：域名 %s，候选 %d 个", host, len(candidates)))
+	s.logf(fmt.Sprintf("开始优选：域名 %s，候选 %d 个（地址族 %s）", host, len(candidates), family))
+	if ipv6Env != nil && ipv6Env.Status != scan.IPv6EnvOK {
+		s.logLevel(ipv6Env.Message, "warn")
+		for _, advice := range ipv6Env.Advice {
+			s.logLevel("   · "+advice, "info")
+		}
+	}
 
 	go func() {
 		defer func() {
@@ -264,12 +286,18 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 
+		// 回填与可复制列表**包含 IPv6**：备注里带 `IPv4_` / `IPv6_` 族标记，
+		// 订阅节点名因此自动分成 `优选IPv4_…` / `优选IPv6_…`，Clash 侧再按族分组，
+		// 客户端没开 IPv6 时选 IPv4 组即可 —— 不需要在回填这一层拦。
 		payload := map[string]any{
 			"ok":       true,
 			"entries":  entries,
 			"copyable": formatCopyable(sum.Entries),
 			"stats":    sum.Stats,
 			"host":     host,
+			// 地址族与 IPv6 环境预检结论：界面据此提示「为什么这次没有 v6 节点」
+			"family":  family,
+			"ipv6Env": ipv6Env,
 		}
 
 		// ---- 结果明细分条打到日志----
@@ -336,6 +364,46 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 		"candidates": len(candidates),
 		"note":       "扫描已开始，进度会通过 SSE 实时推送",
 	})
+}
+
+// resolveFamily 解析地址族（auto → v4 / both），并给出 IPv6 环境预检结论。
+//
+// 返回值：解析后的族、预检结论（未涉及 v6 时为 nil）、运行期发现的活跃 48 位前缀。
+//
+// ## auto 的解析规则（与 CLI 的 resolveCandidatePlan 一致）
+//
+//	显式 v4        → 直接纯 v4，零预检开销
+//	显式 v6 / both → 照做，预检只用来提示，不阻断（用户明确要求了）
+//	auto + 预检通过 → both
+//	auto + 预检不通过 / 没有活跃前缀 → 纯 v4，且**不写任何负向观测**
+func (s *Server) resolveFamily(familyRaw, host string) (string, *scan.IPv6EnvResult, []string) {
+	family := strings.ToLower(strings.TrimSpace(familyRaw))
+	switch family {
+	case "":
+		family = "auto"
+	case "auto", "v4", "v6", "both":
+	default:
+		// 界面只会传这四种；异常值按 auto 处理，不该让整个扫描失败
+		family = "auto"
+	}
+	if family == "v4" {
+		return family, nil, nil
+	}
+
+	extra := scan.DiscoverIPv6Prefixes([]string{host}, 6*time.Second)
+	pool := append(scan.IPv6ActivePrefixes(), extra...)
+	if len(pool) == 0 {
+		// 一个已知可用的活跃段都没有（静态表被清空 + AAAA 也查不到）
+		if family == "auto" {
+			return "v4", nil, nil
+		}
+		return family, nil, nil
+	}
+	env := scan.DetectIPv6Env(scan.CanaryAddresses(pool, 3), 1500*time.Millisecond)
+	if family == "auto" && env.Status != scan.IPv6EnvOK {
+		return "v4", &env, extra
+	}
+	return family, &env, extra
 }
 
 // handleScanCancel 取消正在进行的扫描。
@@ -483,8 +551,10 @@ func (s *Server) handleScanPushResults(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		// Lines 是可复制格式的行（IP:Port#COLO）
+		// Lines 是可复制格式的行（IP:Port#IPv4_SJC圣何塞_12_35.5）
 		Lines []string `json:"lines"`
+		// Mode 是写入方式：`replace`（默认）/ `append`（增量回填）
+		Mode string `json:"mode"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
@@ -534,7 +604,7 @@ func (s *Server) handleScanPushResults(w http.ResponseWriter, r *http.Request) {
 
 	// ---- 3. 回填 ----
 	url := scan.DefaultCallbackURL(host)
-	res := scan.PostResults(ctx, url, tok.Token, req.Lines, 20*time.Second)
+	res := scan.PostResults(ctx, url, tok.Token, req.Lines, req.Mode, 20*time.Second)
 	if !res.OK {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":    false,
@@ -733,7 +803,7 @@ func (s *Server) doPanelCallback(ctx context.Context, host string, entries []sca
 
 	lines := make([]string, 0, len(entries))
 	for _, e := range entries {
-		lines = append(lines, fmt.Sprintf("%s:%d#%s", scan.FormatHost(e.IP), e.Port, coloTag(e.Colo)))
+		lines = append(lines, fmt.Sprintf("%s:%d#%s", scan.FormatHost(e.IP), e.Port, preferredRemark(e)))
 	}
 
 	// KV 写配额日风控：回填会写一次面板的 KV（本地优选池）。
@@ -744,7 +814,8 @@ func (s *Server) doPanelCallback(ctx context.Context, host string, entries []sca
 	}
 
 	s.logLevel("正在回填到面板："+url, "info")
-	res := scan.PostResults(ctx, url, token, lines, 15*time.Second)
+	// 自动回填保持历史行为（覆盖）；界面手动回填走 handleScanPushResults，可选增量
+	res := scan.PostResults(ctx, url, token, lines, "replace", 15*time.Second)
 	if res.OK {
 		s.logLevel(fmt.Sprintf("✅ 已回填 %d 条到面板", len(lines)), "ok")
 		return
@@ -808,7 +879,22 @@ func (s *Server) handleScanEnvCheck(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"findings": findings})
+	// IPv6 环境预检：与优选时用的是**同一套逻辑**（只读，不写任何网络档案）。
+	//
+	// 界面把两段结果一起塞进「检测网络环境」弹窗 ——
+	// 代理环境解释「结果为什么会失真」，IPv6 环境解释「为什么一个 v6 节点都没有」。
+	// 域名留空也能跑：金丝雀会退回静态活跃前缀。
+	var req struct {
+		Host string `json:"host"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	_, env, _ := s.resolveFamily("auto", req.Host)
+	var ipv6 any
+	if env != nil {
+		ipv6 = env
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"findings": findings, "ipv6": ipv6})
 }
 
 // handleScanParseCandidates 清洗用户粘贴的候选列表。
@@ -861,14 +947,37 @@ func coloTag(colo string) string {
 	return code
 }
 
+// preferredRemark 生成回填 / 可复制列表用的备注：`IPv4_SJC圣何塞_12_35.5`。
+//
+// 三段各有用途（对照 CLI 的 preferredRemark）：
+//   - 族标记 → 订阅节点名前缀（`优选IPv4_` / `优选IPv6_`）
+//   - 机房 + 城市 → 面板机房列与国家筛选（parseScannerRemark 会剥出三字码）
+//   - 延迟 + 速度 → 面板的两列指标
+//
+// ⚠️ 尾部那对数字不能省：面板的 parseScannerRemark 靠它判断
+// 「这是扫描器写的备注」，没有数字会直接返回空 → 机房/延迟/速度三列全空、
+// 国家筛选也失效（这正是桌面版回填长期丢这三列的原因）。
+func preferredRemark(e scan.Entry) string {
+	tag := "IPv4"
+	if scan.FamilyOf(e.IP) == "v6" {
+		tag = "IPv6"
+	}
+	return fmt.Sprintf("%s_%s_%d_%s", tag, coloTag(e.Colo), e.Latency, formatSpeed(e.Speed))
+}
+
+// formatSpeed 把速度格式化成最多两位小数（与 CLI 侧 JS 的数字转字符串一致）。
+func formatSpeed(v float64) string {
+	return strconv.FormatFloat(math.Round(v*100)/100, 'f', -1, 64)
+}
+
 // formatCopyable 生成可直接粘贴进客户端的节点列表。
 //
-// 格式：`IP:Port#机房城市`（如 `1.2.3.4:443#SIN新加坡`），每行一个。
+// 格式：`IP:Port#IPv4_SJC圣何塞_12_35.5`，每行一个。
 // 与 CLI 的 formatCopyable 输出一致 —— 用户会在两个版本间复制粘贴。
 func formatCopyable(entries []scan.Entry) string {
 	var sb strings.Builder
 	for _, e := range entries {
-		fmt.Fprintf(&sb, "%s:%d#%s\n", scan.FormatHost(e.IP), e.Port, coloTag(e.Colo))
+		fmt.Fprintf(&sb, "%s:%d#%s\n", scan.FormatHost(e.IP), e.Port, preferredRemark(e))
 	}
 	return sb.String()
 }

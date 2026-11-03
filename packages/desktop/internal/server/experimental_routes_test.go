@@ -9,6 +9,7 @@ package server
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/scan"
@@ -103,8 +104,23 @@ func TestAdaptiveSamplingDisabledByDefault(t *testing.T) {
 		t.Error("未启用时不应有观察回调")
 	}
 	// 关闭时采样仍然可用（退化成原有行为）。
-	if len(s.sampleCandidates(ctx, 50, false)) == 0 {
+	if len(s.sampleCandidates(ctx, 50, false, "", nil)) == 0 {
 		t.Error("关闭时应照常生成候选")
+	}
+	// 显式要 IPv6 时也要能出候选（不依赖预检：预检只在 auto 下决定是否启用）。
+	if v6 := s.sampleCandidates(ctx, 50, false, "both", nil); len(v6) == 0 {
+		t.Error("both 应同时产出候选")
+	} else {
+		hasV6 := false
+		for _, ip := range v6 {
+			if strings.Contains(ip, ":") {
+				hasV6 = true
+				break
+			}
+		}
+		if !hasV6 {
+			t.Error("both 模式下应包含 IPv6 候选")
+		}
 	}
 }
 

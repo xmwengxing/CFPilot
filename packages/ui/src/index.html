@@ -412,6 +412,8 @@
     .row { display: flex; gap: 10px; }
     .row > * { flex: 1; min-width: 0; }
     .row > .btn { flex: 0 0 auto; }
+    /* 分栏容器：一行里的左右两栏，每栏可纵向叠多个字段 */
+    .col { display: flex; flex-direction: column; min-width: 0; }
 
     /* --------------------------------------------------------------
        提示文字：三级层次（tip 最弱 → hint → muted）
@@ -1519,33 +1521,36 @@
               Cloudflare IP，输出可用 IP 列表
             </p>
 
+            <!--
+              排版：左右分栏（四行），说明文字一律放进 <label title> 的悬浮气泡里。
+              页面上不再铺 tip 段落 —— 省出来的空间给结果表与历史列表。
+            -->
             <div class="row">
               <div class="field">
-                <label>Worker 域名</label>
+                <label title="workers 部署请使用自定义域名！*.workers.dev 生产链路网络阻断。&#10;「自动识别」：优先填入数据面自定义域名，否则填入 workers.dev / pages.dev">Worker 域名</label>
                 <div class="row">
                   <input type="text" id="optHost" placeholder="如 cfp-dat.pages.dev 或自定义域名" />
                   <button class="btn btn-ghost" id="btnAutoDetect" style="flex:0 0 auto">自动识别</button>
                 </div>
-                <p class="tip">
-                  · <b>workers 部署请使用自定义域名！</b><code>*.workers.dev</code> 生产链路网络阻断<br>
-                  · 「自动识别」：优先填入数据面自定义域名，否则填入 workers.dev / pages.dev
-                </p>
               </div>
               <div class="field">
-                <label>WS 路径</label>
-                <div class="row">
-                  <input type="text" id="optPath" placeholder="如 /vless 或 /（根路径）" />
-                </div>
-                <p class="tip">
-                  · <b>必须与实际 WebSocket 路径完全一致</b>，否则无法优选 IP <br>
-                  · CFPilot 项目：部署后日志内复制，或点击「自动识别」从项目内读取后填入<br>
-                </p>
+                <label title="必须与实际 WebSocket 路径完全一致，否则无法优选 IP。&#10;CFPilot 项目：部署后日志内复制，或点「自动识别」从项目内读取后填入。">WS 路径</label>
+                <input type="text" id="optPath" placeholder="如 /vless 或 /（根路径）" />
               </div>
             </div>
 
             <div class="row">
               <div class="field">
-                <label for="optCountryGroup">机房国家</label>
+                <label title="自动 = 先做 IPv6 环境预检（本机公网地址 + 默认路由 + 活跃段连通性），通了才让 IPv6 参与采样，不通就退回纯 IPv4。&#10;这样不会把一半采样预算烧在必然超时的候选上。&#10;两族都有时各拿一半预算，结果也分族各取一半，避免某一族被挤掉。&#10;IPv6 只在实测活跃的 48 位前缀内采样 —— 在官方公布段里盲采实测 0/18 全超时。">地址族</label>
+                <select id="optFamily">
+                  <option value="auto" selected>自动（推荐）</option>
+                  <option value="v4">仅 IPv4</option>
+                  <option value="v6">仅 IPv6</option>
+                  <option value="both">双栈（v4 + v6）</option>
+                </select>
+              </div>
+              <div class="field">
+                <label title="需要同时选多个分组、或只选部分国家时，点「自定义配置」。&#10;若结果未出现候选国家，请增加「候选采样数」。&#10;机房来自 101 握手响应，因此筛选在阶段二之后生效；带筛选会自动扩大 101 校验的候选池（120 → 最多 500）。">机房国家</label>
                 <div class="row">
                   <select id="optCountryGroup" aria-label="机房国家快捷分组">
                     <option value="">全部国家（不筛选）</option>
@@ -1554,54 +1559,29 @@
                   </select>
                   <button class="btn btn-ghost" id="btnCountryCustom">自定义配置</button>
                 </div>
-                <p class="tip">
-                  · 需要同时选多个分组、或只选部分国家时，点<b>「自定义配置」</b><br>
-                  · 若结果未出现候选国家，请增加<b>「候选采样数」</b>
-                </p>
-              </div>
-              <div class="field">
-                <label>保留条数（--top）</label>
-                <input type="number" id="optTop" value="8" min="1" max="100" />
-                <p class="tip">
-                  · 建议 <b>10~20</b>，节点过多只会稀释分流质量没有实际意义<br>
-                  · 端口固定 <b>443</b> —— 订阅启用多端口请在 Web 面板中勾选
-                </p>
               </div>
             </div>
 
             <div class="row">
-              <div class="field">
-                <label>候选采样数（--sample）</label>
-                <input type="number" id="optSample" value="6556" min="100" max="50000" />
-                <p class="tip">
-                  · 建议 <b>6556</b>（默认），<b>不宜超过 23000</b>
-                </p>
+              <div class="col">
+                <div class="field">
+                  <label title="建议 10~20：节点过多只会稀释分流质量，没有实际意义。&#10;端口固定 443 —— 订阅启用多端口请在 Web 面板中勾选。">保留条数</label>
+                  <input type="number" id="optTop" value="8" min="1" max="100" />
+                </div>
+                <div class="field">
+                  <label title="建议 6556（默认），不宜超过 23000。&#10;阶段一按 TLS 握手耗时筛选，而握手快慢与 TCP 延迟几乎无关（实测 TCP 9ms 的 IP 可能要 3.5 秒），采样小了根本碰不到握手快的 IP。&#10;两族都有时各拿一半预算。">候选采样数</label>
+                  <input type="number" id="optSample" value="6556" min="100" max="50000" />
+                </div>
               </div>
-              <div class="field">
-                <label>测速地址（可选）</label>
-                <input type="text" id="optProbePath" placeholder="留空 = 自动" />
-                <p class="tip">
-                  · 自定义则强制使用指定地址（大文件测试可自行填写）
-                </p>
-              </div>
-            </div>
-
-            <div class="row">
-              <div class="field">
-                <label>测速连接数</label>
-                <input type="number" id="optSpeedConns" value="8" min="1" max="8" />
-                <p class="tip">
-                  · 建议 <b>8</b>：单条 TCP 受拥塞窗口限制，会系统性低估带宽（实测 1 条 0.12、3 条 0.47、8 条 1.15 MB/s）<br>
-                  · 上限 8：实测并发 32 条也不会被平台卸载，但连接越多流量越大
-                </p>
-              </div>
-              <div class="field">
-                <label>测速时长（秒）</label>
-                <input type="number" id="optSpeedDur" value="6" min="2" max="10" />
-                <p class="tip">
-                  · 建议 <b>6</b>，过短会被 TCP 慢启动拉低（前 1 秒的样本会被丢弃）<br>
-                  · 流量 ≈ 时长 × 速率 × 连接数：一轮约 1GB，流量敏感时调小它或勾选「跳过测速」
-                </p>
+              <div class="col">
+                <div class="field">
+                  <label title="建议 6 秒：过短会被 TCP 慢启动拉低（前 1 秒的样本会被丢弃）。&#10;流量 ≈ 时长 × 速率 × 连接数：一轮约 1GB，流量敏感时调小它，或勾选「跳过测速」。&#10;测速连接数固定 8 条 —— 单条 TCP 受拥塞窗口限制会系统性低估带宽（实测 1 条 0.12、3 条 0.47、8 条 1.15 MB/s）。">测速时长（秒）</label>
+                  <input type="number" id="optSpeedDur" value="6" min="2" max="10" />
+                </div>
+                <div class="field">
+                  <label title="留空 = 自动：优先用目标项目自己的探针端点，没有则回落公开测速地址。&#10;填 /开头 = 强制用该探针路径；填网址 = 强制用该公开测速地址（大文件测试可自行填写）。">测速地址（可选）</label>
+                  <input type="text" id="optProbePath" placeholder="留空 = 自动" />
+                </div>
               </div>
             </div>
 
@@ -1690,7 +1670,7 @@
               1. 「不回填面板，只输出列表」勾选框
                  —— 回填改为结果出来后手动点按钮，这个开关就没意义了。
               2. 「扫描令牌」输入框 + 「自动获取」按钮
-                 —— 令牌改为点「回填面板」时才现取。优选要跑几分钟，
+                 —— 令牌改为点「增量回填 / 覆盖回填」时才现取。优选要跑几分钟，
                      提前取的 10 分钟令牌很容易过期；而且用户也不需要
                      理解令牌这回事，按个按钮就行。
             -->
@@ -1720,7 +1700,7 @@
                 · 勾选「跳过测速」时退化为纯延迟排序（速度列显示 —）；<br>
                 · 机房国家筛选在阶段二之后生效（机房码只有 101 响应里才有）；<br>
                 · 每次优选成功自动留底到下方<b>「优选历史」</b>，可多选复制、二次复测可用性；<br>
-                · 结果输出在下方，可复制到 Web 面板的「手动优选 IP」框，或点「回填面板」直接写入。
+                · 结果输出在下方，可复制到 Web 面板的「手动优选 IP」框，或点「增量回填 / 覆盖回填」直接写入。
               </div>
             </details>
 
@@ -1745,32 +1725,19 @@
             </div>
             <div class="btn-row" style="margin-top: 10px">
               <p class="tip" id="scanProgressText" style="margin:0 2px 0 0"></p>
-              <button class="btn btn-ghost" id="btnCopyResult">复制结果</button>
-              <button class="btn btn-primary" id="btnPushToPanel" disabled>回填面板</button>
+              <!--
+                三个按钮的作用一律用 title 悬浮气泡说明（不再占页面高度的折叠卡片）。
+                回填拆成增量 / 覆盖：增量保留面板优选池里已有的 IP，覆盖清空后写入。
+              -->
+              <button class="btn btn-ghost" id="btnCopyResult"
+                title="把这批 IP 复制到剪贴板，自行粘贴到 Web 面板的「手动优选 IP」框。&#10;不需要令牌、离线可用 —— 适合只想留存备份，或不希望工具联网的情况。">复制结果</button>
+              <button class="btn btn-ghost" id="btnPushAppend" disabled
+                title="保留面板优选池里已有的 IP，只把本次结果里「新的」补进去，已有条目原样不动。&#10;后台会现取一个临时令牌（用部署时设置的面板密码登录控制面换取），10 分钟内有效、用完即弃。">增量回填</button>
+              <button class="btn btn-primary" id="btnPushReplace" disabled
+                title="清空面板优选池后写入本次结果，订阅里就只有这一批。&#10;同样现取 10 分钟有效的临时令牌；会连带清掉面板里手填的「手动指定 IP」。&#10;想保留原有节点请用「增量回填」。">覆盖回填</button>
             </div>
             <!-- 本轮是否用了自适应采样（实验性），由后端在 scan-result 里带回 -->
             <p class="tip" id="scanAdaptiveNote" hidden style="margin:8px 0 0"></p>
-
-            <!--
-              两个按钮的分工说明
-
-              设计要点：令牌改为**优选完成后**才获取。
-              原因：优选要跑几分钟，提前取的令牌（10 分钟有效）很容易过期。
-              放到点击「回填面板」时才现取，既不会超时，用户也没有学习成本
-              —— 他只管在拿到结果后按一下按钮。
-            -->
-            <details class="fold" style="margin-top: 12px">
-              <summary>两个按钮的区别</summary>
-              <div class="note">
-                <b>复制结果</b> —— 将这批 IP 复制，自行粘贴到 Web 面板的
-                「手动优选 IP」框中。<br />
-                <span class="muted">不需要令牌，离线可用；适合只需留存备份、或不希望工具联网的情况。</span><br /><br />
-                <b>回填面板</b> —— 自动登录控制面面板，将这批 IP 直接写入，
-                之后订阅即可使用。<br />
-                <span class="muted">后台会自动向面板申请临时令牌，<b>10 分钟内有效</b>，
-                用完即弃。申请令牌会使用部署时设置的面板密码。</span>
-              </div>
-            </details>
 
             <!-- 回填进度 / 结果反馈 -->
             <p class="tip" id="pushHint" style="margin-top: 8px"></p>
@@ -1855,9 +1822,10 @@
 			  · 默认分配 30 个节点 = 优选域名 10 个 + 官方优选 IP 20 个<br><br>
 			  <b>优选 IP</b><br>
 			  1. 在「优选」页点击自动识别，其他保持默认，点击「开始优选」，等待优选结果<br>
-			  2. 「回填面板」：自动获取临时 Token 并填入面板并保存，订阅直接生效<br>
-			  3. 「复制结果」：Web 面板打开「节点来源」，手动指定 IP 中粘贴结果，保存并应用<br>
-			  · ⚠️「回填面板」<b>将清空原有的手动指定 IP</b>，增选请使用「复制结果」<br>
+			  2. 「增量回填」：保留面板里已有的优选 IP，只补入本次新结果，订阅直接生效<br>
+			  3. 「覆盖回填」：清空面板优选池后写入本次结果<br>
+			  4. 「复制结果」：Web 面板打开「节点来源」，手动指定 IP 中粘贴结果，保存并应用<br>
+			  · ⚠️「覆盖回填」<b>会清空原有的手动指定 IP</b>；只想加几条请用「增量回填」<br>
               · 优选 IP 稳定且短期不会失效，无需每日优选；节点测试延迟 -1 请再次测试<br><br>
               <b>升级内核</b><br>
               1. 在「凭据」页「当前使用」中选中账号（系统自动识别 CFPilot 实例）<br>
@@ -1997,6 +1965,40 @@
       </div>
     </div>
   </div>
+          <!--
+            检测网络环境弹窗
+
+            两段结果：
+              1. 代理环境 —— 常见代理端口是否在监听（会干扰优选，测到的是代理的延迟）
+              2. IPv6 环境 —— 预检的公网地址 / 默认路由 / 活跃段金丝雀三项
+            两项都是**只读检测**：不改配置、不写网络档案
+            （否则会把「本机没 v6」学成「v6 网段不可用」，永久毒化历史）。
+          -->
+          <div class="modal-mask" id="envModal" hidden>
+            <div class="modal-box" style="width: min(660px, 100%)">
+              <div class="modal-head">
+                <strong>检测网络环境</strong>
+                <div class="btn-row" style="margin:0">
+                  <button class="btn btn-ghost" id="btnEnvRefresh" type="button">重新检测</button>
+                  <button class="btn btn-ghost" id="btnEnvClose" type="button">关闭</button>
+                </div>
+              </div>
+              <div class="note" style="margin-top:0">
+                <b>代理环境</b>
+                <div id="envProxyList" style="margin-top:4px"><span class="muted">（未检测）</span></div>
+              </div>
+              <div class="note">
+                <b>IPv6 环境</b>
+                <div id="envV6List" style="margin-top:4px"><span class="muted">（未检测）</span></div>
+              </div>
+              <p class="tip" style="margin-top:10px">
+                两项都是<b>只读检测</b>：不改配置、不写网络档案。<br />
+                · 代理环境异常 → 优选测到的是<b>代理的延迟</b>，结果会失真<br />
+                · IPv6 环境不通 → 自动退回纯 IPv4，<b>不会浪费采样预算</b>（详见「地址族」气泡）
+              </p>
+            </div>
+          </div>
+
           <!--
             用量 / 额度弹窗
 

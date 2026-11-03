@@ -780,21 +780,65 @@ export function expandCidrs(cidrs: string[], options: IpRangeOptions = {}): stri
 }
 
 /**
+ * 这一列是不是一个 IP 字面量（IPv4 / `IPv4:port` / 裸 IPv6 / `[IPv6]:port`）。
+ *
+ * 用于 CSV 里**认列**：不能只看第一列，也不能用「像不像主机」来猜 ——
+ * 表头的 `No`、`Amazon.com` 都会被误判。
+ */
+function looksLikeIpLiteral(value: string): boolean {
+  if (!value) return false
+  if (value.startsWith('[')) return /^\[[0-9a-fA-F:.]+\](?::\d{1,5})?$/.test(value)
+  if (/^\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?$/.test(value)) {
+    const host = value.split(':')[0]!
+    return host.split('.').every((octet) => Number(octet) <= 255)
+  }
+  // 裸 IPv6：至少两个冒号（域名与 `IPv4:port` 都只有 0 或 1 个）
+  if (value.includes(':') && value.split(':').length > 2) {
+    return /^[0-9a-fA-F:.]+$/.test(value)
+  }
+  return false
+}
+
+/**
  * 读取本地 IP 列表文件（每行一个 IP / IP:端口）
  *
  * 兼容面板 ADD 池的写法：`IP:Port#备注`、`[IPv6]:Port#备注`、CSV 整行。
+ *
+ * ## CSV 按「哪一列像 IP」取，不假设列序
+ *
+ * 早前固定取第一列 —— 遇到 `No,Proxy IP,Port,...` 这种带序号的表会把**序号当 IP**，
+ * 表头行也会被当成候选（白测一次、还让候选数对不上）。
+ *
+ * 现在的规则，按顺序：
+ *   1. 逐列找第一个 IP 字面量 → 用它；
+ *   2. 找不到但**有列含空格** → 表头 / 说明行，整行跳过；
+ *   3. 否则回退第一列 —— 保住 `example.com,8080` 这种「主机,端口」写法。
  */
 export function readIpFile(text: string): string[] {
   const out: string[] = []
   for (const raw of text.split(/\r?\n/)) {
     let line = raw.trim()
     if (!line || line.startsWith('#')) continue
-    // 去掉 CSV 行里的其它列
-    if (line.includes(',')) line = line.split(',')[0]!.trim()
+    if (line.includes(',')) {
+      const cols = line.split(',').map((c) => c.trim().replace(/^"|"$/g, ''))
+      const hit = cols.find((c) => looksLikeIpLiteral(c))
+      if (hit) line = hit
+      // 没有 IP 列时再分三种：
+      //   · 有列含空格 → 表头 / 说明行（`No,Proxy IP,Port,...`）
+      //   · 第一列带点 → `example.com,8080` 这种「主机,端口」，取第一列
+      //   · 其余（`IP,Port` 这类无点无空格的表头）→ 跳过
+      else if (cols.some((c) => c.includes(' '))) continue
+      else if ((cols[0] ?? '').includes('.')) line = cols[0]!
+      else continue
+    }
+    if (!line) continue
     // 去掉 #备注
     const hash = line.indexOf('#')
     if (hash >= 0) line = line.slice(0, hash).trim()
     if (!line) continue
+    // 主机名与 IP 都不含空白：到这里还带空格的一定是说明行 / 粘错的文本
+    // （先剥备注再判，`1.2.3.4:443#SJC 12ms` 这种带空格备注不会被误伤）
+    if (/\s/.test(line)) continue
     // [IPv6]:端口#备注 → IPv6
     const bracket = /^\[([^\]]+)\](?::\d+)?$/.exec(line)
     if (bracket) {

@@ -61,6 +61,17 @@ describe('blockedTarget（直连目标黑名单）', () => {
     ['fe80::1', 'link-local'],
     ['ff02::1', 'multicast'],
     ['::ffff:192.168.1.1', 'private'],
+    // 十六进制写法的 IPv4-mapped：旧实现只认点分尾巴，这三行以前是**放行**的
+    ['::ffff:7f00:1', 'loopback'], // = 127.0.0.1
+    ['::ffff:a9fe:a9fe', 'link-local'], // = 169.254.169.254（云元数据）
+    ['::ffff:ac10:1', 'private'], // = 172.16.0.1
+    ['0:0:0:0:0:ffff:10.0.0.1', 'private'], // 全展开 + 点分尾巴
+    // NAT64 知名前缀内嵌私网 IPv4（同样以前放行）
+    ['64:ff9b::10.0.0.1', 'private'],
+    ['64:ff9b::7f00:1', 'loopback'],
+    ['64:ff9b::a9fe:a9fe', 'link-local'],
+    // 已废弃的 IPv4 兼容地址：内嵌私网同样按 IPv4 判
+    ['::10.0.0.1', 'private'],
     ['localhost', 'loopback'],
     ['nas.localhost', 'loopback'],
     ['printer.local', 'internal-name'],
@@ -77,6 +88,7 @@ describe('blockedTarget（直连目标黑名单）', () => {
     '1.1.1.1', // Cloudflare 公共 DNS：由选路降权，不是策略拦截
     '2606:4700::1111',
     '2001:db8::1',
+    '::ffff:1.2.3.4', // 映射的**公网** IPv4：照旧放行，不误伤
     'example.com',
     'www.example.com',
     'nas.example.com', // 域名解析结果不预判（见 guard.ts 的边界说明）
@@ -109,6 +121,30 @@ describe('dial（策略接线）', () => {
     const result = await dial({ hostname: '8.8.8.8', port: 80 })
     expect(result.via).toBe('direct')
     expect(connectedHosts).toEqual(['8.8.8.8'])
+  })
+
+  // IPv6 字面量在**直连通道**上是能力上限，不是内网安全问题：
+  // `connect()` 出站不支持 IPv6、反代与 ProxyIP 都靠 SNI（必须是域名）。
+  // 不提前失败的代价是白等一次建连超时，再收到一条与真因无关的文案。
+  it('IPv6 字面量目标立即失败，且不发起任何出站连接', async () => {
+    const failure = await dial({ hostname: '2606:4700::1', port: 443 }).catch((err) => err)
+
+    expect(failure).toBeInstanceOf(TargetBlockedError)
+    expect(String(failure)).toContain('IPv6')
+    expect(connectedHosts).toEqual([])
+  })
+
+  // 配了真正的出站代理时必须照常放行 —— 字面量交给代理去连是合法用法，
+  // 且那条链路的 IPv6 打包（CONNECT 方括号、SOCKS5 的 ATYP）刚修好。
+  it('配了落地代理时 IPv6 字面量目标照常交给代理', async () => {
+    const result = await dial({
+      hostname: '2606:4700::1',
+      port: 443,
+      proxies: [{ kind: 'http', host: 'proxy.example.com', port: 8080 }],
+    })
+
+    expect(result.via).toBe('http')
+    expect(connectedHosts).toEqual(['proxy.example.com'])
   })
 
   it('反代入口拨号可显式跳过策略（它接的是我们自己选的落地服务器）', async () => {

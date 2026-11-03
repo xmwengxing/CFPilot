@@ -43,6 +43,26 @@ describe('代理池解析', () => {
     expect(entry).toMatchObject({ host: '2606:4700::', port: 443 })
   })
 
+  it('方括号形式带端口时正确切分', () => {
+    expect(parseProxyEntry('socks5://[2606:4700::1]:1080')).toMatchObject({
+      host: '2606:4700::1',
+      port: 1080,
+      kind: 'socks5',
+    })
+  })
+
+  // 裸 IPv6 必须**整体拒绝**，不能按最后一个冒号硬切。
+  //
+  // 旧实现（lastIndexOf(':')）把 `2606:4700::1` 读成 host=`2606:4700:` + port=1，
+  // 校验照样通过 —— 端点是坏的，之后怎么拨都连不上，用户只看到「代理不通」。
+  // `2606:4700::1:1080` 更是无法与「地址的最后一段」区分，只能要求方括号。
+  it('裸 IPv6（无论带不带端口）一律拒绝，要求方括号消除歧义', () => {
+    expect(parseProxyEntry('2606:4700::1')).toBeNull()
+    expect(parseProxyEntry('socks5://2a01:4f8::1')).toBeNull()
+    expect(parseProxyEntry('2606:4700::1:1080')).toBeNull()
+    expect(parseProxyEntry('[2606:4700::1]')).toBeNull()
+  })
+
   it('多行多分隔符的池文本全部解析', () => {
     const pool = parseProxyPool('1.1.1.1:443\n2.2.2.2:443,3.3.3.3:443;4.4.4.4:443', 'direct')
     expect(pool.map((p) => p.host)).toEqual(['1.1.1.1', '2.2.2.2', '3.3.3.3', '4.4.4.4'])

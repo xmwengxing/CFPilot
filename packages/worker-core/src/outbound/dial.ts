@@ -27,7 +27,7 @@
  */
 import { socks5Connect } from './socks5'
 import { httpConnect } from './http-proxy'
-import { blockedTarget, TargetBlockedError } from './guard'
+import { blockedTarget, TargetBlockedError, IPV6_DIRECT_UNSUPPORTED } from './guard'
 import { isIpv4 } from '../protocols/address'
 import { resolveEndpointIps } from './doh'
 import { collectRelayEndpoints, RELAY_BATCH_SIZE, type RelayPoolOptions } from './relay'
@@ -42,9 +42,20 @@ import {
 import type { ProxyEndpoint } from './proxy-pool'
 import type { ProxyMode } from '../types'
 
-type ConnectFn = (
+export type ConnectFn = (
   address: { hostname: string; port: number },
-  options?: { secureTransport?: 'off' | 'on' | 'starttls'; allowHalfOpen?: boolean }
+  options?: {
+    secureTransport?: 'off' | 'on' | 'starttls'
+    allowHalfOpen?: boolean
+    /**
+     * TLS 期望的主机名（SNI + 证书主机名校验）。
+     *
+     * ⚠️ 真机复核发现：只把它传给 `startTls()` **不生效** ——
+     * 拿「证书签给别的域名」的 IP 实测，握手照样成功，而且对端收不到 SNI、
+     * SNI 路由型代理直接 RST。必须同时放进 `connect()` 的 options。
+     */
+    expectedServerHostname?: string
+  }
 ) => SocketLike
 
 /** sockets 模块只加载一次；失败时缓存异常避免反复尝试 */
@@ -55,6 +66,9 @@ let connectPromise: Promise<ConnectFn> | null = null
  *
  * 用运行时拼接而非字面量：esbuild 的常量折叠会把相邻字面量
  * 还原成明文 `cloudflare:sockets`（已实测），这里必须让它无法被折叠。
+ *
+ * 导出给**出站体检**（`relay-probe.ts`）复用：它同样需要「先 TCP、
+ * 再 startTls」这条链路，另写一份必然与这里的坑（惰性加载、startTls 换 socket）漂移。
  */
 async function getConnect(): Promise<ConnectFn> {
   if (!connectPromise) {
@@ -68,6 +82,7 @@ async function getConnect(): Promise<ConnectFn> {
   }
   return await connectPromise
 }
+export { getConnect }
 
 export type { ProxyKind, ProxyEndpoint } from './proxy-pool'
 export { parseProxyEntry, parseProxyPool } from './proxy-pool'
@@ -188,7 +203,7 @@ export function nat64Address(ipv4: string, prefix: string): string | null {
   return `${clean}::${high}:${low}`
 }
 
-interface SocketLike {
+export interface SocketLike {
   readable: ReadableStream<Uint8Array>
   writable: WritableStream<Uint8Array>
   /** 建连成功时 resolve；失败时 reject */
@@ -322,6 +337,25 @@ async function dialDirect(options: DialOptions): Promise<DialResult> {
     }
     throw err
   }
+}
+
+/** 目标是否是 IPv6 字面量（域名与 IPv4 地址都不含冒号）。 */
+function isV6Literal(hostname: string): boolean {
+  return hostname.includes(':')
+}
+
+/**
+ * 这个候选能不能把 IPv6 **字面量**目标原样交给对端去连。
+ *
+ * 只有真正的出站代理（SOCKS5 / HTTP / HTTPS）做得到 —— 它们的握手里
+ * 会显式写出目标地址（CONNECT 权威串 / SOCKS5 的 ATYP 字段）。
+ *
+ * 另外两类做不到，因为目标是靠**域名**表达的：
+ *   - ProxyIP（`via.kind === 'direct'`）：复用连接，目标由客户端的 TLS SNI 决定；
+ *   - 反代入口：同样按 ClientHello 里的 SNI 转发。
+ */
+function carriesLiteralTarget(candidate: RouteCandidate): boolean {
+  return candidate.source === 'proxy' && candidate.via !== undefined && candidate.via.kind !== 'direct'
 }
 
 /** 通过代理池落地 */
@@ -780,6 +814,20 @@ export async function dial(options: DialOptions): Promise<DialResult> {
     const connectTimeout = Math.max(200, Math.min(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, remaining))
     const attemptOptions: DialOptions = { ...options, timeoutMs: connectTimeout }
     try {
+      // IPv6 字面量目标 + 非出站代理候选 → 立刻失败，不发任何 socket。
+      //
+      // 依据是通道能力上限（详见 guard.ts 的 IPV6_DIRECT_UNSUPPORTED）：
+      // `connect()` 出站不支持 IPv6、反代只能按 SNI 转发域名、
+      // ProxyIP 是「复用连接 + 客户端 TLS SNI 决定目标」—— 后两者同样需要域名。
+      // 不提前失败的代价是：白等一次建连超时，再收到一条与真因无关的文案。
+      //
+      // ⚠️ 只有**真正的出站代理**（SOCKS5 / HTTP / HTTPS，`via.kind !== 'direct'`）
+      // 能把字面量交给对端去连 —— 那条路径照常放行，不受此限。
+      // ⚠️ 刻意不看 `skipTargetPolicy`：那个开关是给反代放行内网目标用的，
+      // 对「这个通道根本搬不动字面量」不起作用。
+      if (!carriesLiteralTarget(candidate) && isV6Literal(options.hostname)) {
+        throw new TargetBlockedError(options.hostname, IPV6_DIRECT_UNSUPPORTED)
+      }
       // 目标地址策略：只拦直连 / 优选 IP。代理与反代入口不受影响 ——
       // 「用落地代理回家里的 NAS」是合法用法，拦掉就等于功能不可用。
       if (!options.skipTargetPolicy && candidate.source !== 'proxy' && candidate.source !== 'relay') {

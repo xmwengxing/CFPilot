@@ -280,20 +280,28 @@ async function saveAdaptiveObservations(args: ParsedArgs, observations: ScanObse
   await saveNetworkProfile(context.file, next)
 }
 
-function printProgress(event: ScanEvent, quiet: boolean): void {
+/**
+ * 扫描进度输出。
+ *
+ * ⚠️ `--json` 时**必须走 stderr**：stdout 是给机器读的，
+ * 混进横幅/进度行会让 `JSON.parse` 直接失败（早前 `--json > file`
+ * 拿到的文件开头就是横幅，解析必然报错）。
+ */
+function printProgress(event: ScanEvent, quiet: boolean, asJson = false): void {
   if (quiet) return
+  const out = asJson ? process.stderr : process.stdout
   switch (event.type) {
     case 'stage':
-      process.stdout.write(`\n▶ 阶段 ${event.stage}：${event.name}（共 ${event.total} 个候选）\n`)
+      out.write(`\n▶ 阶段 ${event.stage}：${event.name}（共 ${event.total} 个候选）\n`)
       break
     case 'progress':
-      if (event.message) process.stdout.write(`\r  ${event.message}`.padEnd(78))
+      if (event.message) out.write(`\r  ${event.message}`.padEnd(78))
       break
     case 'done':
-      process.stdout.write(`\n✓ 优选完成，共 ${event.count} 条\n`)
+      out.write(`\n✓ 优选完成，共 ${event.count} 条\n`)
       break
     case 'error':
-      process.stdout.write(`\n✗ ${event.message}\n`)
+      out.write(`\n✗ ${event.message}\n`)
       break
     default:
       break
@@ -347,13 +355,18 @@ function printCopyable(entries: ScanEntry[]): void {
 }
 
 export async function runScanCommand(args: ParsedArgs): Promise<void> {
-  // 二级子命令：compare / ips / serve（通过第一个 positional 判断）
+  // 二级子命令：compare / relay / ips / serve（通过第一个 positional 判断）
   const sub = args.positionals[0]
 
   // compare 排在帮助判断**之前**：它有自己的 `scan compare --help`
   if (sub === 'compare') {
     const { runCompareCommand } = await import('./compare')
     await runCompareCommand(args)
+    return
+  }
+  if (sub === 'relay') {
+    const { runRelayCommand } = await import('./relay')
+    await runRelayCommand(args)
     return
   }
 
@@ -466,7 +479,8 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
         token || autoTokenUsed ? `https://${callbackBase}/api/v1/preferred-ips` : ''
       )
 
-  if (!quiet) {
+  // `--json` 时不打横幅：stdout 必须是纯 JSON
+  if (!quiet && !asJson) {
     process.stdout.write(`\n${NAME} v${VERSION}\n`)
     process.stdout.write(`目标域名：${host}:${port}（将作为 TLS SNI 与 HTTP Host）\n`)
     process.stdout.write(`WS 路径：${wsPath}\n`)
@@ -483,7 +497,7 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
   if (!quiet || asJson) {
     const env = await detectProxyInterference(host)
     envResult = env
-    if (!quiet && !env.clean) {
+    if (!quiet && !asJson && !env.clean) {
       process.stdout.write('\n⚠️  检测到可能干扰优选的因素：\n')
       for (const f of env.findings) {
         process.stdout.write(`   ${f.message}\n`)
@@ -497,7 +511,7 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
     }
   }
 
-  if (!quiet) process.stdout.write('正在准备 Cloudflare 网段…\n')
+  if (!quiet && !asJson) process.stdout.write('正在准备 Cloudflare 网段…\n')
 
   const candidatePlan = await resolveCandidatesFromArgs(args, [host, panelHost])
   const candidates = candidatePlan.candidates
@@ -509,7 +523,7 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
     }
     process.exit(1)
   }
-  if (!quiet) {
+  if (!quiet && !asJson) {
     process.stdout.write(`候选 IP：${candidates.length} 个（IPv4 ${candidatePlan.counts.v4} / IPv6 ${candidatePlan.counts.v6}）\n`)
     process.stdout.write(`${candidatePlan.note}\n`)
     // 预检没过时把排查建议一并给出：用户看到「只扫了 IPv4」需要知道为什么
@@ -671,7 +685,7 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
     unlock: flagBool(args, 'unlock'),
     verifyWsPath: args.flags['no-verify-ws-path'] === undefined,
     top,
-    onProgress: (event) => printProgress(event, quiet),
+    onProgress: (event) => printProgress(event, quiet, asJson),
   })
 
   // 实验性：把本轮观测写回网络档案（仅在开启 --adaptive 时有档案）。

@@ -2,7 +2,7 @@
  * SOCKS5 客户端握手（出站落地代理）
  */
 import { ByteStream } from '../protocols/stream'
-import { isIpv4, isIpv6 } from '../protocols/address'
+import { isIpv4, isIpv6, parseIpv6 } from '../protocols/address'
 
 export interface Socks5Options {
   username?: string
@@ -132,8 +132,12 @@ export async function socks5Connect(
 }
 
 function encodeSocks5Address(hostname: string, port: number): Uint8Array {
-  if (isIpv4(hostname)) {
-    const parts = hostname.split('.').map((p) => Number(p))
+  // 容错：调用方给的是 `[2606:4700::1]` 时不能整个当域名打包
+  // （对端 getaddrinfo 会直接失败），统一剥掉方括号再判形态。
+  const host = hostname.replace(/^\[|\]$/g, '')
+
+  if (isIpv4(host)) {
+    const parts = host.split('.').map((p) => Number(p))
     const out = new Uint8Array(7)
     out[0] = 0x01
     out.set(parts, 1)
@@ -141,20 +145,28 @@ function encodeSocks5Address(hostname: string, port: number): Uint8Array {
     out[6] = port & 0xff
     return out
   }
-  if (isIpv6(hostname)) {
+  if (isIpv6(host)) {
+    // ⚠️ 必须走 parseIpv6()，不能自己按 `:` 切。
+    //
+    // `2606:4700::1` 直接 split 会得到 3 段（`::` 产生的空串被过滤掉），
+    // 于是 8 个分组里只有前 3 个有值 —— 打给对端的是 `2606:4700:1::`，
+    // **地址完全错误但握手看起来正常**，表现为「代理连上了却连不到目标」。
+    // parseIpv6 已正确处理 `::` 压缩与内嵌 IPv4。
+    const groups = parseIpv6(host)
     const out = new Uint8Array(19)
     out[0] = 0x04
-    const groups = hostname.split(':').filter(Boolean)
-    for (let i = 0; i < 8; i++) {
-      const value = parseInt(groups[i] ?? '0', 16) || 0
-      out[1 + i * 2] = (value >> 8) & 0xff
-      out[2 + i * 2] = value & 0xff
+    if (groups) {
+      for (let i = 0; i < 8; i++) {
+        const value = groups[i] ?? 0
+        out[1 + i * 2] = (value >> 8) & 0xff
+        out[2 + i * 2] = value & 0xff
+      }
     }
     out[17] = (port >> 8) & 0xff
     out[18] = port & 0xff
     return out
   }
-  const name = new TextEncoder().encode(hostname)
+  const name = new TextEncoder().encode(host)
   const out = new Uint8Array(2 + name.length + 2)
   out[0] = 0x03
   out[1] = name.length

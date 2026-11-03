@@ -47,6 +47,14 @@ packages/worker-core/src/route-profile.generated.ts
 /docs/*.md
 /docs/*.ini
 /docs/tist.ini
+# 反代 IP 的**实测产物**不入库：它是特定网络、特定时刻的快照，
+# 换个时间/网络重跑结果就不同，进了仓库只会制造无意义的 diff。
+# 候选池本身（docs/relay-ip-candidates.csv）是工具输入，需要入库。
+/docs/relay-ip-measured.csv
+/docs/relay-ip-entry.json
+/docs/relay-ip-round*.json
+/docs/relay-ip-outbound.json
+/docs/relay-ip-proxypool.txt
 # 但 README 引用的截图必须入库
 !/docs/images/
 !/docs/images/**

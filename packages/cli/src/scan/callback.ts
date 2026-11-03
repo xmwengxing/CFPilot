@@ -47,6 +47,98 @@ export async function postResults(
 }
 
 /**
+ * 登录控制面，返回可直接复用的会话 Cookie。
+ *
+ * 从 `fetchScannerToken` 里抽出来：配置读写（`patchPanelConfig`）与
+ * 取扫描令牌都要走同一次登录，两处各写一遍必然在「单 Cookie 回退」
+ * 这类分支上漂移。
+ *
+ * ⚠️ 手动提取 Cookie，不依赖运行时自动管理 —— 面板的 Set-Cookie 带
+ * `Secure; HttpOnly; SameSite=Strict`，某些运行时的 fetch 不会自动回传。
+ */
+export async function loginPanel(
+  panelHost: string,
+  password: string,
+  timeoutMs = 25000
+): Promise<{ ok: boolean; base: string; cookie: string; error?: string }> {
+  let base = panelHost.trim()
+  if (!base) return { ok: false, base: '', cookie: '', error: '缺少控制面域名（--panel）' }
+  if (!/^https?:\/\//i.test(base)) base = 'https://' + base
+  base = base.replace(/\/$/, '')
+
+  try {
+    const loginRes = await fetch(base + '/api/v1/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+
+    if (loginRes.status === 401) {
+      return { ok: false, base, cookie: '', error: '面板密码不正确' }
+    }
+    if (!loginRes.ok) {
+      const text = await loginRes.text().catch(() => '')
+      return { ok: false, base, cookie: '', error: `登录失败 HTTP ${loginRes.status} ${text.slice(0, 120)}` }
+    }
+
+    const headersWithCookies = loginRes.headers as Headers & { getSetCookie?: () => string[] }
+    const raw = headersWithCookies.getSetCookie?.() ?? []
+    const cookie = raw
+      .map((c) => (c.split(';')[0] ?? '').trim())
+      .filter(Boolean)
+      .join('; ')
+
+    if (cookie) return { ok: true, base, cookie }
+
+    // 兼容：有的运行时只能取合并后的单值
+    const single = loginRes.headers.get('set-cookie')
+    if (!single) {
+      return { ok: false, base, cookie: '', error: '登录成功但服务端没有下发会话 Cookie' }
+    }
+    return { ok: true, base, cookie: (single.split(';')[0] ?? '').trim() }
+  } catch (err) {
+    return { ok: false, base, cookie: '', error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/**
+ * 打补丁式更新面板配置（`PUT /api/v1/config`，后端做合并）。
+ *
+ * 只发要改的字段 —— 接口收的是 **partial patch**，不需要先 GET 全量。
+ * 用途：给 `scan relay` 临时打开 `relayProbe` 开关，测完再关回去。
+ */
+export async function patchPanelConfig(
+  panelHost: string,
+  password: string,
+  patch: Record<string, unknown>,
+  timeoutMs = 25000
+): Promise<{ ok: boolean; error?: string; config?: Record<string, unknown> }> {
+  const session = await loginPanel(panelHost, password, timeoutMs)
+  if (!session.ok) return { ok: false, error: session.error }
+  try {
+    const res = await fetch(session.base + '/api/v1/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: session.cookie },
+      body: JSON.stringify({ config: patch }),
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    const text = await res.text().catch(() => '')
+    if (!res.ok) return { ok: false, error: `更新配置失败 HTTP ${res.status} ${text.slice(0, 160)}` }
+    // 接口回的是**合并后**的完整配置 —— 调用方常要顺手取 uuid，
+    // 再为此单独 GET 一次纯属浪费（而且要多登一次录）。
+    try {
+      const parsed = JSON.parse(text) as { config?: Record<string, unknown> }
+      return { ok: true, config: parsed.config }
+    } catch {
+      return { ok: true }
+    }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/**
  * 用面板密码登录控制面，换取一次性扫描令牌。
  *
  * ## 为什么需要
@@ -68,50 +160,12 @@ export async function fetchScannerToken(
   password: string,
   timeoutMs = 25000
 ): Promise<{ ok: boolean; token?: string; error?: string }> {
-  let base = panelHost.trim()
-  if (!base) return { ok: false, error: '缺少控制面域名（--panel）' }
-  if (!/^https?:\/\//i.test(base)) base = 'https://' + base
-  base = base.replace(/\/$/, '')
-
+  // 登录部分与 patchPanelConfig 共用 loginPanel —— 两处各写一遍
+  // 会在「单 Cookie 回退」这类分支上漂移（历史上就是这么长出来的）。
+  const session = await loginPanel(panelHost, password, timeoutMs)
+  if (!session.ok) return { ok: false, error: session.error }
   try {
-    // ---- 1. 登录 ----
-    const loginRes = await fetch(base + '/api/v1/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password }),
-      signal: AbortSignal.timeout(timeoutMs),
-    })
-
-    if (loginRes.status === 401) {
-      return { ok: false, error: '面板密码不正确' }
-    }
-    if (!loginRes.ok) {
-      const text = await loginRes.text().catch(() => '')
-      return { ok: false, error: `登录失败 HTTP ${loginRes.status} ${text.slice(0, 120)}` }
-    }
-
-    // ---- 2. 取会话 Cookie ----
-    //
-    // ⚠️ 手动提取，不依赖运行时自动管理 Cookie。
-    // 面板的 Set-Cookie 带 Secure; HttpOnly; SameSite=Strict，
-    // 某些运行时的 fetch 不会自动回传。
-    const headersWithCookies = loginRes.headers as Headers & { getSetCookie?: () => string[] }
-    const raw = headersWithCookies.getSetCookie?.() ?? []
-    const cookie = raw
-      .map((c) => (c.split(';')[0] ?? '').trim())
-      .filter(Boolean)
-      .join('; ')
-
-    if (!cookie) {
-      // 兼容：有的运行时只能取合并后的单值
-      const single = loginRes.headers.get('set-cookie')
-      if (!single) {
-        return { ok: false, error: '登录成功但服务端没有下发会话 Cookie' }
-      }
-      return await takeToken(base, (single.split(';')[0] ?? '').trim(), timeoutMs)
-    }
-
-    return await takeToken(base, cookie, timeoutMs)
+    return await takeToken(session.base, session.cookie, timeoutMs)
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }

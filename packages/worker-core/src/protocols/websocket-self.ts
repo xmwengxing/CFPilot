@@ -25,7 +25,7 @@ import type { ProxyEndpoint } from '../outbound/proxy-pool'
 import { parseVlessBuffer, VLESS_COMMAND_UDP } from '../protocols/vless'
 import { parseTrojanBuffer, TROJAN_COMMAND_UDP } from '../protocols/trojan'
 import { DnsUdpSession } from './udp-dns'
-import { concatBytes } from '../protocols/stream'
+import { concatBytes, awaitSendCapacity } from '../protocols/stream'
 import { UplinkQueue } from './uplink-queue'
 import { dial, type DialResult } from '../outbound/dial'
 import { TrafficMeter } from '../budget'
@@ -503,6 +503,9 @@ export async function handleWebSocket(
             cutByTraffic()
             return
           }
+          // 下行背压：只在发送缓冲真堆到阈值时让出一次事件循环。
+          // 正常流量下它等价于读一个属性（不进分支），见 awaitSendCapacity。
+          await awaitSendCapacity(server)
           send(value)
         }
       }

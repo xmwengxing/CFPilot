@@ -63,6 +63,31 @@ describe('HTTP CONNECT 代理握手', () => {
     expect(req).toContain('Host: example.com:443')
   })
 
+  // 权威串（authority）按 RFC 3986 要求，IPv6 字面量必须加方括号。
+  // 不加时对端会把 `2606:4700::1:443` 读成 host=`2606`、port=`4700`，
+  // 或直接判非法 —— 链式出站 100% 断流，且看起来只是「代理不通」。
+  it('IPv6 目标的 CONNECT 权威串带方括号', async () => {
+    const w = collectingWritable()
+    const readable = readableOf(enc('HTTP/1.1 200 Connection Established\r\n\r\n'))
+    await httpConnect(readable, w.stream, '2606:4700::1', 443)
+    const req = w.text()
+    expect(req).toContain('CONNECT [2606:4700::1]:443 HTTP/1.1')
+    expect(req).toContain('Host: [2606:4700::1]:443')
+    // 无括号的错误形态一个字都不能出现
+    expect(req).not.toContain('CONNECT 2606:4700::1:443 HTTP/1.1')
+  })
+
+  it('IPv4 与域名的权威串保持原样（不被括号规则误伤）', async () => {
+    for (const host of ['example.com', '104.16.1.1']) {
+      const w = collectingWritable()
+      const readable = readableOf(enc('HTTP/1.1 200 Connection Established\r\n\r\n'))
+      await httpConnect(readable, w.stream, host, 443)
+      const req = w.text()
+      expect(req).toContain(`CONNECT ${host}:443 HTTP/1.1`)
+      expect(req).not.toContain(`[${host}]`)
+    }
+  })
+
   it('带凭据时发出 Proxy-Authorization 头', async () => {
     const w = collectingWritable()
     const readable = readableOf(enc('HTTP/1.1 200 Connection Established\r\n\r\n'))

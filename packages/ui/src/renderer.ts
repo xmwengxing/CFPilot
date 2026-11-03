@@ -282,32 +282,28 @@
     const id = select.value
     const item = kvOptions.find((o) => o.id === id)
     const hint = $text('kvHint')
-    // 「目标账号」不再单独占一行，说明并到 KV 提示里。
-    const prefix = detectedAccountLabel ? '目标账号 ' + detectedAccountLabel + ' · ' : ''
+    // ⚠️ 这里**不放目标账号信息**：账号在「当前使用」下拉里已经可见，
+    // 再往这行注释里塞一遍只会让它变长、把真正的排障线索挤没。
     if (!item) {
-      hint.textContent =
-        prefix +
-        (currentAccountId
-          ? kvGuidance || '请选择一个命名空间（全新部署时会自动创建 KV）。'
-          : '选择账户后会自动检测账号与实例；检测到已部署实例会自动选中对应的 KV。')
+      hint.textContent = currentAccountId
+        ? kvGuidance || '请选择一个命名空间（全新部署时会自动创建 KV）。'
+        : '选择账户后会自动检测账号与实例；检测到已部署实例会自动选中对应的 KV。'
       return
     }
     if (item.ownership === 'instance') {
       hint.textContent =
-        prefix + `控制面 ${item.controlProject} / 数据面 ${item.dataProject}，部署于 ${item.at}。` + (kvGuidance ? ' ' + kvGuidance : '')
+        `控制面 ${item.controlProject} / 数据面 ${item.dataProject}，部署于 ${item.at}。` + (kvGuidance ? ' ' + kvGuidance : '')
     } else if (item.ownership === 'foreign') {
       hint.textContent =
-        prefix +
         '此命名空间已被其他项目占用，不能用于 CFPilot。' +
         'CFPilot 的数据面已完全自研，两者不再共用同一 KV' +
         '（会共享配额、混淆配置、让排查变难）。请到「部署」页新建一个实例。'
     } else if (item.ownership === 'cfpilot') {
       hint.textContent =
-        prefix +
         '此命名空间含 CFPilot 的 CONFIG 键但没有部署清单（残留配置）。' +
         '部署会覆盖它，除非你确实知道自己在做什么。'
     } else {
-      hint.textContent = prefix + '空命名空间，可用于部署新实例。'
+      hint.textContent = '空命名空间，可用于部署新实例。'
     }
     // 换了 KV 之后，之前那次检测结果就不适用了 —— 清掉，回到本地留档显示。
     deployChecked = null
@@ -1018,21 +1014,6 @@
     return (el?.value ?? 'auto') as 'auto' | 'fresh' | 'update'
   }
 
-  /**
-   * 数据面部署形态的说明文案。
-   *
-   * 文案是产品口径（用户给的原话），不要随手改：
-   * 它同时承担「这个模式适合什么」和「域名会不会被阻断」两个告知义务。
-   */
-  const DATA_PLANE_HINTS: Record<'pages' | 'workers', string> = {
-    pages:
-      '深度集成 Git (GitHub/GitLab)，自动构建便利，开放流量，适合静态网站和无自有域名部署；' +
-      '*.pages.dev 域名直连可访问，无需配置自定义域名！',
-    workers:
-      '极致的动态与边缘控制，适合 API、代理、鉴权、重定向、SSR 渲染以及结合 D1、R2、KV 等全栈后端部署；' +
-      ' *.workers.dev 域名直连无法访问，请登录 cloudflare 控制台配置自定义域名！',
-  }
-
   /** 用户是否手动改过「数据面部署模式」单选框 */
   let dataPlaneTouched = false
 
@@ -1041,11 +1022,14 @@
     return el?.value === 'workers' ? 'workers' : 'pages'
   }
 
-  /** 按当前选中的形态切换说明文案与「自定义域名」输入框的可见性 */
+  /**
+   * 按当前选中的形态切换「自定义域名」输入框的可见性。
+   *
+   * 模式说明文案已移进各选项的 `title` 悬浮气泡（见 index.html），
+   * 这里不再往页面上写第二份 —— 两处文案必然漂移。
+   */
   function syncDataPlaneUI(): void {
     const mode = readDataPlane()
-    const hint = document.getElementById('dataPlaneHint')
-    if (hint) hint.textContent = DATA_PLANE_HINTS[mode]
     const field = document.getElementById('dataHostField')
     if (field) field.style.display = mode === 'workers' ? 'block' : 'none'
   }

@@ -4,7 +4,12 @@
  * 单独成模块的原因：`dial.ts` 里引用了 `cloudflare:sockets`，而 Worker 的启动图越小越稳。
  * 把「解析配置」和「真正拨号」拆开后，路由层与配置层不再把 sockets 拖进启动图，
  * sockets 只在真正建立连接时才被动态加载。
+ *
+ * 端点切分借用 `doh.ts` 的 `splitHostPort()`：它是纯字符串函数，
+ * 与 `cloudflare:sockets` 无关，且 IPv4 / 域名 / `[IPv6]:port` / 裸 IPv6
+ * 四种形态已经写对、有单测覆盖 —— 在这里再抄一遍必然漂移。
  */
+import { splitHostPort } from './doh'
 
 export type ProxyKind = 'direct' | 'socks5' | 'http' | 'https'
 
@@ -72,10 +77,13 @@ export function parseProxyEntry(entry: string, defaultKind: ProxyKind = 'direct'
     serverName = sniMatch[1]!.trim()
     rest = rest.slice(0, sniMatch.index) + rest.slice(sniMatch.index + sniMatch[0].length)
   }
-  const portIndex = rest.lastIndexOf(':')
-  if (portIndex < 0) return null
-  const host = rest.slice(0, portIndex).replace(/^\[|\]$/g, '')
-  const port = Number(rest.slice(portIndex + 1))
+  // 端点切分复用 doh 的 splitHostPort —— 它已经覆盖
+  // `[IPv6]:port`、裸 IPv6、`host:port`、`user:pass@host:port` 四种形态。
+  //
+  // ⚠️ 这里原来用 lastIndexOf(':')，遇到**裸 IPv6 且没写端口**（如
+  // `2a01:4f8::1`）会把它读成 host=`2a01:4f8:` + port=1 —— 校验照样通过，
+  // 但端点是坏的，之后无论怎么拨都连不上，用户只会看到「代理不通」。
+  const { host, port } = splitHostPort(rest, 0)
   if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) return null
   // 域名形式的 host 本身就是 SNI（IP 不行 —— 证书是签给域名的）
   if (!serverName && kind === 'https' && !isIpv4Literal(host)) {

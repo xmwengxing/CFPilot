@@ -26,6 +26,7 @@
  * 边界因此很明确：域名解析到内网地址（例如 `nas.example.com` → `192.168.1.5`）
  * 不在拦截范围内，仍会交给运行时去连（并通常以超时告终）。
  */
+import { parseIpv6 } from '../protocols/address'
 
 /** 被拦截的目标类别 */
 export type BlockedTargetKind =
@@ -45,6 +46,8 @@ export type BlockedTargetKind =
   | 'multicast'
   /** 保留地址（240/4） */
   | 'reserved'
+  /** IPv6 字面量目标 —— 直连通道的能力上限，不是内网安全问题 */
+  | 'ipv6-direct-unsupported'
   /** 固定的内网域名后缀（.local / .internal / localhost） */
   | 'internal-name'
 
@@ -56,6 +59,30 @@ export interface BlockedTarget {
 
 /** 错误信息前缀 —— `classifyDialFailure` 据此归类为 `policy` */
 export const TARGET_BLOCKED_PREFIX = '目标地址被策略拦截'
+
+/**
+ * IPv6 字面量目标在**直连通道**上的失败原因。
+ *
+ * ## 为什么这是「能力上限」而不是安全策略
+ *
+ * Workers 的 `connect()` 对 IPv6 目标出站不可用 —— 这条在生产环境实测过两轮
+ * （2026-10-26 首测、2026-10-27 复核），2026-11-03 又用同一服务的
+ * v4 / v6 双地址做了对照：v4 拿到目标的真实响应，v6 只拿到反代兜底的 400。
+ *
+ * 与之配套的两条链路也不通，所以**没有「再等等就好」的余地**：
+ *   - 反代入口是**按 SNI 转发**的，SNI 必须是域名，字面量根本带不过去；
+ *   - ProxyIP 走的是「把目标域名当 SNI 复用既有连接」，同样需要域名。
+ *
+ * 因此不提前失败的代价是：白等一次建连超时，然后收到一条与真实原因
+ * 无关的失败文案，用户完全看不出问题在哪。
+ *
+ * **配了落地代理（SOCKS5 / HTTP / HTTPS）的路径不受此限制** ——
+ * 字面量交给代理服务器去连是合法用法，且那条链路的 IPv6 打包刚修过。
+ */
+export const IPV6_DIRECT_UNSUPPORTED: BlockedTarget = {
+  kind: 'ipv6-direct-unsupported',
+  reason: '直连与反代通道不支持 IPv6 目标，可改用落地代理转发',
+}
 
 /** 目标被策略拦截 */
 export class TargetBlockedError extends Error {
@@ -118,39 +145,62 @@ function checkIpv4(ip: string): BlockedTarget | null {
   return null
 }
 
-/** 取 IPv6 第一个 hextet（用于判定 ULA / 链路本地 / 组播前缀） */
-function firstHextet(ip: string): number | null {
-  const clean = ip.split('%')[0] ?? ''
-  if (!clean.includes(':')) return null
-  if (clean.startsWith('::')) return 0
-  const head = clean.split(':')[0] ?? ''
-  if (head === '') return 0
-  const value = Number.parseInt(head, 16)
-  return Number.isFinite(value) ? value : null
+/**
+ * 把 8 个 16 位分组拼回点分 IPv4（用于 IPv4-mapped / NAT64 内嵌地址）。
+ * 只在 `groups[6..7]` 确实承载 v4 时调用。
+ */
+function groupsToIpv4(groups: number[]): string {
+  const hi = groups[6] ?? 0
+  const lo = groups[7] ?? 0
+  return `${hi >>> 8}.${hi & 0xff}.${lo >>> 8}.${lo & 0xff}`
 }
 
 function checkIpv6(ip: string): BlockedTarget | null {
   const clean = (ip.split('%')[0] ?? '').toLowerCase()
   if (!clean.includes(':')) return null
 
-  // IPv4 映射地址（::ffff:1.2.3.4 / 0:0:0:0:0:ffff:1.2.3.4）：按内嵌的 IPv4 判定
-  if (/ffff:/i.test(clean)) {
-    const tail = /(\d{1,3}(?:\.\d{1,3}){3})$/.exec(clean)
-    if (tail) {
-      const inner = checkIpv4(tail[1]!)
-      if (inner) return inner
-      return null
-    }
+  // 统一归一化成 8 个分组再判 —— 文本形态有无数种写法
+  // （`::` 压缩、大小写、十六进制尾巴、内嵌点分 IPv4），
+  // 按字符串判必然被变形绕过；按分组判只有一种写法。
+  //
+  // 解析不了就放行：这里的目标是「快速失败 + 明确原因」，
+  // 不是安全边界（运行时本就连不到内网，见文件头注释）。
+  const groups = parseIpv6(clean)
+  if (!groups) return null
+
+  const headZero = groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 && groups[4] === 0
+
+  // IPv4 映射地址：`::ffff:1.2.3.4` 与**十六进制写法** `::ffff:7f00:1`。
+  //
+  // ⚠️ 旧实现只认点分尾巴，于是 `::ffff:7f00:1`（=127.0.0.1）、
+  // `::ffff:a9fe:a9fe`（=169.254.169.254 云元数据）全部放行 ——
+  // 换个写法就绕过去了。按分组判没有这个问题。
+  if (headZero && groups[5] === 0xffff) {
+    const inner = checkIpv4(groupsToIpv4(groups))
+    return inner ?? null
   }
 
-  const head = firstHextet(clean)
-  if (head === null) return null
-  if (clean === '::' || head === 0) {
-    // `::` 未指定；`::1` 环回（其余 `::x` 是已废弃的 IPv4 兼容地址，不额外判）
-    if (clean === '::1') return { kind: 'loopback', reason: '环回地址' }
-    if (clean === '::') return { kind: 'unspecified', reason: '未指定地址' }
-    return null
+  // 未指定 / 环回：前 7 组全 0，最后一组是 0 或 1
+  if (headZero && groups[5] === 0 && groups[6] === 0 && (groups[7] === 0 || groups[7] === 1)) {
+    return groups[7] === 1
+      ? { kind: 'loopback', reason: '环回地址' }
+      : { kind: 'unspecified', reason: '未指定地址' }
   }
+
+  // 早期 IPv4 兼容地址 `::a.b.c.d`（已废弃，但形态仍在）：同样按内嵌 v4 判
+  if (headZero && groups[5] === 0) {
+    const inner = checkIpv4(groupsToIpv4(groups))
+    return inner ?? null
+  }
+
+  // NAT64 知名前缀 `64:ff9b::/96`：内嵌的 IPv4 可能是私网 / 环回
+  //（`64:ff9b::10.0.0.1`、`64:ff9b::7f00:1` 都能直达内网语义）
+  if (groups[0] === 0x0064 && groups[1] === 0xff9b && groups[2] === 0 && groups[3] === 0 && groups[4] === 0 && groups[5] === 0) {
+    const inner = checkIpv4(groupsToIpv4(groups))
+    if (inner) return inner
+  }
+
+  const head = groups[0] ?? 0
   if ((head & 0xfe00) === 0xfc00) return { kind: 'ula', reason: 'IPv6 唯一本地地址' }
   if ((head & 0xffc0) === 0xfe80) return { kind: 'link-local', reason: 'IPv6 链路本地地址' }
   if ((head & 0xff00) === 0xff00) return { kind: 'multicast', reason: 'IPv6 组播地址' }

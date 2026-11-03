@@ -37,7 +37,11 @@ export async function httpConnect(
 ): Promise<ReadableStream<Uint8Array>> {
   const stream = new ByteStream(readable)
   const writer = writable.getWriter()
-  const target = `${hostname}:${port}`
+  // 权威串（authority）必须按 RFC 3986 拼：IPv6 字面量要加方括号，
+  // 否则 `CONNECT 2606:4700::1:443` 会被对端当成「host=2606、port=4700」
+  // （或直接判为非法），代理端解析失败 → 链式出站 100% 断流。
+  // IPv4 与域名的拼法保持原样，正常路径一字未变。
+  const target = hostname.includes(':') ? `[${hostname}]:${port}` : `${hostname}:${port}`
 
   try {
     // 代理认证（RFC 7235 Basic），用 Proxy-Authorization 头。

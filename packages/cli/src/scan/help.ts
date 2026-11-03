@@ -14,6 +14,7 @@ CFPilot 本地真连接优选器 —— 用你自己的 Worker 域名做 SNI/Hos
 用法:
   ${NAME} scan [选项]        执行三阶优选扫描
   ${NAME} scan compare      双栈对照报告（IPv4 vs IPv6，同参数跑两轮）
+  ${NAME} scan relay        反代入口候选的出站体检（从 Worker 内部发起）
   ${NAME} scan serve [选项]   启动本地桥接服务（供面板一键唤醒）
   ${NAME} scan ips [选项]     打印 Cloudflare 官方网段
   ${NAME} --help             显示帮助
@@ -174,4 +175,51 @@ ${NAME} scan compare —— 双栈对照报告（IPv4 vs IPv6）
 示例:
   ${NAME} scan compare --host cfpilot.example.com
   ${NAME} scan compare --host cfpilot.example.com --sample 2000 --json
+`
+
+/**
+ * `scan relay` 的帮助 —— 反代入口候选的出站体检。
+ *
+ * 与 SCAN_HELP 分开：它要的是控制面密码与一个候选文件，
+ * 语义（从 Worker 内部发起）也与普通优选完全不同。
+ */
+export const SCAN_RELAY_HELP = `
+${NAME} scan relay —— 反代入口（ProxyIP 池）候选的出站体检
+
+做什么:
+  用**本机**开一条 VLESS/WS 隧道到你的数据面，让 Worker 去连候选 IP:443，
+  再由本机在这条隧道上完成 TLS 握手（SNI = 你的数据面域名）并请求 /__cfp_version。
+
+  两个条件同时成立才算通过：
+    · 证书按你的域名校验通过 → 该候选确实把 SNI 转发到了 Cloudflare
+    · 返回的 build 等于数据面自己的 build → 落点确实是你的实例
+
+  ⚠️ 为什么不让 Worker 自己做 TLS：生产的反代链路是**明文管道**
+     （Worker 把客户端的 ClientHello 原样转发）。真机实测 Worker 侧
+     connect()+startTls() 到这类代理读不到任何字节，而同一批 IP 从本机测全部 200。
+
+用法:
+  ${NAME} scan relay --file <候选文件> --host <数据面域名> \\
+                     --ws-path <WS 路径> --uuid <UUID> [选项]
+
+选项:
+  --file <path>          候选 IP 文件（每行一个，支持 CSV 与 # 注释）
+  --host <domain>        数据面域名（隧道与 SNI 都用它）
+  --ws-path <path>       数据面的 WebSocket 路径
+  --uuid <uuid>          VLESS UUID
+  --rounds <n>           轮数，默认 2
+  --timeout <ms>         单目标超时，默认 12000
+  --out <path>           写出可**直接粘贴**进 ProxyIP 池的清单（只含全通项，按质量排序）
+  --top <n>              与 --out 配合：最多写几条，默认 10
+  --json                 输出机器可读 JSON
+  --quiet                只输出结果
+  -h, --help             显示本帮助
+
+产出怎么用:
+  通过率高的前几条填进面板「入站配置 → ProxyIP 池」（每行一条）。
+  该池**不进订阅**，只影响 Worker 的出站选路，日常转发性能不受影响。
+
+示例:
+  ${NAME} scan relay --file docs/relay-ip-candidates.csv \\
+    --host data.example.com --ws-path /xxxx --uuid 00000000-0000-0000-0000-000000000000
 `

@@ -15,6 +15,7 @@ import {
   expandCidrs,
   fetchCloudflareCidrs,
   ipv6Prefix48,
+  parseCidr,
   readIpFile,
 } from './ip-ranges'
 import { isPublicAddress } from './net-env'
@@ -92,19 +93,50 @@ export interface CandidateOptions {
   }
 }
 
-/** 把 --cidr / body.cidr 的多种写法归一成网段数组 */
+/**
+ * 把 --cidr / body.cidr 的多种写法归一成网段数组。
+ *
+ * ## 裸 IP 会自动补默认前缀
+ *
+ * `parseCidr()` 要求显式前缀：`1.2.3.4` 没有 `/` 会被判 null。
+ * 这里以前原样透传，结果是**静默丢弃** —— 用户喂一串 IP 进来，
+ * 看到的只有「候选数为 0」，完全不知道是格式问题。
+ *
+ * 现在补 `/32`（v4）与 `/128`（v6）；补完仍然不合法的**直接报错并列出条目**，
+ * 不再让错误以「没有候选」的形式出现。
+ */
 function normalizeCidrInput(cidr: string | string[] | undefined): string[] {
   if (cidr === undefined) return []
   const list = Array.isArray(cidr) ? cidr : [cidr]
   const out: string[] = []
+  const rejected: string[] = []
   for (const item of list) {
     if (typeof item !== 'string') continue
     for (const part of item.split(/[\n,]+/)) {
       const value = part.trim()
-      if (value) out.push(value)
+      if (!value) continue
+      const normalized = withDefaultPrefix(value)
+      if (parseCidr(normalized)) out.push(normalized)
+      else rejected.push(value)
     }
   }
+  if (rejected.length > 0) {
+    const head = rejected.slice(0, 5).join('、')
+    const more = rejected.length > 5 ? ` 等 ${rejected.length} 条` : ''
+    throw new Error(
+      `无法识别的网段/IP：${head}${more}。` +
+        `正确写法是 1.2.3.4、1.2.3.0/24、2606:4700::1 或 2606:4700::/48`
+    )
+  }
   return out
+}
+
+/** 裸 IP 补默认前缀；已是 CIDR 形态的原样返回（域名等其它形态交给 parseCidr 判）。 */
+function withDefaultPrefix(value: string): string {
+  if (value.includes('/')) return value
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(value)) return `${value}/32`
+  if (value.includes(':')) return `${value}/128`
+  return value
 }
 
 function isIpv6Cidr(cidr: string): boolean {

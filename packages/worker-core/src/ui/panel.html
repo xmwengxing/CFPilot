@@ -1009,6 +1009,13 @@
     });
   }
 
+  // IPv6 直接拼 `:端口` 会显示成 `2606:4700::1:443` —— 分不清地址到哪结束，
+  // 与订阅里 `[…]:443` 的写法也不一致，复制出去会被解析成另一个地址。
+  function hostTxt(ip) {
+    var v = String(ip == null ? '' : ip);
+    return v.indexOf(':') >= 0 ? '[' + v + ']' : v;
+  }
+
   // === [Module 2: HTTP API Client] ===
   function api(path, options) {
     options = options || {};
@@ -1253,14 +1260,14 @@
     var list = (r.nodes || []).slice(0, 100);
     var rows = list.map(function (n, i) {
       return '<tr><td>' + (i + 1) + '</td><td><span class="tag ' + esc(n.source) + '">' + esc(n.source) + '</span></td>' +
-        '<td class="mono">' + esc(n.ip) + ':' + n.port + '</td><td>' + esc(n.coloLabel || n.colo || '-') + '</td>' +
+        '<td class="mono">' + hostTxt(n.ip) + ':' + n.port + '</td><td>' + esc(n.coloLabel || n.colo || '-') + '</td>' +
         '<td>' + (n.latency ? n.latency + ' ms' : '-') + '</td><td>' + (n.speed ? n.speed + ' MB/s' : '-') + '</td></tr>';
     }).join('');
     $('nodeTable').querySelector('tbody').innerHTML = rows || '<tr><td colspan="6" class="muted">当前暂无可用节点</td></tr>';
 
     var subRows = list.map(function (n, i) {
       return '<tr><td>' + (i + 1) + '</td><td><span class="tag ' + esc(n.source) + '">' + esc(n.source) + '</span></td>' +
-        '<td class="mono">' + esc(n.ip) + ':' + n.port + '</td><td>' + esc(n.coloLabel || n.colo || '-') + '</td></tr>';
+        '<td class="mono">' + hostTxt(n.ip) + ':' + n.port + '</td><td>' + esc(n.coloLabel || n.colo || '-') + '</td></tr>';
     }).join('');
     $('subTable').querySelector('tbody').innerHTML = subRows || '<tr><td colspan="4" class="muted">当前暂无可用节点</td></tr>';
 
@@ -1528,7 +1535,7 @@
     es.addEventListener('result', function (ev) {
       var d = JSON.parse(ev.data);
       var e = d.entry || {};
-      log('✓ 入围节点：' + (e.ip || '') + (e.port ? ':' + e.port : '') + (e.colo ? ' [' + e.colo + ']' : ''), 'ok');
+      log('✓ 入围节点：' + hostTxt(e.ip) + (e.port ? ':' + e.port : '') + (e.colo ? ' [' + e.colo + ']' : ''), 'ok');
     });
     es.addEventListener('done', function (ev) {
       var d = JSON.parse(ev.data);

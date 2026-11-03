@@ -128,16 +128,32 @@ export function parseScannerRemark(remark: string): { colo: string; latency: num
     const latency = num(parts[i - 1])
     const speed = num(parts[i])
     if (latency !== null && speed !== null) {
-      return { colo: parts.slice(0, i - 1).join('_'), latency, speed }
+      return { colo: cleanColo(parts.slice(0, i - 1).join('_')), latency, speed }
     }
   }
   // 退化：只有一个数字 = 延迟
   const only = num(parts[parts.length - 1])
   if (only !== null && parts.length >= 2) {
-    return { colo: parts.slice(0, -1).join('_'), latency: only, speed: 0 }
+    return { colo: cleanColo(parts.slice(0, -1).join('_')), latency: only, speed: 0 }
   }
   // 完全没有数字：不是扫描器写的备注（历史行为：返回空，而不是把整串当机房码）
   return { colo: '', latency: 0, speed: 0 }
+}
+
+/**
+ * 从备注的机房段里取出**干净的三字码**。
+ *
+ * 新格式是 `IPv4_SJC圣何塞_12_35.5`（族标记 + 机房 + 城市 + 指标）。
+ * 直接把整段当 colo 会让 `countryOfColo()` 查不到 → **国家筛选全部失效**，
+ * 而且 `nodeLabel` 还会再追加一次城市名（`…圣何塞 圣何塞`）。
+ *
+ * 这里先剥掉族标记，再取第一段三字母大写码；取不到就原样返回 ——
+ * 老格式（`SJC_12_35.5`）与用户手填的中文备注行为完全不变。
+ */
+function cleanColo(raw: string): string {
+  const stripped = raw.replace(/^IPv[46]_\s*/i, '')
+  const matched = stripped.match(/[A-Z]{3}/)
+  return matched ? matched[0] : raw
 }
 
 function toEntry(clean: CleanResult, source: NodeSource): NodeEntry {
@@ -645,7 +661,10 @@ export function filterByCountries(entries: NodeEntry[], countries: string[]): No
 export const POOL_LABELS = {
   official: '官方优选IP',
   domain: '优选域名',
-  manual: '手动优选IP',
+  // 手动优选池的前缀只留「优选」两个字，族标记由**备注**提供
+  // （`IPv4_…` / `IPv6_…`），于是节点名变成 `优选IPv4_SJC圣何塞_12_35.5`。
+  // 这样族信息不用控制面再算一遍，数据面也只是字符串拼接。
+  manual: '优选',
   api: '远程API',
   csv: '测速CSV',
 } as const
@@ -1095,8 +1114,15 @@ function resolveGroups(ctx: RenderContext): PoolGroup[] {
 function nodeLabel(entry: NodeEntry, protocol: string, index: number, groupName = ''): string {
   const base = entry.remark && !/^[\d.]+$/.test(entry.remark) ? entry.remark : entry.ip
   // 机房显示成「香港 HKG」而不是裸三字码 —— 优选结果里最常被问的就是「这个 HKG 是哪」。
-  const colo = entry.colo && entry.colo !== base ? ` ${coloLabel(entry.colo)}` : ''
-  const prefix = groupName ? `${groupName} ` : ''
+  //
+  // ⚠️ 备注里已经带了城市（`IPv4_SJC圣何塞_…`）时**不能再追加一次**，
+  // 否则节点名变成 `…圣何塞 圣何塞 #1`。
+  const label = entry.colo ? coloLabel(entry.colo) : ''
+  const colo = label && entry.colo !== base && !base.includes(label) ? ` ${label}` : ''
+  // 备注以族标记开头（`IPv4_` / `IPv6_`）时前缀直接贴上、**不留空格** ——
+  // 节点名就是 `优选IPv4_SJC圣何塞_12_35.5 #1`；其它池仍用空格分隔。
+  const tight = /^IPv[46]_/.test(base)
+  const prefix = groupName ? `${groupName}${tight ? '' : ' '}` : ''
   return `${prefix}${base}${colo} #${index + 1}${protocol === 'trojan' ? ' Trojan' : ''}`
 }
 
@@ -1288,6 +1314,13 @@ export function renderClash(ctx: RenderContext): string {
   const lines: string[] = []
   const proxies: string[] = []
   const allNames: string[] = []
+  /**
+   * 按地址族分桶的节点名 —— Clash 的「优选IPv4 / 优选IPv6」两个分组用它。
+   *
+   * 族按 **IP 字面量**判（含冒号 = IPv6），不依赖备注里有没有族标记：
+   * 用户手填的节点没有 `IPv4_` 前缀，但同样应该归对组。
+   */
+  const familyNames: { v4: string[]; v6: string[] } = { v4: [], v6: [] }
   // ⚠️ Clash / mihomo **不支持 XHTTP**（XHTTP 是 Xray 专有传输），
   // 所以 XHTTP 变体在这些格式里跳过 —— 否则客户端会把它当未知 network 而失败。
   const variants = resolveSubVariants(ctx.config.subVariants, ctx.config, WS_ONLY_VARIANTS)
@@ -1307,13 +1340,16 @@ export function renderClash(ctx: RenderContext): string {
 
   for (const group of resolveGroups(ctx)) {
     group.entries.forEach((entry, index) => {
-      const baseLabel = `${group.name} ${nodeLabel(entry, 'vless', index, '')}`
+      // 分组名由 nodeLabel 自己拼（族标记开头时不留空格 → `优选IPv4_…`）
+      const baseLabel = nodeLabel(entry, 'vless', index, group.name)
+      const bucket = entry.ip.includes(':') ? familyNames.v6 : familyNames.v4
       // 端口展开：勾了多个端口时每个端口生成一份，label 加后缀区分
       for (const port of portsForEntry(entry, ctx)) {
         const portSuffix = ctx.ports.length > 1 ? `:${port}` : ''
         const label = `${baseLabel}${portSuffix}`
         if (wantVless) {
           allNames.push(label)
+          bucket.push(label)
           proxies.push(
             [
               `  - name: ${yamlQuote(label)}`,
@@ -1336,6 +1372,7 @@ export function renderClash(ctx: RenderContext): string {
         if (wantTrojan) {
           const trojanLabel = `${label} Trojan`
           allNames.push(trojanLabel)
+          bucket.push(trojanLabel)
           proxies.push(
             [
               `  - name: ${yamlQuote(trojanLabel)}`,
@@ -1419,6 +1456,9 @@ export function renderClash(ctx: RenderContext): string {
   lines.push('    proxies:')
   lines.push('      - "自动选择"')
   lines.push('      - "故障转移"')
+  // 族分组挂在主手动分组之下：想只走 IPv6（或只走 IPv4）时直接选它
+  if (familyNames.v4.length > 0) lines.push('      - "优选IPv4"')
+  if (familyNames.v6.length > 0) lines.push('      - "优选IPv6"')
   if (allNames.length === 0) lines.push('      []')
   else for (const name of allNames) lines.push(`      - ${yamlQuote(name)}`)
   if (allNames.length > 0) {
@@ -1437,6 +1477,18 @@ export function renderClash(ctx: RenderContext): string {
     lines.push('    interval: 300')
     lines.push('    proxies:')
     for (const name of allNames) lines.push(`      - ${yamlQuote(name)}`)
+
+    // 按地址族分组：只放该族的节点，便于「这条线路只走 IPv6」这类用法。
+    // 成员按 IP 判族（见 familyNames），所以手填的节点也会正确归组。
+    const familyGroup = (name: string, members: string[]): void => {
+      lines.push('')
+      lines.push(`  - name: ${yamlQuote(name)}`)
+      lines.push('    type: select')
+      lines.push('    proxies:')
+      for (const member of members) lines.push(`      - ${yamlQuote(member)}`)
+    }
+    if (familyNames.v4.length > 0) familyGroup('优选IPv4', familyNames.v4)
+    if (familyNames.v6.length > 0) familyGroup('优选IPv6', familyNames.v6)
   }
   // ini 定义的附加代理组（挂在 CFPilot / 自动选择 之下）
   if (route.groups.length > 0) {

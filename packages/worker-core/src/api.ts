@@ -227,31 +227,59 @@ export async function handleApi(
     const token = header.startsWith('Bearer ') ? header.slice(7).trim() : header.trim()
     const authorized = await verifyScanToken(store, token)
     if (!authorized) return error('Token 校验失败', 401)
-    let body: { ips?: unknown }
+    let body: { ips?: unknown; mode?: unknown }
     try {
-      body = (await request.json()) as { ips?: unknown }
+      body = (await request.json()) as { ips?: unknown; mode?: unknown }
     } catch {
       return error('请求体解析失败', 400)
     }
     const list = Array.isArray(body.ips) ? body.ips.map((v) => String(v)) : []
-    const cleaned = list
+    const incoming = list
       .map((line) => line.trim())
       .filter((line) => line.length > 0)
-      .join('\n')
+    // mode：
+    //   replace（默认）—— 清空后写入（历史行为，调用方不传时不变）
+    //   append         —— 保留池里已有的 IP，只补新的（「增量回填」）
+    const append = body.mode === 'append'
+    // 同 ip:port 只保留一条：已有的**不动**（保留上一轮的备注），只补真正新的
+    const keyOf = (line: string): string =>
+      line.split('#')[0]!.trim().replace(/^\[([^\]]+)\]:(\d+)$/, '$1:$2')
+
     // ⚠️ 先读再比，内容没变就不写。
     //
     // KV 免费版配额是 **1000 次写/天**，而「一键优选」可能一天跑好几次
     // （托盘菜单、手册扫描、多实例）。同一批结果重复 put 纯属浪费配额，
     // 写配额耗尽后「保存配置 / 回填」会直接 500。
     const previous = await store.get(LOCAL_IPS_KEY)
+    let cleaned: string
+    let added = incoming.length
+    if (append) {
+      const existing = (previous ?? '')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+      const seen = new Set(existing.map(keyOf))
+      const fresh = incoming.filter((line) => {
+        const key = keyOf(line)
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+      added = fresh.length
+      cleaned = [...existing, ...fresh].join('\n')
+    } else {
+      cleaned = incoming.join('\n')
+    }
     const changed = previous !== cleaned
     if (changed) await store.put(LOCAL_IPS_KEY, cleaned)
 
-    // 覆盖：清空面板手填的「手动优选 IP」，让订阅里只有本次回填的结果；
-    // 同时**自动启用「手动指定 IP」来源**（poolManual）——
+    // 覆盖：清空面板手填的「手动指定 IP」，让订阅里只有本次回填的结果；
+    // 增量：**不动**它（增量的语义就是「什么都别删」）。
+    //
+    // 两种模式都**自动启用「手动指定 IP」来源**（poolManual）——
     // 否则用户没勾选该来源时，回填的 IP 不会进订阅，看起来「回填没生效」。
     const patch: Partial<typeof config> = {}
-    if ((config.add ?? '').trim() !== '') patch.add = ''
+    if (!append && (config.add ?? '').trim() !== '') patch.add = ''
     if (!config.poolManual) patch.poolManual = true
     let clearedManual = false
     if (Object.keys(patch).length > 0) {
@@ -262,7 +290,9 @@ export async function handleApi(
 
     return json({
       ok: true,
-      count: list.length,
+      mode: append ? 'append' : 'replace',
+      count: incoming.length,
+      added,
       clearedManual,
       enabledManual: patch.poolManual === true,
     })

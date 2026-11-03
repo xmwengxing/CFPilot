@@ -22,8 +22,8 @@ import {
 } from './scan'
 import { coloCity, normalizeCountryFilter } from './countries'
 import { formatEntries } from './scan'
-import { postResults, fetchScannerToken } from './callback'
-import { resolveCandidates } from './candidates'
+import { postResults, fetchScannerToken, type PushMode } from './callback'
+import { resolveCandidatePlan, type CandidatePlan, type FamilyChoice } from './candidates'
 import {
   loadNetworkProfile,
   mergeProfileStores,
@@ -47,7 +47,8 @@ import {
 } from './speed-url'
 import { BUILTIN_IPV4_CIDRS, BUILTIN_IPV6_CIDRS, readIpFile } from './ip-ranges'
 
-function normalizeWsPath(raw: string | undefined, fallback: string): string {
+/** 校验并归一化 WS 路径（导出供 `scan compare` 复用，避免两处实现漂移）。 */
+export function normalizeWsPath(raw: string | undefined, fallback: string): string {
   const value = (raw ?? fallback).trim()
   if (!value) return fallback
 
@@ -104,7 +105,14 @@ function seedFromArgs(args: ParsedArgs): number | undefined {
 interface AdaptiveContext {
   file: string
   store: ProfileStoreDocument
-  profileId: string
+  /**
+   * 按地址族分的档案 ID。
+   *
+   * 档案 ID = hash(运营商, 地区, 接入方式, **地址族**)，两族天然不同 ——
+   * 采样时按族查各自的观测，写入时也按 IP 族归档，
+   * 否则 v6 的历史要么查不到、要么错查成 v4 的。
+   */
+  profileIds: { v4: string; v6: string }
 }
 
 /** 运营商归一化：只接受已知枚举，其它一律记为 other。 */
@@ -138,16 +146,81 @@ async function loadAdaptiveContext(args: ParsedArgs): Promise<AdaptiveContext> {
       /* 桌面版档案读不到就只用 CLI 自己的 */
     }
   }
-  const profile = normalizeNetworkProfile({ isp, region, access, family: 'ipv4', source: 'manual' })
-  store.profiles[profile.id] = { ...profile, updatedAt: Date.now() }
-  return { file, store, profileId: profile.id }
+  const base = { isp, region, access, source: 'manual' as const }
+  const v4 = normalizeNetworkProfile({ ...base, family: 'ipv4' })
+  const v6 = normalizeNetworkProfile({ ...base, family: 'ipv6' })
+  const updatedAt = Date.now()
+  // 两族档案都建出来：采样按族查观测、写入按 IP 族归档，
+  // 少建任何一个都会让那一族的历史无处可放。
+  store.profiles[v4.id] = { ...v4, updatedAt }
+  store.profiles[v6.id] = { ...v6, updatedAt }
+  return { file, store, profileIds: { v4: v4.id, v6: v6.id } }
 }
 
-async function resolveCandidatesFromArgs(args: ParsedArgs): Promise<string[]> {
+/**
+ * 回填模式。
+ *
+ *   `overwrite`（默认）—— 清空面板优选池后写入（历史行为）
+ *   `incremental`      —— 保留池里已有的 IP，只补新的（「增量回填」）
+ *
+ * 也接受 `append` / `replace`（面板接口的字段名），方便脚本两边一致。
+ */
+function pushModeFromArgs(args: ParsedArgs): PushMode {
+  const raw = (flagString(args, 'push-mode') || 'overwrite').trim().toLowerCase()
+  switch (raw) {
+    case 'incremental':
+    case 'append':
+      return 'append'
+    case 'overwrite':
+    case 'replace':
+      return 'replace'
+    default:
+      process.stderr.write(`✗ --push-mode 只接受 incremental / overwrite，收到的是：「${raw}」\n`)
+      process.exit(1)
+  }
+}
+
+/**
+ * `--family` 参数：`auto`（默认）/ `v4` / `v6` / `both`。
+ *
+ * 默认 `auto` 的含义是「先做 IPv6 环境预检，通了才让 v6 参与」——
+ * 本机没有可用 IPv6 时自动退回纯 v4，不会让用户撞见
+ * 「一半候选全超时」才明白怎么回事。
+ */
+function familyFromArgs(args: ParsedArgs): FamilyChoice {
+  // ⚠️ 必须用 `||` 而不是 `??`：flagString 在参数缺席时返回**空串**（fallback 默认 ''），
+  // 用 `??` 兜不住，会走到报错分支 —— 实测默认调用直接退出。
+  const raw = (flagString(args, 'family') || 'auto').trim().toLowerCase()
+  if (raw === 'auto' || raw === 'v4' || raw === 'v6' || raw === 'both') return raw
+  process.stderr.write(`✗ --family 只接受 auto / v4 / v6 / both，收到的是：「${raw}」\n`)
+  process.exit(1)
+}
+
+/**
+ * 解析候选并给出完整结论（预检 / 分族 / 计数）。
+ *
+ * @param extraHosts 用于发现活跃 IPv6 前缀的域名（数据面 + 控制面）
+ */
+async function resolveCandidatesFromArgs(
+  args: ParsedArgs,
+  extraHosts: readonly string[] = []
+): Promise<CandidatePlan> {
   const ipFile = flagString(args, 'ip-file')
   if (ipFile) {
     const text = readFileSync(ipFile, 'utf8')
-    return readIpFile(text)
+    const candidates = readIpFile(text)
+    return {
+      candidates,
+      family: 'both',
+      ipv6Env: null,
+      v6Prefixes: [],
+      v6Discovered: [],
+      counts: {
+        v4: candidates.filter((ip) => !ip.includes(':')).length,
+        v6: candidates.filter((ip) => ip.includes(':')).length,
+      },
+      note: `候选来自文件 ${ipFile}（未做网段采样，也未做 IPv6 预检）`,
+    }
   }
 
   const base = {
@@ -159,25 +232,27 @@ async function resolveCandidatesFromArgs(args: ParsedArgs): Promise<string[]> {
     // ⚠️ 不传 seed = 每次随机（默认）。只有用户显式给了 --seed 才固定，
     // 否则「每次跑都测同一批 IP」——那批落在劣质路由段上时永远测不出好 IP。
     seed: seedFromArgs(args),
+    family: familyFromArgs(args),
+    extraHosts,
   }
 
   // 实验性：自适应采样（默认关闭）。
-  if (!flagBool(args, 'adaptive')) return resolveCandidates(base)
+  if (!flagBool(args, 'adaptive')) return resolveCandidatePlan(base)
 
   const context = await loadAdaptiveContext(args)
   const exploreRate = flagNumber(args, 'explore-rate', 20) / 100
-  const candidates = await resolveCandidates({
+  const plan = await resolveCandidatePlan({
     ...base,
     profile: context.store,
     adaptiveSampling: {
       explorationRate: Math.min(1, Math.max(0.05, exploreRate)),
       includeZeroWeight: flagBool(args, 'explore-zero'),
-      profileId: context.profileId,
+      profileIds: context.profileIds,
     },
   })
   // 把档案留在内存里，扫描结束后回写观测。
   adaptiveContexts.set(args, context)
-  return candidates
+  return plan
 }
 
 /** 本次命令使用的自适应上下文（扫描结束后回写观测用）。 */
@@ -197,7 +272,8 @@ async function saveAdaptiveObservations(args: ParsedArgs, observations: ScanObse
       latencyMs: observation.latencyMs,
       speedMBps: observation.speedMBps,
       at: now,
-      profileId: context.profileId,
+      // 按 IP 族归档到对应档案：档案 ID 含地址族，两族历史互不污染
+      profileId: observation.ip.includes(':') ? context.profileIds.v6 : context.profileIds.v4,
     })),
     now,
   )
@@ -271,14 +347,22 @@ function printCopyable(entries: ScanEntry[]): void {
 }
 
 export async function runScanCommand(args: ParsedArgs): Promise<void> {
+  // 二级子命令：compare / ips / serve（通过第一个 positional 判断）
+  const sub = args.positionals[0]
+
+  // compare 排在帮助判断**之前**：它有自己的 `scan compare --help`
+  if (sub === 'compare') {
+    const { runCompareCommand } = await import('./compare')
+    await runCompareCommand(args)
+    return
+  }
+
   // scan 专属帮助
   if (flagBool(args, 'h') || flagBool(args, 'help')) {
     process.stdout.write(SCAN_HELP)
     return
   }
 
-  // 二级子命令：ips / serve（通过第一个 positional 判断）
-  const sub = args.positionals[0]
   if (sub === 'ips') {
     const includeIpv6 = !flagBool(args, 'no-ipv6')
     const cidrs = [...BUILTIN_IPV4_CIDRS, ...(includeIpv6 ? BUILTIN_IPV6_CIDRS : [])]
@@ -415,12 +499,34 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
 
   if (!quiet) process.stdout.write('正在准备 Cloudflare 网段…\n')
 
-  const candidates = await resolveCandidatesFromArgs(args)
+  const candidatePlan = await resolveCandidatesFromArgs(args, [host, panelHost])
+  const candidates = candidatePlan.candidates
   if (candidates.length === 0) {
     process.stderr.write('候选 IP 为空，请检查 --ip-file / --cidr 参数\n')
+    if (candidatePlan.ipv6Env && candidatePlan.ipv6Env.status !== 'ok') {
+      process.stderr.write(`  ${candidatePlan.ipv6Env.message}\n`)
+      for (const line of candidatePlan.ipv6Env.advice) process.stderr.write(`   · ${line}\n`)
+    }
     process.exit(1)
   }
-  if (!quiet) process.stdout.write(`候选 IP：${candidates.length} 个\n`)
+  if (!quiet) {
+    process.stdout.write(`候选 IP：${candidates.length} 个（IPv4 ${candidatePlan.counts.v4} / IPv6 ${candidatePlan.counts.v6}）\n`)
+    process.stdout.write(`${candidatePlan.note}\n`)
+    // 预检没过时把排查建议一并给出：用户看到「只扫了 IPv4」需要知道为什么
+    if (candidatePlan.ipv6Env && candidatePlan.ipv6Env.status !== 'ok') {
+      for (const line of candidatePlan.ipv6Env.advice) process.stdout.write(`   · ${line}\n`)
+    }
+  }
+
+  /**
+   * v6 结果**默认参与回填与可复制列表**（与桌面版一致）。
+   *
+   * 备注里带 `IPv4_` / `IPv6_` 族标记，订阅节点名因此自动分成
+   * `优选IPv4_…` / `优选IPv6_…`，Clash 侧再按族分组 ——
+   * 客户端没开 IPv6 时选 IPv4 组即可，不需要在优选器这层拦。
+   * 只要「仅 IPv4」就用 `--family v4`。
+   */
+  const pushMode = pushModeFromArgs(args)
 
   // ---- 决定测速方式 ----
   //
@@ -571,6 +677,9 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
   // 实验性：把本轮观测写回网络档案（仅在开启 --adaptive 时有档案）。
   await saveAdaptiveObservations(args, summary.observations)
 
+  // 本次用于「可复制列表 + 回填」的条目（v4 与 v6 都进，族标记在备注里）
+  const fillable = summary.entries
+
   if (asJson) {
     // 可复现报告：参数 + 种子 + 环境 + 失败分布 + 结果
     //
@@ -597,6 +706,15 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
             skipSpeed,
             verifyPayload,
             tunnelVerified: Boolean(flagString(args, 'uuid') || flagString(args, 'trojan-password')),
+            // 地址族：请求值 / 解析后的实际值 / IPv6 环境预检结论 / 分族候选数
+            familyRequested: familyFromArgs(args),
+            familyResolved: candidatePlan.family,
+            pushMode,
+            candidatesByFamily: candidatePlan.counts,
+            v6PrefixCount: candidatePlan.v6Prefixes.length,
+            v6DiscoveredByAAAA: candidatePlan.v6Discovered,
+            ipv6Env: candidatePlan.ipv6Env,
+            candidateNote: candidatePlan.note,
             // 实验性：自适应采样的开关与档案（未开启时为 null，便于复现报告区分模式）
             adaptive: flagBool(args, 'adaptive')
               ? {
@@ -617,22 +735,27 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
     )
   } else {
     printTable(summary.entries)
-    printCopyable(summary.entries)
+    printCopyable(fillable)
   }
 
   // ---- 回填 ----
   if (callback && token) {
     // 已明确给了 token：直接回填
-    const result = await postResults(callback, token, formatEntries(summary.entries))
+    const result = await postResults(callback, token, formatEntries(fillable), pushMode)
     if (result.ok) {
-      process.stdout.write(`\n✓ 已回填 ${summary.entries.length} 条到面板\n`)
+      process.stdout.write(
+        `\n✓ 已${pushMode === 'append' ? '增量回填' : '回填'} ${fillable.length} 条到面板\n`
+      )
+      if (pushMode === 'append') {
+        process.stdout.write('  （面板里原有的优选 IP 已保留，只补入了新的）\n')
+      }
     } else {
       process.stderr.write(`\n✗ 回填失败：${result.error}\n`)
       process.exitCode = 1
     }
-  } else if (askCallback && !quiet && summary.entries.length > 0) {
+  } else if (askCallback && !quiet && fillable.length > 0) {
     // 交互询问是否回填
-    await promptCallback(summary.entries, host, panelHost, panelPassword)
+    await promptCallback(fillable, host, panelHost, panelPassword, pushMode)
   } else if (!quiet && !asJson) {
     process.stdout.write('\n（未提供 --token，跳过回填）\n')
   }
@@ -647,7 +770,8 @@ async function promptCallback(
   entries: ScanEntry[],
   dataHost: string,
   panelHost: string,
-  panelPassword: string
+  panelPassword: string,
+  mode: PushMode
 ): Promise<void> {
   const { createInterface } = await import('node:readline/promises')
   const { stdin, stdout } = await import('node:process')
@@ -703,7 +827,7 @@ async function promptCallback(
 
   const url = `https://${panelHost.replace(/^https?:\/\//, '').replace(/\/$/, '')}/api/v1/preferred-ips`
   process.stdout.write(`正在回填到 ${url} …\n`)
-  const result = await postResults(url, tk.token, formatEntries(entries))
+  const result = await postResults(url, tk.token, formatEntries(entries), mode)
   if (result.ok) {
     process.stdout.write(`\n✓ 已回填 ${entries.length} 条到面板「手动优选 IP」\n`)
     process.stdout.write('→ 打开面板「节点来源 → 手动优选 IP」点「查看」即可看到\n')

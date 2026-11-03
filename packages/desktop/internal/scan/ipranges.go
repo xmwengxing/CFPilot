@@ -43,6 +43,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/big"
+	mathrand "math/rand"
 	"net"
 	"sort"
 	"strings"
@@ -95,9 +96,22 @@ var ipv4CidrWeights = map[string]float64{
 	"131.0.72.0/22":    0,
 }
 
-// cidrWeightFor 返回采样用权重。neutral 时忽略权重差异（只保留 0 = 不可达）。
-func cidrWeightFor(cidr string, neutral bool) float64 {
+// cidrWeightForWithExtra 返回采样用权重（neutral 时忽略权重差异，只保留 0 = 不可达）。
+//
+// 静态表会漂移，而用户自己域名的 AAAA **永远指向当下真正在用的段**，
+// 有它兜底，静态表过期也不会让 v6 采样变成 0 候选。
+func cidrWeightForWithExtra(cidr string, neutral bool, extra []string) float64 {
 	w := CIDRWeight(cidr)
+	if w <= 0 && len(extra) > 0 && isIPv6CIDR(cidr) {
+		if key := IPv6Prefix48(cidr); key != "" {
+			for _, e := range extra {
+				if IPv6Prefix48(e) == key {
+					w = 1
+					break
+				}
+			}
+		}
+	}
 	if neutral && w > 0 {
 		return 1
 	}
@@ -106,6 +120,140 @@ func cidrWeightFor(cidr string, neutral bool) float64 {
 
 // DefaultCIDRWeight 是未列入权重表的网段的默认权重（保守取中等偏低）。
 const DefaultCIDRWeight = 0.2
+
+// BuiltinIPv6CIDRs 是 Cloudflare 公开的 IPv6 **聚合段**。
+//
+// ⚠️ 它们只是「分配」，不是「在用」：2026-11-03 实测在这些段里随机抽 48 位前缀
+// **0/18 全超时**，而已知活跃段内随机 IID 则 TCP 6/6、TLS 4/4、WS101 8/8。
+// 所以**绝不能拿这张表当采样池** —— 真正的池子是 ipv6PrefixWeights 里权重 > 0 的段
+// （对照 CLI 的 IPV6_ACTIVE_PREFIXES）。保留它只为了文档与「官方列表」语义。
+var BuiltinIPv6CIDRs = []string{
+	"2400:cb00::/32",
+	"2606:4700::/32",
+	"2803:f800::/32",
+	"2405:b500::/32",
+	"2405:8100::/32",
+	"2a06:98c0::/29",
+	"2c0f:f248::/32",
+}
+
+// ipv6PrefixWeights 对照 CLI 的 IPV6_PREFIX_WEIGHTS，**逐项一致**。
+//
+// ## 为什么 v6 必须自成一张表、且默认 0
+//
+// 2026-11-03 实测（本机原生 IPv6，SNI = 自己的数据面域名，端口 443）：
+//
+//	在公布聚合段里随机取 48 位前缀      0/18 全超时
+//	在已知活跃 48 位段内随机 IID        TCP 6/6、TLS 4/4、WS101 8/8
+//
+// 结论：**IPv6 的可用性粒度是 48 位前缀，且只有少数前缀真的在用**。
+// 未列入本表的 v6 段默认权重 0（不参与采样），与 v4 的 0.2（宁可多采）取值相反，
+// 这是有意的：v6 侧没有「宁可多采」的本钱，盲采只会把预算烧在死地址上。
+//
+// ## 只有两档，没有中间档
+//
+// 曾给「仅 TCP 通」的段留了 0.5，复测发现其中 4 段 WS101 **12/12 全 403** ——
+// 中间档只会让预算流向注定出不了结果的段。判据只认 WS101，不认 TCP。
+//
+// ⚠️ 同 v4 权重表一样，这张表是启发式且会漂移，**改表前必须复测**：
+//
+//	cfpilot scan --host <数据面域名> --family v6 --sample 300 --json --no-callback
+var ipv6PrefixWeights = map[string]float64{
+	// ---- WS101 实测通过（1）----
+	"2606:4700:3035::/48": 1, // 自己域名 AAAA 所在段，WS101 → AMS
+	"2606:4700:3037::/48": 1, // 自己域名 AAAA 所在段，WS101 → AMS
+	"2606:4700:3030::/48": 1, // 随机 IID ×2 → AMS
+	"2606:4700:10::/48":   1, // 随机 IID ×2 → FRA
+	"2606:4700:20::/48":   1, // 随机 IID ×2 → FRA
+	"2a06:98c1:3100::/48": 1, // 随机 IID ×2 → SIN
+	"2606:4700::/48":      1, // cloudflare.com AAAA 所在段；扫描实测 WS101 → SJC
+	"2606:4700:1::/48":    1, // 扫描实测 WS101 → SJC
+
+	// ---- 实测不可用（0）----
+	"2400:cb00:2048::/48": 0, // 随机 /64 ×4 全超时（TCP 层就不通）
+	"2400:cb00:2049::/48": 0, // TCP/TLS 全通但 WS101 回 403 —— 「活跃 ≠ 可用」的实例
+	// 以下 4 段复测：TCP/TLS 全通，WS101 **12/12 全部 403**。
+	// 一次扫描里它们吃掉 42/120 的阶段二名额却一条都出不来，必须降到 0。
+	"2606:4700:50::/48": 0,
+	"2606:4700:58::/48": 0,
+	"2803:f800:50::/48": 0,
+	"2a06:98c1:50::/48": 0,
+}
+
+// DefaultIPv6CIDRWeight 是未列入 IPv6 权重表的段的默认权重：**不采样**。
+const DefaultIPv6CIDRWeight = 0
+
+// weightEntry6 是 IPv6 权重表的预解析条目（ones 降序 → 最长前缀优先）。
+type weightEntry6 struct {
+	ones   int
+	ipnet  *net.IPNet
+	weight float64
+}
+
+// ipv6WeightTable 是 IPv6 权重表的预解析结果（按前缀长度降序，最长前缀优先）。
+var ipv6WeightTable = func() []weightEntry6 {
+	out := make([]weightEntry6, 0, len(ipv6PrefixWeights))
+	for tableCidr, w := range ipv6PrefixWeights {
+		_, tNet, err := net.ParseCIDR(tableCidr)
+		if err != nil {
+			continue
+		}
+		ones, _ := tNet.Mask.Size()
+		out = append(out, weightEntry6{ones: ones, ipnet: tNet, weight: w})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ones > out[j].ones })
+	return out
+}()
+
+// IPv6Prefix48 把 IPv6 地址 / 网段归一成 `h1:h2:h3::/48`。
+//
+// 与 CLI 的 network-profile.ts `networkBucket()` / ip-ranges.ts `ipv6Prefix48()`
+// **逐字节一致** —— 观测就是用这个字符串写进档案的，两边格式差一个 `0`
+// 就永远查不到历史（v6 观测学不到就是这么来的：旧实现写的是 8 组不压缩的裸地址）。
+//
+// 例：`2606:4700:0:0:0:0:6810:85e5` → `2606:4700:0::/48`
+//
+// ⚠️ 注意是 `2606:4700:0::/48` 而不是 `2606:4700::/48` ——
+// 三个十六进制组必须都写出来，与 TS 侧的模板字符串行为保持一致。
+func IPv6Prefix48(value string) string {
+	c := strings.TrimSpace(strings.Trim(strings.TrimSpace(value), "[]"))
+	if c == "" {
+		return ""
+	}
+	if !strings.Contains(c, "/") {
+		c += "/48"
+	}
+	_, ipnet, err := net.ParseCIDR(c)
+	if err != nil {
+		return ""
+	}
+	if ipnet.IP.To4() != nil {
+		return ""
+	}
+	b := ipnet.IP.To16()
+	if b == nil {
+		return ""
+	}
+	return fmt.Sprintf("%x:%x:%x::/48",
+		binary.BigEndian.Uint16(b[0:2]),
+		binary.BigEndian.Uint16(b[2:4]),
+		binary.BigEndian.Uint16(b[4:6]))
+}
+
+// IPv6ActivePrefixes 返回权重 > 0 的 IPv6 前缀（已归一成 `x:x:x::/48` 形式）。
+//
+// 这就是 v6 的**采样池**：既当静态先验，也当预检金丝雀的地址来源
+// （对照 CLI 的 IPV6_ACTIVE_PREFIXES）。
+func IPv6ActivePrefixes() []string {
+	out := make([]string, 0, len(ipv6PrefixWeights))
+	for cidr, w := range ipv6PrefixWeights {
+		if w > 0 {
+			out = append(out, IPv6Prefix48(cidr))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
 
 // CIDRWeight 返回某个网段的权重。
 //
@@ -149,13 +297,35 @@ var weightTable = func() []weightEntry {
 
 func CIDRWeight(cidr string) float64 {
 	normalized := normalizeCIDR(cidr)
-	if w, ok := ipv4CidrWeights[normalized]; ok {
-		return w
-	}
-
 	ip, ipnet, err := net.ParseCIDR(normalized)
 	if err != nil {
 		return DefaultCIDRWeight
+	}
+
+	// ---- IPv6：查 ipv6PrefixWeights，默认 0（没实测过的一律不采）----
+	//
+	// 对照 CLI 的 cidrWeight —— 两族的兜底值不同是刻意的：
+	// v4 默认 0.2（宁可多采），v6 默认 0（盲采实测 0/18）。
+	// ⚠️ 必须按 128 位做最长前缀匹配，写死 32 会右移错位、匹配到无关条目。
+	if ip.To4() == nil {
+		if w, ok := ipv6PrefixWeights[normalized]; ok {
+			return w
+		}
+		ones, _ := ipnet.Mask.Size()
+		for _, e := range ipv6WeightTable {
+			// 条目必须不比查询更具体（e.ones <= ones），否则它覆盖不了查询段
+			if e.ones > ones {
+				continue
+			}
+			if e.ipnet.Contains(ip) {
+				return e.weight
+			}
+		}
+		return DefaultIPv6CIDRWeight
+	}
+
+	if w, ok := ipv4CidrWeights[normalized]; ok {
+		return w
 	}
 	ones, _ := ipnet.Mask.Size()
 
@@ -218,16 +388,125 @@ func cidrSize(cidr string) uint64 {
 type SampleOptions struct {
 	// Count 是期望采到的 IP 总数
 	Count int
-	// CIDRs 覆盖默认网段列表（空表示用 BuiltinIPv4CIDRs）
+	// CIDRs 覆盖默认网段列表（空表示用内置网段）
 	CIDRs []string
 	// Seed 为 0 表示用密码学随机
 	Seed int64
 	// Neutral 为 true 时忽略权重、按网段大小等比采样（只保留权重 0 的不可达段）
 	Neutral bool
+	// Family 是**已解析完**的地址族："v4" / "v6" / "both"。
+	// 空串等价 "v4" —— 保持旧调用方（与既有测试）的默认行为不变。
+	Family string
+	// ExtraIPv6CIDRs 是运行期从域名 AAAA 发现的活跃 48 位前缀。
+	// 对照 CLI 的 extraWeights：静态表会漂移，用户自己域名的 AAAA 永远指向
+	// 当下真正在用的段，有它兜底，静态表过期也不会让 v6 采样变成 0 候选。
+	ExtraIPv6CIDRs []string
 	// Adaptive 非 nil 时启用网络档案的 /24 探索/利用采样；nil 保留现有采样语义。
-	Adaptive     *AdaptiveSamplingOptions
+	Adaptive *AdaptiveSamplingOptions
+	// ProfileID 是 IPv4 档案 ID；ProfileIDV6 是 IPv6 档案 ID。
+	//
+	// 档案 ID 由「运营商 + 地址族 + …」哈希得到，两族天然不同 ——
+	// 采样必须按族查各自的观测，只给一个 ID 时 v6 的历史要么查不到、
+	// 要么错查成 v4 的（对照 CLI 的 adaptivePool().options.profileIds）。
 	ProfileID    string
+	ProfileIDV6  string
 	Observations []PrefixObservation
+}
+
+// familyIncludesV6 判断地址族是否包含 IPv6（空串 = 仅 IPv4，保持旧行为）。
+func familyIncludesV6(family string) bool { return family == "v6" || family == "both" }
+
+// isIPv6CIDR 判断网段字符串是否属于 IPv6（IPv6 地址里有多个冒号，不会与 IPv4 混淆）。
+func isIPv6CIDR(cidr string) bool { return strings.Contains(cidr, ":") }
+
+// resolveIPv6Pool 对照 CLI 的 splitByWeight(v6)：把输入里的 v6 段**收窄到活跃的 48 位前缀**。
+//
+// 为什么要收窄：官方公布的聚合段只是「分配」不是「在用」，实测随机抽 48 位前缀
+// 0/18 全超时。整段参与采样等于把预算全烧在死地址上。
+//
+// 规则（与 CLI 一致）：
+//  1. 输入段本身被某个活跃前缀覆盖 → 原样保留（用户给了更细的段就尊重他）
+//  2. 否则把落在输入段**内部**的活跃前缀收进来
+//  3. 都没有 → 整段丢弃
+func resolveIPv6Pool(pool []string, extra []string) []string {
+	active := make([]string, 0, len(ipv6PrefixWeights)+len(extra))
+	seen := map[string]bool{}
+	for _, p := range IPv6ActivePrefixes() {
+		if !seen[p] {
+			seen[p] = true
+			active = append(active, p)
+		}
+	}
+	for _, p := range extra {
+		if !isIPv6CIDR(p) {
+			continue
+		}
+		n := normalizeCIDR(p)
+		if !seen[n] {
+			seen[n] = true
+			active = append(active, n)
+		}
+	}
+	if len(active) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(pool))
+	added := map[string]bool{}
+	add := func(s string) {
+		if !added[s] {
+			added[s] = true
+			out = append(out, s)
+		}
+	}
+	for _, c := range pool {
+		if !isIPv6CIDR(c) {
+			add(c)
+			continue
+		}
+		normalized := normalizeCIDR(c)
+		cNet, cOnes, err := parseCIDRParts(normalized)
+		if err != nil {
+			continue
+		}
+		// 规则 1：有活跃前缀覆盖它 → 原样保留
+		covered := false
+		for _, p := range active {
+			aNet, aOnes, err := parseCIDRParts(p)
+			if err != nil {
+				continue
+			}
+			if aOnes <= cOnes && aNet.Contains(cNet.IP) {
+				covered = true
+				break
+			}
+		}
+		if covered {
+			add(normalized)
+			continue
+		}
+		// 规则 2：把落在它内部的活跃前缀收进来
+		for _, p := range active {
+			aNet, aOnes, err := parseCIDRParts(p)
+			if err != nil {
+				continue
+			}
+			if aOnes >= cOnes && cNet.Contains(aNet.IP) {
+				add(p)
+			}
+		}
+	}
+	return out
+}
+
+// parseCIDRParts 解析出网段与前缀长度（避免调用点重复写 ParseCIDR + Mask.Size）。
+func parseCIDRParts(cidr string) (*net.IPNet, int, error) {
+	_, ipnet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return nil, 0, err
+	}
+	ones, _ := ipnet.Mask.Size()
+	return ipnet, ones, nil
 }
 
 // SampleCandidates 从 Cloudflare 网段里加权采样候选 IP。
@@ -238,18 +517,64 @@ type SampleOptions struct {
 //
 // 用「最大余数法」把小数预算分配成整数，保证总数正好等于 Count，
 // 且每个有权重的网段至少拿到 1 个（否则高权重的小网段会被大网段挤掉）。
+//
+// ## 分族预算（对照 CLI 的 expandCidrs）
+//
+// 两族都有可用段时**各拿 round(Count/2)**：v6 段的容量是 2^80、v4 的 /24 只有 254，
+// 共用一个加权池会让容量大的一方吃掉几乎全部候选。
 func SampleCandidates(opt SampleOptions) []string {
 	if opt.Adaptive != nil {
 		return SampleAdaptiveCandidates(opt)
-	}
-	pool := opt.CIDRs
-	if len(pool) == 0 {
-		pool = BuiltinIPv4CIDRs
 	}
 	if opt.Count <= 0 {
 		opt.Count = 500
 	}
 
+	includeV6 := familyIncludesV6(opt.Family)
+	// 默认池按族裁剪：只给 v6 时**不能**把 IPv4 官方段塞进来，
+	// 否则「仅 IPv6」会静默产出一半 IPv4 候选。
+	includeV4 := opt.Family != "v6"
+	pool := opt.CIDRs
+	if len(pool) == 0 {
+		switch {
+		case includeV6 && includeV4:
+			pool = append(append([]string{}, BuiltinIPv4CIDRs...), IPv6ActivePrefixes()...)
+		case includeV6:
+			pool = IPv6ActivePrefixes()
+		default:
+			pool = BuiltinIPv4CIDRs
+		}
+	}
+
+	v4Pool := make([]string, 0, len(pool))
+	v6Pool := make([]string, 0, len(pool))
+	for _, c := range pool {
+		if isIPv6CIDR(c) {
+			if includeV6 {
+				v6Pool = append(v6Pool, c)
+			}
+		} else if includeV4 {
+			v4Pool = append(v4Pool, c)
+		}
+	}
+	if includeV6 {
+		v6Pool = resolveIPv6Pool(v6Pool, opt.ExtraIPv6CIDRs)
+	}
+
+	switch {
+	case len(v4Pool) == 0 && len(v6Pool) == 0:
+		return []string{}
+	case len(v6Pool) == 0:
+		return sampleWeighted(v4Pool, opt.Count, opt)
+	case len(v4Pool) == 0:
+		return sampleWeighted(v6Pool, opt.Count, opt)
+	}
+	half := (opt.Count + 1) / 2 // 与 CLI 的 Math.round(count/2) 一致
+	return append(sampleWeighted(v4Pool, half, opt), sampleWeighted(v6Pool, half, opt)...)
+}
+
+// sampleWeighted 对单一地址族按「大小 × 权重」分配预算并采样。
+func sampleWeighted(pool []string, count int, opt SampleOptions) []string {
 	type seg struct {
 		cidr   string
 		weight float64
@@ -261,7 +586,7 @@ func SampleCandidates(opt SampleOptions) []string {
 	segs := make([]seg, 0, len(pool))
 	var totalWeight float64
 	for _, c := range pool {
-		w := cidrWeightFor(c, opt.Neutral)
+		w := cidrWeightForWithExtra(c, opt.Neutral, opt.ExtraIPv6CIDRs)
 		if w <= 0 {
 			continue // 权重 0 的网段完全不采样
 		}
@@ -280,7 +605,7 @@ func SampleCandidates(opt SampleOptions) []string {
 	// 第一轮：按比例分配整数部分
 	assigned := 0
 	for i := range segs {
-		segs[i].budget = float64(opt.Count) * (float64(segs[i].size) * segs[i].weight) / totalWeight
+		segs[i].budget = float64(count) * (float64(segs[i].size) * segs[i].weight) / totalWeight
 		segs[i].alloc = int(segs[i].budget)
 		if segs[i].alloc < 1 {
 			segs[i].alloc = 1 // 至少 1 个
@@ -292,7 +617,7 @@ func SampleCandidates(opt SampleOptions) []string {
 	}
 
 	// 第二轮：用最大余数法补齐差额
-	if assigned < opt.Count {
+	if assigned < count {
 		type rem struct {
 			idx int
 			r   float64
@@ -303,10 +628,10 @@ func SampleCandidates(opt SampleOptions) []string {
 		}
 		sort.Slice(rems, func(a, b int) bool { return rems[a].r > rems[b].r })
 
-		for assigned < opt.Count {
+		for assigned < count {
 			progressed := false
 			for _, r := range rems {
-				if assigned >= opt.Count {
+				if assigned >= count {
 					break
 				}
 				i := r.idx
@@ -323,8 +648,8 @@ func SampleCandidates(opt SampleOptions) []string {
 	}
 
 	// 逐段随机取 IP（去重）
-	seen := make(map[string]struct{}, opt.Count)
-	out := make([]string, 0, opt.Count)
+	seen := make(map[string]struct{}, count)
+	out := make([]string, 0, count)
 	for _, sg := range segs {
 		for _, ip := range sampleFromCIDR(sg.cidr, sg.alloc, opt.Seed) {
 			if _, dup := seen[ip]; dup {
@@ -332,7 +657,7 @@ func SampleCandidates(opt SampleOptions) []string {
 			}
 			seen[ip] = struct{}{}
 			out = append(out, ip)
-			if len(out) >= opt.Count {
+			if len(out) >= count {
 				return out
 			}
 		}
@@ -353,6 +678,12 @@ func sampleFromCIDR(cidr string, n int, seed int64) []string {
 	hostBits := bits - ones
 	if hostBits <= 0 {
 		return []string{ipnet.IP.String()}
+	}
+
+	// ---- IPv6：活跃段是 /48 = 2^80 个地址，只能随机取址，绝不能枚举 ----
+	// （对照 CLI 的 expandCidrs 大桶分支：枚举会直接把进程撑到 OOM）
+	if bits == 128 {
+		return sampleFromCIDRv6(ipnet, n, seed, hostBits)
 	}
 
 	base := binary.BigEndian.Uint32(ipnet.IP.To4())
@@ -393,6 +724,64 @@ func sampleFromCIDR(cidr string, n int, seed int64) []string {
 		ip := make(net.IP, 4)
 		binary.BigEndian.PutUint32(ip, addr)
 		out = append(out, ip.String())
+	}
+	return out
+}
+
+// sampleFromCIDRv6 在 IPv6 网段内随机取 n 个不重复的地址。
+//
+// ## 为什么不能像 IPv4 那样「偏移取模」
+//
+// IPv4 的确定性偏移是 `(seed + attempts*7919) % maxHosts`，
+// 而 /48 的 maxHosts 是 2^80 —— 取模等于没取，
+// 所有样本会全部挤在网络地址附近（同一个 /64 里）。
+// 这里改成用 seeded PRNG 拼出 hostBits 位再取模，样本才能铺满整个前缀。
+//
+// ## 为什么不减 2 跳过「网络地址 / 广播地址」
+//
+// 那是 IPv4 的 /31 /32 特例；IPv6 没有广播地址，
+// 唯一要避开的是每个 /64 的子网路由器任播地址（全 0 接口标识）——
+// 随机取址撞上它的概率是 1/2^64，不值得为此加分支。
+func sampleFromCIDRv6(ipnet *net.IPNet, n int, seed int64, hostBits int) []string {
+	span := new(big.Int).Lsh(big.NewInt(1), uint(hostBits))
+	base := new(big.Int).SetBytes(ipnet.IP)
+
+	var rng *mathrand.Rand
+	if seed != 0 {
+		rng = mathrand.New(mathrand.NewSource(seed))
+	}
+
+	seen := make(map[string]struct{}, n)
+	out := make([]string, 0, n)
+	attempts := 0
+	maxAttempts := n*10 + 100
+	for len(out) < n && attempts < maxAttempts {
+		attempts++
+		offset := new(big.Int)
+		if rng != nil {
+			// 确定性采样：每次拼 30 位，直到凑够 hostBits 位
+			for produced := 0; produced < hostBits; produced += 30 {
+				offset.Lsh(offset, 30)
+				offset.Or(offset, big.NewInt(int64(rng.Intn(1<<30))))
+			}
+			offset.Mod(offset, span)
+		} else {
+			r, err := rand.Int(rand.Reader, span)
+			if err != nil {
+				continue
+			}
+			offset = r
+		}
+		// 网络地址的主机位全 0，直接加偏移不会越出前缀
+		addr := new(big.Int).Add(base, offset)
+		buf := make([]byte, net.IPv6len)
+		addr.FillBytes(buf)
+		key := net.IP(buf).String()
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
 	}
 	return out
 }
@@ -565,6 +954,17 @@ func isHostname(s string) bool {
 // 订阅里就会指向一个不存在的地址。
 // AGENTS.md 铁律 6 也要求解析器兼容 `[IPv6]:Port#备注` —— 产出方必须与之一致。
 //
+// familyOf 返回地址族：`v4` / `v6`（按字面量判，含冒号 = IPv6）。
+//
+// 对照 CLI 的 scan.ts `familyTag()` —— 备注里的 `IPv4_` / `IPv6_` 前缀
+// 与 Entry.Family 都由它推导，两处永远一致。
+func FamilyOf(ip string) string {
+	if strings.Contains(ip, ":") {
+		return "v6"
+	}
+	return "v4"
+}
+
 // 对应 CLI 版 packages/cli/src/scan/scan.ts 的 formatHost()。
 func FormatHost(ip string) string {
 	if strings.Contains(ip, ":") {

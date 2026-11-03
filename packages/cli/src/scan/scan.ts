@@ -52,6 +52,7 @@ import {
 import { parseSpeedUrl, withBytes, schemeForPort, DEFAULT_SPEED_URL } from './speed-url'
 import { coloCity, countryOfColo, normalizeCountryFilter } from './countries'
 import { describeUnlock, probeUnlock } from './unlock'
+import { ipv6Prefix48 } from './ip-ranges'
 import type { Observation } from './network-profile'
 
 export interface ScanOptions {
@@ -201,6 +202,13 @@ function countFailure(into: FailureBreakdown, stage: string, error: string | und
 
 export interface ScanEntry {
   ip: string
+  /**
+   * 地址族。
+   *
+   * 由 IP 字面量推导（含冒号 = IPv6），**不单独存**族相关结论 ——
+   * 备注里的 `IPv4_` / `IPv6_` 前缀也是从它生成的，两处永远一致。
+   */
+  family: 'v4' | 'v6'
   port: number
   colo: string
   latency: number
@@ -753,9 +761,18 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
 
   // 阶段二的截断同样改为「TLS 握手优先」——101 校验通过的候选里，
   // 握手快的对客户端更友好（延迟 -1 的主因就是握手慢）。
-  const stage2 = wsFiltered
-    .sort((a, b) => a.tls.tlsMs - b.tls.tlsMs || a.latency - b.latency)
-    .slice(0, speedLimit)
+  //
+  // ⚠️ 截断必须**按网段轮流**，不能直接切前 speedLimit 名。
+  //
+  // TLS 耗时与机房强相关（同一网段 → 同一机房 → 相近耗时），直接切会让
+  // 「稍慢一点的网段」整批出局。2026-11-03 实测（IPv6 侧 14 个活跃 48 位段、
+  // 294 个候选、120 进阶段二、80 通过）：直接切时最终结果只剩 4 个段，
+  // 其中一个段独占 12/30 —— 多样性在这一层就被吃掉了，
+  // 后面的 pickWithDiversity 再准也无济于事。
+  const stage2 = pickWithDiversity(
+    wsFiltered.sort((a, b) => a.tls.tlsMs - b.tls.tlsMs || a.latency - b.latency),
+    speedLimit
+  )
 
   // ---- 阶段三：真实下行测速（可用 --no-speed 跳过） ----
   //
@@ -858,6 +875,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
     .filter((r) => (options.skipSpeed ? true : Boolean(r.speed && r.speed > 0)))
     .map((r) => ({
       ip: r.ip,
+      family: (r.ip.includes(':') ? 'v6' : 'v4') as 'v4' | 'v6',
       port: options.port,
       colo: r.probe.colo || 'UNK',
       latency: r.latency,
@@ -1019,37 +1037,99 @@ function copyTag(colo: string): string {
 }
 
 /**
- * 可直接复制粘贴到同类项目「自定义 IP / 优选 IP」输入框的格式：
- *   `1.2.3.4:443#NRT东京`  一行一个
- *   `[2606:4700::1]:443#NRT东京`（IPv6 带方括号）
+ * 备注里的族标记：`IPv4` / `IPv6`（按 IP 字面量判，含冒号 = IPv6）。
+ *
+ * 订阅的节点名 = 分组前缀 `优选` + 这段备注，于是自动得到
+ * `优选IPv4_SJC圣何塞_12_35.5` / `优选IPv6_…` ——
+ * 族信息由**优选器**写进备注，控制面与数据面都只做字符串拼接，不用再算。
  */
-export function formatCopyable(entries: ScanEntry[]): string {
-  return entries.map((e) => `${formatHost(e.ip)}:${e.port}#${copyTag(e.colo)}`).join('\n')
-}
-
-/** 转换为面板回填格式：IP:Port#机房_延迟_速度[_标签] */
-export function formatEntries(entries: ScanEntry[]): string[] {
-  return entries.map(
-    (e) => `${formatHost(e.ip)}:${e.port}#${e.colo}_${e.latency}_${e.speed}`
-  )
+export function familyTag(ip: string): string {
+  return ip.includes(':') ? 'IPv6' : 'IPv4'
 }
 
 /**
- * 按 /16 轮流取前 N 条，保证结果覆盖多个网段。
+ * 回填 / 可复制列表统一用的备注：`IPv4_SJC圣何塞_12_35.5`。
  *
- * 例：三个 /16 的候选按速度排好后，顺序为
+ * 三段都保留：
+ *   - 族标记 → 订阅节点名前缀（`优选IPv4_`）
+ *   - 机房 + 城市 → 面板机房列、国家筛选（`parseScannerRemark` 会剥出三字码）
+ *   - 延迟 + 速度 → 面板的两列指标
+ *
+ * ⚠️ 尾部这对数字**不能省**：`parseScannerRemark` 靠它判断「这是扫描器写的备注」，
+ * 没有数字会直接返回空 → 面板的机房/延迟/速度三列全空、国家筛选也失效。
+ */
+export function preferredRemark(entry: ScanEntry): string {
+  return `${familyTag(entry.ip)}_${copyTag(entry.colo)}_${entry.latency}_${entry.speed}`
+}
+
+/**
+ * 可直接复制粘贴到同类项目「自定义 IP / 优选 IP」输入框的格式：
+ *   `1.2.3.4:443#IPv4_NRT东京_12_35.5`  一行一个
+ *   `[2606:4700::1]:443#IPv6_NRT东京_20_10.2`（IPv6 带方括号）
+ */
+export function formatCopyable(entries: ScanEntry[]): string {
+  return entries.map((e) => `${formatHost(e.ip)}:${e.port}#${preferredRemark(e)}`).join('\n')
+}
+
+/** 转换为面板回填格式（与 formatCopyable 同一份备注，只是拆成数组） */
+export function formatEntries(entries: ScanEntry[]): string[] {
+  return entries.map((e) => `${formatHost(e.ip)}:${e.port}#${preferredRemark(e)}`)
+}
+
+/**
+ * 分族取前 N 条，并在**族内**按网段轮流，保证结果覆盖多个网段。
+ *
+ * ## 为什么必须分族
+ *
+ * 不同地址族的成绩不能直接混排 —— v4 与 v6 走的是不同路径，
+ * 按速度混在一起取前 N 会让某一族被完全挤掉
+ * （实测 v4 通常更快，混排的结果就是 v6 一条都留不下）。
+ *
+ * 两族都有时各取 `round(top / 2)`；一族为空则另一族拿满。
+ *
+ * ## 族内的网段分散
+ *
+ * IPv4 按**前两段**（/16）轮流，例：三个 /16 的候选排好后顺序为
  *   A1(104.16) B1(104.17) C1(104.18) A2 B2 C2 …
  * 而不是 A1 A2 A3 B1 B2 C1。
+ *
+ * IPv6 按 **48 位前缀**轮流 —— 实测同一 /48 内的地址等价（同机房），
+ * 而不同 /48 落在不同机房：`2606:4700:3035`→AMS、`2606:4700:10`→FRA、
+ * `2a06:98c1:3100`→SIN。不分散就会整批挤在一个机房。
  *
  * 不到 N 条时有多少给多少；只有一个网段时行为与直接截取完全一致。
  */
 export function pickWithDiversity<T extends { ip: string }>(ranked: readonly T[], top: number): T[] {
   if (top <= 0) return []
-  // 按 /16 分桶（保持桶内速度顺序）
+  const v4 = ranked.filter((item) => !item.ip.includes(':'))
+  const v6 = ranked.filter((item) => item.ip.includes(':'))
+  if (v4.length === 0) return roundRobinBy(v6, top, bucketKeyV6)
+  if (v6.length === 0) return roundRobinBy(v4, top, bucketKeyV4)
+  const half = Math.max(1, Math.round(top / 2))
+  return [...roundRobinBy(v4, half, bucketKeyV4), ...roundRobinBy(v6, Math.max(1, Math.round(top / 2)), bucketKeyV6)]
+}
+
+/** IPv4 分桶键：前两段（/16）。非字面量（优选域名）各自成桶，与旧行为一致。 */
+function bucketKeyV4(ip: string): string {
+  const parts = ip.split('.')
+  return parts.length >= 2 ? `${parts[0]}.${parts[1]}` : ip
+}
+
+/** IPv6 分桶键：48 位前缀。解析不了（域名 / 异常串）就退回整串，各自成桶。 */
+function bucketKeyV6(ip: string): string {
+  return ipv6Prefix48(`${ip.split('%')[0]}/48`) || ip
+}
+
+/** 按给定分桶键轮流取前 `top` 条（桶内保持原有顺序）。 */
+function roundRobinBy<T extends { ip: string }>(
+  ranked: readonly T[],
+  top: number,
+  keyOf: (ip: string) => string
+): T[] {
+  if (top <= 0 || ranked.length === 0) return []
   const buckets = new Map<string, T[]>()
   for (const item of ranked) {
-    const parts = item.ip.split('.')
-    const key = parts.length >= 2 ? `${parts[0]}.${parts[1]}` : item.ip
+    const key = keyOf(item.ip)
     const list = buckets.get(key)
     if (list) list.push(item)
     else buckets.set(key, [item])

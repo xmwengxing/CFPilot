@@ -180,7 +180,10 @@ func TestScanCountryGroups(t *testing.T) {
 	}
 }
 
-// 环境检测：没代理时应给出「可信」的结论。
+// 环境检测：没代理时应给出「可信」的结论，并**总是**带上 IPv6 预检字段。
+//
+// ipv6 可能是 null（本机没有公网 IPv6 / 没有可用活跃前缀），
+// 但**字段必须存在** —— 界面靠它决定弹窗里显示「✓ 可用」还是「未检测」。
 func TestScanEnvCheck(t *testing.T) {
 	s, base := newTestServer(t)
 	cookie := loginCookie(t, s, base)
@@ -192,6 +195,14 @@ func TestScanEnvCheck(t *testing.T) {
 	findings, ok := body["findings"].([]any)
 	if !ok || len(findings) == 0 {
 		t.Fatalf("应至少有一条结论，实际 %v", body["findings"])
+	}
+	if _, exists := body["ipv6"]; !exists {
+		t.Fatalf("应带 ipv6 预检字段，实际 %v", body)
+	}
+	if env, ok := body["ipv6"].(map[string]any); ok {
+		if status, _ := env["status"].(string); status == "" {
+			t.Errorf("ipv6.status 不应为空：%v", env)
+		}
 	}
 }
 
@@ -254,17 +265,38 @@ func TestNormalizePagesHost(t *testing.T) {
 
 // formatCopyable 输出格式要与 CLI 版一致（用户会跨版本复制）。
 //
-// 备注 = 机房码 + 城市中文名（`#HKG香港`）：备注会进订阅节点名，
-// 客户端里直接显示城市，比裸三字码直观；未知机房只留机房码。
+// 备注 = 族标记 + 机房码 + 城市中文名 + 延迟 + 速度（`#IPv4_HKG香港_120_5.2`）：
+//   - 族标记 → 订阅节点名前缀（`优选IPv4_`）
+//   - 机房 + 城市 → 面板机房列与国家筛选
+//   - 延迟 + 速度 → 面板的两列指标（没有它们面板三列全空）
+//
+// IPv6 必须带方括号，否则 `2606:4700::1:443` 会被解析成「一个更长的 IPv6 地址」。
 func TestFormatCopyable(t *testing.T) {
 	entries := []scan.Entry{
-		{IP: "104.16.1.1", Port: 443, Colo: "HKG"},
-		{IP: "104.17.2.2", Port: 2053, Colo: ""},
-		{IP: "104.18.3.3", Port: 443, Colo: "ZZZ"},
+		{IP: "104.16.1.1", Port: 443, Colo: "HKG", Latency: 120, Speed: 5.2},
+		{IP: "104.17.2.2", Port: 2053, Colo: "", Latency: 88, Speed: 0},
+		{IP: "2606:4700:3035::1", Port: 443, Colo: "ZZZ", Latency: 20, Speed: 1.3},
 	}
 	got := formatCopyable(entries)
-	want := "104.16.1.1:443#HKG香港\n104.17.2.2:2053#CF\n104.18.3.3:443#ZZZ\n"
+	want := "104.16.1.1:443#IPv4_HKG香港_120_5.2\n" +
+		"104.17.2.2:2053#IPv4_CF_88_0\n" +
+		"[2606:4700:3035::1]:443#IPv6_ZZZ_20_1.3\n"
 	if got != want {
 		t.Errorf("输出格式不对：\n期望 %q\n实际 %q", want, got)
+	}
+}
+
+// 备注必须能被面板的 parseScannerRemark 解析出「族 + 机房 + 延迟 + 速度」。
+//
+// 这是回填链路的闭环：面板拿到 `IPv4_HKG香港_120_5.2` 后
+// 要能剥出干净的三字码 HKG（否则国家筛选失效），并取到 120 / 5.2。
+func TestPreferredRemarkRoundTrip(t *testing.T) {
+	e := scan.Entry{IP: "104.16.1.1", Port: 443, Colo: "HKG", Latency: 120, Speed: 5.2}
+	got := preferredRemark(e)
+	if got != "IPv4_HKG香港_120_5.2" {
+		t.Fatalf("备注格式不对：%q", got)
+	}
+	if scan.FamilyOf("2606:4700::1") != "v6" || scan.FamilyOf("1.2.3.4") != "v4" {
+		t.Error("族判定不对")
 	}
 }

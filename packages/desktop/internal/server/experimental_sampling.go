@@ -22,6 +22,7 @@ package server
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/history"
@@ -32,8 +33,14 @@ import (
 type adaptiveContext struct {
 	// enabled 为 false 时，后续调用全部退化成原有采样逻辑。
 	enabled bool
-	// profileID 是本次使用的网络档案 ID（空表示未启用）。
+	// profileID 是 IPv4 档案 ID（空表示未启用）。
 	profileID string
+	// profileIDV6 是 IPv6 档案 ID。
+	//
+	// 档案 ID 由「运营商 + 地址族 + …」哈希得到，两族天然不同 ——
+	// 采样按族查各自的观测、写入按 IP 族归档，少建任何一个
+	// 都会让那一族的历史无处可放。
+	profileIDV6 string
 	// profileLabel 是档案的可读名称（界面提示用）。
 	profileLabel string
 	// store 是本机档案库（历史观测）。
@@ -145,9 +152,17 @@ func (s *Server) prepareAdaptive() adaptiveContext {
 		Family: "ipv4",
 		Source: "manual",
 	})
+	profileV6 := store.PutProfile(scan.NetworkProfile{
+		ISP:    settings.ISP,
+		Region: settings.Region,
+		Access: settings.Access,
+		Family: "ipv6",
+		Source: "manual",
+	})
 	return adaptiveContext{
 		enabled:      true,
 		profileID:    profile.ID,
+		profileIDV6:  profileV6.ID,
 		profileLabel: profileLabel(profile),
 		store:        store,
 		path:         path,
@@ -157,28 +172,47 @@ func (s *Server) prepareAdaptive() adaptiveContext {
 // sampleCandidates 按当前上下文生成候选。
 //
 // 未启用自适应时与历史行为完全一致（同一套 SampleCandidates 默认语义）。
-func (s *Server) sampleCandidates(ctx adaptiveContext, count int, neutral bool) []string {
+//
+// family 是**已解析完**的地址族（"" / "v4" / "v6" / "both"），
+// extraIPv6 是运行期从域名 AAAA 发现的活跃 48 位前缀。
+func (s *Server) sampleCandidates(ctx adaptiveContext, count int, neutral bool, family string, extraIPv6 []string) []string {
 	if !ctx.enabled {
-		return scan.SampleCandidates(scan.SampleOptions{Count: count, Neutral: neutral})
+		return scan.SampleCandidates(scan.SampleOptions{
+			Count: count, Neutral: neutral, Family: family, ExtraIPv6CIDRs: extraIPv6,
+		})
 	}
 	settings := normalizeExperimental(s.Settings().Experimental)
+	// 两族档案的观测都要取进来：采样按前缀（/24 vs /48）分族查，互不串
+	observations := append(
+		append([]scan.PrefixObservation{}, ctx.store.ForProfile(ctx.profileID)...),
+		ctx.store.ForProfile(ctx.profileIDV6)...,
+	)
 	return scan.SampleCandidates(scan.SampleOptions{
-		Count:        count,
-		Neutral:      neutral,
-		Adaptive:     &scan.AdaptiveSamplingOptions{ExplorationRatio: settings.ExploreRatio},
-		ProfileID:    ctx.profileID,
-		Observations: ctx.store.ForProfile(ctx.profileID),
+		Count:          count,
+		Neutral:        neutral,
+		Family:         family,
+		ExtraIPv6CIDRs: extraIPv6,
+		Adaptive:       &scan.AdaptiveSamplingOptions{ExplorationRatio: settings.ExploreRatio},
+		ProfileID:      ctx.profileID,
+		ProfileIDV6:    ctx.profileIDV6,
+		Observations:   observations,
 	})
 }
 
 // observer 返回写入档案的观察回调（未启用时返回 nil）。
+//
+// 观测按 **IP 族**归档到对应档案：档案 ID 含地址族，两族历史互不污染。
 func (s *Server) observer(ctx adaptiveContext) func(ip, stage string, ok bool, latencyMs int64) {
 	if !ctx.enabled {
 		return nil
 	}
 	now := time.Now().UTC()
 	return func(ip, stage string, ok bool, latencyMs int64) {
-		ctx.store.RecordProbeResult(ctx.profileID, ip, stage, ok, "", float64(latencyMs), 0, now)
+		profileID := ctx.profileID
+		if strings.Contains(ip, ":") {
+			profileID = ctx.profileIDV6
+		}
+		ctx.store.RecordProbeResult(profileID, ip, stage, ok, "", float64(latencyMs), 0, now)
 	}
 }
 
@@ -189,6 +223,9 @@ func (s *Server) saveAdaptive(ctx adaptiveContext) {
 	}
 	// 记录「这次用过」：界面据此提示档案是否已过时（换了网络却没改档案）。
 	ctx.store.TouchProfile(ctx.profileID, time.Now().UTC())
+	if ctx.profileIDV6 != "" {
+		ctx.store.TouchProfile(ctx.profileIDV6, time.Now().UTC())
+	}
 	if err := ctx.store.Save(ctx.path); err != nil {
 		s.logLevel("保存网络档案失败："+err.Error(), "warn")
 	}

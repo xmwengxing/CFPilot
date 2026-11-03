@@ -127,6 +127,98 @@ export const IPV4_CIDR_WEIGHTS: Readonly<Record<string, number>> = {
 export const DEFAULT_CIDR_WEIGHT = 0.2
 
 /**
+ * Cloudflare IPv6 网段的可用率权重（0~1），**按 /48 粒度**。
+ *
+ * ## 为什么 v6 必须自成一张表、且默认 0
+ *
+ * 2026-11-03 实测（本机原生 IPv6，SNI = 自己的数据面域名，端口 443）：
+ *
+ * | 采样方式 | 结果 |
+ * |---|---|
+ * | 在**公布聚合段**（`ips-v6` 的 /32、/29）里随机取 /48 | **0/18 全超时** |
+ * | 在**已知活跃 /48** 内随机取 /64、随机 IID | TCP 6/6、TLS 4/4、**WS101 8/8** |
+ *
+ * 结论：**IPv6 的可用性粒度是 /48，且只有少数 /48 真的在用** ——
+ * 公布段是「分配」不是「在用」，在里面盲采等于把预算全烧掉。
+ * 所以未列入本表的 v6 网段默认权重 **0（不参与采样）**，
+ * 与 IPv4 的 `DEFAULT_CIDR_WEIGHT = 0.2`（宁可多采）**取值相反**，这是有意的。
+ *
+ * ## 证据强度
+ *
+ * - **1**：WS101 真连接校验通过（最强证据，可直接当候选用）
+ * - **0**：实测不可用 —— 要么 TCP 层不通，要么 TCP/TLS 全通但 WS101 回 403
+ *
+ * ⚠️ 只有**两档，没有中间档**。曾经给「仅 TCP 通」的段留了 0.5，
+ * 结果复测发现其中 4 段 WS101 **12/12 全 403** —— 中间档只会让预算
+ * 流向注定出不了结果的段。判据只认 WS101，不认 TCP。
+ *
+ * ⚠️ 同 IPv4 权重表一样，这张表是**启发式且会漂移**（CF 会调整分区）。
+ * **改表前必须复测**，复现方法：
+ * ```
+ * cfpilot scan --host <你的数据面域名> --family v6 --sample 300 --json --no-callback
+ * ```
+ * 看 `passRateByFamily.v6` 与各 /48 的机房分布；WS101 通过率才是判据，
+ * **不能只看 TCP**（本表里 `2400:cb00:2049` 就是 TCP/TLS 全通但 WS101 回 403）。
+ *
+ * ## 机房分布（同一 /48 内地址等价，差异在 /48 之间）
+ *
+ * `2606:4700:3035` / `3030` → AMS；`2606:4700:10` / `20` → FRA；`2a06:98c1:3100` → SIN。
+ * 所以 v6 侧的「网段分散」应当按 48 位前缀做（对应 IPv4 的前两段）。
+ */
+export const IPV6_PREFIX_WEIGHTS: Readonly<Record<string, number>> = {
+  // ---- WS101 实测通过（1.0）----
+  '2606:4700:3035::/48': 1, // 自己域名 AAAA 所在段，WS101 → AMS
+  '2606:4700:3037::/48': 1, // 自己域名 AAAA 所在段，WS101 → AMS
+  '2606:4700:3030::/48': 1, // 随机 IID ×2 → AMS
+  '2606:4700:10::/48': 1, // 随机 IID ×2 → FRA
+  '2606:4700:20::/48': 1, // 随机 IID ×2 → FRA
+  '2a06:98c1:3100::/48': 1, // 随机 IID ×2 → SIN（只实测到 48 位前缀这一级，其余未验，不夸大）
+  '2606:4700::/48': 1, // cloudflare.com AAAA 所在段；2026-11-03 扫描实测 WS101 → SJC
+  '2606:4700:1::/48': 1, // 2026-11-03 扫描实测 WS101 → SJC
+  // ---- 实测不可用（0）----
+  '2400:cb00:2048::/48': 0, // 随机 /64 ×4 全超时（TCP 层就不通）
+  '2400:cb00:2049::/48': 0, // TCP/TLS 全通但 WS101 回 403 —— 「活跃 ≠ 可用」的实例
+  // 以下 4 段 2026-11-03 复测：TCP/TLS 全通，WS101 **12/12 全部 403**。
+  // 它们在一次扫描里吃掉了 42/120 的阶段二名额却一条都出不来，
+  // 必须降到 0，把预算让给真正可用的段。
+  '2606:4700:50::/48': 0,
+  '2606:4700:58::/48': 0,
+  '2803:f800:50::/48': 0,
+  '2a06:98c1:50::/48': 0,
+}
+
+/**
+ * 把 IPv6 网段归一成 `h1:h2:h3::/48` 形式。
+ *
+ * 与 `network-profile.ts` 的 `networkBucket()` **逐字节一致** —— 观测就是用
+ * `networkBucket` 写进档案的，两边格式差一个 `0` 就永远查不到历史
+ * （v6 观测学不到的坑就是这么来的）。
+ *
+ * ⚠️ 所以表里写 `2606:4700::/48` 还是 `2606:4700:0::/48` 都可以，
+ * 导出的清单会统一归一成后者。
+ */
+export function ipv6Prefix48(cidr: string): string {
+  const parsed = parseCidr(cidr)
+  if (!parsed || parsed.family !== 6) return ''
+  const groups = [112n, 96n, 80n].map((shift) => ((parsed.base >> shift) & 65535n).toString(16))
+  return `${groups[0]}:${groups[1]}:${groups[2]}::/48`
+}
+
+/** 未列入 IPv6 权重表的网段的默认权重：**不采样**（见 IPV6_PREFIX_WEIGHTS 注释）。 */
+export const DEFAULT_IPV6_CIDR_WEIGHT = 0
+
+/** 实测活跃的 IPv6 /48（权重 > 0，已归一成 networkBucket 形式），供预检金丝雀与「只在活跃段内采样」使用。 */
+export const IPV6_ACTIVE_PREFIXES: readonly string[] = Object.entries(IPV6_PREFIX_WEIGHTS)
+  .filter(([, w]) => w > 0)
+  .map(([cidr]) => ipv6Prefix48(cidr))
+
+/** 实测不可用的 IPv6 前缀（权重 = 0，已归一成 networkBucket 形式）。 */
+export const IPV6_DEAD_PREFIXES: readonly string[] = Object.entries(IPV6_PREFIX_WEIGHTS)
+  .filter(([, w]) => w <= 0)
+  .map(([cidr]) => ipv6Prefix48(cidr))
+
+
+/**
  * 取某个网段的可用率权重。
  *
  * ## 为什么不能只做精确匹配
@@ -151,36 +243,38 @@ interface WeightEntry {
   weight: number
 }
 
-const WEIGHT_TABLE: WeightEntry[] = (() => {
+/** 把一张「CIDR → 权重」表预解析成可做最长前缀匹配的结构。 */
+function buildWeightEntries(src: Readonly<Record<string, number>>, family: 4 | 6): WeightEntry[] {
   const out: WeightEntry[] = []
-  for (const [cidr, weight] of Object.entries(IPV4_CIDR_WEIGHTS)) {
+  for (const [cidr, weight] of Object.entries(src)) {
     const parsed = parseCidr(cidr)
-    if (!parsed || parsed.family !== 4) continue
+    if (!parsed || parsed.family !== family) continue
     out.push({ base: parsed.base, prefix: parsed.prefix, weight })
   }
   return out
-})()
+}
 
-export function cidrWeight(cidr: string): number {
-  const normalized = cidr.trim()
-  // 1) 精确匹配优先
-  if (normalized in IPV4_CIDR_WEIGHTS) return IPV4_CIDR_WEIGHTS[normalized]!
+const WEIGHT_TABLE_V4: WeightEntry[] = buildWeightEntries(IPV4_CIDR_WEIGHTS, 4)
+const WEIGHT_TABLE_V6: WeightEntry[] = buildWeightEntries(IPV6_PREFIX_WEIGHTS, 6)
 
-  // 2) 最长前缀匹配：找表中能覆盖 normalized 的最具体网段
-  const parsed = parseCidr(normalized)
-  if (!parsed || parsed.family !== 4) return DEFAULT_CIDR_WEIGHT
-
+/**
+ * 最长前缀匹配：在表里找「能覆盖 parsed 的最具体网段」的权重。
+ *
+ * ## 为什么必须按位宽右移
+ *
+ * 归一化到「前 entry.prefix 位」再比较：
+ * `parsed.base >> (bits - entry.prefix)`。
+ * ⚠️ `bits` 对 IPv4 是 32、对 IPv6 是 **128** ——
+ * 旧实现写死 32，喂 IPv6 网段会右移错位、匹配到完全无关的条目。
+ */
+function lpmWeight(table: readonly WeightEntry[], parsed: ParsedCidr, bits: number, fallback: number): number {
   let bestPrefix = -1
-  let bestWeight = DEFAULT_CIDR_WEIGHT
-  for (const entry of WEIGHT_TABLE) {
+  let bestWeight = fallback
+  for (const entry of table) {
     // entry 必须能覆盖 parsed：前缀更短（或相等）
     if (entry.prefix > parsed.prefix) continue
-    // 对齐检查：都归一到「前 entry.prefix 位」再比。
-    // parsed 的前 entry.prefix 位 = parsed.base >> (32 - entry.prefix)
-    //   （parsed.base 已按更长的 parsed.prefix 掩过，主机位为 0，直接右移即可）
-    // table 的前 entry.prefix 位 = entry.base >> (32 - entry.prefix)
-    const parsedNorm = parsed.base >> BigInt(32 - entry.prefix)
-    const tableNorm = entry.base >> BigInt(32 - entry.prefix)
+    const parsedNorm = parsed.base >> BigInt(bits - entry.prefix)
+    const tableNorm = entry.base >> BigInt(bits - entry.prefix)
     if (parsedNorm !== tableNorm) continue
     if (entry.prefix > bestPrefix) {
       bestPrefix = entry.prefix
@@ -189,6 +283,55 @@ export function cidrWeight(cidr: string): number {
   }
   return bestWeight
 }
+
+/**
+ * 取某个网段的可用率权重。
+ *
+ * IPv4 查 `IPV4_CIDR_WEIGHTS`（默认 0.2），IPv6 查 `IPV6_PREFIX_WEIGHTS`（默认 **0**）。
+ * 两族默认值不同是刻意的：IPv4 是「宁可多采」，IPv6 是「没实测过的一律不采」
+ * —— 因为在公布段里盲采实测 0/18（见 IPV6_PREFIX_WEIGHTS 注释）。
+ */
+export function cidrWeight(cidr: string): number {
+  const normalized = cidr.trim()
+  const parsed = parseCidr(normalized)
+  if (!parsed) return DEFAULT_CIDR_WEIGHT
+
+  if (parsed.family === 6) {
+    // 1) 精确匹配优先
+    const exact = IPV6_PREFIX_WEIGHTS[normalized]
+    if (exact !== undefined) return exact
+    // 2) 最长前缀匹配（如 /48 条目覆盖同段内的 /64）
+    return lpmWeight(WEIGHT_TABLE_V6, parsed, 128, DEFAULT_IPV6_CIDR_WEIGHT)
+  }
+
+  // 1) 精确匹配优先
+  if (normalized in IPV4_CIDR_WEIGHTS) return IPV4_CIDR_WEIGHTS[normalized]!
+  // 2) 最长前缀匹配
+  return lpmWeight(WEIGHT_TABLE_V4, parsed, 32, DEFAULT_CIDR_WEIGHT)
+}
+
+/**
+ * 生成本次调用专用的权重函数：把**运行期发现的活跃前缀**（目标域名 AAAA 展开而来）
+ * 合并进静态表。
+ *
+ * 为什么需要它：静态表会漂移，而用户自己域名的 AAAA **永远指向当下真正在用的 /48**。
+ * 把它并进来，即使静态表过期，v6 采样也还能找到可用段。
+ */
+export function makeWeightFn(extra?: Readonly<Record<string, number>>): (cidr: string) => number {
+  const entries = extra ? buildWeightEntries(extra, 6) : []
+  if (entries.length === 0) return cidrWeight
+  const merged = [...entries, ...WEIGHT_TABLE_V6]
+  const extraMap = extra!
+  return (cidr: string): number => {
+    const parsed = parseCidr(cidr.trim())
+    if (!parsed) return DEFAULT_CIDR_WEIGHT
+    if (parsed.family !== 6) return cidrWeight(cidr)
+    const exact = extraMap[cidr.trim()]
+    if (exact !== undefined) return exact
+    return lpmWeight(merged, parsed, 128, DEFAULT_IPV6_CIDR_WEIGHT)
+  }
+}
+
 
 /** 内置 IPv6 网段 */
 export const BUILTIN_IPV6_CIDRS: string[] = [
@@ -212,6 +355,14 @@ export interface IpRangeOptions {
   includeIpv6?: boolean
   /** 超时（ms） */
   timeoutMs?: number
+  /**
+   * 运行期发现的**活跃 IPv6 前缀**（由目标域名的 AAAA 展开而来，键为 /48 CIDR）。
+   *
+   * 会与静态表 `IPV6_PREFIX_WEIGHTS` 合并，见 `makeWeightFn`。
+   * 静态表会漂移，而用户自己域名的 AAAA 永远指向当下真正在用的段 ——
+   * 有它兜底，静态表过期也不会让 v6 采样变成 0 候选。
+   */
+  extraWeights?: Readonly<Record<string, number>>
 }
 
 /** 拉取 Cloudflare 官方网段 */
@@ -367,8 +518,20 @@ function bigIntToIpv6(value: bigint): string {
  *
  * 只对 IPv4 生效（权重表只覆盖 IPv4）。
  */
-function splitByWeight(cidr: ParsedCidr): ParsedCidr[] {
-  if (cidr.family !== 4) return [cidr]
+function splitByWeight(cidr: ParsedCidr, weightFn: (c: string) => number = cidrWeight): ParsedCidr[] {
+  const bits = cidr.family === 4 ? 32 : 128
+  const maxPrefix = cidr.family === 4 ? 32 : 48
+  const format = (base: bigint): string => (cidr.family === 4 ? bigIntToIpv4(base) : bigIntToIpv6(base))
+
+  /** v6：子树里是否有表内前缀（用于剪枝，避免从 /32 盲拆到 /48 生出 65536 个叶子）。 */
+  const v6HasEntryInside = (c: ParsedCidr): boolean => {
+    for (const entry of WEIGHT_TABLE_V6) {
+      if (entry.prefix < c.prefix) continue // 更短的是祖先，不算「内部」
+      if (entry.base >= c.base && entry.base < c.base + c.size) return true
+    }
+    return false
+  }
+
   const out: ParsedCidr[] = []
   /** 待处理栈：[网段, 已知权重] */
   const stack: Array<{ c: ParsedCidr; known?: number }> = [{ c: cidr }]
@@ -376,23 +539,41 @@ function splitByWeight(cidr: ParsedCidr): ParsedCidr[] {
   while (stack.length > 0) {
     const item = stack.pop()!
     const c = item.c
-    const weight = item.known ?? cidrWeight(c.cidr)
-    if (c.prefix >= 32) {
+    const weight = item.known ?? weightFn(c.cidr)
+    if (c.prefix >= maxPrefix) {
       out.push(c)
       continue
     }
+    if (cidr.family === 6) {
+      // 自己就是活跃前缀（或被更短的活跃前缀覆盖）→ 到此为止
+      if (weight > 0) {
+        out.push(c)
+        continue
+      }
+      // 子树里没有已知活跃段 → 再怎么拆也全是 0，直接停
+      if (!v6HasEntryInside(c)) {
+        out.push(c)
+        continue
+      }
+    }
     // 拆成两个等长子网。注意 cidr 字段要同步成子网的字符串形式，
-    // 否则 cidrWeight 会一直拿到父网段的串、得出相同的权重。
-    const half = 1n << BigInt(32 - c.prefix - 1)
+    // 否则 weightFn 会一直拿到父网段的串、得出相同的权重。
+    const half = 1n << BigInt(bits - c.prefix - 1)
     const mk = (base: bigint): ParsedCidr => {
       const sub: ParsedCidr = { ...c, prefix: c.prefix + 1, size: half, base }
-      return { ...sub, cidr: `${bigIntToIpv4(base)}/${c.prefix + 1}` }
+      return { ...sub, cidr: `${format(base)}/${c.prefix + 1}` }
     }
     const left = mk(c.base)
     const right = mk(c.base + half)
-    const lw = cidrWeight(left.cidr)
-    const rw = cidrWeight(right.cidr)
-    if (lw === rw) {
+    const lw = weightFn(left.cidr)
+    const rw = weightFn(right.cidr)
+    // ⚠️ 「两半权重相同就停」只对 IPv4 成立。
+    //
+    // IPv6 的兜底权重是 0，而 /33 这一级表里根本没有条目（表全是 /48），
+    // 于是两半都是 0 → 第一层就判停 → 整个 /32 被当成权重 0 丢掉，
+    // 活跃 /48 一个都出不来。v6 改由上面的「权重 > 0 / 子树无表内前缀 /
+    // 到 /48」三条规则控制停止。
+    if (cidr.family === 4 && lw === rw) {
       // 两半权重相同：无需继续拆
       out.push(c)
       continue
@@ -434,13 +615,18 @@ function splitByWeight(cidr: ParsedCidr): ParsedCidr[] {
  */
 export function expandCidrs(cidrs: string[], options: IpRangeOptions = {}): string[] {
   const neutral = options.neutral === true
-  const sample = options.sample ?? 20000
+  let sample = options.sample ?? 20000
   const random = makeRandom(options.seed ?? 0x5eed)
   const parsedRaw = cidrs.map(parseCidr).filter((c): c is ParsedCidr => c !== null)
   if (parsedRaw.length === 0) return []
+  // 本次调用专用的权重函数：把运行期发现的活跃 v6 前缀（AAAA 展开）并进静态表
+  const weightFn = makeWeightFn(options.extraWeights)
   // 按权重区拆分：让细粒度权重在跨区网段上也生效
-  const parsed = parsedRaw.flatMap(splitByWeight)
+  const parsed = parsedRaw.flatMap((c) => splitByWeight(c, weightFn))
   if (parsed.length === 0) return []
+  // ⚠️ 「不限制」对 IPv6 不成立：活跃段是 /48 = 2^80 个地址，全量枚举必撑爆内存
+  //   （自适应采样那边就因此 OOM 过）。混入 v6 时降级为默认采样数，走有界采样。
+  if (sample <= 0 && parsed.some((c) => c.family === 6)) sample = 20000
   if (sample <= 0) {
     // 不限制：全量枚举
     const all: string[] = []
@@ -462,7 +648,11 @@ export function expandCidrs(cidrs: string[], options: IpRangeOptions = {}): stri
     if (group.length === 0) continue
     // 混合两族时各拿一半预算，保证总数≈sample；单族时拿全量
     // 注意：必须先算布尔值再走三元——`sample / bool ? a : b` 会因 / 优先级高于 ?: 而恒为真
-    const hasOtherFamily = parsed.some((c) => c.family !== family)
+    //
+    // ⚠️ 判「有没有另一族」必须看**权重非 0 的**条目：
+    // IPv6 权重表默认 0，公布段里的死 /48 会留在 parsed 里，
+    // 若按「存在即算」，v4 的预算会被一堆产不出候选的死段白白分走一半。
+    const hasOtherFamily = parsed.some((c) => c.family !== family && weightFn(c.cidr) > 0)
     const familyBudget = Math.max(1, Math.round(hasOtherFamily ? sample / 2 : sample))
 
     // 可用率加权：
@@ -473,11 +663,10 @@ export function expandCidrs(cidrs: string[], options: IpRangeOptions = {}): stri
     // 0% 可用的网段 —— 表现为「阶段一过后只剩零星候选、阶段二全军覆没」。
     //
     // 因此预算按「大小 × 可用率权重」分配，把候选集中到真正能用的网段。
-    // IPv6 不加权（无实测数据；且 Workers 的 connect() 不支持 IPv6 出站，
-    // IPv6 候选主要供客户端侧使用）。
+    // 两族都走同一套权重逻辑（v6 查 IPV6_PREFIX_WEIGHTS，默认 0），
+    // 差别只在默认值：v4 默认 0.2（宁可多采），v6 默认 0（没实测过的一律不采）。
     const effectiveSize = (c: ParsedCidr): bigint => {
-      if (c.family !== 4) return c.size
-      const raw = cidrWeight(c.cidr)
+      const raw = weightFn(c.cidr)
       // 中性采样：权重表只用来区分「完全不可达（0）」与「其它（1）」
       const weight = neutral ? (raw > 0 ? 1 : 0) : raw
       if (weight <= 0) return 0n // 权重 0 的网段直接排除
@@ -486,11 +675,19 @@ export function expandCidrs(cidrs: string[], options: IpRangeOptions = {}): stri
     }
 
     const rawTotal = group.reduce((sum, c) => sum + effectiveSize(c), 0n)
-    // 全部网段权重为 0（极端情况）：退化为按原始大小分配，避免返回空列表卡死用户
+    // 全部网段权重为 0（极端情况）
     const allZero = rawTotal === 0n
     let familyTotal = rawTotal
     let allocOf = effectiveSize
     if (allZero) {
+      // ⚠️ IPv6 在这里必须**直接跳过**，不能像 IPv4 那样退化为「按原始大小分配」。
+      //
+      // IPv4 的兜底是防止返回空列表卡死用户（它的默认权重非 0，
+      // allZero 意味着「表里全判死」这种极端情况）。
+      // 而 IPv6 的默认权重**本来就是 0**，allZero 只说明「没有已知可用段」，
+      // 此时按大小分配只会把预算全部烧在实测 0/18 的死地址上 ——
+      // 正是本功能要修的那个问题。
+      if (family === 6) continue
       familyTotal = group.reduce((sum, c) => sum + c.size, 0n)
       allocOf = (c: ParsedCidr): bigint => c.size
     }
@@ -502,9 +699,10 @@ export function expandCidrs(cidrs: string[], options: IpRangeOptions = {}): stri
     // 与 1.0 权重相同的保底数（真机：162.159 拿到 64 个，与 104.16 一样多），
     // 加权就白做了。缩放后保底 1 个（低权重网段至少留个探针）。
     const minForCidr = (c: ParsedCidr): number => {
-      if (c.family !== 4 || neutral) return minPerCidr
-      const w = cidrWeight(c.cidr)
+      if (neutral) return minPerCidr
+      const w = weightFn(c.cidr)
       if (w >= 1) return minPerCidr
+      if (w <= 0) return 0 // 权重 0 不占保底名额（下面 usablePlans 也会剔除它）
       return Math.max(1, Math.round(minPerCidr * w))
     }
 

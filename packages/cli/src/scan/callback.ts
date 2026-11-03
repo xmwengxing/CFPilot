@@ -8,10 +8,21 @@ export interface CallbackResult {
   error?: string
 }
 
+/**
+ * 回填模式。
+ *
+ *   `replace`（默认）—— 清空面板优选池后写入（历史行为）
+ *   `append`         —— 保留池里已有的 IP，只补真正新的（「增量回填」）
+ *
+ * 对应面板 `POST /api/v1/preferred-ips` 的 `mode` 字段。
+ */
+export type PushMode = 'replace' | 'append'
+
 export async function postResults(
   callbackUrl: string,
   token: string,
   entries: string[],
+  mode: PushMode = 'replace',
   timeoutMs = 15000
 ): Promise<CallbackResult> {
   try {
@@ -22,7 +33,7 @@ export async function postResults(
         Authorization: `Bearer ${token}`,
         'User-Agent': 'CFPilot-Scanner/1.0',
       },
-      body: JSON.stringify({ ips: entries }),
+      body: JSON.stringify({ ips: entries, mode }),
       signal: AbortSignal.timeout(timeoutMs),
     })
     if (!response.ok) {

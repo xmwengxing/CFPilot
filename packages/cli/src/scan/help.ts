@@ -13,6 +13,7 @@ CFPilot 本地真连接优选器 —— 用你自己的 Worker 域名做 SNI/Hos
 
 用法:
   ${NAME} scan [选项]        执行三阶优选扫描
+  ${NAME} scan compare      双栈对照报告（IPv4 vs IPv6，同参数跑两轮）
   ${NAME} scan serve [选项]   启动本地桥接服务（供面板一键唤醒）
   ${NAME} scan ips [选项]     打印 Cloudflare 官方网段
   ${NAME} --help             显示帮助
@@ -66,6 +67,19 @@ scan 选项:
                           建议 6556 起：阶段一按 TLS 握手耗时筛选，而握手快慢
                           与 TCP 延迟几乎无关（实测 TCP 9ms 的 IP 可能要 3.5 秒），
                           采样小了根本碰不到握手快的 IP
+  --family <auto|v4|v6|both>
+                          地址族，默认 auto
+                          auto = 先做 IPv6 环境预检（本机公网地址 + 默认路由 +
+                          活跃段金丝雀连通），通了才让 IPv6 参与采样；
+                          不通则退回纯 IPv4，并给出「当前网络环境不具备
+                          IPv6 测速条件」与排查建议 —— 不会把一半预算
+                          烧在必然超时的候选上。
+                          v6 / both = 明确要求，预检只作提示不阻断。
+  --push-mode <incremental|overwrite>
+                          回填面板的写入方式，默认 overwrite
+                          overwrite   —— 清空面板优选池后写入
+                          incremental —— 保留池里已有的 IP，只补真正新的
+                          （也接受 append / replace，与面板接口字段同名）
   --countries <a,b>      国家 / 地区过滤（可多选，逗号分隔，如 US,JP,SG）
                          也接受分组关键字：ASIA = 亚洲组、US = 美国组，
                          可与国家码混写（如 ASIA,US）；不填 = 全量。
@@ -118,4 +132,46 @@ serve 选项:
 示例:
   ${NAME} scan --host cfpilot.example.com --token abc123
   ${NAME} serve
+`
+
+/**
+ * `scan compare` 的帮助。
+ *
+ * 与 SCAN_HELP 分开：对照是独立子命令，选项少得多，
+ * 混在一长串里用户找不到重点。
+ */
+export const SCAN_COMPARE_HELP = `
+${NAME} scan compare —— 双栈对照报告（IPv4 vs IPv6）
+
+用法:
+  ${NAME} scan compare --host <数据面域名> [选项]
+
+做什么:
+  同一目标、同一环境、**相同参数**跑两轮（先 IPv4 后 IPv6），
+  输出两族的通过率、延迟、吞吐与机房分布对照，最后给一句结论。
+
+  ⚠️ 两轮各自用相同的 --sample 生成候选（不是 auto 拆一半）——
+     预算相等才有可比性，否则通过率会被采样规模污染。
+  ⚠️ 只比较「本机 → Cloudflare 边缘」的入口质量，不代表出口 IP 信誉。
+
+选项:
+  --host <domain>        数据面域名（TLS SNI 与 HTTP Host），必填
+  --port <n>             端口，默认 443
+  --path <p>             真实 WebSocket 路径，默认 /__edge_probe
+  --probe-path <p>       探针端点路径，默认 /__edge_probe
+  --sample <n>           **每族**的采样数，默认 3000
+  --top <n>             每族保留条数，默认 8
+  --countries <a,b>      国家 / 地区过滤（两族共用）
+  --no-speed             跳过测速（只比可用率与延迟）
+  --speed-conns <n>      测速连接数，默认 8，上限 8
+  --speed-duration <ms>  测速时长，默认 6000，上限 10000
+  --neutral-sampling     忽略网段权重（只保留不可达段为 0）
+  --seed <n>             固定采样种子（两轮各自可复现）
+  --json                 输出机器可读的完整数据（含失败分布）
+  --quiet                只输出表格与结论
+  -h, --help             显示本帮助
+
+示例:
+  ${NAME} scan compare --host cfpilot.example.com
+  ${NAME} scan compare --host cfpilot.example.com --sample 2000 --json
 `

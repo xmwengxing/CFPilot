@@ -70,8 +70,9 @@ const html = readFileSync(join(outDir, 'index.html'), 'utf8')
 
 const checks = [
   ['renderer.js 引用 window.cfpilot', js.includes('cfpilot')],
-  ['renderer.js 有回填逻辑', js.includes('pushScanResults') || js.includes('回填面板')],
-  ['index.html 有回填按钮', html.includes('btnPushToPanel')],
+  ['renderer.js 有回填逻辑', js.includes('pushScanResults') || js.includes('增量回填')],
+  ['index.html 有增量/覆盖回填两个按钮', html.includes('btnPushAppend') && html.includes('btnPushReplace')],
+  ['index.html 有网络环境弹窗', html.includes('envModal')],
   ['index.html 无 adapter 注入（应保持纯净）', !html.includes('adapter.js')],
 ]
 

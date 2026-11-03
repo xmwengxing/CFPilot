@@ -384,6 +384,48 @@ describe('订阅输出', () => {
     expect(vless.transport.type).toBe('ws')
     expect(vless.transport.path).toBe('/vless')
   })
+
+  /**
+   * IPv6 节点在三种订阅里的地址形态**必须各不相同**，写错任何一种客户端就连不上：
+   *
+   *   - URI（vless:// / trojan://）→ **必须带方括号**，否则 `2606:4700::1:443`
+   *     会被解析成「一个更长的 IPv6 地址 + 默认端口」；
+   *   - Clash / Mihomo YAML `server:` → **必须裸地址**（mihomo 自己判断族）；
+   *   - sing-box JSON `server` → **必须裸地址**（JSON 字段，不走 URI 语法）。
+   *
+   * 三种格式对同一地址的写法要求相反，只能靠测试锁住，不能靠人记。
+   */
+  it('IPv6 节点三种输出形态正确（URI 带方括号 / Clash 与 sing-box 裸地址）', () => {
+    const v6 = '2606:4700::1'
+
+    // 1) URI：方括号
+    const links = base64Decode(renderBase64(ctx)).split('\n')
+    const v6Links = links.filter((l) => l.includes(v6))
+    expect(v6Links.length).toBeGreaterThan(0)
+    for (const link of v6Links) {
+      expect(link).toContain(`@[${v6}]:443`)
+      // 反例：裸地址带端口会被误解析
+      expect(link).not.toContain(`@${v6}:443`)
+    }
+
+    // 2) Clash YAML：裸地址，且**不能**出现方括号形式
+    const yaml = renderClash(ctx)
+    expect(yaml).toContain(`server: ${v6}`)
+    expect(yaml).not.toContain(`server: [${v6}]`)
+
+    // 3) sing-box：裸地址
+    const json = JSON.parse(renderSingbox(ctx))
+    const v6Outbound = json.outbounds.find((o: any) => o.server === v6)
+    expect(v6Outbound).toBeTruthy()
+    expect(v6Outbound.server).toBe(v6)
+    expect(JSON.stringify(v6Outbound)).not.toContain(`[${v6}]`)
+  })
+
+  /** Clash 生成的 `dns.ipv6` 必须保持 false：节点是字面量地址，不需要 AAAA 解析，
+   *  改成 true 会连带改变客户端对**目标域名**的解析行为（全局副作用），风险大于收益。 */
+  it('Clash 的 dns.ipv6 保持 false', () => {
+    expect(renderClash(ctx)).toContain('  ipv6: false')
+  })
 })
 
 describe('端到端：默认配置渲染三种订阅', () => {

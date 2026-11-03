@@ -1378,6 +1378,18 @@
    * 展开成国家码 / 机房码由后端负责 —— 界面不维护第二份表，
    * 也不会出现「按钮选中的机房码后端不认识」这种漂移。
    */
+  /**
+   * 读取地址族选择。
+   *
+   * 缺失 / 非法值一律回落 auto —— 后端会按本机 IPv6 环境预检决定
+   * 是否让 v6 参与，用户不选也不会撞见「一半候选全超时」。
+   */
+  function readOptFamily(): 'auto' | 'v4' | 'v6' | 'both' {
+    const el = document.getElementById('optFamily') as HTMLSelectElement | null
+    const value = el?.value
+    return value === 'v4' || value === 'v6' || value === 'both' ? value : 'auto'
+  }
+
   function readOptCountries(): string[] {
     const value = ($sel('optCountryGroup').value || '').trim()
     if (!value) return []
@@ -1658,6 +1670,64 @@
     })
   }
 
+  /**
+   * 把「检测网络环境」的两段结果渲染进弹窗。
+   *
+   * 两段分别是：
+   *   1. 代理环境 —— 本机常见代理端口是否在监听（会干扰优选）
+   *   2. IPv6 环境 —— 预检的地址 / 默认路由 / 活跃段金丝雀三项
+   *
+   * 弹窗是用户唯一能同时看懂「为什么结果会失真」与
+   * 「为什么这次一个 v6 节点都没有」的地方。
+   */
+  function renderEnvModal(result: {
+    clean?: boolean
+    findings?: string[]
+    ipv6?: IPv6EnvInfo | null
+  }): void {
+    const appendLine = (host: HTMLElement, text: string, marginTop: string): void => {
+      const div = document.createElement('div')
+      div.className = 'tip'
+      div.style.marginTop = marginTop
+      div.textContent = text
+      host.appendChild(div)
+    }
+
+    const proxyList = document.getElementById('envProxyList')
+    if (proxyList) {
+      proxyList.innerHTML = ''
+      proxyList.style.color = ''
+      const findings = result.findings ?? []
+      if (findings.length === 0) {
+        proxyList.textContent = '（没有返回检测结果）'
+      } else {
+        for (const line of findings) appendLine(proxyList, '· ' + line, '4px')
+        proxyList.style.color =
+          result.clean === false ? 'var(--warn, #f59e0b)' : 'var(--ok, #22c55e)'
+      }
+    }
+
+    const v6List = document.getElementById('envV6List')
+    if (v6List) {
+      v6List.innerHTML = ''
+      v6List.style.color = ''
+      const env = result.ipv6
+      if (!env) {
+        v6List.textContent = '未检测（没有可用的活跃 IPv6 前缀，或已按「仅 IPv4」跳过）'
+      } else if (env.status === 'ok') {
+        v6List.style.color = 'var(--ok, #22c55e)'
+        appendLine(v6List, '✓ ' + (env.message || 'IPv6 环境可用'), '4px')
+      } else {
+        v6List.style.color = 'var(--warn, #f59e0b)'
+        appendLine(v6List, '✗ ' + (env.message || '当前网络环境不具备 IPv6 测速条件'), '4px')
+        for (const line of env.advice ?? []) appendLine(v6List, '· ' + line, '2px')
+      }
+    }
+
+    const mask = document.getElementById('envModal')
+    if (mask) mask.hidden = false
+  }
+
   function renderScanResult(payload: {
     entries: Array<{
       ip: string
@@ -1673,11 +1743,22 @@
     copyable: string
     sessionId?: string
     skippedSpeed?: boolean
+    /** 解析后的地址族（auto 已解析成 v4 或 both） */
+    family?: string
+    /** IPv6 环境预检结论；未涉及 v6 时为 null */
+    ipv6Env?: IPv6EnvInfo | null
     /** 本轮是否启用了自适应采样（实验性） */
     adaptive?: { enabled: boolean; profileId?: string; profileLabel?: string; exploreRate?: number }
   }): void {
     const out = $('scanOut')
     out.textContent = payload.copyable || '（没有结果）'
+    // 预检没过时必须在日志里说一声：后端会静默退回纯 IPv4，
+    // 不提示的话用户只会以为「怎么一个 v6 节点都没有」。
+    const env = payload.ipv6Env
+    if (env && env.status !== 'ok') {
+      log('⚠ ' + (env.message || '当前网络环境不具备 IPv6 测速条件'), 'warn')
+      for (const line of env.advice ?? []) log('   · ' + line, 'warn')
+    }
     const table = document.getElementById('scanTable') as HTMLTableElement
     const tbody = table.querySelector('tbody')!
     tbody.innerHTML = ''
@@ -1738,14 +1819,16 @@
       .map((l) => l.trim())
       .filter((l) => l.length > 0)
 
-    const pushBtn = document.getElementById('btnPushToPanel') as HTMLButtonElement | null
+    const canPush = lastScanLines.length > 0
+    for (const id of ['btnPushAppend', 'btnPushReplace']) {
+      const btn = document.getElementById(id) as HTMLButtonElement | null
+      if (btn) btn.disabled = !canPush
+    }
     const pushHint = document.getElementById('pushHint')
-    if (pushBtn) pushBtn.disabled = lastScanLines.length === 0
     if (pushHint) {
-      pushHint.textContent =
-        lastScanLines.length > 0
-          ? '上方是本次结果。需要让订阅用上这些 IP 就点「回填面板」。'
-          : ''
+      pushHint.textContent = canPush
+        ? '上方是本次结果。要让订阅用上这些 IP，点「增量回填」（保留原有）或「覆盖回填」（清空后写入）。'
+        : ''
     }
 
     // 本轮是否用了自适应采样（实验性）：写清楚，用户才知道这批结果是怎么采出来的。
@@ -2523,8 +2606,12 @@
           countries: readOptCountries(),
           speedMode: speedUrl ? 'url' : 'auto',
           speedUrl,
-          speedConnections: Number($('optSpeedConns').value) || 3,
+          // 测速连接数固定 8 条：单条 TCP 受拥塞窗口限制会系统性低估带宽
+          // （实测 1 条 0.12、3 条 0.47、8 条 1.15 MB/s），界面不再提供输入框
+          speedConnections: 8,
           speedDurationMs: (Number($('optSpeedDur').value) || 6) * 1000,
+          // 地址族：默认 auto（后端先做 IPv6 环境预检，通了才让 v6 参与）
+          family: readOptFamily(),
           // ⚠️ 必须把「不回填」勾选状态传给后端
           //
           // 界面也没有读取勾选状态的地方 —— 于是用户取消勾选后
@@ -2532,7 +2619,7 @@
           // 看起来像「勾选被自动恢复」，实际是整个开关没接线。
           // 优选阶段**不回填**
           //
-          // 回填改为结果出来后手动点「回填面板」按钮再执行。
+          // 回填改为结果出来后手动点「增量回填 / 覆盖回填」按钮再执行。
           // 好处：
           //   1. 令牌在回填那一刻才申请，不会因为优选耗时而过期
           //   2. 用户不必理解令牌机制，看到结果再决定要不要回填
@@ -2568,22 +2655,29 @@
     /**
      * 回填面板：把这批 IP 写进面板的「手动优选 IP」。
      *
-     * 回填需要临时令牌（面板签发，10 分钟有效）。
-     * 令牌很容易在回填前就过期，而且界面上多一个令牌输入框，
-     * 用户还得理解「令牌」是什么东西。
+     * 拆成**增量 / 覆盖**两个按钮，共用同一段「取令牌 → 提交」流程：
+     *   - 增量 append  ：保留池里已有的 IP，只补真正新的
+     *   - 覆盖 replace ：清空池后写入（历史行为）
      *
-     * 现在改为：点这个按钮时才「取令牌 → 回填」，一气呵成。
-     * 既不会超时，用户也没有学习成本 —— 拿到结果按一下就好。
+     * 令牌改为**点按钮时才现取**：优选要跑几分钟，提前取的 10 分钟令牌
+     * 很容易过期；现取既不会超时，用户也不用理解「令牌」这回事。
      */
-    document.getElementById('btnPushToPanel')!.addEventListener('click', async () => {
-      const btn = document.getElementById('btnPushToPanel') as HTMLButtonElement | null
+    const runPush = async (mode: 'append' | 'replace'): Promise<void> => {
+      const btn = document.getElementById(
+        mode === 'append' ? 'btnPushAppend' : 'btnPushReplace'
+      ) as HTMLButtonElement | null
+      const other = document.getElementById(
+        mode === 'append' ? 'btnPushReplace' : 'btnPushAppend'
+      ) as HTMLButtonElement | null
       const hint = document.getElementById('pushHint')
+      const verb = mode === 'append' ? '增量回填' : '覆盖回填'
 
       if (lastScanLines.length === 0) {
         log('还没有优选结果，先跑一次优选', 'warn')
         return
       }
       if (btn) btn.disabled = true
+      if (other) other.disabled = true
       if (hint) hint.textContent = '正在申请临时令牌…'
 
       try {
@@ -2591,33 +2685,46 @@
         if (!tokenRes || !tokenRes.ok) {
           const msg = (tokenRes && tokenRes.error) || '未知错误'
           if (hint) hint.textContent = '获取令牌失败：' + msg
-          log('回填失败：' + msg, 'err')
+          log(verb + '失败：' + msg, 'err')
           return
         }
 
-        if (hint) hint.textContent = '正在回填到面板…'
-        const result = await window.cfpilot.pushScanResults(lastScanLines)
+        if (hint) hint.textContent = '正在' + verb + '…'
+        const result = await window.cfpilot.pushScanResults(lastScanLines, mode)
         if (!result || !result.ok) {
           const msg = (result && result.error) || '未知错误'
-          if (hint) hint.textContent = '回填失败：' + msg
-          log('回填失败：' + msg, 'err')
+          if (hint) hint.textContent = verb + '失败：' + msg
+          log(verb + '失败：' + msg, 'err')
           return
         }
 
-        const n = result.count ?? lastScanLines.length
+        const total = result.count ?? lastScanLines.length
+        const added = typeof result.added === 'number' ? result.added : total
+        const detail =
+          mode === 'append'
+            ? '新增 ' + added + ' 条（面板原有条目已保留）'
+            : '共 ' + total + ' 条'
         if (hint) {
           hint.textContent =
-            '✅ 已回填 ' + n + ' 条到面板。打开面板「节点来源 → 手动优选 IP」点「查看」即可看到。'
+            '✅ 已' + verb + '：' + detail + '。打开面板「节点来源 → 手动优选 IP」点「查看」即可看到。'
         }
-        log('✅ 已回填 ' + n + ' 条到面板的「手动优选 IP」', 'ok')
+        log('✅ 已' + verb + '：' + detail, 'ok')
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        if (hint) hint.textContent = '回填失败：' + msg
-        log('回填失败：' + msg, 'err')
+        if (hint) hint.textContent = verb + '失败：' + msg
+        log(verb + '失败：' + msg, 'err')
       } finally {
         if (btn) btn.disabled = false
+        if (other) other.disabled = false
       }
-    })
+    }
+
+    document
+      .getElementById('btnPushAppend')!
+      .addEventListener('click', () => void runPush('append'))
+    document
+      .getElementById('btnPushReplace')!
+      .addEventListener('click', () => void runPush('replace'))
 
     /**
      * 自动识别：一次填好域名 + WS 路径。
@@ -2667,40 +2774,60 @@
       }
     })
 
-    document.getElementById('btnEnvCheck')!.addEventListener('click', async () => {
-      log('检测网络环境…')
+    /**
+     * 「检测网络环境」：弹窗展示两段结果 —— 代理环境 + IPv6 环境。
+     *
+     * ⚠️ 必须**总是**往弹窗里写点什么：一个字都不写的话，
+     * 用户点了按钮看到弹窗空白，看起来就是按钮坏了。
+     */
+    const openEnvCheck = async (): Promise<void> => {
       const btn = document.getElementById('btnEnvCheck') as HTMLButtonElement | null
+      const proxyList = document.getElementById('envProxyList')
+      const v6List = document.getElementById('envV6List')
+      const mask = document.getElementById('envModal')
+      if (proxyList) {
+        proxyList.innerHTML = ''
+        proxyList.style.color = ''
+        proxyList.textContent = '检测中…'
+      }
+      if (v6List) {
+        v6List.innerHTML = ''
+        v6List.style.color = ''
+        v6List.textContent = '检测中…'
+      }
+      if (mask) mask.hidden = false
       if (btn) btn.disabled = true
-      try {
-        // ⚠️ 必须**总是**输出结果
-        //
-        // **一个字都不打** —— 用户点了按钮看到日志里只有「检测网络环境…」
-        // 然后什么都没有，看起来就是按钮坏了。
-        //
-        // 正确行为：
-        //   - 正常 → 明确说「正常」
-        //   - 有发现 → 逐条列出发现项，并说明对优选结果的影响
-        const result = await window.cfpilot.checkEnvironment()
+      log('检测网络环境…')
 
+      try {
+        // 带上当前填的域名：IPv6 预检要靠它的 AAAA 找活跃前缀做金丝雀
+        const result = await window.cfpilot.checkEnvironment($('optHost').value.trim())
+        renderEnvModal(result)
         if (result.clean) {
-          log('✅ 环境正常，优选结果可信', 'ok')
+          log('✅ 代理环境正常，优选结果可信', 'ok')
         } else {
-          log('⚠ 检测到网络环境异常，优选结果可能失真：', 'warn')
-          const findings = result.findings ?? []
-          if (findings.length === 0) {
-            log('  （未提供具体发现项）', 'warn')
-          } else {
-            for (const f of findings) {
-              log('  · ' + f, 'warn')
-            }
-          }
-          log('  建议：关闭系统代理 / TUN 模式后重新优选', 'warn')
+          log('⚠ 检测到代理环境异常，优选结果可能失真（建议关闭系统代理 / TUN 后重测）', 'warn')
+        }
+        const v6 = result.ipv6
+        if (v6 && v6.status !== 'ok') {
+          log('⚠ ' + (v6.message || '当前网络环境不具备 IPv6 测速条件'), 'warn')
+        } else if (v6) {
+          log('✅ ' + (v6.message || 'IPv6 环境可用'), 'ok')
         }
       } catch (err) {
-        log('检测失败：' + (err instanceof Error ? err.message : String(err)), 'err')
+        const msg = err instanceof Error ? err.message : String(err)
+        log('检测失败：' + msg, 'err')
+        renderEnvModal({ clean: undefined, findings: ['检测失败：' + msg] })
       } finally {
         if (btn) btn.disabled = false
       }
+    }
+
+    document.getElementById('btnEnvCheck')!.addEventListener('click', () => void openEnvCheck())
+    document.getElementById('btnEnvRefresh')?.addEventListener('click', () => void openEnvCheck())
+    document.getElementById('btnEnvClose')?.addEventListener('click', () => {
+      const mask = document.getElementById('envModal')
+      if (mask) mask.hidden = true
     })
   }
 

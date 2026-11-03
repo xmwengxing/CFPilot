@@ -571,8 +571,9 @@
      * 服务端会现取临时令牌（10 分钟有效）再回填，
      * 所以不会出现「优选跑太久令牌过期」的问题。
      */
-    pushScanResults: function (lines) {
-      return post('/api/scan/push-results', { lines: lines || [] })
+    pushScanResults: function (lines, mode) {
+      // mode：`replace`（默认，清空后写入）/ `append`（保留已有的，只补新的）
+      return post('/api/scan/push-results', { lines: lines || [], mode: mode || 'replace' })
     },
 
     fetchScannerToken: function (host, password) {
@@ -626,11 +627,14 @@
         })
     },
 
-    checkEnvironment: function () {
+    checkEnvironment: function (host) {
       // ⚠️ 界面判断的是 `result.clean`（布尔），后端返回的是
       // { findings: [{kind, message, level}] } —— 缺 clean 字段，
       // 于是「环境正常」永远不会显示。这里做转换。
-      return post('/api/scan/env-check')
+      //
+      // host（数据面域名）一并带上：IPv6 预检要靠它的 AAAA
+      // 找到「实测活跃的 48 位前缀」做金丝雀，否则只能用静态表里的。
+      return post('/api/scan/env-check', { host: host || '' })
         .then(function (r) {
           var findings = (r && r.findings) || []
           // 有任意一条 level=warn 就认为环境不干净
@@ -643,6 +647,8 @@
             findings: findings.map(function (f) {
               return (f && f.message) || String(f)
             }),
+            // IPv6 环境预检结论（后端原样透传；旧后端没有该字段时为 undefined）
+            ipv6: r && r.ipv6 ? r.ipv6 : null,
           }
         })
         .catch(function (err) {
@@ -650,6 +656,7 @@
           return {
             clean: true,
             findings: ['环境检测失败：' + (err && err.message ? err.message : String(err))],
+            ipv6: null,
           }
         })
     },

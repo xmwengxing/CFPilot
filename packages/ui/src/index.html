@@ -1146,34 +1146,62 @@
               凭据仅保存在本机 <code>~/.cfpilot-gui/secrets.json</code>，不会上传到任何服务器。
             </p>
 
-            <div class="field">
-              <label>当前使用</label>
-              <div class="row">
-                <select id="profileSelect">
-                  <option value="">— 还没有账户配置 —</option>
-                </select>
-                <button class="btn btn-danger" id="btnProfileDelete">删除本地账号/凭据</button>
+            <!--
+              三行左右分栏。
+
+              说明文字**保持明文**，唯一例外是面板密码的说明 —— 它收进 label 的
+              title 悬浮气泡（低频操作，不值得常年占三行高度）。
+            -->
+            <div class="row">
+              <div class="field">
+                <label>当前使用</label>
+                <div class="row">
+                  <select id="profileSelect">
+                    <option value="">— 还没有账户配置 —</option>
+                  </select>
+                  <button class="btn btn-danger" id="btnProfileDelete">删除本地账号/凭据</button>
+                </div>
+                <p class="tip" id="profileHint">
+                  选择「＋ 新建账户」并填入 Token 即可添加第二个账号；选择已有账户则显示该账号信息。
+                </p>
               </div>
-              <p class="tip" id="profileHint">
-                选择「＋ 新建账户」并填入 Token 即可添加第二个账号；选择已有账户则显示该账号信息。
-              </p>
+              <div class="field">
+                <label>Cloudflare API Token <span class="badge info" id="tokenBadge">未保存</span></label>
+                <div class="row">
+                  <input type="password" id="cfToken" placeholder="粘贴 Cloudflare API Token" />
+                  <button class="btn btn-primary" id="btnSaveToken" style="flex:0 0 auto">添加并保存</button>
+                </div>
+                <p class="tip">
+                  没有令牌？<a href="#" data-url="https://dash.cloudflare.com/profile/api-tokens">点此创建</a>。
+                  需要的权限见页面下方说明。
+                </p>
+              </div>
             </div>
 
-            <div class="field">
-              <label>Cloudflare API Token <span class="badge info" id="tokenBadge">未保存</span></label>
-              <div class="row">
-                <input type="password" id="cfToken" placeholder="粘贴 Cloudflare API Token" />
-                <button class="btn btn-primary" id="btnSaveToken" style="flex:0 0 auto">添加并保存</button>
+            <div class="row">
+              <div class="field">
+                <label>本次部署使用的 KV</label>
+                <div class="row">
+                  <select id="kvSelect">
+                    <option value="">— 请先检测账号 —</option>
+                  </select>
+                  <button class="btn btn-ghost" id="btnKvRefresh">刷新 KV 列表</button>
+                </div>
+                <p class="tip" id="kvHint">
+                  选择账户后会自动检测账号与实例；检测到已部署实例会自动选中对应的 KV。
+                  一个 KV 命名空间仅对应一对 CFPilot 部署实例（数据面 + 控制面），选中后立即生效。
+                </p>
               </div>
-              <p class="tip">
-                没有令牌？<a href="#" data-url="https://dash.cloudflare.com/profile/api-tokens">点此创建</a>。
-                需要的权限见页面下方说明。
-              </p>
-            </div>
-
-            <div class="btn-row">
-              <button class="btn btn-primary" id="btnDetect">检测账号</button>
-              <button class="btn btn-ghost" id="btnUsage">用量/额度</button>
+              <div class="field">
+                <label>手动指定 KV ID</label>
+                <div class="row">
+                  <input type="text" id="kvManual" placeholder="粘贴 KV 命名空间 ID" />
+                  <button class="btn btn-ghost" id="btnKvManual" style="flex:0 0 auto">使用此 ID</button>
+                </div>
+                <p class="tip">
+                  从其它机器迁移、或 KV 列表中未显示时，可直接粘贴 ID。
+                </p>
+              </div>
             </div>
 
             <!--
@@ -1183,65 +1211,39 @@
               <span class="ico"></span><span class="msg"></span>
             </div>
 
-            <div class="field" style="margin-top:14px">
-              <label>本次部署使用的 KV</label>
-              <div class="row">
-                <select id="kvSelect">
-                  <option value="">— 请先检测账号 —</option>
-                </select>
-                <button class="btn btn-ghost" id="btnKvRefresh">刷新 KV 列表</button>
+            <div class="row" style="margin-top:14px">
+              <div class="field">
+                <label>账号检测</label>
+                <div class="row">
+                  <button class="btn btn-primary" id="btnDetect">检测账号</button>
+                  <button class="btn btn-ghost" id="btnUsage">用量/额度</button>
+                </div>
               </div>
-              <p class="tip" id="kvHint">
-                选择账户后会自动检测账号与实例；检测到已部署实例会自动选中对应的 KV。
-                一个 KV 命名空间仅对应一对 CFPilot 部署实例（数据面 + 控制面），选中后立即生效。
-              </p>
-            </div>
-          </div>
-
-          <!-- 其他：面板密码与手动指定 KV（低频操作，单独收在一起） -->
-          <div class="card">
-            <h2><span class="dot"></span>🧩 其他</h2>
-
-            <div class="field">
-              <label>面板密码</label>
-              <div class="row">
-                <input
-                  type="password"
-                  id="panelPassword"
-                  placeholder="仅用于修改【已部署】面板的登录密码"
-                />
-                <button class="btn btn-ghost" id="btnSavePanelPw" style="flex:0 0 auto">
-                  修改密码
-                </button>
+              <div class="field">
+                <label title="快捷修改已部署面板的登录密码。尚未部署请勿填写，请移步至「部署」页首次设置。&#10;注意：此处填写的密码仅用于登录已部署面板修改密码，不会成为下次部署的密码 —— 部署密码请在「部署」页填写。">面板密码</label>
+                <div class="row">
+                  <input
+                    type="password"
+                    id="panelPassword"
+                    placeholder="仅用于修改【已部署】面板的登录密码"
+                  />
+                  <button class="btn btn-ghost" id="btnSavePanelPw" style="flex:0 0 auto">
+                    修改密码
+                  </button>
+                </div>
               </div>
-              <p class="tip">
-                快捷修改已部署面板的登录密码。尚未部署请勿填写，请移步至「部署」页首次设置。
-                <br />
-                <b>注意</b>：此处填写的密码<b>仅用于登录已部署面板修改密码</b>，
-                <b>不会</b>成为下次部署的密码 —— 部署密码请在「部署」页填写。
-              </p>
             </div>
 
-            <div class="field">
-              <label>手动指定 KV ID</label>
-              <div class="row">
-                <input type="text" id="kvManual" placeholder="粘贴 KV 命名空间 ID" />
-                <button class="btn btn-ghost" id="btnKvManual" style="flex:0 0 auto">使用此 ID</button>
-              </div>
-              <p class="tip">
-                从其它机器迁移、或 KV 列表中未显示时，可直接粘贴 ID。
-              </p>
-            </div>
-              <!--
-                已移除「新建 KV」按钮
+            <!--
+              已移除「新建 KV」按钮
 
-                原因：单独一个「新建 KV」按钮很容易误触，每点一次就在
-                Cloudflare 账号下建一个独立命名空间，白白消耗免费额度。
+              原因：单独一个「新建 KV」按钮很容易误触，每点一次就在
+              Cloudflare 账号下建一个独立命名空间，白白消耗免费额度。
 
-                现在改为：全新部署**总是新建一个独立 KV**（一 KV 一实例），
-                其余模式没有可用 KV 时自动建一个。
-                用户不需要多操作一步，也不会误建多余的 KV。
-              -->
+              现在改为：全新部署**总是新建一个独立 KV**（一 KV 一实例），
+              其余模式没有可用 KV 时自动建一个。
+              用户不需要多操作一步，也不会误建多余的 KV。
+            -->
           </div>
 
           <div class="card">
@@ -1352,25 +1354,34 @@
 
             <div class="field">
               <label>本次操作</label>
+              <!--
+                三行说明移进各选项的 title 气泡：它们是**逐项**的取舍说明，
+                并排铺三行会让人以为三条对所有选项都生效。
+              -->
               <div class="radios">
-                <label class="chk"><input type="radio" name="mode" value="auto" checked /> 自动判断（推荐）</label>
-                <label class="chk"><input type="radio" name="mode" value="update" /> 更新现有部署</label>
-                <label class="chk"><input type="radio" name="mode" value="fresh" /> 全新部署</label>
+                <label class="chk" title="KV 有记录则启动「更新现有部署」，没有则启动「全新部署」。"><input type="radio" name="mode" value="auto" checked /> 自动判断（推荐）</label>
+                <label class="chk" title="复用「凭据」页的 KV 选择，复用所有原参数。"><input type="radio" name="mode" value="update" /> 更新现有部署</label>
+                <label class="chk" title="会新建一个 KV，忽略「凭据」页 KV 选择，自动填写新参数。"><input type="radio" name="mode" value="fresh" /> 全新部署</label>
               </div>
-              <p class="tip">
-                <b>自动判断</b>：KV 有记录则启动「更新现有部署」，没有则启动「全新部署」。
-                <br>⚠ <b>全新部署会新建一个 KV，忽略「凭据」页 KV 选择，自动填写新参数</b>。
-                <br>⚠ <b>更新现有部署会复用「凭据」页 KV 选择，复用所有原参数</b>。
-              </p>
             </div>
 
             <div class="field">
               <label>数据面部署模式</label>
+              <!--
+                两段模式说明同样移进 title 气泡（文案是产品口径，原样保留）：
+                  Pages   —— 深度集成 Git (GitHub/GitLab)，自动构建便利，开放流量，
+                             适合静态网站和无自有域名部署；*.pages.dev 域名直连可访问，
+                             无需配置自定义域名！
+                  Workers —— 极致的动态与边缘控制，适合 API、代理、鉴权、重定向、
+                             SSR 渲染以及结合 D1、R2、KV 等全栈后端部署；
+                             *.workers.dev 域名直连无法访问，请登录 cloudflare 控制台配置自定义域名！
+                ⚠ 切换模式的警告**必须留在明文**：它是会丢域名的破坏性后果，
+                  悬浮气泡容易被漏看。
+              -->
               <div class="radios">
-                <label class="chk"><input type="radio" name="dataPlane" value="pages" checked /> Pages 模式（默认）</label>
-                <label class="chk"><input type="radio" name="dataPlane" value="workers" /> Workers 模式</label>
+                <label class="chk" title="深度集成 Git (GitHub/GitLab)，自动构建便利，开放流量，适合静态网站和无自有域名部署；*.pages.dev 域名直连可访问，无需配置自定义域名！"><input type="radio" name="dataPlane" value="pages" checked /> Pages 模式（默认）</label>
+                <label class="chk" title="极致的动态与边缘控制，适合 API、代理、鉴权、重定向、SSR 渲染以及结合 D1、R2、KV 等全栈后端部署；*.workers.dev 域名直连无法访问，请登录 cloudflare 控制台配置自定义域名！"><input type="radio" name="dataPlane" value="workers" /> Workers 模式</label>
               </div>
-              <p class="tip" id="dataPlaneHint"></p>
               <div id="dataHostField" style="display:none;margin-top:10px">
                 <label>节点域名（Workers 模式）</label>
                 <input type="text" id="dataHost" placeholder="如 w1.example.com" />

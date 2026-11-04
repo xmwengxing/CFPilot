@@ -55,6 +55,11 @@ packages/worker-core/src/route-profile.generated.ts
 /docs/relay-ip-round*.json
 /docs/relay-ip-outbound.json
 /docs/relay-ip-proxypool.txt
+# 多源合并的中间产物（scripts/collect-relay-sources.mjs 生成，随时可重跑；
+# 真正的产物是 packages/cli/assets/relay-ip-builtin.txt，那份才入库）
+/docs/relay-ip-merged.csv
+/docs/relay-ip-merged.txt
+/docs/relay-ip-merged-r*.json
 # 但 README 引用的截图必须入库
 !/docs/images/
 !/docs/images/**

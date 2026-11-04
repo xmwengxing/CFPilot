@@ -619,6 +619,14 @@ interface Window {
     }>
     /** 从面板配置读 UUID / WS 路径 */
     relayUUID(): Promise<{ ok: boolean; uuid?: string; wsPath?: string; error?: string }>
+    /** 随版本发布的内置反代候选（用户不可修改） */
+    relayBuiltin(): Promise<{
+      ok: boolean
+      candidates: string[]
+      count: number
+      raw: string
+      error?: string
+    }>
     /** 写入面板 ProxyIP 池（incremental / overwrite） */
     pushRelayResults(
       ips: string[],

@@ -32,7 +32,26 @@ func (s *Server) registerRelayRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/relay/parse-candidates", s.guard(s.handleRelayParseCandidates))
 	mux.HandleFunc("/api/relay/fetch-candidates", s.guard(s.handleRelayFetchCandidates))
 	mux.HandleFunc("/api/relay/uuid", s.guard(s.handleRelayUUID))
+	mux.HandleFunc("/api/relay/builtin", s.guard(s.handleRelayBuiltin))
 	mux.HandleFunc("/api/relay/push-results", s.guard(s.handleRelayPushResults))
+}
+
+// handleRelayBuiltin 返回随版本发布的内置反代候选清单。
+//
+// 用户不可修改：这是「手上没有 IP 源时也能开跑」的兜底，
+// 要测自己的清单就走导入（粘贴 / 文件 / 链接）。
+func (s *Server) handleRelayBuiltin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "仅支持 GET/POST"})
+		return
+	}
+	list := relay.BuiltinCandidates()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":         true,
+		"candidates": list,
+		"count":      len(list),
+		"raw":        strings.Join(list, "\n"),
+	})
 }
 
 // relayRunRequest 是 POST /api/relay/run 的入参。

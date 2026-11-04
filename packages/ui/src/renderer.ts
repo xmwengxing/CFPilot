@@ -3641,6 +3641,32 @@
         }
       })()
     })
+
+    // 内置清单：随版本发布、用户不可修改（我们发版时重新实测更新）
+    document.getElementById('btnLoadBuiltin')?.addEventListener('click', () => {
+      void (async () => {
+        const hint = document.getElementById('candidateHint')
+        if (hint) hint.textContent = '正在读取内置清单…'
+        try {
+          const res = await window.cfpilot.relayBuiltin()
+          if (!res.ok || res.count === 0) {
+            if (hint) hint.textContent = '内置清单为空：' + (res.error || '请升级到更新版本')
+            return
+          }
+          if (text) text.value = res.raw
+          await refreshCandidateHint()
+          // 内置清单只在「自定义列表」模式下才会被用到，顺手切过去
+          if (modeSel) {
+            modeSel.value = 'custom'
+            syncBox()
+          }
+          log('已加载内置反代清单：' + res.count + ' 条', 'ok')
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          if (hint) hint.textContent = '读取内置清单失败：' + msg
+        }
+      })()
+    })
   }
 
   /** 渲染反代体检结果表 */

@@ -35,6 +35,7 @@ import { flagBool, flagNumber, flagString, type ParsedArgs } from '../shared/arg
 import { NAME, VERSION } from '../shared/version'
 import { SCAN_RELAY_HELP } from './help'
 import { readIpFile, readIpUrl } from './ip-ranges'
+import { readBuiltinRelayCandidates } from './relay-builtin'
 import { getPanelConfig, patchPanelConfig } from './callback'
 
 /** 同时探测几个候选（每条隧道是一个独立请求，不受 Worker 单请求 6 连接的限制） */
@@ -111,6 +112,13 @@ function createDuplex(ws: WebSocket): { duplex: Duplex; push: (buf: Buffer | nul
     read() {
       /* 推模式，无需实现 */
     },
+  })
+  // ⚠️ 必须挂一个 'error' 监听：隧道超时 / WS 异常时我们会 destroy 这个流，
+  // 而 Node 的流如果被 destroy(err) 且没有 error 监听，会抛**未捕获的 error 事件**
+  // 直接结束进程 —— 一个坏候选就能让整轮 3000 个候选的体检崩掉。
+  // 真正的失败由 TLS 握手 / 读超时那条路径报出来，这里只负责别炸进程。
+  duplex.on('error', () => {
+    /* 由上层（Probe 的 try/catch）负责诊断 */
   })
   return {
     duplex,
@@ -377,6 +385,9 @@ export async function runRelayCommand(args: ParsedArgs): Promise<void> {
   const uuid = flagString(args, 'uuid')
   const rounds = Math.max(1, flagNumber(args, 'rounds', 2))
   const timeoutMs = Math.max(1000, flagNumber(args, 'timeout', DEFAULT_TIMEOUT_MS))
+  // 并发可以调高：每条并发都是一条独立隧道（独立 Worker 请求），
+  // 不受「单请求 6 条出站 TCP」的限制；上限只受本机与文件句柄约束。
+  const concurrency = Math.max(1, flagNumber(args, 'concurrency', CONCURRENCY))
   const asJson = flagBool(args, 'json')
   const quiet = flagBool(args, 'quiet')
   /** 产出可粘贴进 ProxyIP 池的清单（按质量排序，一行一个 IP） */
@@ -389,10 +400,9 @@ export async function runRelayCommand(args: ParsedArgs): Promise<void> {
   const panel = flagString(args, 'panel')
   const panelPassword = flagString(args, 'panel-password')
 
-  if ((!file && !url) || !host || !wsPath || !uuid) {
-    process.stderr.write(
-      '缺少参数：--file 或 --url（二选一）、--host、--ws-path、--uuid 都是必填\n'
-    )
+  if (!host || !wsPath || !uuid) {
+    process.stderr.write('缺少参数：--host、--ws-path、--uuid 都是必填\n')
+    process.stderr.write('候选默认用内置清单；也可用 --file / --url 指定\n')
     process.stderr.write('用法见：cfpilot scan relay --help\n')
     process.exit(1)
   }
@@ -407,9 +417,15 @@ export async function runRelayCommand(args: ParsedArgs): Promise<void> {
 
   let ips: string[]
   let rawCount = 0
-  const sourceLabel = file ? `文件 ${file}` : `链接 ${url}`
+  // 三个来源，优先级：显式文件 > 显式链接 > **内置清单**。
+  // 内置清单随版本发布、用户不可修改 —— 让手上没有 IP 源的用户也能跑通。
+  const sourceLabel = file ? `文件 ${file}` : url ? `链接 ${url}` : '内置清单'
   try {
-    const raw = file ? readIpFile(readFileSync(file, 'utf8')) : await readIpUrl(url)
+    const raw = file
+      ? readIpFile(readFileSync(file, 'utf8'))
+      : url
+        ? await readIpUrl(url)
+        : readBuiltinRelayCandidates()
     rawCount = raw.length
     // 反代入口是「明文 TCP + 按 SNI 转发」，端口固定 443，只接受 IPv4 ——
     // IPv6 候选在这里没有意义，直接排除并在下面报告跳过条数。
@@ -477,7 +493,7 @@ export async function runRelayCommand(args: ParsedArgs): Promise<void> {
       }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, jobs.length) }, () => worker()))
+  await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, () => worker()))
   if (!quiet) process.stderr.write('\n')
 
   const aggregates: Aggregate[] = []

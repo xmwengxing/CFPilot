@@ -151,6 +151,23 @@ for (const f of ['control.js', 'dataplane.js']) {
   console.log(`[desktop] 内核产物 ${f} → internal/kernel/assets/ (${kb} KB)`)
 }
 
+// ---- 1c. 同步内置反代候选清单（go:embed 打进 exe）----
+//
+// 与 CLI 共用**同一份文件**（packages/cli/assets/relay-ip-builtin.txt）：
+// 两边各维护一份必然漂移，而这份清单是「手上没有 IP 源时也能开跑」的兜底，
+// 漂移了用户就会拿到过期数据却毫无提示。
+const builtinRelaySrc = join(repoRoot, 'packages', 'cli', 'assets', 'relay-ip-builtin.txt')
+const builtinRelayDstDir = join(desktopDir, 'internal', 'relay', 'assets')
+if (existsSync(builtinRelaySrc)) {
+  mkdirSync(builtinRelayDstDir, { recursive: true })
+  copyFileSync(builtinRelaySrc, join(builtinRelayDstDir, 'relay-ip-builtin.txt'))
+  const n = readFileSync(builtinRelaySrc, 'utf8').split('\n').filter((l) => l.trim()).length
+  console.log(`[desktop] 内置反代候选 → internal/relay/assets/ (${n} 条)`)
+} else {
+  console.error('[desktop] 未找到 packages/cli/assets/relay-ip-builtin.txt')
+  process.exit(1)
+}
+
 // 构建目标（图标生成阶段就要知道是否编 Windows，所以定义在最前面）
 const targets = [
   { goos: 'windows', goarch: 'amd64', out: `cfpilot-${version}-windows-amd64.exe`, extra: ['-H=windowsgui'] },

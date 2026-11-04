@@ -611,6 +611,11 @@
       return get('/api/relay/uuid')
     },
 
+    // 随版本发布的内置反代候选（用户不可修改）
+    relayBuiltin: function () {
+      return get('/api/relay/builtin')
+    },
+
     // 写入面板 ProxyIP 池：incremental 增量 / overwrite 覆盖
     pushRelayResults: function (ips, mode) {
       return post('/api/relay/push-results', { ips: ips || [], mode: mode || 'incremental' })

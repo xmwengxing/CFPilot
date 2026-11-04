@@ -2609,7 +2609,10 @@
           probePath,
           // 自定义候选：选「自定义列表」时跳过网段采样，直接用导入的 IP
           candidates: sourceMode === 'custom' ? candidateText() : '',
-          skipSpeed: $('optNoSpeed').checked,
+          // 「测速」下拉：off = 跳过测速。
+          // 原先是「跳过测速」开关（勾选=跳过），改成开/关下拉后语义相反，
+          // 这里必须按 value 判断，不能沿用 checked。
+          skipSpeed: ($('optNoSpeed') as unknown as HTMLSelectElement).value === 'off',
           sample: Number($('optSample').value) || 6556,
           top: Number($('optTop').value) || 15,
           countries: readOptCountries(),
@@ -3552,6 +3555,14 @@
       const relayPanel = document.getElementById('scanPanelRelay')
       if (entryPanel) entryPanel.hidden = next !== 'entry'
       if (relayPanel) relayPanel.hidden = next !== 'relay'
+
+      // 入口方向的两张产物卡（结果 / 自适应对照）在反代页签下**收起**：
+      // 它们只跟入口优选有关，留在反代页里既占地方又容易看错。
+      // 反代的结果卡本身在 scanPanelRelay 内部，随面板一起切换。
+      const entryResult = document.getElementById('entryResultCard')
+      const adaptiveCard = document.getElementById('adaptiveCard')
+      if (entryResult) entryResult.hidden = next !== 'entry'
+      if (adaptiveCard) adaptiveCard.hidden = next !== 'entry'
     })
   }
 

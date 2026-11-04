@@ -437,6 +437,55 @@
     /* 分栏容器：一行里的左右两栏，每栏可纵向叠多个字段 */
     .col { display: flex; flex-direction: column; min-width: 0; }
 
+    /*
+      字段网格：参数卡统一用它排版。
+
+      为什么不用 .row + .col 嵌套：嵌套的 flex 在窄屏（手机）上会把几个输入框
+      挤成一团，宽度由内容决定、无法均匀分配。grid + auto-fit 会按可用宽度
+      自动决定每行几列（宽屏 3~4 列、窄屏自动落成单列），且每列等宽。
+    */
+    .grid > .field { margin-bottom: 0; }
+    /* 需要占两列（如 UUID 这种长输入） */
+    .grid > .span-2 { grid-column: span 2; }
+    @media (max-width: 640px) {
+      .grid { grid-template-columns: 1fr; }
+      .grid > .span-2 { grid-column: auto; }
+    }
+    /* 输入框 + 小按钮同一行：输入框吃掉剩余宽度，按钮不收缩 */
+    .field-inline { display: flex; gap: 8px; }
+    .field-inline > input,
+    .field-inline > select { flex: 1 1 auto; min-width: 0; }
+    .field-inline > .btn { flex: 0 0 auto; }
+
+    /*
+      左右两栏 + 每栏并排两个字段（入口优选的参数卡）。
+
+      宽屏：2 栏 × 每栏 2 个字段（一行 4 个说明框）
+      中等：落成 1 栏 × 2 个字段
+      手机：全部单列
+      比 flex 嵌套稳：每格等宽，不会因为某个说明文字长短而错位。
+    */
+    .pair-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px 20px;
+    }
+    .pair {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px 14px;
+      align-content: start;
+    }
+    /* 在 .pair 里占满整行（如「机房国家」后面要跟一个自定义配置按钮） */
+    .pair > .full { grid-column: 1 / -1; }
+    .pair-grid .field { margin-bottom: 0; }
+    @media (max-width: 860px) {
+      .pair-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 560px) {
+      .pair { grid-template-columns: 1fr; }
+    }
+
     /* --------------------------------------------------------------
        提示文字：三级层次（tip 最弱 → hint → muted）
        -------------------------------------------------------------- */
@@ -1558,27 +1607,43 @@
           </div>
 
           <!--
-            候选来源：两个方向都要「导入自己的 IP 列表」——
-            入口方向是「用清单代替 CF 网段采样」，反代方向是「测这批代理」。
-            同一套控件放页签外面，避免两份 DOM 与两套状态。
+            ① 数据面与候选来源
+            Worker 域名 / WS 路径是**两种优选共用**的参数：
+              入口优选拿它做 TLS + 101 校验，反代优选拿它开隧道。
+            所以放在页签外面、最靠前的位置 —— 填一次，两个方向都生效。
           -->
           <div class="card" id="sourceCard">
-            <h2><span class="dot"></span>📥 候选来源</h2>
-            <div class="row">
+            <h2><span class="dot"></span>① 数据面与候选来源</h2>
+            <p class="desc">
+              下面三项两种优选<b>共用</b>：入口优选拿数据面地址做校验，反代优选拿它开隧道。
+            </p>
+            <div class="grid">
               <div class="field">
-                <label title="默认：入口优选按网段权重采样 Cloudflare 候选；反代优选使用内置反代清单。&#10;自定义列表：直接用你导入的 IP，跳过网段采样。">来源</label>
+                <label title="workers 部署请使用自定义域名！*.workers.dev 生产链路网络阻断。&#10;「自动识别」：优先填入数据面自定义域名，否则填入 workers.dev / pages.dev">Worker 域名</label>
+                <div class="field-inline">
+                  <input type="text" id="optHost" placeholder="如 cfp-dat.pages.dev 或自定义域名" />
+                  <button class="btn btn-ghost" id="btnAutoDetect">自动识别</button>
+                </div>
+              </div>
+              <div class="field">
+                <label title="必须与实际 WebSocket 路径完全一致，否则无法优选 IP。&#10;CFPilot 项目：部署后日志内复制，或点「自动识别」从项目内读取后填入。">WS 路径</label>
+                <input type="text" id="optPath" placeholder="如 /vless 或 /（根路径）" />
+              </div>
+            </div>
+            <!-- 候选来源单独一行：与上面两个输入框同宽，表格高度才对得齐 -->
+            <div class="grid" style="margin-top:12px">
+              <div class="field">
+                <label title="默认：入口优选按网段权重采样 Cloudflare 候选；反代优选使用内置 Proxy IP 源。&#10;自定义列表：直接用你导入的 IP，跳过网段采样。">候选来源</label>
                 <select id="optSourceMode">
                   <option value="default">默认（入口＝网段采样 / 反代＝内置 Proxy IP 源）</option>
                   <option value="custom">自定义列表</option>
                 </select>
               </div>
             </div>
-            <div id="customSourceBox" hidden>
-              <div class="row">
-                <div class="field" style="flex:1 1 100%">
-                  <label title="每行一个：IP、IP:Port、IP:Port#备注 都行；CSV 整行粘贴也可以（会自动找 IP 那一列）。">IP 列表</label>
-                  <textarea id="optCandidateText" rows="6" placeholder="1.2.3.4&#10;5.6.7.8:443&#10;9.9.9.9:443#SJC&#10;（也可以整行粘贴 CSV）"></textarea>
-                </div>
+            <div id="customSourceBox" hidden style="margin-top:12px">
+              <div class="field">
+                <label title="每行一个：IP、IP:Port、IP:Port#备注 都行；CSV 整行粘贴也可以（会自动找 IP 那一列）。">IP 列表</label>
+                <textarea id="optCandidateText" rows="6" placeholder="1.2.3.4&#10;5.6.7.8:443&#10;9.9.9.9:443#SJC&#10;（也可以整行粘贴 CSV）"></textarea>
               </div>
               <div class="btn-row">
                 <button class="btn btn-ghost" id="btnImportFile">选择文件…</button>
@@ -1601,48 +1666,51 @@
             </p>
 
             <!--
-              排版：左右分栏（四行），说明文字一律放进 <label title> 的悬浮气泡里。
-              页面上不再铺 tip 段落 —— 省出来的空间给结果表与历史列表。
+              排版：统一的等宽字段网格（宽屏 3~4 列、窄屏自动单列），
+              说明文字一律放进 <label title> 的悬浮气泡里 ——
+              页面上不铺 tip 段落，省出来的空间给结果表与历史列表。
+              Worker 域名 / WS 路径已经上移到「① 数据面与候选来源」（两种优选共用）。
             -->
-            <div class="row">
-              <div class="field">
-                <label title="workers 部署请使用自定义域名！*.workers.dev 生产链路网络阻断。&#10;「自动识别」：优先填入数据面自定义域名，否则填入 workers.dev / pages.dev">Worker 域名</label>
-                <div class="row">
-                  <input type="text" id="optHost" placeholder="如 cfp-dat.pages.dev 或自定义域名" />
-                  <button class="btn btn-ghost" id="btnAutoDetect" style="flex:0 0 auto">自动识别</button>
-                </div>
-              </div>
-              <div class="field">
-                <label title="必须与实际 WebSocket 路径完全一致，否则无法优选 IP。&#10;CFPilot 项目：部署后日志内复制，或点「自动识别」从项目内读取后填入。">WS 路径</label>
-                <input type="text" id="optPath" placeholder="如 /vless 或 /（根路径）" />
-              </div>
-            </div>
-
-            <div class="row">
-              <div class="field">
-                <label title="自动 = 先做 IPv6 环境预检（本机公网地址 + 默认路由 + 活跃段连通性），通了才让 IPv6 参与采样，不通就退回纯 IPv4。&#10;这样不会把一半采样预算烧在必然超时的候选上。&#10;两族都有时各拿一半预算，结果也分族各取一半，避免某一族被挤掉。&#10;IPv6 只在实测活跃的 48 位前缀内采样 —— 在官方公布段里盲采实测 0/18 全超时。">地址族</label>
-                <select id="optFamily">
-                  <option value="auto" selected>自动（推荐）</option>
-                  <option value="v4">仅 IPv4</option>
-                  <option value="v6">仅 IPv6</option>
-                  <option value="both">双栈（v4 + v6）</option>
-                </select>
-              </div>
-              <div class="field">
-                <label title="需要同时选多个分组、或只选部分国家时，点「自定义配置」。&#10;若结果未出现候选国家，请增加「候选采样数」。&#10;机房来自 101 握手响应，因此筛选在阶段二之后生效；带筛选会自动扩大 101 校验的候选池（120 → 最多 500）。">机房国家</label>
-                <div class="row">
-                  <select id="optCountryGroup" aria-label="机房国家快捷分组">
-                    <option value="">全部国家（不筛选）</option>
-                    <option value="ASIA">亚洲组</option>
-                    <option value="US">美国组</option>
+            <!--
+              排版：左右两栏、每栏并排两个字段（.pair-grid）。
+              宽屏一行 4 个字段、两行排完；中等宽度落成一栏；手机单列。
+              说明文字一律放进 <label title> 的悬浮气泡里 ——
+              页面上不铺 tip 段落，省出来的空间给结果表与历史列表。
+              Worker 域名 / WS 路径在「① 数据面与候选来源」（两种优选共用）。
+            -->
+            <div class="pair-grid">
+              <div class="pair">
+                <div class="field">
+                  <label title="自动 = 先做 IPv6 环境预检（本机公网地址 + 默认路由 + 活跃段连通性），通了才让 IPv6 参与采样，不通就退回纯 IPv4。&#10;这样不会把一半采样预算烧在必然超时的候选上。&#10;两族都有时各拿一半预算，结果也分族各取一半，避免某一族被挤掉。&#10;IPv6 只在实测活跃的 48 位前缀内采样 —— 在官方公布段里盲采实测 0/18 全超时。">地址族</label>
+                  <select id="optFamily">
+                    <option value="auto" selected>自动（推荐）</option>
+                    <option value="v4">仅 IPv4</option>
+                    <option value="v6">仅 IPv6</option>
+                    <option value="both">双栈（v4 + v6）</option>
                   </select>
-                  <button class="btn btn-ghost" id="btnCountryCustom">自定义配置</button>
+                </div>
+                <div class="field">
+                  <label title="开（默认）：逐个候选测下行速度，结果表出现「下行(MB/s)」列。&#10;关：跳过测速，只按延迟排序 —— 快很多、几乎不耗流量，但无法区分「延迟低但带宽差」的 IP；结果表的速度列显示为 —。&#10;流量参考：开时一轮约 1GB（6 秒 × 8 连接 × 候选数）。">测速</label>
+                  <select id="optNoSpeed">
+                    <option value="on" selected>开</option>
+                    <option value="off">关</option>
+                  </select>
                 </div>
               </div>
-            </div>
-
-            <div class="row">
-              <div class="col">
+              <div class="pair">
+                <div class="field full">
+                  <label title="需要同时选多个分组、或只选部分国家时，点「自定义配置」。&#10;若结果未出现候选国家，请增加「候选采样数」。&#10;机房来自 101 握手响应，因此筛选在阶段二之后生效；带筛选会自动扩大 101 校验的候选池（120 → 最多 500）。">机房国家</label>
+                  <div class="field-inline">
+                    <select id="optCountryGroup" aria-label="机房国家快捷分组">
+                      <option value="">全部国家（不筛选）</option>
+                      <option value="ASIA">亚洲组</option>
+                      <option value="US">美国组</option>
+                    </select>
+                    <button class="btn btn-ghost" id="btnCountryCustom">自定义配置</button>
+                  </div>
+                </div>
+              </div>
+              <div class="pair">
                 <div class="field">
                   <label title="建议 10~20：节点过多只会稀释分流质量，没有实际意义。&#10;端口固定 443 —— 订阅启用多端口请在 Web 面板中勾选。">保留条数</label>
                   <input type="number" id="optTop" value="8" min="1" max="100" />
@@ -1652,9 +1720,9 @@
                   <input type="number" id="optSample" value="6556" min="100" max="50000" />
                 </div>
               </div>
-              <div class="col">
+              <div class="pair">
                 <div class="field">
-                  <label title="建议 6 秒：过短会被 TCP 慢启动拉低（前 1 秒的样本会被丢弃）。&#10;流量 ≈ 时长 × 速率 × 连接数：一轮约 1GB，流量敏感时调小它，或勾选「跳过测速」。&#10;测速连接数固定 8 条 —— 单条 TCP 受拥塞窗口限制会系统性低估带宽（实测 1 条 0.12、3 条 0.47、8 条 1.15 MB/s）。">测速时长（秒）</label>
+                  <label title="建议 6 秒：过短会被 TCP 慢启动拉低（前 1 秒的样本会被丢弃）。&#10;流量 ≈ 时长 × 速率 × 连接数：一轮约 1GB，流量敏感时调小它，或把「测速」设为关。&#10;测速连接数固定 8 条 —— 单条 TCP 受拥塞窗口限制会系统性低估带宽（实测 1 条 0.12、3 条 0.47、8 条 1.15 MB/s）。">测速时长（秒）</label>
                   <input type="number" id="optSpeedDur" value="6" min="2" max="10" />
                 </div>
                 <div class="field">
@@ -1663,15 +1731,6 @@
                 </div>
               </div>
             </div>
-
-            <label class="switch-box">
-              <span class="sw-info">
-                <span class="sw-title">跳过测速，仅按延迟排序</span>
-                <span class="sw-desc">启用后结果表中的下行速度列显示为 —</span>
-              </span>
-              <input type="checkbox" id="optNoSpeed" />
-              <span class="switch"></span>
-            </label>
 
             <!--
               实验性功能（默认全部关闭）
@@ -1806,12 +1865,13 @@
                 由<b>本机</b>在这条隧道上完成 TLS 握手与请求。
                 只有证书按你的域名校验通过、<b>且</b>返回的 build 等于数据面自己的 build 才算通过。
               </p>
-              <div class="row">
-                <div class="field">
+              <!-- 与入口优选同一套等宽网格：宽屏一行放下，窄屏自动落成单列 -->
+              <div class="grid">
+                <div class="field span-2">
                   <label title="VLESS UUID，隧道鉴权用。点右侧按钮可直接从面板配置读取，不用手抄。">UUID</label>
-                  <div style="display:flex;gap:8px">
+                  <div class="field-inline">
                     <input type="text" id="optRelayUuid" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
-                    <button class="btn btn-ghost" id="btnRelayFetchUuid" style="flex:0 0 auto">从面板读取</button>
+                    <button class="btn btn-ghost" id="btnRelayFetchUuid">从面板读取</button>
                   </div>
                 </div>
                 <div class="field">
@@ -1843,7 +1903,7 @@
             </div>
 
             <div class="card">
-              <h2><span class="dot"></span>📋 反代结果</h2>
+              <h2><span class="dot"></span>📋 反代 IP 优选结果</h2>
               <div class="result-box" id="relayOut">暂无结果</div>
               <div class="btn-row" style="margin-top:10px">
                 <button class="btn btn-ghost" id="btnRelayPushAppend" disabled
@@ -1857,8 +1917,8 @@
             </div>
           </div>
 
-          <div class="card">
-            <h2><span class="dot"></span>📋 优选结果</h2>
+          <div class="card" id="entryResultCard">
+            <h2><span class="dot"></span>📋 入口 IP 优选结果</h2>
             <div class="result-box" id="scanOut">暂无结果，填写上方参数后点击「开始优选」</div>
             <div id="scanProgressWrap" hidden style="margin-top:8px">
               <div style="height:8px;border-radius:999px;background:var(--border);overflow:hidden"><i id="scanProgressBar" style="display:block;height:100%;width:0%;border-radius:999px;background:var(--accent);transition:width .25s ease"></i></div>
@@ -1895,7 +1955,7 @@
             同样的档案、同样的域名，一轮开一轮关，比较阶段通过率与可用节点数。
             这是把实验能力转成正式功能前唯一可靠的验收依据。
           -->
-          <div class="card">
+          <div class="card" id="adaptiveCard">
             <h2><span class="dot"></span>🧪 自适应效果对照</h2>
             <p class="desc">
               同一档案、同一域名下「开启 / 关闭」自适应采样的分阶段通过率对照。

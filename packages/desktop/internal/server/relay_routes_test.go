@@ -87,7 +87,7 @@ func TestRelayRunValidation(t *testing.T) {
 		{"host": "", "wsPath": "/ws", "uuid": "u", "candidates": "1.2.3.4"},
 		{"host": "data.example.com", "wsPath": "", "uuid": "u", "candidates": "1.2.3.4"},
 		{"host": "data.example.com", "wsPath": "/ws", "uuid": "", "candidates": "1.2.3.4"},
-		{"host": "data.example.com", "wsPath": "/ws", "uuid": "u", "candidates": ""},
+		{"host": "data.example.com", "wsPath": "/ws", "uuid": "u", "candidates": "not-an-ip"},
 		{"host": "data.example.com", "wsPath": "/ws", "uuid": "u", "candidates": "2606:4700::1"},
 	}
 	for _, req := range cases {
@@ -96,6 +96,28 @@ func TestRelayRunValidation(t *testing.T) {
 			t.Fatalf("应该拒绝：%v → %d %v", req, code, body)
 		}
 	}
+}
+
+// 候选为空 → 回落到**内置清单**（随版本发布、用户不可修改）。
+//
+// 这条是「手上没有反代 IP 源也能开跑」的兜底，界面上的默认文案
+// （「反代＝内置 Proxy IP 源」）就是它。
+func TestRelayRunFallsBackToBuiltin(t *testing.T) {
+	s, base := newTestServer(t)
+	s.SetStore(newEmptyStore(t))
+	cookie := loginCookie(t, s, base)
+
+	code, body := postJSON(t, base+"/api/relay/run", cookie, map[string]any{
+		"host": "data.example.com", "wsPath": "/ws", "uuid": "u", "candidates": "",
+	})
+	if code != http.StatusOK || body["ok"] != true || body["started"] != true {
+		t.Fatalf("空候选应回落到内置清单：%d %v", code, body)
+	}
+	if n, _ := body["count"].(float64); n < 10 {
+		t.Fatalf("内置清单候选数不足：%v", body["count"])
+	}
+	// 立刻取消：后台任务只验证「启动成功」，不必真的去连数据面
+	postJSON(t, base+"/api/relay/cancel", cookie, map[string]any{})
 }
 
 // TestRelayRunRejectsConcurrent 同一时刻只允许一个反代体检。

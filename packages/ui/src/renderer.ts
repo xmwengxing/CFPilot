@@ -2607,6 +2607,8 @@
           // 端口固定 443：Pages 的 HTTPS 入口，2053 等端口在部分网络会被阻断
           wsPath: path,
           probePath,
+          // 自定义候选：选「自定义列表」时跳过网段采样，直接用导入的 IP
+          candidates: sourceMode === 'custom' ? candidateText() : '',
           skipSpeed: $('optNoSpeed').checked,
           sample: Number($('optSample').value) || 6556,
           top: Number($('optTop').value) || 15,
@@ -3522,6 +3524,325 @@
   }
 
   /* ------------------------------------------------------------------ */
+  /* 优选页：二级页签 / 候选来源 / 反代优选                                */
+  /* ------------------------------------------------------------------ */
+
+  /** 当前选中的优选方向 */
+  let scanTab: 'entry' | 'relay' = 'entry'
+  /** 候选来源：默认（网段采样 / 内置清单）或自定义列表 */
+  let sourceMode: 'default' | 'custom' = 'default'
+  /** 反代体检「全通可取」的 IP（回填按钮用） */
+  let relayPicked: string[] = []
+
+  function bindScanSubtabs(): void {
+    const nav = document.getElementById('scanTabs')
+    if (!nav) return
+    nav.addEventListener('click', (ev) => {
+      const btn = (ev.target as HTMLElement | null)?.closest(
+        'button[data-scan-tab]'
+      ) as HTMLButtonElement | null
+      if (!btn) return
+      const next: 'entry' | 'relay' = btn.dataset.scanTab === 'relay' ? 'relay' : 'entry'
+      if (next === scanTab) return
+      scanTab = next
+      for (const b of nav.querySelectorAll('button[data-scan-tab]')) {
+        b.classList.toggle('active', (b as HTMLElement).dataset.scanTab === next)
+      }
+      const entryPanel = document.getElementById('scanPanelEntry')
+      const relayPanel = document.getElementById('scanPanelRelay')
+      if (entryPanel) entryPanel.hidden = next !== 'entry'
+      if (relayPanel) relayPanel.hidden = next !== 'relay'
+    })
+  }
+
+  /** 读当前候选文本框的内容 */
+  function candidateText(): string {
+    const el = document.getElementById('optCandidateText') as HTMLTextAreaElement | null
+    return el ? el.value : ''
+  }
+
+  /**
+   * 更新「已识别 N 个」提示。
+   *
+   * 提交前先看计数，避免「粘了 1000 行结果只认了 3 个」这种静默失败。
+   */
+  async function refreshCandidateHint(): Promise<void> {
+    const hint = document.getElementById('candidateHint')
+    if (!hint) return
+    const raw = candidateText().trim()
+    if (!raw) {
+      hint.textContent = '粘贴或导入后这里会显示识别结果。'
+      return
+    }
+    try {
+      const res = await window.cfpilot.parseRelayCandidates(raw)
+      const parts = ['已识别 ' + res.count + ' 个 IPv4']
+      if (res.skipped > 0) parts.push('跳过 ' + res.skipped + ' 条非 IPv4')
+      hint.textContent = parts.join('，')
+    } catch (err) {
+      hint.textContent = '识别失败：' + (err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  function bindCandidateSource(): void {
+    const modeSel = document.getElementById('optSourceMode') as HTMLSelectElement | null
+    const box = document.getElementById('customSourceBox')
+    const text = document.getElementById('optCandidateText') as HTMLTextAreaElement | null
+
+    const syncBox = (): void => {
+      sourceMode = modeSel && modeSel.value === 'custom' ? 'custom' : 'default'
+      if (box) box.hidden = sourceMode !== 'custom'
+    }
+    modeSel?.addEventListener('change', syncBox)
+    syncBox()
+
+    let timer: ReturnType<typeof setTimeout> | null = null
+    text?.addEventListener('input', () => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => void refreshCandidateHint(), 350)
+    })
+
+    // 本地文件：纯前端读取（FileReader），不经过后端
+    const fileInput = document.getElementById('fileImportInput') as HTMLInputElement | null
+    document.getElementById('btnImportFile')?.addEventListener('click', () => fileInput?.click())
+    fileInput?.addEventListener('change', () => {
+      const file = fileInput.files?.[0]
+      if (!file) return
+      const reader = new FileReader()
+      reader.onload = () => {
+        if (text) text.value = String(reader.result ?? '')
+        void refreshCandidateHint()
+        log('已导入文件：' + file.name, 'ok')
+      }
+      reader.onerror = () => log('读取文件失败', 'err')
+      reader.readAsText(file)
+      fileInput.value = ''
+    })
+
+    // 远程链接：交给**后端**拉取（界面直连会被 CORS 拦掉）
+    document.getElementById('btnImportUrl')?.addEventListener('click', () => {
+      const url = window.prompt('清单链接（http/https，上限 2MB）')
+      if (!url) return
+      void (async () => {
+        const hint = document.getElementById('candidateHint')
+        if (hint) hint.textContent = '正在拉取…'
+        try {
+          const res = await window.cfpilot.fetchRelayCandidates(url)
+          if (!res.ok) {
+            if (hint) hint.textContent = '导入失败：' + (res.error || '未知错误')
+            return
+          }
+          if (text) text.value = res.raw || ''
+          await refreshCandidateHint()
+          log('已从链接导入 ' + (res.count || 0) + ' 个 IP', 'ok')
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          if (hint) hint.textContent = '导入失败：' + msg
+        }
+      })()
+    })
+  }
+
+  /** 渲染反代体检结果表 */
+  function renderRelayResult(payload: CFPilotRelayResult): void {
+    const out = document.getElementById('relayOut')
+    const pushHint = document.getElementById('relayPushHint')
+    const appendBtn = document.getElementById('btnRelayPushAppend') as HTMLButtonElement | null
+    const overBtn = document.getElementById('btnRelayPushOverwrite') as HTMLButtonElement | null
+    const copyBtn = document.getElementById('btnRelayCopy') as HTMLButtonElement | null
+
+    relayPicked = payload.picked ?? []
+    const hasPicked = relayPicked.length > 0
+    if (appendBtn) appendBtn.disabled = !hasPicked
+    if (overBtn) overBtn.disabled = !hasPicked
+    if (copyBtn) copyBtn.disabled = !hasPicked
+
+    if (!payload.ok) {
+      if (out) out.textContent = '体检失败：' + (payload.error || '未知错误')
+      return
+    }
+    if (!out) return
+
+    out.textContent = ''
+    const head = document.createElement('p')
+    head.className = 'hint'
+    head.textContent =
+      '全通 ' + (payload.alwaysOk ?? 0) +
+      ' · 抖动 ' + (payload.flaky ?? 0) +
+      ' · 全挂 ' + (payload.neverOk ?? 0) +
+      ' · 期望 build ' + (payload.expectedBuild ?? '—')
+    out.appendChild(head)
+
+    const table = document.createElement('table')
+    const thead = document.createElement('thead')
+    thead.innerHTML =
+      '<tr><th>#</th><th>IP</th><th>成功%</th><th>轮次</th><th>隧道(ms)</th>' +
+      '<th>TLS(ms)</th><th>TLSP95</th><th>HTTP(ms)</th><th>失败原因</th></tr>'
+    table.appendChild(thead)
+    const tbody = document.createElement('tbody')
+    for (const [index, entry] of (payload.entries ?? []).entries()) {
+      const tr = document.createElement('tr')
+      const cells = [
+        String(index + 1),
+        entry.ip,
+        String(entry.successPct),
+        entry.passed + '/' + entry.rounds,
+        String(entry.tunnelMs),
+        String(entry.tlsMs),
+        String(entry.tlsP95),
+        String(entry.httpMs),
+        (entry.errors && entry.errors[0]) || '',
+      ]
+      for (const cell of cells) {
+        const td = document.createElement('td')
+        td.textContent = cell
+        tr.appendChild(td)
+      }
+      tbody.appendChild(tr)
+    }
+    table.appendChild(tbody)
+    out.appendChild(table)
+
+    if (pushHint) {
+      pushHint.textContent = hasPicked
+        ? '可写入 ' + relayPicked.length + ' 条（只含全通项）'
+        : '没有全通项，无法写入'
+    }
+  }
+
+  function bindRelay(): void {
+    const uuidInput = document.getElementById('optRelayUuid') as HTMLInputElement | null
+
+    document.getElementById('btnRelayFetchUuid')?.addEventListener('click', () => {
+      void (async () => {
+        try {
+          const res = await window.cfpilot.relayUUID()
+          if (!res.ok) {
+            log('读取 UUID 失败：' + (res.error || '未知错误'), 'err')
+            return
+          }
+          if (uuidInput && res.uuid) uuidInput.value = res.uuid
+          log('已从面板读取 UUID', 'ok')
+        } catch (err) {
+          log('读取 UUID 失败：' + (err instanceof Error ? err.message : String(err)), 'err')
+        }
+      })()
+    })
+
+    document.getElementById('btnRelayRun')?.addEventListener('click', () => {
+      void (async () => {
+        const host = $('optHost').value.trim()
+        const path = $('optPath').value.trim()
+        const uuid = uuidInput ? uuidInput.value.trim() : ''
+        if (!host || !path) {
+          log('请先填写 Worker 域名与 WS 路径（两个方向共用）', 'warn')
+          return
+        }
+        if (!uuid) {
+          log('请填写 UUID，或点「从面板读取」', 'warn')
+          return
+        }
+        const raw = candidateText().trim()
+        if (!raw) {
+          log('反代优选需要候选清单：把「候选来源」切到自定义列表并导入', 'warn')
+          return
+        }
+
+        const wrap = document.getElementById('relayProgressWrap')
+        const bar = document.getElementById('relayBar')
+        const progressText = document.getElementById('relayProgressText')
+        if (wrap) wrap.hidden = false
+        if (bar) bar.style.width = '0%'
+        if (progressText) progressText.textContent = '正在启动…'
+        const out = document.getElementById('relayOut')
+        if (out) out.textContent = '正在体检，请稍候…'
+        try {
+          const res = await window.cfpilot.runRelay({
+            host,
+            wsPath: path,
+            uuid,
+            rounds: Number($('optRelayRounds').value) || 2,
+            top: Number($('optRelayTop').value) || 10,
+            timeoutMs: Number($('optRelayTimeout').value) || 12000,
+            candidates: raw,
+          })
+          if (!res.ok) {
+            log('启动失败：' + (res.error || '未知错误'), 'err')
+            if (out) out.textContent = '启动失败：' + (res.error || '')
+            return
+          }
+          log('反代体检已启动：' + (res.count || 0) + ' 个候选', 'ok')
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          log('启动失败：' + msg, 'err')
+          if (out) out.textContent = '启动失败：' + msg
+        }
+      })()
+    })
+
+    document.getElementById('btnRelayCancel')?.addEventListener('click', () => {
+      void (async () => {
+        try {
+          await window.cfpilot.cancelRelay()
+          log('已请求取消', 'warn')
+        } catch {
+          /* 没有进行中的任务 */
+        }
+      })()
+    })
+
+    const pushTo = (mode: 'incremental' | 'overwrite'): void => {
+      void (async () => {
+        if (relayPicked.length === 0) {
+          log('没有可写入的 IP', 'warn')
+          return
+        }
+        const hint = document.getElementById('relayPushHint')
+        try {
+          const res = await window.cfpilot.pushRelayResults(relayPicked, mode)
+          if (!res.ok) {
+            if (hint) hint.textContent = '写入失败：' + (res.error || '未知错误')
+            return
+          }
+          if (hint) {
+            hint.textContent =
+              '✅ 已写入 ' + (res.written ?? relayPicked.length) + ' 条，池内共 ' + (res.total ?? '?') + ' 条'
+          }
+          log('已写入面板 ProxyIP 池（' + (mode === 'incremental' ? '增量' : '覆盖') + '）', 'ok')
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          if (hint) hint.textContent = '写入失败：' + msg
+        }
+      })()
+    }
+    document
+      .getElementById('btnRelayPushAppend')
+      ?.addEventListener('click', () => pushTo('incremental'))
+    document
+      .getElementById('btnRelayPushOverwrite')
+      ?.addEventListener('click', () => pushTo('overwrite'))
+    document.getElementById('btnRelayCopy')?.addEventListener('click', () => {
+      if (relayPicked.length === 0) return
+      copy(relayPicked.join('\n'))
+    })
+
+    window.cfpilot.onRelayProgress((p) => {
+      const bar = document.getElementById('relayBar')
+      const text = document.getElementById('relayProgressText')
+      const pct = p.total > 0 ? Math.round((p.done / p.total) * 100) : 0
+      if (bar) bar.style.width = pct + '%'
+      if (text) text.textContent = '进度 ' + p.done + '/' + p.total + ' · ' + p.ip + (p.ok ? ' ✓' : ' ✗')
+    })
+    window.cfpilot.onRelayResult((payload) => {
+      renderRelayResult(payload)
+      const bar = document.getElementById('relayBar')
+      if (bar) bar.style.width = payload.ok ? '100%' : '0%'
+      const text = document.getElementById('relayProgressText')
+      if (text) text.textContent = payload.ok ? '已完成' : '未完成'
+    })
+  }
+
+  /* ------------------------------------------------------------------ */
   /* 日志页                                                              */
   /* ------------------------------------------------------------------ */
 
@@ -4297,6 +4618,9 @@
     bindDeploy()
     bindChain()
     bindScan()
+    bindScanSubtabs()
+    bindCandidateSource()
+    bindRelay()
     bindHistory()
     bindExperimental()
     bindAdaptiveEffect()

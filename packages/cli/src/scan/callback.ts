@@ -103,10 +103,40 @@ export async function loginPanel(
 }
 
 /**
+ * 读取面板当前配置（只读；「增量写入」要先拿现值）。
+ *
+ * `PUT /api/v1/config` 收的是 partial patch，本身不需要先读；但**增量**语义
+ * 要求把新条目并进现值，所以这一步省不掉。
+ */
+export async function getPanelConfig(
+  panelHost: string,
+  password: string,
+  timeoutMs = 25000
+): Promise<{ ok: boolean; error?: string; config?: Record<string, unknown> }> {
+  const session = await loginPanel(panelHost, password, timeoutMs)
+  if (!session.ok) return { ok: false, error: session.error }
+  try {
+    const res = await fetch(session.base + '/api/v1/config', {
+      headers: { Cookie: session.cookie },
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    const text = await res.text().catch(() => '')
+    if (!res.ok) return { ok: false, error: `读取配置失败 HTTP ${res.status} ${text.slice(0, 160)}` }
+    try {
+      const parsed = JSON.parse(text) as { config?: Record<string, unknown> }
+      return { ok: true, config: parsed.config }
+    } catch {
+      return { ok: false, error: '配置接口返回的不是 JSON' }
+    }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/**
  * 打补丁式更新面板配置（`PUT /api/v1/config`，后端做合并）。
  *
  * 只发要改的字段 —— 接口收的是 **partial patch**，不需要先 GET 全量。
- * 用途：给 `scan relay` 临时打开 `relayProbe` 开关，测完再关回去。
  */
 export async function patchPanelConfig(
   panelHost: string,

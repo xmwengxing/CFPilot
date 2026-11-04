@@ -90,6 +90,7 @@ scan 选项:
                          筛不到时会明确提示「已放宽为全量」而不是静默忽略
   --cidr <a,b>           自定义网段（可重复，用逗号分隔）
   --ip-file <path>       使用本地 IP 列表文件
+  --ip-url <链接>        使用远程 IP 列表（http/https，上限 2MB，与 --ip-file 二选一）
   --max-latency <ms>     阶段一 TCP 延迟上限，默认 0（不限）
   --tls-timeout <ms>     阶段一 TLS 握手超时，默认 2000
                          超时不再重试（该 IP 在当前网络下就是不可用）
@@ -201,16 +202,24 @@ ${NAME} scan relay —— 反代入口（ProxyIP 池）候选的出站体检
 用法:
   ${NAME} scan relay --file <候选文件> --host <数据面域名> \\
                      --ws-path <WS 路径> --uuid <UUID> [选项]
+  ${NAME} scan relay --url <清单链接> --host <数据面域名> \\
+                     --ws-path <WS 路径> --uuid <UUID> \\
+                     --push incremental --panel <控制面> --panel-password ***
 
 选项:
   --file <path>          候选 IP 文件（每行一个，支持 CSV 与 # 注释）
+  --url <链接>           远程候选清单（http/https，上限 2MB），与 --file 二选一
   --host <domain>        数据面域名（隧道与 SNI 都用它）
   --ws-path <path>       数据面的 WebSocket 路径
-  --uuid <uuid>          VLESS UUID
+  --uuid <uuid>          VLESS UUID（隧道鉴权，必需）
   --rounds <n>           轮数，默认 2
   --timeout <ms>         单目标超时，默认 12000
   --out <path>           写出可**直接粘贴**进 ProxyIP 池的清单（只含全通项，按质量排序）
-  --top <n>              与 --out 配合：最多写几条，默认 10
+  --top <n>              与 --out / --push 配合：最多取几条，默认 10
+  --push <mode>          直接写入面板 ProxyIP 池：incremental 增量 / overwrite 覆盖
+                         需要同时给 --panel 与 --panel-password
+  --panel <domain>       控制面域名（--push 时必填）
+  --panel-password <pw>  面板登录密码（--push 时必填）
   --json                 输出机器可读 JSON
   --quiet                只输出结果
   -h, --help             显示本帮助

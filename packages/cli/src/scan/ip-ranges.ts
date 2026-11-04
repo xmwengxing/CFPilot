@@ -785,7 +785,11 @@ export function expandCidrs(cidrs: string[], options: IpRangeOptions = {}): stri
  * 用于 CSV 里**认列**：不能只看第一列，也不能用「像不像主机」来猜 ——
  * 表头的 `No`、`Amazon.com` 都会被误判。
  */
-function looksLikeIpLiteral(value: string): boolean {
+function looksLikeIpLiteral(rawValue: string): boolean {
+  if (!rawValue) return false
+  // 先剥掉 `#备注`：CSV 单元格里也可能带备注（`[2606:4700::1]:443#LAX`），
+  // 不剥会判定失败 → 整行被当成表头跳过，候选静默少一条。
+  const value = (rawValue.split('#')[0] ?? '').trim()
   if (!value) return false
   if (value.startsWith('[')) return /^\[[0-9a-fA-F:.]+\](?::\d{1,5})?$/.test(value)
   if (/^\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?$/.test(value)) {
@@ -858,4 +862,83 @@ export function readIpFile(text: string): string[] {
     out.push(line)
   }
   return out
+}
+
+/** 远程清单的**硬上限**：2MB 足够装下几万条 IP，再大基本是给错了链接 */
+export const IP_URL_MAX_BYTES = 2 * 1024 * 1024
+/** 远程清单拉取超时 */
+export const IP_URL_TIMEOUT_MS = 15_000
+
+/**
+ * 从远程链接拉取 IP 清单。
+ *
+ * ## 三条边界
+ *
+ * 1. **只收 http/https** —— 避免 `file://` 之类的本地读取被当成「导入」；
+ * 2. **流式读取 + 硬截断**：先看 `content-length`，实际读的时候再按字节计数拦截。
+ *    只看 content-length 不够（可以缺省或撒谎），一次性 `res.text()` 又会让
+ *    一个错链接把几 GB 读进内存；
+ * 3. **清洗复用 `readIpFile`** —— 远程清单的格式与本地文件完全一样
+ *    （CSV / 每行一个 / 带备注），两套解析必然漂移。
+ */
+export async function readIpUrl(
+  rawUrl: string,
+  timeoutMs = IP_URL_TIMEOUT_MS,
+  maxBytes = IP_URL_MAX_BYTES
+): Promise<string[]> {
+  const trimmed = rawUrl.trim()
+  let url: URL
+  try {
+    url = new URL(trimmed)
+  } catch {
+    throw new Error(`不是合法的链接：${trimmed}`)
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`只支持 http/https 链接，实际是 ${url.protocol}`)
+  }
+
+  let res: Response
+  try {
+    res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(timeoutMs) })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    throw new Error(`拉取失败：${msg}`)
+  }
+  if (!res.ok) throw new Error(`拉取失败 HTTP ${res.status} ${res.statusText}`.trim())
+
+  const declared = Number(res.headers.get('content-length') ?? '')
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new Error(
+      `清单过大：声明 ${(declared / 1024 / 1024).toFixed(1)} MB，上限 ${(maxBytes / 1024 / 1024).toFixed(1)} MB`
+    )
+  }
+
+  const decoder = new TextDecoder()
+  let text = ''
+  let total = 0
+  const reader = res.body?.getReader()
+  if (reader) {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value || value.byteLength === 0) continue
+      total += value.byteLength
+      if (total > maxBytes) {
+        try {
+          await reader.cancel()
+        } catch {
+          /* 已结束 */
+        }
+        throw new Error(`清单过大：超过 ${(maxBytes / 1024 / 1024).toFixed(1)} MB 上限`)
+      }
+      text += decoder.decode(value, { stream: true })
+    }
+  }
+  text += decoder.decode()
+
+  const list = readIpFile(text)
+  if (list.length === 0) {
+    throw new Error(`链接内容里没有可识别的 IP：${trimmed}`)
+  }
+  return list
 }

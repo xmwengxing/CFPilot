@@ -45,7 +45,7 @@ import {
   SPEED_URL_PRESETS,
   pickAvailableSpeedUrl,
 } from './speed-url'
-import { BUILTIN_IPV4_CIDRS, BUILTIN_IPV6_CIDRS, readIpFile } from './ip-ranges'
+import { BUILTIN_IPV4_CIDRS, BUILTIN_IPV6_CIDRS, readIpFile, readIpUrl } from './ip-ranges'
 
 /** 校验并归一化 WS 路径（导出供 `scan compare` 复用，避免两处实现漂移）。 */
 export function normalizeWsPath(raw: string | undefined, fallback: string): string {
@@ -206,9 +206,10 @@ async function resolveCandidatesFromArgs(
   extraHosts: readonly string[] = []
 ): Promise<CandidatePlan> {
   const ipFile = flagString(args, 'ip-file')
-  if (ipFile) {
-    const text = readFileSync(ipFile, 'utf8')
-    const candidates = readIpFile(text)
+  const ipUrl = flagString(args, 'ip-url')
+  if (ipFile || ipUrl) {
+    // 文件与链接只差「文本从哪来」：解析、清洗、计数全部走同一条路径
+    const candidates = ipFile ? readIpFile(readFileSync(ipFile, 'utf8')) : await readIpUrl(ipUrl)
     return {
       candidates,
       family: 'both',
@@ -219,7 +220,9 @@ async function resolveCandidatesFromArgs(
         v4: candidates.filter((ip) => !ip.includes(':')).length,
         v6: candidates.filter((ip) => ip.includes(':')).length,
       },
-      note: `候选来自文件 ${ipFile}（未做网段采样，也未做 IPv6 预检）`,
+      note: ipFile
+        ? `候选来自文件 ${ipFile}（未做网段采样，也未做 IPv6 预检）`
+        : `候选来自链接 ${ipUrl}（未做网段采样，也未做 IPv6 预检）`,
     }
   }
 

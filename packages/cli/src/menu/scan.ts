@@ -233,3 +233,96 @@ export async function menuScanPush(): Promise<void> {
   const { runScanCommand } = await import('../scan/command')
   await runScanCommand(makeArgs(flags))
 }
+
+/**
+ * 反代优选：出站链路体检。
+ *
+ * 与「本地优选」是**两个方向**：
+ *   - 本地优选测「你 → CF 边缘」（结果进订阅节点）
+ *   - 反代优选测「Worker → 候选代理 → CF」（结果进面板 ProxyIP 池，不进订阅）
+ *
+ * UUID 直接从面板配置读，不让用户手抄 —— 它随订阅分发、用户手里往往只有订阅链接。
+ */
+export async function menuRelayScan(): Promise<void> {
+  const cfg = loadConfig()
+  if (!cfg.dataHost || !cfg.panelHost) {
+    status('warn', '需要先有已部署的实例（缺数据面或控制面域名）')
+    return
+  }
+
+  process.stdout.write('\n')
+  box('反代优选（出站链路体检）', [
+    `${c.gray('数据面')} ${cfg.dataHost}`,
+    `${c.gray('控制面')} ${cfg.panelHost}`,
+    '验证候选代理能否把 SNI 转发到你的数据面',
+  ])
+  process.stdout.write('\n')
+
+  const source = await select<'file' | 'url'>('候选来源', [
+    { label: '本地文件（csv / txt）', value: 'file' },
+    { label: '远程链接', value: 'url' },
+  ])
+  if (source === null) return
+  const sourceValue = await ask(source === 'file' ? '文件路径' : '清单链接', { fallback: '' })
+  if (!sourceValue.trim()) {
+    status('warn', '需要候选清单')
+    return
+  }
+
+  const password = await ask('面板密码（用于读取 UUID 与写入 ProxyIP 池）', {
+    password: true,
+    allowEmpty: true,
+  })
+  if (!password) {
+    status('warn', '需要面板密码')
+    return
+  }
+
+  const { getPanelConfig } = await import('../scan/callback')
+  const cfgRes = await getPanelConfig(cfg.panelHost, password)
+  if (!cfgRes.ok) {
+    status('fail', `读取面板配置失败：${cfgRes.error}`)
+    return
+  }
+  const uuid = String(cfgRes.config?.uuid ?? '')
+  const wsPath = cfg.wsPath || String(cfgRes.config?.wsPath ?? '')
+  if (!uuid || !wsPath) {
+    status('warn', '面板配置里缺 uuid 或 wsPath，先在面板里确认实例配置')
+    return
+  }
+
+  const topStr = await ask('保留条数（写入/输出）', { fallback: '10' })
+  const roundsStr = await ask('轮数（每轮重测一次，抗抖动）', { fallback: '2' })
+
+  const push = await confirm('测完直接写入面板 ProxyIP 池？', true)
+  let pushMode: 'incremental' | 'overwrite' = 'incremental'
+  if (push) {
+    const picked = await select<'incremental' | 'overwrite'>('写入方式', [
+      { label: '增量（保留池里已有的）', value: 'incremental' },
+      { label: '覆盖（清空后写入）', value: 'overwrite' },
+    ])
+    if (picked === null) return
+    pushMode = picked
+  }
+
+  process.stdout.write('\n')
+  status('info', '开始出站体检…')
+  status('info', '每个候选都要走一条隧道，260 个约 3~4 分钟')
+  process.stdout.write('\n')
+
+  const flags: Record<string, string | boolean> = {
+    host: cfg.dataHost,
+    'ws-path': wsPath,
+    uuid,
+    rounds: roundsStr || '2',
+    top: topStr || '10',
+    panel: cfg.panelHost,
+    'panel-password': password,
+  }
+  if (source === 'file') flags.file = sourceValue.trim()
+  else flags.url = sourceValue.trim()
+  if (push) flags.push = pushMode
+
+  const { runRelayCommand } = await import('../scan/relay')
+  await runRelayCommand(makeArgs(flags))
+}

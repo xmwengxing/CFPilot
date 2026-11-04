@@ -34,7 +34,8 @@ import * as tls from 'node:tls'
 import { flagBool, flagNumber, flagString, type ParsedArgs } from '../shared/args'
 import { NAME, VERSION } from '../shared/version'
 import { SCAN_RELAY_HELP } from './help'
-import { readIpFile } from './ip-ranges'
+import { readIpFile, readIpUrl } from './ip-ranges'
+import { getPanelConfig, patchPanelConfig } from './callback'
 
 /** 同时探测几个候选（每条隧道是一个独立请求，不受 Worker 单请求 6 连接的限制） */
 const CONCURRENCY = 8
@@ -370,6 +371,7 @@ export async function runRelayCommand(args: ParsedArgs): Promise<void> {
   }
 
   const file = flagString(args, 'file')
+  const url = flagString(args, 'url')
   const host = flagString(args, 'host').trim().replace(/^https?:\/\//i, '').replace(/\/$/, '')
   const wsPath = flagString(args, 'ws-path')
   const uuid = flagString(args, 'uuid')
@@ -380,25 +382,50 @@ export async function runRelayCommand(args: ParsedArgs): Promise<void> {
   /** 产出可粘贴进 ProxyIP 池的清单（按质量排序，一行一个 IP） */
   const outPath = flagString(args, 'out')
   const topN = Math.max(1, flagNumber(args, 'top', 10))
+  /** 写入面板 ProxyIP 池：incremental（默认语义）/ overwrite */
+  const pushRaw = flagString(args, 'push').trim().toLowerCase()
+  const pushKind =
+    pushRaw === 'append' ? 'incremental' : pushRaw === 'replace' ? 'overwrite' : pushRaw
+  const panel = flagString(args, 'panel')
+  const panelPassword = flagString(args, 'panel-password')
 
-  if (!file || !host || !wsPath || !uuid) {
-    process.stderr.write('缺少参数：--file / --host / --ws-path / --uuid 都是必填\n')
+  if ((!file && !url) || !host || !wsPath || !uuid) {
+    process.stderr.write(
+      '缺少参数：--file 或 --url（二选一）、--host、--ws-path、--uuid 都是必填\n'
+    )
     process.stderr.write('用法见：cfpilot scan relay --help\n')
+    process.exit(1)
+  }
+  if (pushKind && pushKind !== 'incremental' && pushKind !== 'overwrite') {
+    process.stderr.write('✗ --push 只接受 incremental（增量）/ overwrite（覆盖）\n')
+    process.exit(1)
+  }
+  if (pushKind && (!panel || !panelPassword)) {
+    process.stderr.write('✗ --push 需要同时提供 --panel（控制面）与 --panel-password\n')
     process.exit(1)
   }
 
   let ips: string[]
+  let rawCount = 0
+  const sourceLabel = file ? `文件 ${file}` : `链接 ${url}`
   try {
-    ips = readIpFile(readFileSync(file, 'utf8')).filter((ip) => /^\d{1,3}(\.\d{1,3}){3}$/.test(ip))
+    const raw = file ? readIpFile(readFileSync(file, 'utf8')) : await readIpUrl(url)
+    rawCount = raw.length
+    // 反代入口是「明文 TCP + 按 SNI 转发」，端口固定 443，只接受 IPv4 ——
+    // IPv6 候选在这里没有意义，直接排除并在下面报告跳过条数。
+    ips = raw.filter((ip) => /^\d{1,3}(\.\d{1,3}){3}$/.test(ip))
   } catch (err) {
-    process.stderr.write(`✗ 读取候选文件失败：${err instanceof Error ? err.message : String(err)}\n`)
+    process.stderr.write(`✗ 读取候选失败：${err instanceof Error ? err.message : String(err)}\n`)
     process.exit(1)
     return
   }
   if (ips.length === 0) {
-    process.stderr.write(`✗ ${file} 里没有可读的 IPv4 候选\n`)
+    process.stderr.write(`✗ ${sourceLabel} 里没有可读的 IPv4 候选\n`)
     process.exit(1)
     return
+  }
+  if (rawCount > ips.length && !quiet) {
+    process.stderr.write(`已忽略 ${rawCount - ips.length} 条非 IPv4 条目\n`)
   }
 
   const wsUrl = `wss://${host}${wsPath.startsWith('/') ? wsPath : '/' + wsPath}`
@@ -481,13 +508,49 @@ export async function runRelayCommand(args: ParsedArgs): Promise<void> {
 
   // 产出可直接粘贴的清单：只取**全通**的，按 TLS 中位排序，最多 topN 条。
   // 池子不是越大越好 —— 每条都要参与拨号竞速，塞几百条反而拖慢选路。
+  const picked = aggregates
+    .filter((a) => a.successPct === 100)
+    .slice(0, topN)
+    .map((a) => a.ip)
   if (outPath) {
-    const picked = aggregates
-      .filter((a) => a.successPct === 100)
-      .slice(0, topN)
-      .map((a) => a.ip)
     writeFileSync(outPath, picked.join('\n') + (picked.length > 0 ? '\n' : ''), 'utf8')
     if (!quiet) process.stderr.write(`已写出 ${picked.length} 条到 ${outPath}\n`)
+  }
+
+  // ---- 写入面板 ProxyIP 池 ----
+  //
+  // 与「入口优选」的回填是两回事：那边写的是「手动优选 IP 池」（会进订阅、
+  // 每个 IP 变成一个节点），这里写的是 `proxyIp`（只是 Worker 的出站选路，
+  // **不进订阅**）。混用会把 260 个反代 IP 变成 260 个节点。
+  if (pushKind) {
+    if (picked.length === 0) {
+      if (!quiet) process.stderr.write('没有全通项，跳过写入面板\n')
+    } else {
+      const current = await getPanelConfig(panel, panelPassword)
+      if (!current.ok) {
+        process.stderr.write(`✗ 读取面板配置失败：${current.error}\n`)
+        process.exitCode = 1
+      } else {
+        const existing = String(current.config?.proxyIp ?? '')
+          .split(/[\n,;]+/)
+          .map((s) => s.trim())
+          .filter(Boolean)
+        const next = pushKind === 'overwrite' ? picked : [...new Set([...existing, ...picked])]
+        const written = await patchPanelConfig(panel, panelPassword, { proxyIp: next.join('\n') })
+        if (!written.ok) {
+          process.stderr.write(`✗ 写入面板失败：${written.error}\n`)
+          process.exitCode = 1
+        } else if (!quiet) {
+          const verb = pushKind === 'overwrite' ? '覆盖写入' : '增量写入'
+          const added = next.length - existing.length
+          process.stderr.write(
+            `已${verb}面板 ProxyIP 池：本次 ${picked.length} 条` +
+              (pushKind === 'overwrite' ? '' : `（新增 ${Math.max(0, added)} 条）`) +
+              `，池内共 ${next.length} 条\n`
+          )
+        }
+      }
+    }
   }
 
   if (asJson) {
@@ -498,7 +561,7 @@ export async function runRelayCommand(args: ParsedArgs): Promise<void> {
           tool: 'cfpilot',
           version: VERSION,
           command: 'scan relay',
-          params: { file, host, wsPath, rounds, targets: ips.length },
+          params: { source: sourceLabel, host, wsPath, rounds, targets: ips.length },
           expectedBuild,
           summary: { alwaysOk, neverOk, flaky: aggregates.length - alwaysOk - neverOk },
           results: aggregates,

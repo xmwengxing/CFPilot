@@ -70,11 +70,15 @@ describe('反代入口池汇总', () => {
     expect(result).toEqual([])
   })
 
-  it('内置表非空且与 vendor 同构', () => {
+  it('内置表非空，且是**固定 IP**（不再依赖 DoH 解析）', () => {
     expect(BUILTIN_RELAY_DOMAINS.length).toBeGreaterThan(0)
-    // 这组域名即内置反代表
-    expect(BUILTIN_RELAY_DOMAINS).toContain('proxyip.hk.cmliussss.net')
-    expect(BUILTIN_RELAY_DOMAINS).toContain('proxyip.jp.cmliussss.net')
+    // 内置表已从「若干第三方域名」换成实测过的固定 IP：
+    //   - 不再每次出站做 DoH 解析；
+    //   - 同一 colo 每次选中同一批入口，出口稳定（域名表会竞速挑到不同 IP，
+    //     同一会话的多个请求来自不同出口 → 触发目标站风控）。
+    for (const entry of BUILTIN_RELAY_DOMAINS) {
+      expect(entry).toMatch(/^\d{1,3}(\.\d{1,3}){3}$/)
+    }
   })
 
   it('去重：同一 IP 不重复出现', async () => {

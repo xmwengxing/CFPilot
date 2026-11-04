@@ -111,54 +111,72 @@ describe('sortEndpointsByRegion', () => {
 })
 
 describe('regionOfEntry：从入口字符串推断地区', () => {
-  it('内置域名 → 对应地区码', () => {
-    expect(regionOfEntry('proxyip.hk.cmliussss.net')).toBe('HK')
-    expect(regionOfEntry('proxyip.us.cmliussss.net')).toBe('US')
-    expect(regionOfEntry('proxyip.jp.cmliussss.net')).toBe('JP')
+  // 内置表已换成固定 IP（没有地区信息），地区排序逻辑本身仍要覆盖 ——
+  // 用自造表注入，测的是**函数行为**，不是内置内容。
+  const regions: Record<string, string> = {
+    'proxyip.hk.example.net': 'HK',
+    'proxyip.us.example.net': 'US',
+    'proxyip.jp.example.net': 'JP',
+    'proxyip.sg.example.net': 'SG',
+  }
+
+  it('表内入口 → 对应地区码', () => {
+    expect(regionOfEntry('proxyip.hk.example.net', regions)).toBe('HK')
+    expect(regionOfEntry('proxyip.us.example.net', regions)).toBe('US')
+    expect(regionOfEntry('proxyip.jp.example.net', regions)).toBe('JP')
   })
 
   it('大小写不敏感', () => {
-    expect(regionOfEntry('ProxyIP.HK.CMLiussss.net')).toBe('HK')
+    expect(regionOfEntry('ProxyIP.HK.example.net', regions)).toBe('HK')
   })
 
   it('带端口的域名也能识别', () => {
-    expect(regionOfEntry('proxyip.sg.cmliussss.net:443')).toBe('SG')
+    expect(regionOfEntry('proxyip.sg.example.net:443', regions)).toBe('SG')
   })
 
   it('IP 字面量 → 未知', () => {
-    expect(regionOfEntry('1.2.3.4')).toBe(UNKNOWN_REGION)
-    expect(regionOfEntry('2606:4700::1')).toBe(UNKNOWN_REGION)
+    expect(regionOfEntry('1.2.3.4', regions)).toBe(UNKNOWN_REGION)
+    expect(regionOfEntry('2606:4700::1', regions)).toBe(UNKNOWN_REGION)
   })
 
   it('陌生域名 → 未知', () => {
-    expect(regionOfEntry('my-relay.example.com')).toBe(UNKNOWN_REGION)
+    expect(regionOfEntry('my-relay.example.com', regions)).toBe(UNKNOWN_REGION)
   })
 })
 
-describe('selectRelayDomains：按地区邻接选域名', () => {
-  it('美国机房：美国域名排第一', () => {
-    const domains = selectRelayDomains('LAX', 3)
-    expect(domains[0]).toBe('proxyip.us.cmliussss.net')
+describe('selectRelayDomains：按地区邻接选入口', () => {
+  const table = [
+    'proxyip.hk.example.net',
+    'proxyip.us.example.net',
+    'proxyip.jp.example.net',
+    'proxyip.sg.example.net',
+  ]
+  const regions: Record<string, string> = {
+    'proxyip.hk.example.net': 'HK',
+    'proxyip.us.example.net': 'US',
+    'proxyip.jp.example.net': 'JP',
+    'proxyip.sg.example.net': 'SG',
+  }
+
+  it('美国机房：美国入口排第一', () => {
+    expect(selectRelayDomains('LAX', 3, table, regions)[0]).toBe('proxyip.us.example.net')
   })
 
-  it('香港机房：香港域名排第一', () => {
-    const domains = selectRelayDomains('HKG', 3)
-    expect(domains[0]).toBe('proxyip.hk.cmliussss.net')
+  it('香港机房：香港入口排第一', () => {
+    expect(selectRelayDomains('HKG', 3, table, regions)[0]).toBe('proxyip.hk.example.net')
   })
 
   it('limit=1 只返回当前地区', () => {
-    const domains = selectRelayDomains('SIN', 1)
-    expect(domains).toEqual(['proxyip.sg.cmliussss.net'])
+    expect(selectRelayDomains('SIN', 1, table, regions)).toEqual(['proxyip.sg.example.net'])
   })
 
-  it('未知机房时仍返回完整列表（顺序为表顺序）', () => {
-    const domains = selectRelayDomains(undefined, 100)
-    expect(domains.length).toBeGreaterThan(0)
-    expect(new Set(domains).size).toBe(domains.length) // 无重复
+  it('无地区信息时按表顺序（内置固定 IP 就是这种形态）', () => {
+    const ips = ['9.9.9.9', '1.1.1.1', '5.5.5.5']
+    expect(selectRelayDomains('LAX', 100, ips, {})).toEqual(ips)
   })
 
   it('limit=0 返回空', () => {
-    expect(selectRelayDomains('LAX', 0)).toEqual([])
+    expect(selectRelayDomains('LAX', 0, table, regions)).toEqual([])
   })
 })
 

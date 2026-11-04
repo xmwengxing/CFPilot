@@ -476,3 +476,52 @@ describe('端到端：默认配置渲染三种订阅', () => {
     expect(tags).toContain('优选域名')
   })
 })
+
+/**
+ * 回填备注 → 订阅节点名。
+ *
+ * 优选器写进备注的是 `IPv6_SJC圣何塞_491_6.12`（族_机房_延迟_速度），
+ * 节点名由 `nodeLabel` 拼装。这里锁两件事：
+ *   1. 机房**不能重复出现** —— 备注写的是 `SJC圣何塞`，展示名是 `圣何塞 SJC`，
+ *      两者字符串不相等，只比整串会让名字变成 `…圣何塞 圣何塞 SJC`；
+ *   2. 数字尾巴**只留下行速度** —— 延迟每轮都在变，写进名字既长又没用。
+ */
+describe('节点命名（回填备注 → 订阅节点名）', () => {
+  const makeCtx = (remark: string, colo: string, latency: number, speed: number): RenderContext => ({
+    nodes: [{ ip: '2606:4700::1', port: 443, remark, colo, latency, speed, source: 'local' }],
+    config,
+    domain: 'cfpilot.example.com',
+    port: 443,
+    ports: [443],
+    protocol: 'both',
+    transport: 'both',
+  })
+
+  const firstName = (ctx: RenderContext): string => {
+    const link = base64Decode(renderBase64(ctx)).split('\n').find((l) => l.startsWith('vless://'))
+    expect(link).toBeDefined()
+    return decodeURIComponent(link!.split('#')[1] ?? '')
+  }
+
+  it('机房只出现一次，数字尾巴只保留速度', () => {
+    const name = firstName(makeCtx('IPv6_SJC圣何塞_491_6.12', 'SJC', 491, 6.12))
+    expect(name).toContain('IPv6_SJC圣何塞_6.12')
+    // 延迟值不再出现在节点名里
+    expect(name).not.toContain('491')
+    // 机房没有被追加第二遍
+    expect(name.match(/圣何塞/g) ?? []).toHaveLength(1)
+    expect(name).not.toContain('圣何塞 SJC')
+  })
+
+  it('IPv4 同样适用', () => {
+    const name = firstName(makeCtx('IPv4_LAX洛杉矶_120_35.5', 'LAX', 120, 35.5))
+    expect(name).toContain('IPv4_LAX洛杉矶_35.5')
+    expect(name.match(/洛杉矶/g) ?? []).toHaveLength(1)
+  })
+
+  it('未带机房的普通备注仍会补上机房展示名', () => {
+    const name = firstName(makeCtx('我的节点', 'HKG', 12, 5))
+    expect(name).toContain('我的节点')
+    expect(name).toContain('香港 HKG')
+  })
+})

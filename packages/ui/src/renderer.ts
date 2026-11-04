@@ -1774,20 +1774,43 @@
       const reportButton = document.createElement('button')
       reportButton.type = 'button'
       reportButton.className = 'btn btn-ghost'
-      reportButton.textContent = '查看'
+      reportButton.textContent = '质量报告'
+      reportButton.setAttribute('aria-expanded', 'false')
       reportButton.disabled = !payload.sessionId
       reportCell.appendChild(reportButton)
       tr.appendChild(reportCell)
+      tbody.appendChild(tr)
+
+      // 报告展开行（默认收起）—— 与「优选历史」同一种模式：
+      // 点按钮在表格下方展开独立一行显示完整报告，再点收起。
+      // 早前直接画在「质量报告」这一列里，列宽只有按钮那么宽，
+      // 报告内容被挤成一条竖线，根本读不了。
+      const reportRow = document.createElement('tr')
+      reportRow.hidden = true
+      const reportDetail = document.createElement('td')
+      reportDetail.colSpan = 7
+      reportDetail.style.whiteSpace = 'normal'
+      reportRow.appendChild(reportDetail)
+      tbody.appendChild(reportRow)
+      let reportLoaded = false
       reportButton.addEventListener('click', async () => {
-        if (!payload.sessionId) return
+        reportRow.hidden = !reportRow.hidden
+        reportButton.setAttribute('aria-expanded', String(!reportRow.hidden))
+        if (reportRow.hidden || reportLoaded || !payload.sessionId) return
+        reportDetail.textContent = '正在读取本地报告…'
         reportButton.disabled = true
         try {
           const result = await window.cfpilot.getIPQualityReport({ sessionId: payload.sessionId, ip: e.ip, port: e.port })
-          if (result.ok && result.report) renderIPQualityReport(reportCell, result.report)
-          else reportButton.title = result.error || '报告不可用'
-        } finally { reportButton.disabled = false }
+          if (result.ok && result.report) {
+            reportLoaded = true
+            renderIPQualityReport(reportDetail, result.report)
+          } else {
+            reportDetail.textContent = result.error || '报告不可用'
+          }
+        } finally {
+          reportButton.disabled = false
+        }
       })
-      tbody.appendChild(tr)
     })
     table.hidden = payload.entries.length === 0
 
@@ -2828,14 +2851,18 @@
   let historySessions: ScanHistorySession[] = []
 
   /**
-   * 当前展开的会话 id（手风琴式：同一时刻只展开一个）。
+   * 当前展开的会话 id 集合（**可同时展开多个**）。
    *
-   * 为什么只允许展开一个：复测要用**该次会话保存的域名 / WS 路径**，
-   * 跨会话勾选可能来自不同域名，混在一起复测会打到错误的 SNI 上。
+   * 早前是手风琴式（只允许展开一个），理由是「复测要用该次会话保存的域名 /
+   * WS 路径，跨会话混一起会打到错误的 SNI」。但用户实际需要「把几次优选里
+   * 最好的 IP 挑出来一起复制 / 一起复测」—— 手风琴式让这件事无法操作。
+   *
+   * 现在改为允许多个同时展开，复测**按会话分组**分别调用后端（每组用该会话
+   * 自己的 host / wsPath），既支持跨批次选择，也不会打错 SNI。
    */
-  let historyExpandedId = ''
+  let historyExpandedIds = new Set<string>()
 
-  /** 展开会话内勾选的 IP（键 = ip:port） */
+  /** 勾选的 IP（键 = ip:port；**跨会话共享**，可跨批次一起复制 / 复测） */
   let historyChecked = new Set<string>()
 
   function historyKey(ip: string, port: number): string {
@@ -2853,10 +2880,19 @@
         return
       }
       historySessions = res.sessions ?? []
-      // 展开中的会话可能已被删除 / 裁剪出容量，此时收起
-      if (historyExpandedId && !historySessions.some((s) => s.id === historyExpandedId)) {
-        historyExpandedId = ''
-        historyChecked.clear()
+      // 展开中的会话可能已被删除 / 裁剪出容量，此时收起（勾选集同步剔除）
+      const alive = historySessions.map((s) => s.id)
+      let pruned = false
+      for (const id of [...historyExpandedIds]) {
+        if (!alive.includes(id)) {
+          historyExpandedIds.delete(id)
+          pruned = true
+        }
+      }
+      if (pruned) {
+        const aliveKeys = new Set<string>()
+        for (const s of historySessions) for (const e of s.entries) aliveKeys.add(historyKey(e.ip, e.port))
+        for (const key of [...historyChecked]) if (!aliveKeys.has(key)) historyChecked.delete(key)
       }
       renderScanHistory()
     } catch (err) {
@@ -2908,7 +2944,7 @@
 
       const arrow = document.createElement('span')
       arrow.className = 'arrow'
-      arrow.textContent = historyExpandedId === sess.id ? '▾' : '▸'
+      arrow.textContent = historyExpandedIds.has(sess.id) ? '▾' : '▸'
       head.appendChild(arrow)
 
       const at = document.createElement('span')
@@ -2943,15 +2979,15 @@
       head.appendChild(del)
 
       head.addEventListener('click', () => {
-        // 切换展开时清空勾选：勾选集只对展开的会话有意义
-        historyExpandedId = historyExpandedId === sess.id ? '' : sess.id
-        historyChecked.clear()
+        // 切换展开时**保留**勾选：允许多个批次同时展开、跨批次一起复制 / 复测
+        if (historyExpandedIds.has(sess.id)) historyExpandedIds.delete(sess.id)
+        else historyExpandedIds.add(sess.id)
         renderScanHistory()
       })
       item.appendChild(head)
 
       // ---- 展开体：条目表（含勾选与最近复测状态）----
-      if (historyExpandedId === sess.id) {
+      if (historyExpandedIds.has(sess.id)) {
         const body = document.createElement('div')
         body.className = 'history-body'
         body.appendChild(buildHistoryTable(sess))
@@ -2969,16 +3005,18 @@
     const thead = document.createElement('thead')
     const hrow = document.createElement('tr')
 
-    // 表头 checkbox = 本会话全选 / 全不选
+    // 表头 checkbox = 本会话全选 / 全不选（只影响本会话，不碰其它批次的勾选）
     const thCheck = document.createElement('th')
     const selAll = document.createElement('input')
     selAll.type = 'checkbox'
-    selAll.checked = sess.entries.length > 0 && historyChecked.size === sess.entries.length
+    const sessKeys = sess.entries.map((e) => historyKey(e.ip, e.port))
+    selAll.checked = sessKeys.length > 0 && sessKeys.every((k) => historyChecked.has(k))
+    selAll.indeterminate = !selAll.checked && sessKeys.some((k) => historyChecked.has(k))
     selAll.addEventListener('change', () => {
       if (selAll.checked) {
-        for (const e of sess.entries) historyChecked.add(historyKey(e.ip, e.port))
+        for (const k of sessKeys) historyChecked.add(k)
       } else {
-        historyChecked.clear()
+        for (const k of sessKeys) historyChecked.delete(k)
       }
       renderScanHistory()
     })
@@ -3313,11 +3351,28 @@
     })
   }
 
-  /** 展开会话里被勾选的条目 */
+  /**
+   * 被勾选的条目（**跨会话**，按会话倒序取首次出现）。
+   *
+   * 同一 IP 出现在多次优选里时只保留**最近一次**那条 —— 指标更新，
+   * 复制出来的备注也才不会重复。
+   */
+  function selectedHistoryPairs(): Array<{ sess: ScanHistorySession; entry: ScanHistoryEntry }> {
+    const out: Array<{ sess: ScanHistorySession; entry: ScanHistoryEntry }> = []
+    const seen = new Set<string>()
+    for (const sess of historySessions) {
+      for (const entry of sess.entries) {
+        const key = historyKey(entry.ip, entry.port)
+        if (!historyChecked.has(key) || seen.has(key)) continue
+        seen.add(key)
+        out.push({ sess, entry })
+      }
+    }
+    return out
+  }
+
   function selectedHistoryEntries(): ScanHistoryEntry[] {
-    const sess = historySessions.find((s) => s.id === historyExpandedId)
-    if (!sess) return []
-    return sess.entries.filter((e) => historyChecked.has(historyKey(e.ip, e.port)))
+    return selectedHistoryPairs().map((p) => p.entry)
   }
 
   function updateHistoryButtons(): void {
@@ -3340,73 +3395,117 @@
         log('请先在历史里勾选 IP', 'warn')
         return
       }
-      const lines = sel.map((e) => e.ip + ':' + e.port + '#' + (e.colo || 'CF') + (e.city || ''))
+      // 每行 `IP:Port#备注`，备注与面板回填**完全同格式**：
+      //   `[2606:4700::1]:443#IPv6_SJC圣何塞_491_6.12`
+      //   `104.16.1.1:443#IPv4_LAX洛杉矶_120_35.5`
+      //
+      // 三个细节缺一不可：
+      //   1. IPv6 必须带方括号 —— 否则 `2606:4700::1:443` 无法解析成 host:port；
+      //   2. 必须带族标记（`IPv4_`/`IPv6_`）—— 订阅节点名前缀与面板分族都靠它；
+      //   3. 必须带**延迟与速度两个数字** —— 面板的 `parseScannerRemark`
+      //      靠「末尾两个连续数字」识别这是优选结果，少一个就会把速度当延迟，
+      //      机房 / 延迟 / 速度三列与国家筛选一起失效。
+      const lines = sel.map((e) => {
+        const host = e.ip.includes(':') ? '[' + e.ip + ']' : e.ip
+        const family = e.ip.includes(':') ? 'IPv6' : 'IPv4'
+        const tag = (e.colo || 'CF') + (e.city || '')
+        const latency = Number.isFinite(e.latency) && e.latency > 0 ? Math.round(e.latency) : 0
+        const speed = Number.isFinite(e.speed) && e.speed > 0 ? e.speed : 0
+        return host + ':' + e.port + '#' + family + '_' + tag + '_' + latency + '_' + speed
+      })
       copy(lines.join('\n'))
-      log('已复制 ' + sel.length + ' 个 IP（IP:Port#机房）', 'ok')
+      log('已复制 ' + sel.length + ' 个 IP（IP:Port#族_机房_延迟_速度）', 'ok')
     })
 
     // 复测选中：分层校验（TCP → TLS → WS101，可选测速），结论写回历史
     const reBtn = document.getElementById('btnHistoryRetest') as HTMLButtonElement | null
     const hint = document.getElementById('historyHint')
     reBtn?.addEventListener('click', async () => {
-      const sess = historySessions.find((s) => s.id === historyExpandedId)
-      if (!sess) {
-        log('请先展开一次历史记录', 'warn')
-        return
-      }
-      const sel = selectedHistoryEntries()
-      if (sel.length === 0) {
+      const pairs = selectedHistoryPairs()
+      if (pairs.length === 0) {
         log('请先勾选要复测的 IP', 'warn')
         return
       }
 
-      const targets = sel.map((e) => ({ ip: e.ip, port: e.port }))
+      // 按会话分组：复测必须用**该次会话**保存的域名 / WS 路径。
+      // 跨批次勾选时每组各用各的参数，否则会打到错误的 SNI 上。
+      const groups = new Map<
+        string,
+        { sess: ScanHistorySession; targets: Array<{ ip: string; port: number }> }
+      >()
+      for (const { sess, entry } of pairs) {
+        let group = groups.get(sess.id)
+        if (!group) {
+          group = { sess, targets: [] }
+          groups.set(sess.id, group)
+        }
+        group.targets.push({ ip: entry.ip, port: entry.port })
+      }
+
+      const total = pairs.length
       const withSpeed = $('optHistorySpeed').checked
       if (reBtn) reBtn.disabled = true
-      if (hint) {
-        hint.textContent =
-          '正在复测 ' + targets.length + ' 个 IP…（每 IP 最多约 ' + (withSpeed ? '10' : '6') + ' 秒）'
-      }
+      let okCount = 0
+      let doneCount = 0
+      const failures: string[] = []
       try {
-        const res = await window.cfpilot.reTestIps({
-          sessionId: sess.id,
-          // ⚠️ 必须用历史会话保存的参数，不是当前表单 ——
-          // 否则改过表单后复测会打到错误的域名 / 路径上。
-          host: sess.host,
-          wsPath: sess.wsPath,
-          probePath: sess.probePath,
-          withSpeed,
-          targets,
-        })
-        if (!res || !res.ok) {
-          const msg = (res && res.error) || '未知错误'
-          if (hint) hint.textContent = '复测失败：' + msg
-          log('复测失败：' + msg, 'err')
-          return
-        }
-        const results = res.results ?? []
-        // 把结论写进本地状态并重绘（后端也已写回历史文件）
-        for (const r of results) {
-          const e = sess.entries.find((x) => x.ip === r.ip && x.port === r.port)
-          if (e) {
-            e.lastTest = {
-              at: new Date().toISOString(),
-              tcpMs: r.tcpMs,
-              tlsMs: r.tlsMs,
-              wsOk: r.wsOk,
-              colo: r.colo,
-              speed: r.speed,
-              ok: r.ok,
-              error: r.error,
+        for (const { sess, targets } of groups.values()) {
+          if (hint) {
+            hint.textContent =
+              '正在复测 ' + targets.length + ' 个 IP…（' + sess.host +
+              '，剩余 ' + pairs.length + ' 个，每 IP 最多约 ' + (withSpeed ? '10' : '6') + ' 秒）'
+          }
+          try {
+            const res = await window.cfpilot.reTestIps({
+              sessionId: sess.id,
+              // ⚠️ 必须用历史会话保存的参数，不是当前表单 ——
+              // 否则改过表单后复测会打到错误的域名 / 路径上。
+              host: sess.host,
+              wsPath: sess.wsPath,
+              probePath: sess.probePath,
+              withSpeed,
+              targets,
+            })
+            if (!res || !res.ok) {
+              failures.push((res && res.error) || '未知错误')
+              continue
             }
+            const results = res.results ?? []
+            // 把结论写进本地状态并重绘（后端也已写回历史文件）
+            for (const r of results) {
+              doneCount += 1
+              if (r.ok) okCount += 1
+              const e = sess.entries.find((x) => x.ip === r.ip && x.port === r.port)
+              if (e) {
+                e.lastTest = {
+                  at: new Date().toISOString(),
+                  tcpMs: r.tcpMs,
+                  tlsMs: r.tlsMs,
+                  wsOk: r.wsOk,
+                  colo: r.colo,
+                  speed: r.speed,
+                  ok: r.ok,
+                  error: r.error,
+                }
+              }
+            }
+          } catch (err) {
+            failures.push(err instanceof Error ? err.message : String(err))
           }
         }
-        const okCount = results.filter((r) => r.ok).length
-        if (hint) hint.textContent = '✅ 复测完成：' + okCount + '/' + results.length + ' 可用。'
-        log(
-          '复测完成：' + okCount + '/' + results.length + ' 个 IP 可用',
-          okCount > 0 ? 'ok' : 'warn'
-        )
+
+        if (failures.length > 0) {
+          const msg = failures[0] ?? '未知错误'
+          if (hint) {
+            hint.textContent =
+              (doneCount > 0 ? '✅ 已复测 ' + doneCount + '/' + total + ' 个，' : '') +
+              '有 ' + failures.length + ' 个批次失败：' + msg
+          }
+          log('复测部分失败：' + msg, 'err')
+        } else {
+          if (hint) hint.textContent = '✅ 复测完成：' + okCount + '/' + doneCount + ' 可用。'
+          log('复测完成：' + okCount + '/' + doneCount + ' 个 IP 可用', okCount > 0 ? 'ok' : 'warn')
+        }
         renderScanHistory()
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
@@ -3890,6 +3989,12 @@
 
     window.cfpilot.onScanResult((payload) => {
       renderScanResult(payload)
+      // 优选结束 → 总进度条收尾到 100%。
+      //
+      // ⚠️ 早前只有**失败**路径会调 `finishScanProgress`，成功时进度条永远停在
+      // 最后一条日志映射出的百分比上（常见是「处理中 · 总进度 1%」）——
+      // 桌面版跑完优选后进度条一直卡着，就是这里漏了收尾。
+      finishScanProgress(payload.entries.length > 0)
       // 优选成功后端已自动留底 —— 顺手刷新历史列表，
       // 用户不用手动点「刷新」就能看到刚跑完的这批结果。
       if (payload && payload.entries && payload.entries.length > 0) {

@@ -1112,15 +1112,26 @@ function resolveGroups(ctx: RenderContext): PoolGroup[] {
 }
 
 function nodeLabel(entry: NodeEntry, protocol: string, index: number, groupName = ''): string {
-  const base = entry.remark && !/^[\d.]+$/.test(entry.remark) ? entry.remark : entry.ip
+  const raw = entry.remark && !/^[\d.]+$/.test(entry.remark) ? entry.remark : entry.ip
+  // 扫描器备注形如 `IPv4_SJC圣何塞_491_6.12`（族_机房_延迟_速度）。
+  //
+  // 节点名**只保留下行速度**：延迟每轮都在变，写进名字既长又没有参考价值
+  // （客户端里能看到的延迟是实时值）。备注本身不动 —— 面板的机房 / 延迟 /
+  // 速度三列与国家筛选都靠 `parseScannerRemark` 读完整备注。
+  const scanner = /^(IPv[46])_(.+)_(\d+(?:\.\d+)?)_(\d+(?:\.\d+)?)$/.exec(raw)
+  const base = scanner ? `${scanner[1]}_${scanner[2]}_${scanner[4]}` : raw
   // 机房显示成「香港 HKG」而不是裸三字码 —— 优选结果里最常被问的就是「这个 HKG 是哪」。
   //
-  // ⚠️ 备注里已经带了城市（`IPv4_SJC圣何塞_…`）时**不能再追加一次**，
-  // 否则节点名变成 `…圣何塞 圣何塞 #1`。
+  // ⚠️ 备注里已经带了机房时**不能再追加一次**：
+  // 备注写的是 `SJC圣何塞`，而展示名是 `圣何塞 SJC`，两者字符串并不相等，
+  // 只比较整串会让节点名变成 `…圣何塞_491_6.12 圣何塞 SJC`。
+  // 所以判据用「备注里出现过这个三字码」而不是「备注等于展示名」。
   const label = entry.colo ? coloLabel(entry.colo) : ''
-  const colo = label && entry.colo !== base && !base.includes(label) ? ` ${label}` : ''
+  const code = entry.colo.toUpperCase()
+  const hasColo = code !== '' && (base.toUpperCase().includes(code) || (label !== '' && base.includes(label)))
+  const colo = label && entry.colo !== base && !hasColo ? ` ${label}` : ''
   // 备注以族标记开头（`IPv4_` / `IPv6_`）时前缀直接贴上、**不留空格** ——
-  // 节点名就是 `优选IPv4_SJC圣何塞_12_35.5 #1`；其它池仍用空格分隔。
+  // 节点名就是 `优选IPv4_SJC圣何塞_35.5 #1`；其它池仍用空格分隔。
   const tight = /^IPv[46]_/.test(base)
   const prefix = groupName ? `${groupName}${tight ? '' : ' '}` : ''
   return `${prefix}${base}${colo} #${index + 1}${protocol === 'trojan' ? ' Trojan' : ''}`

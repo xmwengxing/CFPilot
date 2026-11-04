@@ -287,6 +287,13 @@ interface Window {
        * 并在结果里给出「当前网络环境不具备 IPv6 测速条件」与排查建议。
        */
       family?: 'auto' | 'v4' | 'v6' | 'both'
+      /**
+       * 自定义候选（原始文本，留空则按网段采样）。
+       *
+       * 用户导入 csv / txt / 粘贴列表时走这里 —— 后端会跳过网段采样，
+       * 直接用清洗出来的 IP。
+       */
+      candidates?: string
     }): Promise<{
       /** 同上：Go 版异步执行时只返回 `started`，结果走 SSE 的 scan-result */
       ok?: boolean
@@ -576,6 +583,51 @@ interface Window {
     onLog(cb: (entry: CFPilotLogEntry) => void): () => void
     onDeployStatus(cb: (status: CFPilotDeployStatus) => void): () => void
     onScanResult(cb: (payload: CFPilotScanResult) => void): () => void
+    /* ---------------- 反代优选（出站链路体检） ---------------- */
+    /**
+     * 启动反代体检（异步：结果走 `onRelayResult`）。
+     *
+     * 与 `runScan` 不同，这里**不等结果** —— 一次体检要几分钟，
+     * 用 SSE 推送进度与终态更合适。
+     */
+    runRelay(params: {
+      host: string
+      wsPath: string
+      uuid: string
+      rounds?: number
+      top?: number
+      timeoutMs?: number
+      /** 原始候选文本（换行 / CSV / 带备注都支持） */
+      candidates: string
+    }): Promise<{ ok?: boolean; started?: boolean; count?: number; error?: string }>
+    cancelRelay(): Promise<{ ok: boolean; error?: string }>
+    /** 候选预览：返回可识别的 IPv4 与被跳过的条数 */
+    parseRelayCandidates(raw: string): Promise<{
+      candidates: string[]
+      count: number
+      skipped: number
+      total: number
+    }>
+    /** 由服务端拉取远程清单（界面直连会被 CORS 拦掉） */
+    fetchRelayCandidates(url: string): Promise<{
+      ok: boolean
+      raw?: string
+      candidates?: string[]
+      count?: number
+      skipped?: number
+      error?: string
+    }>
+    /** 从面板配置读 UUID / WS 路径 */
+    relayUUID(): Promise<{ ok: boolean; uuid?: string; wsPath?: string; error?: string }>
+    /** 写入面板 ProxyIP 池（incremental / overwrite） */
+    pushRelayResults(
+      ips: string[],
+      mode: 'incremental' | 'overwrite'
+    ): Promise<{ ok: boolean; written?: number; total?: number; error?: string }>
+    onRelayResult(cb: (payload: CFPilotRelayResult) => void): () => void
+    onRelayProgress(
+      cb: (p: { done: number; total: number; ip: string; ok: boolean }) => void
+    ): () => void
     onUpdateProgress(
       cb: (p: {
         received: number
@@ -613,8 +665,37 @@ interface IPv6EnvInfo {
   advice?: string[]
 }
 
-interface CFPilotScanResult {
-  entries: Array<{
+/** 反代体检：单个候选的多轮汇总 */
+interface CFPilotRelayEntry {
+  ip: string
+  rounds: number
+  passed: number
+  successPct: number
+  tunnelMs: number
+  tlsMs: number
+  tlsP95: number
+  httpMs: number
+  errors?: string[] | null
+}
+
+/**
+ * 反代体检的终态（SSE `relay-result`）。
+ *
+ * `picked` 是「全通」里质量最好的前 N 条，界面直接用它回填 ProxyIP 池。
+ */
+interface CFPilotRelayResult {
+  ok: boolean
+  error?: string
+  expectedBuild?: string
+  alwaysOk?: number
+  neverOk?: number
+  flaky?: number
+  picked?: string[]
+  entries?: CFPilotRelayEntry[]
+  at?: string
+}
+
+interface CFPilotScanResult {  entries: Array<{
     ip: string
     port: number
     colo: string

@@ -576,6 +576,54 @@
       return post('/api/scan/push-results', { lines: lines || [], mode: mode || 'replace' })
     },
 
+    /* ---------------- 反代优选（出站链路体检） ---------------- */
+
+    // 启动体检。**不等结果**：一次体检要几分钟，结果走 SSE 的 relay-result。
+    runRelay: function (params) {
+      const p = params || {}
+      return post('/api/relay/run', {
+        host: p.host || '',
+        wsPath: p.wsPath || '',
+        uuid: p.uuid || '',
+        rounds: p.rounds || 2,
+        top: p.top || 10,
+        timeoutMs: p.timeoutMs || 12000,
+        candidates: p.candidates || '',
+      })
+    },
+
+    cancelRelay: function () {
+      return post('/api/relay/cancel', {})
+    },
+
+    // 候选预览：让用户立刻看到「实际会被测多少个」。
+    parseRelayCandidates: function (raw) {
+      return post('/api/relay/parse-candidates', { raw: raw || '' })
+    },
+
+    // 远程导入：由**服务端**拉取（界面直连会被 CORS 拦掉）。
+    fetchRelayCandidates: function (url) {
+      return post('/api/relay/fetch-candidates', { url: url || '' })
+    },
+
+    // 从面板配置里读 UUID / WS 路径（用户手里通常只有订阅链接）。
+    relayUUID: function () {
+      return get('/api/relay/uuid')
+    },
+
+    // 写入面板 ProxyIP 池：incremental 增量 / overwrite 覆盖
+    pushRelayResults: function (ips, mode) {
+      return post('/api/relay/push-results', { ips: ips || [], mode: mode || 'incremental' })
+    },
+
+    onRelayResult: function (cb) {
+      return subscribe('relay-result', cb)
+    },
+
+    onRelayProgress: function (cb) {
+      return subscribe('relay-progress', cb)
+    },
+
     fetchScannerToken: function (host, password) {
       return post('/api/scan/scanner-token', {
         host: host || '',

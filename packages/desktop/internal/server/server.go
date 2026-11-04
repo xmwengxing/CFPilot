@@ -68,6 +68,8 @@ type Server struct {
 	deploy deployState
 	// scan 是优选任务状态（同一时刻只允许一个扫描）
 	scan scanState
+	// relay 是反代体检任务状态（同一时刻只允许一个）
+	relay relayState
 	// update 是更新下载状态
 	update updateState
 	// cfBase 覆盖 Cloudflare API 根地址（测试用；生产恒为空 → 走官方地址）
@@ -307,6 +309,9 @@ func (s *Server) routes() http.Handler {
 
 	// 优选 / 环境检测 API
 	s.registerScanRoutes(mux)
+
+	// 反代优选（出站链路体检）API
+	s.registerRelayRoutes(mux)
 
 	// 实验性功能开关（默认全部关闭）
 	s.registerExperimentalRoutes(mux)

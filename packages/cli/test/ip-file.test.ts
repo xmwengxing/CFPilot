@@ -8,7 +8,9 @@
  * 一个 CSV 表头被当成候选、一个裸 IP 被丢掉，都会让整轮优选白跑。
  */
 import { describe, expect, it } from 'vitest'
-import { readIpFile } from '../src/scan/ip-ranges'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { readIpFile, readIpUrl } from '../src/scan/ip-ranges'
 import { resolveCandidatePlan } from '../src/scan/candidates'
 
 describe('readIpFile（候选文件读取）', () => {
@@ -76,5 +78,100 @@ describe('自定义网段归一（--cidr）', () => {
     await expect(resolveCandidatePlan({ cidr: ['not-an-ip'], sample: 100 })).rejects.toThrow(
       /无法识别的网段\/IP/
     )
+  })
+})
+
+/**
+ * 远程清单导入。
+ *
+ * 三条边界都要锁住，否则一个错链接会以「候选 0 个」或「内存被打爆」的形式失败：
+ * 协议白名单、体积上限（声明值与实际字节两个口径）、内容必须真含 IP。
+ */
+describe('readIpUrl（远程清单）', () => {
+  /** 起一个只服务一次的本地 HTTP 服务，返回链接与关闭函数 */
+  async function serve(handler: Parameters<typeof createServer>[1]): Promise<{
+    url: string
+    close: () => Promise<void>
+  }> {
+    const server = createServer(handler)
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const { port } = server.address() as AddressInfo
+    return {
+      url: `http://127.0.0.1:${port}/list.txt`,
+      close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    }
+  }
+
+  it('正常清单按同样规则清洗（CSV 表头 / 备注 / IPv6 括号）', async () => {
+    const srv = await serve((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain' })
+      res.end(
+        [
+          'No,Proxy IP,Port',
+          '1,94.143.231.154,443',
+          '2,[2606:4700::1]:443#LAX',
+        ].join('\n')
+      )
+    })
+    try {
+      await expect(readIpUrl(srv.url)).resolves.toEqual(['94.143.231.154', '2606:4700::1'])
+    } finally {
+      await srv.close()
+    }
+  })
+
+  it('只接受 http/https', async () => {
+    await expect(readIpUrl('file:///etc/passwd')).rejects.toThrow(/http\/https/)
+    await expect(readIpUrl('不是链接')).rejects.toThrow(/不是合法的链接/)
+  })
+
+  it('HTTP 非 2xx 直接报错并带上状态码', async () => {
+    const srv = await serve((_req, res) => {
+      res.writeHead(404)
+      res.end('nope')
+    })
+    try {
+      await expect(readIpUrl(srv.url)).rejects.toThrow(/404/)
+    } finally {
+      await srv.close()
+    }
+  })
+
+  it('声明的 content-length 超上限就提前拒绝', async () => {
+    const srv = await serve((_req, res) => {
+      res.writeHead(200, { 'Content-Length': '999999' })
+      res.end('1.2.3.4\n')
+    })
+    try {
+      await expect(readIpUrl(srv.url, 5000, 100)).rejects.toThrow(/过大/)
+    } finally {
+      await srv.close()
+    }
+  })
+
+  it('没有 content-length 时按实际字节截断', async () => {
+    const srv = await serve((_req, res) => {
+      res.writeHead(200, { 'Transfer-Encoding': 'chunked' })
+      // 每行 8 字节，读够 100 字节上限之前必然超限
+      for (let i = 0; i < 50; i++) res.write(`1.2.3.${i % 256}\n`)
+      res.end()
+    })
+    try {
+      await expect(readIpUrl(srv.url, 5000, 100)).rejects.toThrow(/过大/)
+    } finally {
+      await srv.close()
+    }
+  })
+
+  it('内容是 HTML 之类没有 IP 时明确报错，而不是静默返回空', async () => {
+    const srv = await serve((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/html' })
+      res.end('<html><body>not found</body></html>')
+    })
+    try {
+      await expect(readIpUrl(srv.url)).rejects.toThrow(/没有可识别的 IP/)
+    } finally {
+      await srv.close()
+    }
   })
 })

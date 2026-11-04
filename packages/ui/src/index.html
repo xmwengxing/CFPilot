@@ -169,6 +169,28 @@
       box-shadow: 0 2px 10px rgba(59, 130, 246, 0.3);
     }
 
+    /*
+      页面内的二级页签（优选页用）。
+      刻意比主导航轻：主导航是「换页面」，这里是「换同一页里的配置面板」，
+      视觉上一重一轻，用户不会误以为切到了别的页面。
+    */
+    .subtabs {
+      display: inline-flex; gap: 4px; margin-bottom: 12px;
+      background: var(--bg-nav); border: 1px solid var(--border);
+      padding: 4px; border-radius: var(--radius-md);
+    }
+    .subtabs button {
+      background: transparent; border: none; border-radius: var(--radius-sm);
+      color: var(--text-secondary);
+      padding: 7px 18px; font-size: 13px; font-weight: 500;
+      font-family: inherit; cursor: pointer; transition: all .15s ease;
+    }
+    .subtabs button:hover { color: var(--text-main); background: var(--bg-hover); }
+    .subtabs button.active {
+      background: var(--bg-card); color: var(--text-main); font-weight: 600;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+    }
+
     /* --------------------------------------------------------------
        主体：页面区（滚动）+ 常驻日志面板
        -------------------------------------------------------------- */
@@ -1524,6 +1546,50 @@
 
         <!-- ============ 优选 ============ -->
         <section class="page" id="page-scan">
+          <!--
+            二级页签：两个方向共用数据面配置与日志通道，但**参数完全不同**：
+              入口优选 = 采样 CF 网段 + 分族 + 国家筛选 + 测速 → 结果进订阅
+              反代优选 = 导入候选清单 + 隧道体检 → 结果进 ProxyIP 池（不进订阅）
+            所以配置分开、结果卡共用，避免长成两套骨架。
+          -->
+          <div class="subtabs" id="scanTabs">
+            <button type="button" class="active" data-scan-tab="entry">入口优选</button>
+            <button type="button" data-scan-tab="relay">反代优选</button>
+          </div>
+
+          <!--
+            候选来源：两个方向都要「导入自己的 IP 列表」——
+            入口方向是「用清单代替 CF 网段采样」，反代方向是「测这批代理」。
+            同一套控件放页签外面，避免两份 DOM 与两套状态。
+          -->
+          <div class="card" id="sourceCard">
+            <h2><span class="dot"></span>📥 候选来源</h2>
+            <div class="row">
+              <div class="field">
+                <label title="默认：入口优选按网段权重采样 Cloudflare 候选；反代优选使用内置反代清单。&#10;自定义列表：直接用你导入的 IP，跳过网段采样。">来源</label>
+                <select id="optSourceMode">
+                  <option value="default">默认（入口＝网段采样 / 反代＝需用自定义列表）</option>
+                  <option value="custom">自定义列表</option>
+                </select>
+              </div>
+            </div>
+            <div id="customSourceBox" hidden>
+              <div class="row">
+                <div class="field" style="flex:1 1 100%">
+                  <label title="每行一个：IP、IP:Port、IP:Port#备注 都行；CSV 整行粘贴也可以（会自动找 IP 那一列）。">IP 列表</label>
+                  <textarea id="optCandidateText" rows="6" placeholder="1.2.3.4&#10;5.6.7.8:443&#10;9.9.9.9:443#SJC&#10;（也可以整行粘贴 CSV）"></textarea>
+                </div>
+              </div>
+              <div class="btn-row">
+                <button class="btn btn-ghost" id="btnImportFile">选择文件…</button>
+                <button class="btn btn-ghost" id="btnImportUrl">从链接导入…</button>
+                <input type="file" id="fileImportInput" accept=".csv,.txt,text/plain,text/csv" hidden />
+              </div>
+              <p class="hint" id="candidateHint">粘贴或导入后这里会显示识别结果。</p>
+            </div>
+          </div>
+
+          <div id="scanPanelEntry">
           <div class="card">
             <h2><span class="dot"></span>⚡ 本地真连接优选</h2>
             <p class="desc">
@@ -1724,6 +1790,67 @@
               包括 <b>TUN 模式</b>与<b>系统代理</b><br><br>
               如必须开启代理，请将本程序加入直连/绕过名单；
               点击<b>「检测网络环境」</b>可确认当前系统是否处于干扰/代理状态
+            </div>
+          </div>
+          </div><!-- /scanPanelEntry -->
+
+          <!-- ============ 反代优选（出站链路体检） ============ -->
+          <div id="scanPanelRelay" hidden>
+            <div class="card">
+              <h2><span class="dot"></span>↩️ 反代优选（出站链路体检）</h2>
+              <p class="desc">
+                验证候选代理能否把 <b>SNI 转发到你的数据面</b>。链路是
+                「本机 →（隧道）→ Worker → 候选代理 → Cloudflare → 你的数据面」，
+                由<b>本机</b>在这条隧道上完成 TLS 握手与请求。
+                只有证书按你的域名校验通过、<b>且</b>返回的 build 等于数据面自己的 build 才算通过。
+              </p>
+              <div class="row">
+                <div class="field">
+                  <label title="VLESS UUID，隧道鉴权用。点右侧按钮可直接从面板配置读取，不用手抄。">UUID</label>
+                  <div style="display:flex;gap:8px">
+                    <input type="text" id="optRelayUuid" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+                    <button class="btn btn-ghost" id="btnRelayFetchUuid" style="flex:0 0 auto">从面板读取</button>
+                  </div>
+                </div>
+                <div class="field">
+                  <label title="多轮取成功率抗抖动：每轮把所有候选重测一次。">轮数</label>
+                  <input type="number" id="optRelayRounds" value="2" min="1" max="5" />
+                </div>
+                <div class="field">
+                  <label title="只保留/写入全通的前 N 条。池子越大，Worker 的出站竞速越慢。">保留条数</label>
+                  <input type="number" id="optRelayTop" value="10" min="1" max="100" />
+                </div>
+                <div class="field">
+                  <label title="单个候选的总超时（隧道 + TLS + HTTP 三跳）。跨境链路通常 2~5 秒。">单条超时(ms)</label>
+                  <input type="number" id="optRelayTimeout" value="12000" min="3000" max="30000" step="1000" />
+                </div>
+              </div>
+              <div class="btn-row" style="margin-top:12px">
+                <button class="btn btn-primary" id="btnRelayRun">开始反代优选</button>
+                <button class="btn btn-ghost" id="btnRelayCancel">取消</button>
+              </div>
+              <div id="relayProgressWrap" hidden style="margin-top:8px">
+                <div class="progress"><i id="relayBar"></i></div>
+                <p class="tip" id="relayProgressText" style="margin:5px 0 0"></p>
+              </div>
+              <p class="tip" id="relayHint">
+                候选来自上方「候选来源」的自定义列表；结果写入面板
+                <b>ProxyIP 池</b>（只影响 Worker 出站选路，<b>不进订阅</b>）。
+              </p>
+            </div>
+
+            <div class="card">
+              <h2><span class="dot"></span>📋 反代结果</h2>
+              <div class="result-box" id="relayOut">暂无结果</div>
+              <div class="btn-row" style="margin-top:10px">
+                <button class="btn btn-ghost" id="btnRelayPushAppend" disabled
+                  title="保留面板 ProxyIP 池里已有的条目，只补真正新的。">增量写入 ProxyIP 池</button>
+                <button class="btn btn-ghost" id="btnRelayPushOverwrite" disabled
+                  title="清空面板 ProxyIP 池后写入这一批。">覆盖写入 ProxyIP 池</button>
+                <button class="btn btn-ghost" id="btnRelayCopy" disabled
+                  title="只复制 IP 列表到剪贴板，自行粘贴进面板。">复制 IP 列表</button>
+              </div>
+              <p class="hint" id="relayPushHint"></p>
             </div>
           </div>
 

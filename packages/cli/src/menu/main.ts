@@ -12,6 +12,7 @@ type Action =
   | 'deploy-update'
   | 'status'
   | 'scan'
+  | 'relay'
   | 'change-password'
   | 'token-check'
   | 'config'
@@ -43,6 +44,7 @@ export async function runMenu(): Promise<void> {
       { label: '更新现有实例', value: 'deploy-update', hint: '沿用凭据，只更新内核' },
       { label: '查看实例状态', value: 'status', hint: '读取线上部署信息' },
       { label: '本地优选（真连接测速）', value: 'scan', hint: '扫描可用 IP' },
+      { label: '反代优选（出站链路体检）', value: 'relay', hint: '测候选代理能否转发到你' },
       { label: '修改面板密码', value: 'change-password' },
       { label: '检查 Token 权限', value: 'token-check' },
       { label: '配置（Token / 账号 / KV）', value: 'config' },
@@ -77,6 +79,11 @@ export async function runMenu(): Promise<void> {
         case 'scan': {
           const { menuScan } = await import('./scan')
           await menuScan()
+          break
+        }
+        case 'relay': {
+          const { menuRelayScan } = await import('./scan')
+          await menuRelayScan()
           break
         }
         case 'change-password': {

@@ -816,7 +816,7 @@ func ParseCandidateList(raw string) []string {
 
 	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" {
+		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		// CSV 表头
@@ -825,7 +825,19 @@ func ParseCandidateList(raw string) []string {
 			continue
 		}
 
-		// CSV 行：取第一列
+		// ---- 表格行：只认「IP 字面量列」----
+		//
+		// ⚠️ 不能固定取第一列：带序号的清单（`No,Proxy IP,Port,...`）第一列是序号，
+		// 固定取第一列会把 `1` 当候选、把表头 `No` 当成域名收进来。
+		// 链接导入与面板导出的清单大多是这个形状，不认列序就会「解析出 0 个候选」。
+		if cols := splitTableCols(line); len(cols) > 1 {
+			if host, ok := pickTableAddress(cols); ok {
+				add(host)
+			}
+			continue
+		}
+
+		// ---- 单行：保持原有兼容（IP / IP:port / [IPv6]:port / 优选域名）----
 		fields := strings.FieldsFunc(line, func(r rune) bool {
 			return r == ',' || r == '\t' || r == ' ' || r == ';'
 		})
@@ -883,6 +895,92 @@ func ParseCandidateList(raw string) []string {
 		}
 	}
 	return out
+}
+
+// pickTableAddress 从一行表格里挑出地址列。
+//
+// 规则：
+//  1. 优先找**第一个 IP 字面量列** —— 带序号的清单（`No,Proxy IP,Port,...`）
+//     第一列是序号，固定取第一列会把 `1` 当候选、把表头 `No` 当域名收进来；
+//  2. 没有 IP 列时，退到「第一列是域名」的老形态（`cf.example.com,4,4,...`）。
+func pickTableAddress(cols []string) (string, bool) {
+	for _, cell := range cols {
+		if host, ok := ipLiteralHost(cell); ok {
+			return host, true
+		}
+	}
+	return domainHost(cols[0])
+}
+
+// domainHost 判断一个单元格是不是可用域名。
+//
+// ⚠️ **必须含 `.`** —— 否则表头里的 `No` / `Port` / `Proxy IP` 这类单词
+// 会被 isHostname 当成合法域名收进候选，白占探测额度。
+func domainHost(cell string) (string, bool) {
+	token := strings.TrimSpace(cell)
+	if idx := strings.Index(token, "#"); idx >= 0 {
+		token = strings.TrimSpace(token[:idx])
+	}
+	if !strings.Contains(token, ".") {
+		return "", false
+	}
+	// 点分四段纯数字只可能是 IPv4，解析不过就是无效输入，不能当域名收
+	if looksLikeIPv4(token) {
+		return "", false
+	}
+	if !isHostname(token) {
+		return "", false
+	}
+	return token, true
+}
+
+// splitTableCols 按**表格分隔符**切列（逗号 / 制表符 / 分号）。
+//
+// 刻意不切空格：表头里的 `Proxy IP` 是一个单元格，按空格切会拆出 `Proxy`、
+// `IP` 两个「像域名」的碎片，进而被当成候选加进来。
+func splitTableCols(line string) []string {
+	if !strings.ContainsAny(line, ",\t;") {
+		return nil
+	}
+	return strings.FieldsFunc(line, func(r rune) bool {
+		return r == ',' || r == '\t' || r == ';'
+	})
+}
+
+// ipLiteralHost 判断一个单元格是不是 IP 字面量，返回主机部分。
+//
+// 支持 `1.2.3.4`、`1.2.3.4:443`、裸 IPv6、`[IPv6]:port`，以及带 `#备注` 的写法。
+// **不接受域名** —— 表格行的语义是「某一列是地址」，域名不会出现在这类清单里，
+// 放开会让表头碎片混进候选。
+func ipLiteralHost(cell string) (string, bool) {
+	token := strings.TrimSpace(cell)
+	if idx := strings.Index(token, "#"); idx >= 0 {
+		token = strings.TrimSpace(token[:idx])
+	}
+	if token == "" {
+		return "", false
+	}
+	// [IPv6]:port / [IPv6]
+	if strings.HasPrefix(token, "[") {
+		if end := strings.Index(token, "]"); end > 0 {
+			host := token[1:end]
+			if net.ParseIP(host) != nil && strings.Contains(host, ":") {
+				return host, true
+			}
+		}
+		return "", false
+	}
+	// IPv4:port（只拆一个冒号，避免误伤 IPv6）
+	if strings.Count(token, ":") == 1 {
+		host, port, ok := strings.Cut(token, ":")
+		if ok && isAllDigits(port) && net.ParseIP(host) != nil {
+			return host, true
+		}
+	}
+	if ip := net.ParseIP(token); ip != nil {
+		return token, true
+	}
+	return "", false
 }
 
 // looksLikeIPv4 判断输入是不是「点分四段纯数字」形态。

@@ -283,7 +283,20 @@ func (s *Server) routes() http.Handler {
 	if err != nil {
 		panic(err)
 	}
-	mux.Handle("/", http.FileServer(http.FS(sub)))
+	fileServer := http.FileServer(http.FS(sub))
+	// ⚠️ 必须禁缓存。
+	//
+	// 界面跑在**系统浏览器**里，而监听端口是固定的（换版本后通常还是同一个端口）
+	// → 同源。早前这里没设 Cache-Control，浏览器会把 index.html / renderer.js /
+	// adapter.js 缓存下来；换了 exe 之后就可能出现「新的 HTML + 旧的 JS」这种混合
+	// 状态：旧 adapter 没有新方法 → 初始化在 bindRelay 处抛错 → 后面的
+	// `refreshProfiles()` 不再执行 → 「凭据页的账户列表莫名其妙空了」，
+	// 而磁盘上的凭据其实完好无损。
+	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		fileServer.ServeHTTP(w, r)
+	}))
 
 	// 会话换取：首次访问带 ?t=<bootToken> 换 Cookie
 	mux.HandleFunc("/__session", s.handleSession)

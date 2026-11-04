@@ -3855,14 +3855,14 @@
       copy(relayPicked.join('\n'))
     })
 
-    window.cfpilot.onRelayProgress((p) => {
+    window.cfpilot.onRelayProgress?.((p) => {
       const bar = document.getElementById('relayBar')
       const text = document.getElementById('relayProgressText')
       const pct = p.total > 0 ? Math.round((p.done / p.total) * 100) : 0
       if (bar) bar.style.width = pct + '%'
       if (text) text.textContent = '进度 ' + p.done + '/' + p.total + ' · ' + p.ip + (p.ok ? ' ✓' : ' ✗')
     })
-    window.cfpilot.onRelayResult((payload) => {
+    window.cfpilot.onRelayResult?.((payload) => {
       renderRelayResult(payload)
       const bar = document.getElementById('relayBar')
       if (bar) bar.style.width = payload.ok ? '100%' : '0%'
@@ -4641,22 +4641,40 @@
       }
     }
 
-    bindProfiles()
-    bindRuntime()
-    bindCredentials()
-    bindDeploy()
-    bindChain()
-    bindScan()
-    bindScanSubtabs()
-    bindCandidateSource()
-    bindRelay()
-    bindHistory()
-    bindExperimental()
-    bindAdaptiveEffect()
-    bindUsage()
-    bindLogs()
-      bindUpdater()
-    bindPush()
+    // ⚠️ 每个 bind 都要**独立兜底**。
+    //
+    // 账户列表与凭据状态是在所有 bind 之后才加载的（见本函数末尾的
+    // `runStep('账户列表', refreshProfiles)`）。只要前面任何一个 bind 抛错，
+    // 后面的加载就全部不执行 —— 表现是「凭据页的账户列表空了、要重新添加令牌」，
+    // 而磁盘上的凭据其实完好。这里逐个 try/catch：一处坏掉不影响其余，
+    // 也不影响最终的数据加载。
+    const safeBind = (name: string, fn: () => void): void => {
+      try {
+        fn()
+      } catch (err) {
+        log(
+          '界面初始化「' + name + '」失败：' + (err instanceof Error ? err.message : String(err)),
+          'err'
+        )
+      }
+    }
+
+    safeBind('账户', bindProfiles)
+    safeBind('运行时状态', bindRuntime)
+    safeBind('凭据', bindCredentials)
+    safeBind('部署', bindDeploy)
+    safeBind('链式代理', bindChain)
+    safeBind('优选', bindScan)
+    safeBind('优选页签', bindScanSubtabs)
+    safeBind('候选来源', bindCandidateSource)
+    safeBind('反代优选', bindRelay)
+    safeBind('优选历史', bindHistory)
+    safeBind('实验性设置', bindExperimental)
+    safeBind('自适应对照', bindAdaptiveEffect)
+    safeBind('用量', bindUsage)
+    safeBind('日志', bindLogs)
+    safeBind('更新', bindUpdater)
+    safeBind('回填', bindPush)
 
     // 切到「日志」页时自动加载一次。
     //

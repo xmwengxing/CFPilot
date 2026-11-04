@@ -27,32 +27,30 @@ import {
   selectRelayDomains,
 } from '../src/outbound/relay'
 
-describe('内置反代域名精选（子请求预算）', () => {
-  it('默认只选 3 个域名（与 vendor 同构，不是 14 个全上）', () => {
-    expect(RELAY_DOMAIN_LIMIT).toBe(3)
-    expect(selectRelayDomains('HKG')).toHaveLength(3)
-    expect(selectRelayDomains(undefined)).toHaveLength(3)
+describe('内置反代入口精选', () => {
+  it('默认选 6 个入口（固定 IP 不需要 DoH，不再受子请求预算约束）', () => {
+    expect(RELAY_DOMAIN_LIMIT).toBe(6)
+    expect(selectRelayDomains('HKG')).toHaveLength(6)
+    expect(selectRelayDomains(undefined)).toHaveLength(6)
   })
 
-  it('当前 colo 地区排最前', () => {
+  it('内置表是固定 IP：选中项全部来自表内且无重复', () => {
     const picked = selectRelayDomains('HKG')
-    expect(picked[0]).toBe('proxyip.hk.第三方域名.net')
-    // 备用域名不能与当前地区重复
-    expect(new Set(picked).size).toBe(3)
+    expect(new Set(picked).size).toBe(picked.length)
     expect(picked.every((d) => BUILTIN_RELAY_DOMAINS.includes(d))).toBe(true)
+    for (const entry of picked) expect(entry).toMatch(/^\d{1,3}(\.\d{1,3}){3}$/)
   })
 
-  it('日本机房优先 JP，美国机房优先 US', () => {
-    expect(selectRelayDomains('NRT')[0]).toBe('proxyip.jp.第三方域名.net')
-    expect(selectRelayDomains('LAX')[0]).toBe('proxyip.us.第三方域名.net')
-  })
-
-  it('未知机房回落到 US 地区', () => {
-    expect(selectRelayDomains('ZZZ')[0]).toBe('proxyip.us.第三方域名.net')
+  it('没有地区信息时按表顺序取（顺序即实测质量排序）', () => {
+    // 内置表已从「地区域名」换成固定 IP：IP 没有地区信息，
+    // 选路退化为「表内顺序」，也就是我们的实测排序 —— 确定性、出口稳定。
+    expect(selectRelayDomains('HKG', 3)).toEqual(BUILTIN_RELAY_DOMAINS.slice(0, 3))
+    expect(selectRelayDomains('LAX', 3)).toEqual(BUILTIN_RELAY_DOMAINS.slice(0, 3))
+    expect(selectRelayDomains('ZZZ', 3)).toEqual(BUILTIN_RELAY_DOMAINS.slice(0, 3))
   })
 
   it('limit 可覆盖（测试 / 调试用）', () => {
-    expect(selectRelayDomains('HKG', 1)).toEqual(['proxyip.hk.第三方域名.net'])
+    expect(selectRelayDomains('HKG', 1)).toEqual([BUILTIN_RELAY_DOMAINS[0]])
     expect(selectRelayDomains('HKG', 99)).toHaveLength(BUILTIN_RELAY_DOMAINS.length)
   })
 

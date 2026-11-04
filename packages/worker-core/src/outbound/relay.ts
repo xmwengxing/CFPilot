@@ -56,14 +56,20 @@ export const UNKNOWN_REGION = '??'
 /**
  * 从入口字符串推断地区码。
  *
- * 只认内置表里的域名（`BUILTIN_RELAY_REGION`），其余（用户自配域名 / IP）
- * 一律返回未知 —— 我们无法可靠推断一个陌生域名挂在哪个地区。
+ * 只认内置表里的入口（`BUILTIN_RELAY_REGION`），其余（用户自配域名 / IP）
+ * 一律返回未知 —— 我们无法可靠推断一个陌生入口挂在哪个地区。
+ *
+ * `regions` 可注入：内置表现在是固定 IP、没有地区信息，
+ * 地区排序逻辑本身仍要能被测试覆盖（传入自造表）。
  */
-export function regionOfEntry(entry: string): string {
+export function regionOfEntry(
+  entry: string,
+  regions: Readonly<Record<string, string>> = BUILTIN_RELAY_REGION
+): string {
   const text = entry.trim().toLowerCase()
   // 去掉可能的端口后缀再匹配
   const bare = text.replace(/:\d{1,5}$/, '')
-  return BUILTIN_RELAY_REGION[bare] ?? UNKNOWN_REGION
+  return regions[bare] ?? UNKNOWN_REGION
 }
 
 /**
@@ -137,42 +143,66 @@ export function sortEndpointsByRegion(
  * （但用户自配的入口不受影响）。用 `useBuiltinRelay: false` 可完全关闭。
  */
 /**
- * 内置反代域名 → 地区码。
+ * 内置反代入口 → 地区码。
  *
- * 键顺序与 vendor 的 `Rt` 一致（当前地区不匹配时按此顺序取下一个）。
+ * ⚠️ 现在内置表是**已验证的固定 IP**，没有地区信息（IP 归属地要额外查库，
+ * 而那会把每次出站变成一次外部请求）。留空对象是有意的：
+ * `regionOfEntry()` 对不认识的入口返回 `UNKNOWN_REGION`，
+ * `selectRelayDomains()` 于是按**表内顺序**取前 N 个 —— 顺序就是实测质量排序，
+ * 既确定性又不会每次换出口。
  */
-export const BUILTIN_RELAY_REGION: Readonly<Record<string, string>> = {
-  'proxyip.hk.第三方域名.net': 'HK',
-  'proxyip.us.第三方域名.net': 'US',
-  'proxyip.sg.第三方域名.net': 'SG',
-  'proxyip.jp.第三方域名.net': 'JP',
-  'proxyip.kr.第三方域名.net': 'KR',
-  'proxyip.de.第三方域名.net': 'DE',
-  'proxyip.se.第三方域名.net': 'SE',
-  'proxyip.nl.第三方域名.net': 'NL',
-  'proxyip.fi.第三方域名.net': 'FI',
-  'proxyip.gb.第三方域名.net': 'GB',
-  'proxyip.oracle.第三方域名.net': 'Oracle',
-  'proxyip.digitalocean.第三方域名.net': 'DigitalOcean',
-  'proxyip.vultr.第三方域名.net': 'Vultr',
-  'proxyip.multacom.第三方域名.net': 'Multacom',
-}
+export const BUILTIN_RELAY_REGION: Readonly<Record<string, string>> = {}
 
+/**
+ * 内置反代入口（**固定 IP**，按实测质量排序）。
+ *
+ * ## 为什么从域名换成了固定 IP
+ *
+ * 早前这里放的是若干 `proxyip.*` 域名，每个域名 DoH 出几十个 IP、拨号时
+ * 竞速挑最快的 —— 于是**同一个客户端的不同请求可能从不同出口 IP 出去**。
+ * 需要登录 / 有会话的站点会看到「同一会话来自多个 IP」，直接触发风控
+ * （表现为大量安全验证甚至直接报错）。
+ *
+ * 现在换成固定 IP：
+ *   - 同一 colo 每次选中同一批入口 → 出口稳定；
+ *   - 不再需要 DoH 解析 → 省掉每次出站的子请求；
+ *   - 顺序即优先级，实测 TLS 握手 168~203ms。
+ *
+ * ## 这份表怎么来的
+ *
+ * 多源采集（`scripts/collect-relay-sources.mjs`）→ 全量实测
+ * （`cfpilot scan relay`：证书按本域校验 + 返回 build 必须匹配本实例）
+ * → 取全通里 TLS P95 最好的一批。**发版时重新跑一遍再更新**，
+ * 不写死任何第三方域名。
+ *
+ * ⚠️ 固定 IP 会随时间失效，所以只放前 24 条、保持冗余；
+ * 用户自配的 `proxyIp` / `relayPool` 优先级仍高于这里。
+ */
 export const BUILTIN_RELAY_DOMAINS: readonly string[] = [
-  'proxyip.hk.第三方域名.net',
-  'proxyip.jp.第三方域名.net',
-  'proxyip.sg.第三方域名.net',
-  'proxyip.us.第三方域名.net',
-  'proxyip.de.第三方域名.net',
-  'proxyip.gb.第三方域名.net',
-  'proxyip.kr.第三方域名.net',
-  'proxyip.nl.第三方域名.net',
-  'proxyip.se.第三方域名.net',
-  'proxyip.fi.第三方域名.net',
-  'proxyip.oracle.第三方域名.net',
-  'proxyip.digitalocean.第三方域名.net',
-  'proxyip.vultr.第三方域名.net',
-  'proxyip.multacom.第三方域名.net',
+  '192.18.136.255',
+  '128.121.31.252',
+  '129.159.37.136',
+  '23.144.12.63',
+  '216.36.86.62',
+  '45.133.117.185',
+  '38.84.201.228',
+  '109.120.142.219',
+  '45.140.167.43',
+  '5.253.188.139',
+  '216.36.82.31',
+  '167.253.96.90',
+  '194.87.62.139',
+  '23.144.20.184',
+  '128.121.31.58',
+  '104.238.154.77',
+  '38.244.150.113',
+  '155.248.181.189',
+  '216.36.82.141',
+  '64.181.255.215',
+  '31.25.239.66',
+  '45.76.246.192',
+  '23.95.113.61',
+  '151.244.201.207',
 ]
 
 /**
@@ -317,14 +347,14 @@ const BUILTIN_PER_DOMAIN = 4
 export const RELAY_BATCH_SIZE = 6
 
 /**
- * 默认选取的内置反代域名数。
+ * 单次出站选取几个内置反代入口。
  *
- * ⚠️ 与内置表一致：**当前 colo 地区 + 2 个备用**。
- * vendor 的 `Rt` 选择逻辑是 `[当前地区, ...其他].slice(0, 2)`，
- * 每个域名取 2/1 个 IP —— 少量但地区精确的候选，
- * 比 14 个域名全解析（42 次 DoH 子请求）可靠得多，也更省预算。
+ * ⚠️ 内置表已经是**固定 IP**，不需要 DoH 解析 —— 所以这里的上限不再受
+ * 「子请求预算」约束（早前 14 个域名全解析要 42+ 次 DoH，才压到 3 个）。
+ * 取 6 个：与 `RELAY_BATCH_SIZE` 对齐（一批最多 6 条并发），
+ * 既给了竞速足够的选择，又不会一次顶穿 `MAX_SIMULTANEOUS_CONNECTS`。
  */
-export const RELAY_DOMAIN_LIMIT = 3
+export const RELAY_DOMAIN_LIMIT = 6
 
 /** 当前地区域名取几个 IP（vendor: 2） */
 const CURRENT_REGION_IPS = 2
@@ -461,21 +491,24 @@ export interface RelayPoolOptions {
  */
 export function selectRelayDomains(
   colo: string | undefined | null,
-  limit: number = RELAY_DOMAIN_LIMIT
+  limit: number = RELAY_DOMAIN_LIMIT,
+  table: readonly string[] = BUILTIN_RELAY_DOMAINS,
+  regions: Readonly<Record<string, string>> = BUILTIN_RELAY_REGION
 ): string[] {
   const current = coloToCountry(colo)
 
   // 地区排序：当前机房所在国家 → 地理/线路邻近 → 其余。
   // 邻接关系见 REGION_ADJACENCY。
   const rank = rankRegions(current)
-  const regionRank = (domain: string): number => {
-    const region = BUILTIN_RELAY_REGION[domain]
+  const regionRank = (entry: string): number => {
+    const region = regions[entry]
     if (!region) return rank.length + 1
     const idx = rank.indexOf(region)
     return idx >= 0 ? idx : rank.length
   }
 
-  return BUILTIN_RELAY_DOMAINS.map((d, i) => ({ d, i, rank: regionRank(d) }))
+  return table
+    .map((d, i) => ({ d, i, rank: regionRank(d) }))
     .sort((x, y) => (x.rank !== y.rank ? x.rank - y.rank : x.i - y.i))
     .map((x) => x.d)
     .slice(0, Math.max(0, limit))

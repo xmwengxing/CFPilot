@@ -96,12 +96,21 @@ func (s *Server) handleRelayRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 反代入口是「明文 TCP + 按 SNI 转发」，端口固定 443，只接受 IPv4
-	all := scan.ParseCandidateList(req.Candidates)
-	candidates := make([]string, 0, len(all))
-	for _, ip := range all {
-		if !strings.Contains(ip, ":") && net.ParseIP(ip) != nil {
-			candidates = append(candidates, ip)
+	// 反代入口是「明文 TCP + 按 SNI 转发」，端口固定 443，只接受 IPv4。
+	//
+	// ⚠️ 候选为空时用**内置清单**（随版本发布、用户不可修改）：
+	// 多数用户手上没有反代 IP 源，不给兜底这个功能对他们是死的。
+	var candidates []string
+	if strings.TrimSpace(req.Candidates) == "" {
+		candidates = relay.BuiltinCandidates()
+		s.logf(fmt.Sprintf("反代体检使用内置候选清单：%d 条", len(candidates)))
+	} else {
+		all := scan.ParseCandidateList(req.Candidates)
+		candidates = make([]string, 0, len(all))
+		for _, ip := range all {
+			if !strings.Contains(ip, ":") && net.ParseIP(ip) != nil {
+				candidates = append(candidates, ip)
+			}
 		}
 	}
 	if len(candidates) == 0 {
@@ -127,7 +136,7 @@ func (s *Server) handleRelayRun(w http.ResponseWriter, r *http.Request) {
 	rounds := req.Rounds
 	top := req.Top
 
-	s.logf(fmt.Sprintf("开始反代体检：%s，候选 %d 个（已忽略 %d 条非 IPv4）", host, len(candidates), len(all)-len(candidates)))
+	s.logf(fmt.Sprintf("开始反代体检：%s，候选 %d 个", host, len(candidates)))
 
 	go func() {
 		defer func() {

@@ -3768,9 +3768,12 @@
           log('请填写 UUID，或点「从面板读取」', 'warn')
           return
         }
+        // 候选来源为「默认」时用内置清单（随版本发布），不需要用户填任何东西；
+        // 选「自定义列表」时才要求有内容。
+        const useBuiltin = sourceMode === 'default'
         const raw = candidateText().trim()
-        if (!raw) {
-          log('反代优选需要候选清单：把「候选来源」切到自定义列表并导入', 'warn')
+        if (!useBuiltin && !raw) {
+          log('候选来源选了「自定义列表」但内容为空：请粘贴/导入 IP，或切回「默认」用内置清单', 'warn')
           return
         }
 
@@ -3790,7 +3793,7 @@
             rounds: Number($('optRelayRounds').value) || 2,
             top: Number($('optRelayTop').value) || 10,
             timeoutMs: Number($('optRelayTimeout').value) || 12000,
-            candidates: raw,
+            candidates: useBuiltin ? '' : raw,
           })
           if (!res.ok) {
             log('启动失败：' + (res.error || '未知错误'), 'err')

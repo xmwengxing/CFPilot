@@ -1568,7 +1568,7 @@
               <div class="field">
                 <label title="默认：入口优选按网段权重采样 Cloudflare 候选；反代优选使用内置反代清单。&#10;自定义列表：直接用你导入的 IP，跳过网段采样。">来源</label>
                 <select id="optSourceMode">
-                  <option value="default">默认（入口＝网段采样 / 反代＝需用自定义列表）</option>
+                  <option value="default">默认（入口＝网段采样 / 反代＝内置 Proxy IP 源）</option>
                   <option value="custom">自定义列表</option>
                 </select>
               </div>
@@ -1836,7 +1836,8 @@
                 <p class="tip" id="relayProgressText" style="margin:5px 0 0"></p>
               </div>
               <p class="tip" id="relayHint">
-                候选来自上方「候选来源」的自定义列表；结果写入面板
+                候选来自上方「候选来源」：<b>默认</b>用内置 Proxy IP 源（随版本发布，用户不可修改），
+                也可以切到自定义列表粘贴 / 导入自己的 IP。结果写入面板
                 <b>ProxyIP 池</b>（只影响 Worker 出站选路，<b>不进订阅</b>）。
               </p>
             </div>

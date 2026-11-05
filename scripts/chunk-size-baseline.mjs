@@ -171,27 +171,27 @@ async function uplinkFrames(params, frameSize, total = 1024 * 1024) {
 
   return await new Promise((resolve) => {
     let done = false
-    let firstAt = 0
+    let firstResponseMs = null
+    const t0 = Date.now()
     const finish = (extra) => {
       if (done) return
       done = true
       clearTimeout(timer)
       try { ws.close() } catch {}
-      const span = firstAt > 0 ? (Date.now() - firstAt) / 1000 : 0
-      resolve({ frameSize, frames: frames.length, seconds: Number(span.toFixed(3)),
-        mbps: span > 0 ? Number((total / 1024 / 1024 / span).toFixed(2)) : 0, ...extra })
+      // ⚠️ 口径：`ws.send()` 在客户端只是把帧放进本地队列，
+      // 无法据此推算真实上行吞吐（那需要服务端回显确认）。
+      // 这里只记录「按该帧大小把固定工作量全部入队的耗时」用于横向比较。
+      resolve({ frameSize, frames: frames.length, enqueuedMs, firstResponseMs, ...extra })
     }
     const timer = setTimeout(() => finish({ wait: 'timeout' }), 30000)
-    ws.addEventListener('message', () => { if (firstAt === 0) firstAt = Date.now() })
+    ws.addEventListener('message', () => { if (firstResponseMs === null) firstResponseMs = Date.now() - t0 })
     ws.addEventListener('close', (ev) => finish({ closeCode: ev.code }))
     ws.addEventListener('error', () => finish({ wait: 'ws-error' }))
-    const t0 = Date.now()
-    firstAt = t0
     for (const f of frames) {
       if (ws.readyState !== 1) break
       ws.send(f)
     }
-    // 服务端不回显也不影响：这里测的是客户端 → 隧道的发送完成耗时
+    const enqueuedMs = Date.now() - t0
     setTimeout(() => finish({ stopped: 'sent-all' }), 1000)
   })
 }
@@ -212,8 +212,12 @@ async function main() {
       process.stderr.write(`上行帧 ${size / 1024} KB 第 ${i + 1} 轮 …\n`)
       runs.push(await uplinkFrames(params, size))
     }
-    const vals = runs.map((r) => r.mbps).filter((v) => v > 0).sort((a, b) => a - b)
-    report.uplink.push({ frameSize: size, runs, medianMBps: vals.length ? vals[Math.floor(vals.length / 2)] : 0 })
+    const vals = runs.map((r) => r.enqueuedMs).sort((a, b) => a - b)
+    report.uplink.push({
+      frameSize: size,
+      runs,
+      medianEnqueuedMs: vals.length ? vals[Math.floor(vals.length / 2)] : null,
+    })
   }
   writeFileSync(args.out, JSON.stringify(report, null, 2) + '\n')
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)

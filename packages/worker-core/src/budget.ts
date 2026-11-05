@@ -145,21 +145,39 @@ export async function relay(
    * 中止只是停止中继，**不由这里关闭目标** —— 关闭动作留给调用方，
    * 因为「目标」可能是 socket 写流（不该 close，见 `closeTarget` 的说明）。
    */
-  onChunk?: (bytes: number) => boolean
+  onChunk?: (bytes: number) => boolean,
+  /**
+   * 中继异常回调：区分「读上游失败」与「写目标失败」。
+   *
+   * 原先一个 catch 把所有异常吞成一句「忽略传输错误」，
+   * 于是客户端取消、上游重置、写入失败在诊断里长得一模一样。
+   * 不传时保持原有静默行为（调用方自行负责）。
+   */
+  onError?: (err: unknown, phase: 'read' | 'write') => void
 ): Promise<void> {
   const reader = a.getReader()
   const writer = b.getWriter()
   try {
     for (;;) {
       if (budget?.exhausted) break
-      const { done, value } = await reader.read()
-      if (done) break
+      let chunk: ReadableStreamReadResult<Uint8Array>
+      try {
+        chunk = await reader.read()
+      } catch (err) {
+        onError?.(err, 'read')
+        break
+      }
+      if (chunk.done) break
+      const value = chunk.value
       if (!value || value.byteLength === 0) continue
       if (onChunk?.(value.byteLength)) break
-      await writer.write(value)
+      try {
+        await writer.write(value)
+      } catch (err) {
+        onError?.(err, 'write')
+        break
+      }
     }
-  } catch {
-    /* 忽略传输错误 */
   } finally {
     if (closeTarget) {
       try {

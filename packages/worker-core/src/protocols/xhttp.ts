@@ -241,7 +241,27 @@ export async function handleXhttp(
     return true
   }
 
-  void relay(parsed.payload, dialResult.writable, undefined, false, onUpstreamChunk).catch(() => {
+  void relay(
+    parsed.payload,
+    dialResult.writable,
+    undefined,
+    false,
+    onUpstreamChunk,
+    (err, phase) => {
+      // 原先所有中继异常都被吞成一句「忽略传输错误」，
+      // 客户端取消、上游重置、写入失败在诊断里长得一模一样。
+      // 这里按「读/写阶段 + 错误形态」分类，写进 /__diag 的 xhttp 记录。
+      const message = err instanceof Error ? err.message : String(err)
+      let kind = `relay-${phase}`
+      if (/cancel|abort|closed/i.test(message)) kind = `relay-${phase}-client-cancel`
+      else if (/reset|broken pipe/i.test(message)) kind = `relay-${phase}-upstream-reset`
+      recordXhttpDiagnostics(
+        `${parsed.header.hostname}:${parsed.header.port}`,
+        { kind, message: message.slice(0, 200), candidate: dialResult.endpoint },
+        `XHTTP 中继${phase === 'read' ? '读上游' : '写目标'}失败（${kind}）：${message.slice(0, 120)}`
+      )
+    }
+  ).catch(() => {
     /* 客户端取消 / 出站已关闭：写入失败属预期，不构成未处理异常 */
   })
 

@@ -188,7 +188,7 @@ export async function routeDataPlane(
       })
     }
     if (!diagAuthorized(request, url, config.uuid)) return null
-    const { recentDiagnostics } = await import('../protocols/websocket-self')
+    const { recentDiagnostics, diagnosticCounters } = await import('../protocols/websocket-self')
     const { recentXhttpDiagnostics } = await import('../protocols/xhttp')
     return new Response(
       JSON.stringify(
@@ -200,6 +200,8 @@ export async function routeDataPlane(
           build: BUILD_VERSION,
           recent: recentDiagnostics(),
           xhttp: recentXhttpDiagnostics(),
+          // 纯内存计数：recent 只记录异常路径，正常连接的重拨/让步/超时靠这里看
+          counters: diagnosticCounters(),
         },
         null,
         2

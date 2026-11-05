@@ -46,6 +46,7 @@ const EXPORTABLE: ReadonlyArray<keyof UserConfig> = [
   'concurrentDial',
   'dataBudgetMB',
   'resolvePreferred',
+  'aggressiveRedial',
   'enableTrojan',
   'enableXhttp',
   'subProtocol',

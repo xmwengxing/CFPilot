@@ -47,6 +47,7 @@ const config: UserConfig = {
   concurrentDial: true,
   dataBudgetMB: 0,
   resolvePreferred: true,
+  aggressiveRedial: false,
   relayPool: '',
   useBuiltinRelay: true,
   subVariants: 'vless-ws',

@@ -52,6 +52,8 @@ export const DEFAULT_CONFIG: UserConfig = {
   concurrentDial: true,
   dataBudgetMB: 0,
   resolvePreferred: true,
+  // 默认保守：只修「直连假活」，不替用户在代理出口上擅自换路
+  aggressiveRedial: false,
   relayPool: '',
   useBuiltinRelay: true,
   enableTrojan: true,
@@ -156,6 +158,7 @@ export function configFromEnv(env: Env): UserConfig {
     concurrentDial: bool(env.TCP_CONCURRENT_DIAL, true),
     dataBudgetMB: num(env.DATA_BUDGET_MB, DEFAULT_CONFIG.dataBudgetMB),
     resolvePreferred: bool(env.RESOLVE_PREFERRED, DEFAULT_CONFIG.resolvePreferred),
+    aggressiveRedial: bool(env.AGGRESSIVE_REDIAL, DEFAULT_CONFIG.aggressiveRedial),
     relayPool: text(env.RELAY_POOL, ''),
     useBuiltinRelay: bool(env.USE_BUILTIN_RELAY, DEFAULT_CONFIG.useBuiltinRelay),
     enableTrojan: bool(env.ENABLE_TROJAN ?? env.TROJAN, DEFAULT_CONFIG.enableTrojan),
@@ -199,6 +202,7 @@ export function mergeConfig(base: UserConfig, override: Partial<UserConfig>): Us
     } else if (
       key === 'concurrentDial' ||
       key === 'resolvePreferred' ||
+      key === 'aggressiveRedial' ||
       key === 'useBuiltinRelay' ||
       key === 'enableTrojan' ||
       key === 'enableXhttp' ||

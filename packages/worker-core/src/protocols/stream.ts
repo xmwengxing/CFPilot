@@ -279,41 +279,69 @@ export function wsToByteStream(ws: WebSocket): ReadableStream<Uint8Array> {
 }
 
 /**
- * 下行背压的**让步点**。
+ * 下行发送的「让步点」。
  *
- * ## 为什么需要
+ * ## 平台事实
  *
- * 下行泵是「读一块就 `ws.send` 一块」的无脑转发：客户端比源头慢时，
- * 发送缓冲会一路堆高 —— 免费版 isolate 的内存上限是 32 MB，
- * 堆到头的结局是整条隧道被驱逐，比降速严重得多。
+ * Workers 的 `WebSocketPair` server 端**不提供 `bufferedAmount`**，也没有 drain
+ * 事件；`send()` 无返回值、无背压信号（官方类型声明与运行时实测一致）。
+ * 因此下面的 `awaitSendCapacity` 在真实运行时读到的恒为 `undefined`，
+ * 等价于一个空 return —— 保留它只是为了不破坏既有回归用例，
+ * **转发路径已不再调用**，改用 `DownlinkPacer`。
  *
- * ## 为什么它不会拖慢正常转发
+ * ## 现在的做法
  *
- * 1. 只读一次属性，不复制、不分配、不加锁；
- * 2. 阈值默认 **4 MB**，正常流量的瞬时缓冲远达不到，分支根本不进；
- * 3. 真触发时让出的是 `setTimeout(0)`（一次宏任务），不是固定毫秒 ——
- *    10 ms 那种写法在 100 Mbps 下一次就白丢 125 KB 进度；
- * 4. **运行时没实现 `bufferedAmount`（读到 `undefined`）时比较恒为 false**，
- *    整个函数等价于一个空 return —— 这是「拿不准就不改变行为」的底线。
- *
- * 这样做的效果是：把「内存推爆 → 隧道中断」换成「缓冲满时按 TCP 自然背压
- * 回压上游」，代价只在**真的过载**时出现。
+ * `DownlinkPacer` 按「自上次让步以来累计发送字节」周期性让出一次事件循环，
+ * 给运行时机会把已排队的帧刷出去。这是**主动让步**，不是响应式背压：
+ * 它感知不到客户端是否真的消费了数据，也不会把压力回传到上游 TCP。
+ * 真正防内存膨胀仍靠单连接流量上限与 isolate 级预算。
  */
 export const DOWNLINK_HIGH_WATER = 4 * 1024 * 1024
 
-/** 缓冲超阈值时让出一次事件循环，否则同步返回。 */
+/** 兼容用：缓冲超阈值时让出一次事件循环。转发路径已改用 DownlinkPacer。 */
 export async function awaitSendCapacity(
   ws: { readonly bufferedAmount?: number },
   highWater: number = DOWNLINK_HIGH_WATER
 ): Promise<void> {
-  // 两步判断：既让 TS 知道「可能没有这个属性」，
-  // 也把「运行时没实现 → 直接返回」写成显式分支（读到 undefined 时 return）。
   const buffered = ws.bufferedAmount
   if (typeof buffered !== 'number') return
   if (buffered <= highWater) return
   await new Promise<void>((resolve) => {
     setTimeout(resolve, 0)
   })
+}
+
+/** 每累计这么多下行字节，让出一次事件循环 */
+export const DOWNLINK_YIELD_BYTES = 1024 * 1024
+
+/**
+ * 不依赖运行时属性的下行节流器（每条连接一个实例）。
+ *
+ * `yieldOnce` 可注入，便于在不依赖定时器的单测里验证让步次数。
+ */
+export class DownlinkPacer {
+  private sinceYield = 0
+  private yields = 0
+
+  constructor(
+    private readonly threshold: number = DOWNLINK_YIELD_BYTES,
+    private readonly yieldOnce: () => Promise<void> = () =>
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, 0)
+      })
+  ) {}
+
+  async onChunk(bytes: number): Promise<void> {
+    this.sinceYield += bytes
+    if (this.sinceYield < this.threshold) return
+    this.sinceYield = 0
+    this.yields += 1
+    await this.yieldOnce()
+  }
+
+  get yieldCount(): number {
+    return this.yields
+  }
 }
 
 /** 字节流 → WebSocket 发送 */

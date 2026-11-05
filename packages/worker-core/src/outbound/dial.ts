@@ -532,8 +532,7 @@ function summarizeErrors(errors: readonly unknown[]): string {
  *
  * 语义保持不变：
  *   - 有人成功 → 立刻 resolve，不等同批其它候选；
- *   - **迟到的成功结果要 close 掉**，否则会泄漏一条已建立的 TCP 连接
- *     （Workers 的 `writable.close()` 等于关闭整个连接，这里正是需要的）；
+ *   - **迟到的成功结果要整条 Socket 关掉**，否则会泄漏一条已建立的 TCP 连接；
  *   - 整批失败才 reject，并带上每一批的失败原因。
  */
 function raceBatch(attempts: ReadonlyArray<() => Promise<DialResult>>): Promise<DialResult> {
@@ -548,11 +547,19 @@ function raceBatch(attempts: ReadonlyArray<() => Promise<DialResult>>): Promise<
       attempt().then(
         (result) => {
           if (settled) {
-            // 本批已经有别的候选赢了：关掉这条多余连接
+            // 本批已经有别的候选赢了：整条 Socket 一起关掉。
+            //
+            // ⚠️ 只关 writable 不够：`writable.close()` 不会中断另一头已经挂起的
+            // `reader.read()`，读任务要等运行时超时才回收；而且此刻 writer 可能
+            // 已被 `getWriter()` 锁住，`getWriter()` 会直接抛错并被吞掉 ——
+            // 这条落败连接实际上根本没关，白占单请求 6 条并发槽位之一。
+            // `DialResult.close()` 对应底层 `socket.close()`，同时关读写两端。
+            // 测试桩可能没有真实 Socket，才退回 `writable.close()`。
             try {
-              result.writable.getWriter().close()
+              const close = result.close
+              void Promise.resolve(close ? close() : result.writable.close()).catch(() => {})
             } catch {
-              /* 忽略：已关闭或 writable 已被锁定 */
+              /* 已关闭 */
             }
             return
           }

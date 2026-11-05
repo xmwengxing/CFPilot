@@ -25,7 +25,8 @@ import type { ProxyEndpoint } from '../outbound/proxy-pool'
 import { parseVlessBuffer, VLESS_COMMAND_UDP } from '../protocols/vless'
 import { parseTrojanBuffer, TROJAN_COMMAND_UDP } from '../protocols/trojan'
 import { DnsUdpSession } from './udp-dns'
-import { concatBytes, awaitSendCapacity } from '../protocols/stream'
+import { concatBytes, DownlinkPacer } from '../protocols/stream'
+import { canSwitchToBuiltinRelay } from './relay-guard'
 import { UplinkQueue } from './uplink-queue'
 import { dial, type DialResult } from '../outbound/dial'
 import { TrafficMeter } from '../budget'
@@ -144,6 +145,25 @@ const RECENT_DIAGNOSTICS: Array<{
 /** 保留条数 */
 const RECENT_DIAGNOSTICS_LIMIT = 20
 
+/**
+ * isolate 级诊断计数（纯内存，绝不写 KV）。
+ *
+ * `/__diag` 的 `recent` 只记录异常路径，正常连接不进；
+ * 这些计数器补上「重拨 / 护栏拦截 / 首包超时 / 下行让步」的发生次数，
+ * 让故障切换在真机上可观测、可对比。
+ */
+const DIAG_COUNTERS = {
+  stallRedials: 0,
+  eofRedials: 0,
+  guardedRedials: 0,
+  firstPacketTimeouts: 0,
+  downlinkYields: 0,
+}
+
+export function diagnosticCounters(): Readonly<typeof DIAG_COUNTERS> {
+  return { ...DIAG_COUNTERS }
+}
+
 /** 记录一次出站诊断（供 /__diag 端点查询） */
 export function recordDiagnostics(
   target: string,
@@ -182,6 +202,16 @@ export function recentDiagnostics(): Array<{
  * 给 2 秒足够覆盖慢网与分帧，又不至于让异常连接长期占用资源。
  */
 const HANDSHAKE_DEADLINE_MS = 2000
+
+/**
+ * WS 建立后等待**第一个字节**的上限。
+ *
+ * 与 `HANDSHAKE_DEADLINE_MS` 分层：后者只在「已收到字节但协议头不完整」时起，
+ * 覆盖不了「连上之后一个字节都不发」的连接（扫描器 / 僵死客户端）。
+ * 收到任意首字节即清除，established 之后绝不重启 —— 它不是空闲超时，
+ * SSH / 远程桌面这类正常长连接不能被误关。
+ */
+const FIRST_PACKET_TIMEOUT_MS = 8000
 
 interface WsTarget {
   command: number
@@ -274,6 +304,18 @@ export async function handleWebSocket(
   const uplink = new UplinkQueue()
   /** 握手截止定时器（**唯一一个**：绝不在每帧里新建） */
   let handshakeTimer: ReturnType<typeof setTimeout> | null = null
+  /** 首包等待定时器（WS 建立后零字节时关闭连接） */
+  let firstPacketTimer: ReturnType<typeof setTimeout> | null = null
+  const clearFirstPacketTimer = (): void => {
+    if (firstPacketTimer) {
+      clearTimeout(firstPacketTimer)
+      firstPacketTimer = null
+    }
+  }
+  /** 一条会话只允许一次重拨流程，避免静默定时器与 EOF 分支重复重放上行 */
+  let redialStarted = false
+  /** 下行主动让步节流器（不依赖运行时不存在的 bufferedAmount） */
+  const downlinkPacer = new DownlinkPacer()
   /** 下行 reader（清理时需要 cancel，否则读任务挂到运行时超时） */
   let downReader: ReadableStreamDefaultReader<Uint8Array> | null = null
   /** 是否已经进入关闭流程（closeWith 置位，用于让时间线后续步骤短路） */
@@ -351,6 +393,7 @@ export async function handleWebSocket(
     if (cleanupDone) return
     cleanupDone = true
     clearRetained()
+    clearFirstPacketTimer()
     if (handshakeTimer) {
       clearTimeout(handshakeTimer)
       handshakeTimer = null
@@ -480,13 +523,9 @@ export async function handleWebSocket(
       // 应用层协议），静默完全是**预期行为**：这时重拨既没有可重放的数据，
       // 又会让同一个请求在另一个上游连接上再走一遍。
       if (retainedBytes === 0) return
-      // 一个字节都没收到 —— 这条出站是假活，换反代入口重拨
-      recordDiagnostics(
-        `${target!.hostname}:${target!.port}`,
-        [],
-        `直连 ${DOWNLINK_STALL_MS}ms 无下行数据，改走反代入口`
-      )
-      void redialViaRelay()
+      // 一个字节都没收到：交给统一重拨入口做护栏判定与诊断。
+      // 静默定时器与秒级 EOF 两条触发路径必须共用同一套护栏，否则会漏。
+      void redialViaRelay('stall')
     }, DOWNLINK_STALL_MS)
     stallTimer = stall
 
@@ -503,9 +542,11 @@ export async function handleWebSocket(
             cutByTraffic()
             return
           }
-          // 下行背压：只在发送缓冲真堆到阈值时让出一次事件循环。
-          // 正常流量下它等价于读一个属性（不进分支），见 awaitSendCapacity。
-          await awaitSendCapacity(server)
+          // 平台不提供 bufferedAmount / drain，无法做响应式背压；
+          // 按累计字节周期性让出一次事件循环（见 DownlinkPacer）。
+          const beforeYields = downlinkPacer.yieldCount
+          await downlinkPacer.onChunk(value.byteLength)
+          if (downlinkPacer.yieldCount > beforeYields) DIAG_COUNTERS.downlinkYields++
           send(value)
         }
       }
@@ -523,7 +564,20 @@ export async function handleWebSocket(
       if (downReader === reader) downReader = null
       // 只有当前代的下行泵有权结束会话（旧泵在重拨后退出属于正常现象）；
       // 已经因流量熔断 / 客户端断开关闭过时也不再重复关。
-      if (generation === pumpGeneration && !closed) closeWith(1000, 'done')
+      if (generation !== pumpGeneration || closed) return
+      // 上游秒级 EOF / Reset：已发过上行却一个字节都没回，2500ms 静默窗口
+      // 根本没到就结束了。此时不能按正常结束收尸（close 1000 done），
+      // 否则反代重拨永远没机会触发 —— 真机采样里 6 个目标有 2 个命中这条。
+      if (
+        downlinkBytes === 0 &&
+        retainedBytes > 0 &&
+        relayRedialCount < MAX_RELAY_REDIAL &&
+        !redialStarted
+      ) {
+        void redialViaRelay('eof')
+        return
+      }
+      closeWith(1000, 'done')
     }
   }
 
@@ -677,6 +731,7 @@ export async function handleWebSocket(
       return
     }
     clearHandshakeTimer()
+    clearFirstPacketTimer()
     if (established) return
     established = true
     // 同步到外层作用域：反代重拨（redialViaRelay）需要它做诊断记录
@@ -832,8 +887,10 @@ export async function handleWebSocket(
    * TLS ClientHello / HTTP 首包不会丢。（此前 buffer 被 establish 提前清空，
    * 重放恒为空 —— 是 2026-10-27 代码核实确认的致命缺陷。）
    */
-  const redialViaRelay = async (): Promise<void> => {
-    // target 理论上一定已解析（本函数只在 establish 成功后由静默检测触发），
+  const redialViaRelay = async (trigger: 'stall' | 'eof'): Promise<void> => {
+    // 幂等：静默定时器与 EOF 分支可能几乎同时命中，只允许一次重放流程。
+    if (closed || redialStarted) return
+    // target 理论上一定已解析（本函数只在 establish 成功后触发），
     // 这里仍做空判断，避免未来重构把调用点提前。
     const targetInfo = target
     if (!targetInfo) {
@@ -845,7 +902,37 @@ export async function handleWebSocket(
       closeWith(1011, '出站无数据：直连与反代入口均无响应')
       return
     }
+    redialStarted = true
+
+    // 统一护栏：读的是**旧连接**的出口类型（此时 dialed 还没被覆盖）。
+    // 用户显式指定出口时，静默切到内置反代会绕过它且没有任何报错。
+    const verdict = canSwitchToBuiltinRelay({
+      via: dialed?.via,
+      port: targetInfo.port,
+      userProxyConfigured: proxies.length > 0 || Boolean(config.proxyIp),
+      aggressive: config.aggressiveRedial === true,
+    })
+    if (!verdict.allowed) {
+      DIAG_COUNTERS.guardedRedials++
+      recordDiagnostics(
+        `${targetInfo.hostname}:${targetInfo.port}`,
+        [],
+        `出站无数据：${verdict.reason}；未切换反代（可开启 aggressiveRedial）`
+      )
+      closeWith(1011, `出站无数据：${verdict.reason}`)
+      return
+    }
+
     relayRedialCount++
+    if (trigger === 'stall') DIAG_COUNTERS.stallRedials++
+    else DIAG_COUNTERS.eofRedials++
+    recordDiagnostics(
+      `${targetInfo.hostname}:${targetInfo.port}`,
+      [],
+      trigger === 'stall'
+        ? `直连 ${DOWNLINK_STALL_MS}ms 无下行数据，改走反代入口`
+        : '出站零下行即 EOF/Reset，立即改走反代入口'
+    )
 
     // 收反代入口候选：用户自配优先，其次内置表（按当前 colo 选地区）
     let endpoints: RelayEndpoint[] = []
@@ -899,6 +986,10 @@ export async function handleWebSocket(
           resolvePreferred: false,
           // 反代入口不是用户目标，不走目标地址策略（见 outbound/guard.ts）
           skipTargetPolicy: true,
+          // 激进模式下用户可能配了落地代理：连反代入口也要从同一出口出去，
+          // 不能借「重拨」之名静默绕开用户指定的代理。
+          proxies: config.aggressiveRedial ? proxies : undefined,
+          proxyMode: config.aggressiveRedial ? config.proxyMode : undefined,
         })
         if (!socket) continue
 
@@ -964,6 +1055,8 @@ export async function handleWebSocket(
       const bytes =
         typeof data === 'string' ? new TextEncoder().encode(data) : new Uint8Array(data as ArrayBuffer)
       if (bytes.byteLength === 0) return
+      // 收到任意首字节即解除首包等待；established 之后不再重启这个定时器
+      clearFirstPacketTimer()
 
       // 数据面流量熔断：上下行都计量，超限即断（0 = 不限制）
       if (traffic.add(bytes.byteLength)) {
@@ -1018,6 +1111,15 @@ export async function handleWebSocket(
   // 客户端在收到下行前不会再发帧，不主动触发会白等到超时。
   if (buffer.byteLength > 0) {
     void establish().catch((err) => closeWith(1011, String(err)))
+  } else {
+    // 零字节会话既不会进 establish，也不会启动协议头截止定时器。
+    // 没有这个定时器，连上 WS 却一个字节都不发的连接会一直占资源。
+    firstPacketTimer = setTimeout(() => {
+      firstPacketTimer = null
+      if (closed || established || buffer.byteLength > 0) return
+      DIAG_COUNTERS.firstPacketTimeouts++
+      closeWith(1008, '首包超时：未收到协议头')
+    }, FIRST_PACKET_TIMEOUT_MS)
   }
 
   // Node（vitest）的 Response 不接受 101 状态码，只有 workerd 支持；

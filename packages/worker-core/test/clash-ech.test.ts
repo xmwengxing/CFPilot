@@ -27,6 +27,7 @@ function makeConfig(over: Partial<UserConfig> = {}): UserConfig {
     poolManual: false, poolCountries: '', dls: 0, maxLatency: 0, maxNodes: 0,
     proxyIp: '', socks5: '', httpProxy: '', nat64: '', concurrentDial: true, dataBudgetMB: 0,
     resolvePreferred: true,
+    aggressiveRedial: false,
     relayPool: '',
     useBuiltinRelay: true,
     subVariants: 'vless-ws',

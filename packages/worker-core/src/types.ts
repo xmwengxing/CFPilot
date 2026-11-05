@@ -44,6 +44,11 @@ export interface Env {
   SOCKS5?: string
   /** HTTP 代理 host:port */
   HTTP_PROXY?: string
+  /**
+   * 允许对「已走落地代理」与「非 443/80 端口」的连接也做无下行自动重拨。
+   * 默认关闭：自动重拨可能让同一请求在另一个上游被重复执行。
+   */
+  AGGRESSIVE_REDIAL?: string
   /** NAT64 前缀，例如 64:ff9b:: */
   NAT64?: string
   /** 手动优选池 */
@@ -196,6 +201,13 @@ export interface UserConfig {
    * 关闭则只用手工配置的优选 IP，不产生额外 DoH 请求。
    */
   resolvePreferred: boolean
+  /**
+   * 无下行自动重拨的激进模式。
+   *
+   * 默认 false：只对「直连出口 + 443/80 端口」允许切换到内置反代入口。
+   * 置 true 会放开通道与端口限制，代价是可能产生重复请求。
+   */
+  aggressiveRedial: boolean
   /** 是否启用 Trojan 入站 */
   enableTrojan: boolean
   /** 是否启用 XHTTP 入站 */

@@ -107,6 +107,7 @@ describe('数据面出站池汇总（逻辑与 routes/data.ts 的 collectProxies
     concurrentDial: true,
     dataBudgetMB: 0,
     resolvePreferred: true,
+    aggressiveRedial: false,
     relayPool: '',
     useBuiltinRelay: true,
     subVariants: 'vless-ws',

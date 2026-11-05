@@ -56,6 +56,7 @@ function makeConfig(over: Partial<UserConfig> = {}): UserConfig {
     relayPool: '',
     useBuiltinRelay: false,
     resolvePreferred: false,
+    aggressiveRedial: false,
     enableTrojan: true,
     enableXhttp: false,
     subDomain: '',

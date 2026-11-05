@@ -65,6 +65,24 @@ function eofDialResult(via: 'direct' | 'socks5' = 'direct') {
   }
 }
 
+/** 先给一帧下行、再正常结束的 DialResult 桩 */
+function dataThenEofDialResult() {
+  return {
+    result: {
+      readable: new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(new Uint8Array([1, 2, 3]))
+          c.close()
+        },
+      }),
+      writable: new WritableStream<Uint8Array>(),
+      via: 'direct',
+      endpoint: '203.0.113.1:443',
+      close: vi.fn(),
+    },
+  }
+}
+
 function buildTrojanHeader(hostname: string, port: number): Uint8Array {
   const digest = createHash('sha224').update(PASSWORD).digest('hex')
   const name = new TextEncoder().encode(hostname)
@@ -145,6 +163,24 @@ describe('零字节首包超时', () => {
     await vi.advanceTimersByTimeAsync(8000)
     // 会话可以正常结束，但关闭原因不能是首包超时
     expect(server.closed?.reason ?? '').not.toContain('首包超时')
+  })
+})
+
+describe('正常结束的出口判据', () => {
+  it('收到下行后正常结束 → close reason 带 via 与 endpoint', async () => {
+    dialMock.mockReturnValue(Promise.resolve(dataThenEofDialResult().result))
+
+    await handleWebSocket(request, 'trojan', baseConfig, [], ctxStub)
+    const server = lastPair!.server
+    server.emit('message', { data: firstMessage().buffer })
+    await flush()
+    await new Promise((resolve) => setTimeout(resolve, 30))
+
+    expect(server.closed?.code).toBe(1000)
+    expect(server.closed?.reason).toContain('via=direct')
+    expect(server.closed?.reason).toContain('ep=203.0.113.1:443')
+    // 收到过响应就不该重拨
+    expect(dialMock).toHaveBeenCalledTimes(1)
   })
 })
 

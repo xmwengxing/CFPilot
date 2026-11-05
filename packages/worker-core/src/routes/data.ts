@@ -132,15 +132,16 @@ export async function routeDataPlane(
 
   // 出口地区端点（社区约定的 `GET /region` 形式）。
   //
-  // 报告当前请求落在哪个边缘机房、推断出哪个国家/地区，
-  // 以及反代入口的地区优先级。用途：
-  //   - 用户想知道「我的流量从哪出国」
-  //   - 排查「为什么这个地区连不上」（反代入口按地区选）
+  // 只报告当前请求落在哪个边缘机房、推断出哪个国家/地区。
   //
-  // ⚠️ 只读 GET 且不触碰 KV，因此放在 loadDataPlaneConfig 之前 ——
+  // ⚠️ 这里**不再返回反代入口的地区优先级**：那是出站策略细节，
+  // 对一个免鉴权的探测端点没有必要，还会额外暴露部署特征。
+  // 需要排查选路时改用要求完整 UUID 的 `/__diag`。
+  //
+  // 只读 GET 且不触碰 KV，因此放在 loadDataPlaneConfig 之前 ——
   // 避免为一个纯诊断请求付出一次 KV 读取。
   if (url.pathname === '/region' && request.method === 'GET') {
-    const { coloToCountry, rankRegions } = await import('../outbound/relay')
+    const { coloToCountry } = await import('../outbound/relay')
     const colo = (request as unknown as { cf?: { colo?: string } }).cf?.colo ?? ''
     const region = colo ? coloToCountry(colo) : ''
     return new Response(
@@ -149,8 +150,6 @@ export async function routeDataPlane(
           ok: true,
           colo,
           region,
-          // 反代入口的地区优先级：当前地区 → 邻接 → 其余
-          relayPreference: region ? rankRegions(region) : [],
           timestamp: new Date().toISOString(),
         },
         null,
@@ -188,7 +187,7 @@ export async function routeDataPlane(
       })
     }
     if (!diagAuthorized(request, url, config.uuid)) return null
-    const { recentDiagnostics, diagnosticCounters } = await import('../protocols/websocket-self')
+    const { recentDiagnostics, diagnosticCounters, recentRoutes } = await import('../protocols/websocket-self')
     const { recentXhttpDiagnostics } = await import('../protocols/xhttp')
     return new Response(
       JSON.stringify(
@@ -202,6 +201,8 @@ export async function routeDataPlane(
           xhttp: recentXhttpDiagnostics(),
           // 纯内存计数：recent 只记录异常路径，正常连接的重拨/让步/超时靠这里看
           counters: diagnosticCounters(),
+          // 最近几次出站实际落在哪个出口，用于区分直连与反代
+          routes: recentRoutes(),
         },
         null,
         2

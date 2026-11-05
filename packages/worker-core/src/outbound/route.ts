@@ -29,29 +29,59 @@
 
 import { isTargetBlockedError } from './guard'
 
-/** Cloudflare 官方网段（用于判定「这个 IP 连回 CF 自己」） */
+/**
+ * Cloudflare 官方公告的 IPv4 网段（15 条）。
+ *
+ * 判定表与「优选采样池」是两回事：采样池按实测可用率筛段（见
+ * `data/pools.ts`），判定表只回答「这个 IP 是不是落在 CF 自家网络里」，
+ * 与可用率无关。旧表把两类混在一起，漏了 `173.245.48.0/20` 与
+ * `190.93.240.0/20` 两条官方段，还把公共 DNS 误标成 CF 网段。
+ */
+export const CF_OFFICIAL_IPV4_RANGES: ReadonlyArray<readonly [string, number]> = [
+  ['103.21.244.0', 22],
+  ['103.22.200.0', 22],
+  ['103.31.4.0', 22],
+  ['104.16.0.0', 13],
+  ['104.24.0.0', 14],
+  ['108.162.192.0', 18],
+  ['131.0.72.0', 22],
+  ['141.101.64.0', 18],
+  ['162.158.0.0', 15],
+  ['172.64.0.0', 13],
+  ['173.245.48.0', 20],
+  ['188.114.96.0', 20],
+  ['190.93.240.0', 20],
+  ['197.234.240.0', 22],
+  ['198.41.128.0', 17],
+]
+
+/**
+ * 非官方公告、但本项目仍需降权的段。逐条注明来源，不静默保留。
+ */
+const CF_IPV4_SUPPLEMENT: ReadonlyArray<readonly [string, number]> = [
+  ['104.31.0.0', 15], // 历史实测补充：官方公告到 104.27，ARIN 分配块到 104.31
+  ['192.0.0.0', 24], // IANA 特殊用途段，历史上被一并降权
+  ['192.0.2.0', 24], // TEST-NET-1（文档示例地址）
+  ['192.88.99.0', 24], // 已弃用的 6to4 任播段
+  ['199.27.128.0', 21], // 历史反代服务段
+  ['1.0.0.0', 24], // 自家 Anycast DNS：实测 connect() 被拒
+  ['1.1.1.0', 24], // 同上（架构规范里记录的 TCP Loop 结论）
+]
+
+/**
+ * 公共 DNS 解析器地址 —— **不属于** Cloudflare 网段，不参与 CF 降权。
+ *
+ * 旧表把 `223.5.5.0/24` 注释成「也在 CF 网络内」，导致访问该解析器的
+ * 目标被误判、导向只转发 CF 站点的反代入口。这里单独归类。
+ */
+export const PUBLIC_DNS_IPV4_RANGES: ReadonlyArray<readonly [string, number]> = [
+  ['223.5.5.0', 24], // 阿里公共 DNS
+]
+
+/** 判定用的完整表：官方段 + 本项目补充段 */
 const CF_IPV4_RANGES: ReadonlyArray<readonly [string, number]> = [
-  ['104.16.0.0', 13], // 104.16.0.0/13
-  ['104.24.0.0', 14], // 104.24.0.0/14
-  ['104.31.0.0', 15], // 104.31.0.0/15
-  ['172.64.0.0', 13], // 172.64.0.0/13
-  ['162.158.0.0', 15], // 162.158.0.0/15
-  ['188.114.96.0', 20], // 188.114.96.0/20
-  ['141.101.64.0', 18], // 141.101.64.0/18
-  ['108.162.192.0', 18], // 108.162.192.0/18
-  ['103.21.244.0', 22], // 103.21.244.0/22
-  ['103.22.200.0', 22], // 103.22.200.0/22
-  ['103.31.4.0', 22], // 103.31.4.0/22
-  ['131.0.72.0', 22], // 131.0.72.0/22
-  ['197.234.240.0', 22], // 197.234.240.0/22
-  ['198.41.128.0', 17], // 198.41.128.0/17
-  ['192.0.0.0', 24], // 192.0.0.0/24
-  ['192.0.2.0', 24], // 192.0.2.0/24
-  ['192.88.99.0', 24], // 192.88.99.0/24
-  ['199.27.128.0', 21], // 199.27.128.0/21
-  ['223.5.5.0', 24], // 223.5.5.0/24（阿里公共 DNS，也在 CF 网络内）
-  ['1.0.0.0', 24], // 1.0.0.0/24（Cloudflare 公共 DNS）
-  ['1.1.1.0', 24], // 1.1.1.0/24（Cloudflare 公共 DNS）
+  ...CF_OFFICIAL_IPV4_RANGES,
+  ...CF_IPV4_SUPPLEMENT,
 ]
 
 /** IPv4 → 32 位无符号整数 */
@@ -68,22 +98,29 @@ function ipv4ToInt(ip: string): number | null {
   return value >>> 0
 }
 
-/**
- * 判定表在模块初始化时一次性编译成 `[网络号, 掩码]` 整数对。
- *
- * 原先每次判断都要对 21 个 base 重复 `split('.')` + 正则校验，
- * 而这条判定在每次出站的候选排序里会跑很多次。现在只剩纯位运算。
- *
- * ⚠️ **表内容一个字都没改**：阶段 0 真机对照没有复现「缺失官方段导致失败」，
- * 重建判定表已暂缓，本轮只优化解析开销，判定结果必须与改动前完全一致。
- */
-const CF_IPV4_MASKS: ReadonlyArray<readonly [number, number]> = CF_IPV4_RANGES.map(
-  ([base, prefix]) => {
+/** 把一组 CIDR 表编译成 `[网络号, 掩码]` 整数对，判定降到纯位运算 */
+function compileCidrs(
+  ranges: ReadonlyArray<readonly [string, number]>
+): ReadonlyArray<readonly [number, number]> {
+  return ranges.map(([base, prefix]) => {
     const baseValue = ipv4ToInt(base) ?? 0
     const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0
     return [((baseValue & mask) >>> 0), mask] as const
+  })
+}
+
+const CF_IPV4_MASKS = compileCidrs(CF_IPV4_RANGES)
+const PUBLIC_DNS_MASKS = compileCidrs(PUBLIC_DNS_IPV4_RANGES)
+
+/** 目标是不是公共 DNS 解析器地址（只做归类，不降权、不拦截） */
+export function isPublicDnsIpv4(ip: string): boolean {
+  const value = ipv4ToInt(ip)
+  if (value === null) return false
+  for (const [net, mask] of PUBLIC_DNS_MASKS) {
+    if (((value & mask) >>> 0) === net) return true
   }
-)
+  return false
+}
 
 /**
  * 判断一个 IPv4 地址是否属于 Cloudflare 网段。

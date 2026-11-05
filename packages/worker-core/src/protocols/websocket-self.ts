@@ -30,7 +30,13 @@ import { canSwitchToBuiltinRelay } from './relay-guard'
 import { UplinkQueue } from './uplink-queue'
 import { dial, type DialResult } from '../outbound/dial'
 import { TrafficMeter } from '../budget'
-import { classifyDialFailure, explainDialFailure, type DialFailure } from '../outbound/route'
+import {
+  classifyDialFailure,
+  explainDialFailure,
+  isCloudflareIpv4,
+  isPublicDnsIpv4,
+  type DialFailure,
+} from '../outbound/route'
 import { collectRelayEndpoints, type RelayEndpoint } from '../outbound/relay'
 
 export type WsMode = 'vless' | 'trojan'
@@ -162,6 +168,45 @@ const DIAG_COUNTERS = {
 
 export function diagnosticCounters(): Readonly<typeof DIAG_COUNTERS> {
   return { ...DIAG_COUNTERS }
+}
+
+/**
+ * 最近若干次出站的**实际落地路由**（纯内存，不写 KV）。
+ *
+ * `/__diag` 的 `recent` 只记异常路径，正常连接完全看不到走了哪条出口。
+ * 判定表重建后需要一条能区分「直连 / 反代」的真机判据，这里补上：
+ * `via` + `endpoint` + 目标是否落在 CF 网段 + 是否属于公共 DNS。
+ * 端点与目标含用户访问信息，因此只在要求完整 UUID 的 `/__diag` 里返回。
+ */
+const RECENT_ROUTES: Array<{
+  at: number
+  target: string
+  via: string
+  endpoint: string
+  cfTarget: boolean
+  publicDns: boolean
+  phase: 'initial' | 'redial'
+}> = []
+
+export function recentRoutes(): typeof RECENT_ROUTES {
+  return RECENT_ROUTES
+}
+
+function recordRoute(
+  targetLabel: string,
+  result: DialResult,
+  phase: 'initial' | 'redial'
+): void {
+  RECENT_ROUTES.unshift({
+    at: Date.now(),
+    target: targetLabel,
+    via: result.via,
+    endpoint: result.endpoint,
+    cfTarget: isCloudflareIpv4(targetLabel.split(':')[0] ?? ''),
+    publicDns: isPublicDnsIpv4(targetLabel.split(':')[0] ?? ''),
+    phase,
+  })
+  if (RECENT_ROUTES.length > 20) RECENT_ROUTES.length = 20
 }
 
 /** 记录一次出站诊断（供 /__diag 端点查询） */
@@ -841,6 +886,7 @@ export async function handleWebSocket(
     }
 
     writer = dialed.writable.getWriter()
+    recordRoute(`${parsed.hostname}:${parsed.port}`, dialed, 'initial')
 
     // 通用做法：把协议头之后已收到的数据整体补写。
     // buffer 里可能不只有首帧的负载——拨号期间到达的后续帧也会暂存进
@@ -994,6 +1040,7 @@ export async function handleWebSocket(
         if (!socket) continue
 
         dialed = socket
+        recordRoute(`${targetInfo.hostname}:${targetInfo.port}`, socket, 'redial')
         const nextWriter = socket.writable.getWriter()
         writer = nextWriter
 

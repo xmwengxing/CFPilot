@@ -34,9 +34,22 @@ export interface TrojanResult {
 const TEXT_ENCODER = new TextEncoder()
 const TEXT_DECODER = new TextDecoder()
 
+/**
+ * 按口令缓存 SHA-224 摘要。
+ *
+ * 口令只来自配置，纯 TS 哈希每条连接算 1~3 次没必要重算；
+ * 与 UUID 缓存同理，不往配置对象上挂字段，避免被写回 KV。
+ */
+const trojanHashCache = new Map<string, string>()
+
 /** 计算 Trojan 口令校验值 */
 export function trojanPasswordHash(password: string): string {
-  return sha224Hex(TEXT_ENCODER.encode(password))
+  const hit = trojanHashCache.get(password)
+  if (hit !== undefined) return hit
+  const value = sha224Hex(TEXT_ENCODER.encode(password))
+  if (trojanHashCache.size >= 16) trojanHashCache.clear()
+  trojanHashCache.set(password, value)
+  return value
 }
 
 function isCrLf(bytes: Uint8Array): boolean {

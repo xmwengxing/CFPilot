@@ -146,6 +146,9 @@ export class ByteStream {
   /** 剩余字节（可能是协议头之后紧跟的首包数据） */
   peek(): Uint8Array {
     if (this.chunks.length === 0) return new Uint8Array(0)
+    // 首包解析完通常只剩一块：直接返回视图，省掉一次整块复制。
+    // 调用方（release / HTTP 代理响应头解析）都只读，不会改写它。
+    if (this.chunks.length === 1) return this.chunks[0]!
     const total = this.chunks.reduce((sum, c) => sum + c.byteLength, 0)
     const out = new Uint8Array(total)
     let offset = 0

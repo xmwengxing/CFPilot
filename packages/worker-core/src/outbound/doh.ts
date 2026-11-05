@@ -75,6 +75,14 @@ const DOH_TIMEOUT_MS = 4000
 /** 解析结果缓存时长（ms） */
 const CACHE_TTL_MS = 5 * 60 * 1000
 
+/**
+ * 缓存条目上限。
+ *
+ * TTL 只保证「读到时判过期」，不会主动删记录；长期运行的 isolate
+ * 若不断解析不同域名，Map 会一直留着过期项。写入时顺手清理并按插入顺序淘汰。
+ */
+const CACHE_MAX_ENTRIES = 1000
+
 interface CacheEntry {
   at: number
   ips: DnsAnswer[]
@@ -255,7 +263,12 @@ export async function resolveEndpointIps(
 
   const key = `${target}:${port}`
   const hit = cache.get(key)
-  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.ips
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
+    // 命中即移到末尾，让「最久没用」排在最前，淘汰时近似 LRU
+    cache.delete(key)
+    cache.set(key, hit)
+    return hit.ips
+  }
 
   const answers: DnsAnswer[] = []
 
@@ -315,7 +328,18 @@ export async function resolveEndpointIps(
     deduped.push(item)
   }
 
-  if (deduped.length > 0) cache.set(key, { at: Date.now(), ips: deduped })
+  if (deduped.length > 0) {
+    const now = Date.now()
+    for (const [k, v] of cache) {
+      if (now - v.at >= CACHE_TTL_MS) cache.delete(k)
+    }
+    while (cache.size >= CACHE_MAX_ENTRIES) {
+      const oldest = cache.keys().next().value
+      if (oldest === undefined) break
+      cache.delete(oldest)
+    }
+    cache.set(key, { at: now, ips: deduped })
+  }
   return deduped
 }
 

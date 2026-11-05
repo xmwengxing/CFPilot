@@ -37,12 +37,29 @@ export interface VlessResult {
 /** 复用的解码器：每条连接都要解一次域名，避免每次构造新实例 */
 const TEXT_DECODER = new TextDecoder()
 
+/**
+ * 按 uuid 字符串缓存解析结果。
+ *
+ * 期望值只来自配置，键的个数极少；配置一换就自然换键失效。
+ * 这里刻意不往 `UserConfig` 上挂编译字段 —— 配置对象会被整体
+ * `JSON.stringify` 写回 KV，`Uint8Array` 会污染存储 schema。
+ * 返回值为只读，调用方只做逐字节比较。
+ */
+const uuidBytesCache = new Map<string, Uint8Array | null>()
+
 /** UUID 字符串 → 16 字节 */
 export function uuidToBytes(uuid: string): Uint8Array | null {
+  const hit = uuidBytesCache.get(uuid)
+  if (hit !== undefined) return hit
   const clean = uuid.replace(/-/g, '').trim().toLowerCase()
-  if (!/^[0-9a-f]{32}$/.test(clean)) return null
+  if (!/^[0-9a-f]{32}$/.test(clean)) {
+    uuidBytesCache.set(uuid, null)
+    return null
+  }
   const out = new Uint8Array(16)
   for (let i = 0; i < 16; i++) out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16)
+  if (uuidBytesCache.size >= 16) uuidBytesCache.clear()
+  uuidBytesCache.set(uuid, out)
   return out
 }
 

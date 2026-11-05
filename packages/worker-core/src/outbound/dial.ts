@@ -104,12 +104,6 @@ export interface DialOptions {
   /** 反代入口池配置（用户自配 + 可选的内置表） */
   relayPool?: RelayPoolOptions
   /**
-   * 当前 Cloudflare 边缘机房（colo）。
-   *
-   * 用于按地区优先选反代入口（边缘机房 ≈ 用户位置）。
-   */
-  colo?: string
-  /**
    * 是否允许自动做 DoH 解析以获得优选 IP 候选。
    *
    * 关闭时只用手工给的 `optimizedIps`（不产生额外 DoH 请求）。

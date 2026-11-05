@@ -7,7 +7,12 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 
-import { DnsUdpSession, servfail } from '../src/protocols/udp-dns'
+import {
+  DnsUdpSession,
+  servfail,
+  MAX_CONCURRENT_QUERIES,
+  MAX_QUEUED_QUERIES,
+} from '../src/protocols/udp-dns'
 
 /** 造一个假 DNS 查询（12 字节头 + 任意负载） */
 function query(id: number, payload = 'q'): Uint8Array {
@@ -115,10 +120,42 @@ describe('DnsUdpSession 切帧', () => {
     await flush()
 
     expect(sent).toHaveLength(3)
-    // 串行处理：第 k 个响应体是 query(k)
-    for (let i = 0; i < 3; i++) {
-      expect(sent[i]!.subarray(2)[1]).toBe(i + 1)
-    }
+    // DNS 响应靠 Transaction ID 匹配，乱序返回是协议允许的。
+    // 改成有界并发后不再保证回写顺序，只要求三个 ID 各回来一次。
+    const ids = sent.map((f) => f.subarray(2)[1]).sort((a, b) => a! - b!)
+    expect(ids).toEqual([1, 2, 3])
+  })
+
+  it('一次灌入多个查询 → 有界并发，且在飞数不超过上限', async () => {
+    let active = 0
+    let peak = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        active += 1
+        peak = Math.max(peak, active)
+        await new Promise((resolve) => setTimeout(resolve, 15))
+        active -= 1
+        return new Response(buf(query(1)), { status: 200 })
+      })
+    )
+    const sent: Uint8Array[] = []
+    const session = new DnsUdpSession({
+      endpoint: 'https://dns.example/q',
+      send: (b) => sent.push(b),
+    })
+    session.push(join(...Array.from({ length: 10 }, (_, i) => frame(query(i + 1)))))
+
+    // 刚灌进去时：最多 4 条在飞，其余进有界队列
+    expect(session.activeQueries).toBeLessThanOrEqual(MAX_CONCURRENT_QUERIES)
+    expect(session.queuedCount).toBeLessThanOrEqual(MAX_QUEUED_QUERIES)
+
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    expect(peak).toBeGreaterThan(1) // 确实并发了，没有退化成串行
+    expect(peak).toBeLessThanOrEqual(MAX_CONCURRENT_QUERIES)
+    expect(sent).toHaveLength(10)
+    expect(session.activeQueries).toBe(0)
+    expect(session.queuedCount).toBe(0)
   })
 
   it('DoH 失败 → 回 SERVFAIL 而不是静默丢弃', async () => {

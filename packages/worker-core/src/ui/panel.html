@@ -823,6 +823,14 @@
 
       <div class="switch-box">
         <div class="sw-info">
+          <label class="sw-title" for="cfgAggressiveRedial">放宽无响应自动重拨（AGGRESSIVE_REDIAL）</label>
+          <div class="sw-desc">默认关闭：只在「直连出口 + 443/80 端口」且发出请求后一个字节都收不到时，才自动换到内置反代入口重试。开启后即使配了落地代理 / ProxyIP 或访问其它端口也会重拨；同一请求可能在另一条上游被重复执行，并绕过你指定的出口。仅排查「连上但没数据」时临时开启。</div>
+        </div>
+        <input type="checkbox" id="cfgAggressiveRedial" />
+      </div>
+
+      <div class="switch-box">
+        <div class="sw-info">
           <label class="sw-title" for="cfgEchOn">下发客户端 ECH（Encrypted Client Hello）配置</label>
           <div class="sw-desc">在订阅中注入 ECH 参数以加密 TLS 握手中的真实 SNI 域名（需 Mihomo / Sing-box 1.13+ / v2rayN 等客户端内核支持）。</div>
         </div>
@@ -1196,6 +1204,7 @@
     $('cfgEchDns').value = c.echDns || '';
     $('cfgConcurrent').checked = !!c.concurrentDial;
     $('cfgResolvePreferred').checked = c.resolvePreferred !== false;
+    $('cfgAggressiveRedial').checked = !!c.aggressiveRedial;
 
     $('poolOfficial').checked = !!c.poolOfficial;
     $('poolDomain').checked = !!c.poolDomain;
@@ -1587,6 +1596,7 @@
       useBuiltinRelay: $('cfgBuiltinRelay').checked,
       clientFingerprint: $('cfgFingerprint').value.trim() || 'chrome',
       resolvePreferred: $('cfgResolvePreferred').checked,
+      aggressiveRedial: $('cfgAggressiveRedial').checked,
       ech: $('cfgEchOn').checked,
       echHost: $('cfgEchHost').value.trim() || 'cloudflare-ech.com',
       echDns: $('cfgEchDns').value.trim(),

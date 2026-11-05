@@ -98,6 +98,11 @@ type scanRequest struct {
 	ProbeLimit       int `json:"probeLimit"`
 	ProbeConcurrency int `json:"probeConcurrency"`
 	SpeedLimit       int `json:"speedLimit"`
+	// TwoStageSpeed 两轮测速开关：界面默认勾选，关闭则回到旧的「按延迟取前 N」。
+	// 对照 CLI 的 --two-stage-speed（默认关闭）。
+	TwoStageSpeed bool `json:"twoStageSpeed"`
+	// CoarseSpeedLimit 粗筛候选上限，0 = 用内核默认 120。
+	CoarseSpeedLimit int `json:"coarseSpeedLimit"`
 	SpeedConcurrency int `json:"speedConcurrency"`
 	// SpeedConnections 是每个候选的并发连接数（对照 CLI 的 --speed-conns，默认 3）。
 	//
@@ -200,6 +205,9 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 		ProbeLimit:       req.ProbeLimit,
 		ProbeConcurrency: req.ProbeConcurrency,
 		SpeedLimit:       req.SpeedLimit,
+		// 两轮测速：界面开关直接透传，不传（旧客户端 / 0 值）保持旧行为。
+		TwoStageSpeed:    req.TwoStageSpeed,
+		CoarseSpeedLimit: req.CoarseSpeedLimit,
 		SpeedConcurrency: req.SpeedConcurrency,
 		SpeedConnections: req.SpeedConnections,
 		SpeedDurationMs:  req.SpeedDurationMs,

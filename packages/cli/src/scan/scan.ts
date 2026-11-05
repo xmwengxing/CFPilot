@@ -55,6 +55,45 @@ import { describeUnlock, probeUnlock } from './unlock'
 import { ipv6Prefix48 } from './ip-ranges'
 import type { Observation } from './network-profile'
 
+/**
+ * 两轮测速里「粗筛」的默认参数。
+ *
+ * CLI 是权威定义（AGENTS.md §2.2），Go 版 scan.go 的 defCoarse* 必须逐项对齐。
+ *
+ * ## 为什么是两轮
+ *
+ * 旧流程在 101 通过后按 TLS / 延迟排序直接截前 30 个进精测 ——
+ * 延迟与带宽并不强相关，容易漏掉「握手稍慢但下行明显更快」的 IP。
+ * 两轮改成：先用低成本短测给**全部** 101 通过候选粗排，再对粗排前 30 名
+ * 做原有的 6s × 8 连接精测。粗筛数值只用于排序，**绝不写进结果**。
+ *
+ * ## 成本
+ *
+ * 粗筛 120 个 × 1.2s ≈ 2.4 分钟、流量约 0.3GB（1MB/s 链路）；
+ * 精测仍是 30 个 × 6s ≈ 3 分钟 / 1.4GB。总时长约 5~6 分钟，
+ * 仍在 adapter 的 10 分钟超时之内。
+ *
+ * ⚠️ 粗筛必须串行（与精测同理：带宽是共享的，并行会互相抢），
+ * 且必须有总预算 —— 带地区筛选时阶段二候选池会放大到 500 个，
+ * 不设上限会直接跑过前端超时。
+ */
+export const COARSE_SPEED_DEFAULTS = {
+  /** 粗筛最多测多少个 101 通过候选（预算上限） */
+  limit: 120,
+  /** 单次粗筛测量时长：精测 6s 的 1/5 */
+  durationMs: 1200,
+  /** 丢弃的慢启动样本：短测不能沿用精测的 1s，否则几乎没有稳态样本 */
+  warmupMs: 300,
+  /** 结算窗口：与短测时长匹配 */
+  windowMs: 300,
+  /** 连接数：精测 8 条的 1/4，只求相对排序、不求绝对带宽 */
+  connections: 2,
+  /** 单次整体预算（含拨号 / TLS / 传输），失败候选最多占 3s */
+  timeoutMs: 3000,
+  /** 整个粗筛阶段的总预算，到点停止派发，剩余候选按延迟兜底 */
+  budgetMs: 240_000,
+} as const
+
 export interface ScanOptions {
   /** Worker 域名（作为 SNI / Host） */
   host: string
@@ -101,8 +140,28 @@ export interface ScanOptions {
   probeConcurrency?: number
   /** 阶段二超时（ms） */
   probeTimeoutMs?: number
-  /** 进入阶段三的候选数量 */
+  /** 进入阶段三（精测）的候选数量 */
   speedLimit?: number
+  /**
+   * 两轮测速（默认关闭，`--two-stage-speed` 开启）。
+   *
+   * 开启后：对**全部** 101 通过候选先做短测粗排，再对粗排前 speedLimit 个
+   * 做原有的完整精测；关闭时维持旧行为（按 TLS / 延迟截取前 speedLimit 个）。
+   * 对照 Go 版 `scan.Options.TwoStageSpeed`（桌面版界面默认开启）。
+   *
+   * ⚠️ 粗筛数值只用于排序，绝不写进结果；`skipSpeed` 时自动跳过粗筛。
+   */
+  twoStageSpeed?: boolean
+  /** 粗筛候选上限，默认 COARSE_SPEED_DEFAULTS.limit */
+  coarseSpeedLimit?: number
+  /** 粗筛单次时长 ms，默认 COARSE_SPEED_DEFAULTS.durationMs */
+  coarseDurationMs?: number
+  /** 粗筛连接数，默认 COARSE_SPEED_DEFAULTS.connections */
+  coarseConnections?: number
+  /** 粗筛单次整体预算 ms，默认 COARSE_SPEED_DEFAULTS.timeoutMs */
+  coarseTimeoutMs?: number
+  /** 粗筛阶段总预算 ms，默认 COARSE_SPEED_DEFAULTS.budgetMs */
+  coarseBudgetMs?: number
   /** 阶段三并发 */
   speedConcurrency?: number
   /** 阶段三超时（ms） */
@@ -769,10 +828,15 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   // 294 个候选、120 进阶段二、80 通过）：直接切时最终结果只剩 4 个段，
   // 其中一个段独占 12/30 —— 多样性在这一层就被吃掉了，
   // 后面的 pickWithDiversity 再准也无济于事。
-  const stage2 = pickWithDiversity(
-    wsFiltered.sort((a, b) => a.tls.tlsMs - b.tls.tlsMs || a.latency - b.latency),
-    speedLimit
+  const rankedByLatency = wsFiltered.sort(
+    (a, b) => a.tls.tlsMs - b.tls.tlsMs || a.latency - b.latency
   )
+  let stage2: typeof rankedByLatency
+  if (options.twoStageSpeed && !options.skipSpeed) {
+    stage2 = await coarsePreRank(options, rankedByLatency, speedLimit, report, strictProbePath)
+  } else {
+    stage2 = pickWithDiversity(rankedByLatency, speedLimit)
+  }
 
   // ---- 阶段三：真实下行测速（可用 --no-speed 跳过） ----
   //
@@ -1099,6 +1163,112 @@ export function formatEntries(entries: ScanEntry[]): string[] {
  *
  * 不到 N 条时有多少给多少；只有一个网段时行为与直接截取完全一致。
  */
+/**
+ * 按粗筛速度挑出进入精测的候选（纯逻辑，便于单测）。
+ * Go 版对应 `selectForFineTest`（packages/desktop/internal/scan/scan.go）。
+ *
+ * 语义：
+ *   1. 有粗测速度的按速度降序；未测 / 粗测失败记 0，排在后面
+ *      （稳定排序 → 同速时保持阶段二的 TLS / 延迟顺序）；
+ *   2. 排序后仍走 pickWithDiversity 按网段轮流取，避免某一 /16 独占；
+ *   3. 粗测全失败时自动退化为旧的「延迟序 + 网段轮流」，不会产出空结果。
+ */
+export function rankByCoarseSpeed<T extends { ip: string }>(
+  items: readonly T[],
+  coarse: ReadonlyMap<string, number>,
+  limit: number,
+): T[] {
+  const sorted = [...items].sort(
+    (a, b) => (coarse.get(b.ip) ?? 0) - (coarse.get(a.ip) ?? 0)
+  )
+  // 候选不足上限时直接整批返回：Go 版 pickWSDiverse 在 len<=top 时也是
+  // 原样返回，这里显式短路，避免两端因为「轮流取」把顺序排得不一样。
+  if (sorted.length <= limit) return sorted
+  return pickWithDiversity(sorted, limit)
+}
+
+/**
+ * 两轮测速的第一轮：对全部 101 通过候选做短测粗排。
+ *
+ * ⚠️ 三点硬约束（与 Go 版一致）：
+ *   - 串行（带宽共享，并行粗测会互相抢，相对排序同样失真）；
+ *   - 候选上限 + 阶段总预算双保险，带地区筛选时阶段二可能放大到 500 个；
+ *   - 粗测数值只进 Map 用于排序，**绝不写进 ScanEntry**，结果速度仍来自精测。
+ */
+async function coarsePreRank<T extends { ip: string }>(
+  options: ScanOptions,
+  candidates: readonly T[],
+  speedLimit: number,
+  report: (event: ScanEvent) => void,
+  probePath: string,
+): Promise<T[]> {
+  const limit = Math.max(1, options.coarseSpeedLimit ?? COARSE_SPEED_DEFAULTS.limit)
+  const poolInput = pickWithDiversity(candidates, limit)
+  const startedAt = Date.now()
+  const budgetMs = options.coarseBudgetMs ?? COARSE_SPEED_DEFAULTS.budgetMs
+  const coarse = new Map<string, number>()
+  let done = 0
+  let budgetHit = false
+
+  report({ type: 'stage', stage: 2, name: '全量粗筛（短测粗排）', total: poolInput.length })
+  await pool(poolInput, 1, async (item) => {
+    if (Date.now() - startedAt > budgetMs) {
+      if (!budgetHit) {
+        budgetHit = true
+        report({
+          type: 'progress', stage: 2, done, total: poolInput.length,
+          message: `粗筛已达总预算 ${Math.round(budgetMs / 1000)}s，剩余候选按延迟兜底`,
+        })
+      }
+      return
+    }
+    let speed = 0
+    try {
+      const common = {
+        ip: item.ip,
+        port: options.port,
+        connections: options.coarseConnections ?? COARSE_SPEED_DEFAULTS.connections,
+        durationMs: options.coarseDurationMs ?? COARSE_SPEED_DEFAULTS.durationMs,
+        warmupMs: COARSE_SPEED_DEFAULTS.warmupMs,
+        windowMs: COARSE_SPEED_DEFAULTS.windowMs,
+        timeoutMs: options.coarseTimeoutMs ?? COARSE_SPEED_DEFAULTS.timeoutMs,
+      }
+      if ((options.speedMode ?? 'probe') === 'url') {
+        const parsed = parseSpeedUrl(
+          options.speedUrl ?? DEFAULT_SPEED_URL,
+          schemeForPort(options.port)
+        )
+        const one = await measureThroughput({
+          ...common,
+          sniHost: parsed.host,
+          requestHost: parsed.host,
+          path: withBytes(parsed, options.speedBytes ?? 104857600),
+        })
+        if (one.ok) speed = one.steadyMBps
+      } else {
+        const one = await measureProbeThroughput({
+          ...common,
+          host: options.host,
+          bytes: options.speedBytes ?? 5 * 1024 * 1024,
+          path: probePath,
+          token: options.uuid,
+        })
+        if (one.ok) speed = one.steadyMBps
+      }
+    } catch {
+      // 粗筛失败按 0 处理：不阻断，交给精测或延迟兜底。
+    }
+    coarse.set(item.ip, speed)
+    done++
+    report({
+      type: 'progress', stage: 2, done, total: poolInput.length,
+      message: `粗筛 ${done}/${poolInput.length} · 短测 ${speed.toFixed(1)} MB/s`,
+    })
+  })
+
+  return rankByCoarseSpeed(candidates, coarse, speedLimit)
+}
+
 export function pickWithDiversity<T extends { ip: string }>(ranked: readonly T[], top: number): T[] {
   if (top <= 0) return []
   const v4 = ranked.filter((item) => !item.ip.includes(':'))

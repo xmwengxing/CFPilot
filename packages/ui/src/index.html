@@ -1320,18 +1320,18 @@
           <div class="card">
             <h2><span class="dot"></span>📋 需要的 Token 权限</h2>
             <div class="links">
-              <b>必需（三项，分类都是 Account）</b><br>
-              · Account / Account Settings / <b>Read</b> —— 读取账号列表（<code>GET /accounts</code>）<br>
-              · Account / Workers KV Storage / <b>Edit</b> —— 建 KV、读写部署清单与 <code>CONFIG</code><br>
-              · Account / Pages / <b>Edit</b> —— 建/删 Pages 项目、上传内核、绑 KV、配环境变量<br>
+              <b>必需</b><br>
+              · Account & Billing / Account Settings / <b>Read</b> —— 读取账号列表（<code>GET /accounts</code>）<br>
+              · Developer Platform / Workers KV Storage / <b>Edit</b> —— 建 KV、读写部署清单与 <code>CONFIG</code><br>
+              · Developer Platform / Pages / <b>Edit</b> —— 建/删 Pages 项目、上传内核、绑 KV、配环境变量<br>
               <b>可选</b><br>
-              · Account / Account API Tokens / <b>Read</b> —— 仅用于显示 Token 有效期<br>
-              · Account / Account Analytics / <b>Read</b> —— 仅用于「用量/额度」面板（查已用量）<br>
-              · Zone / Zone / <b>Read</b>（+ Zone / DNS / <b>Edit</b>）—— 仅绑定自定义域名时需要<br><br>
-              <span class="muted">
-                <b>不需要</b>：Developer Platform 下的 Workers Scripts / Workers Routes，
-                以及 Account 下的 DNS Settings、DNS Firewall、Registrar Domains 等。
-                内核走 Pages 部署接口上传，不经过 Workers 脚本 API。
+              · Account & Billing / Account API Tokens / <b>Read</b> —— 仅用于显示 Token 有效期<br>
+              · Analytics & Logs / Account Analytics / <b>Read</b> —— 仅用于「用量/额度」面板（查已用量）<br>
+              · DNS & Zone / Account DNS Settings / <b>Edit</b>（+ DNS View / <b>Read</b>）—— 仅绑定自定义域名时需要<br>
+			  <b>Workers 模式增加一项必需</b><br>
+			  · Developer Platform / Workers / Admin —— 建/删 Workers 项目、上传内核、绑 KV、配环境变量<br>
+			  <br>
+
               </span>
             </div>
           </div>
@@ -1731,6 +1731,23 @@
                 </div>
               </div>
             </div>
+
+            <!--
+              两轮测速（默认开启）
+
+              旧流程在 101 通过后按延迟排序截前 30 个直接精测，会漏掉
+              「握手稍慢但下行明显更快」的 IP。开启后先对全部 101 通过候选
+              做 1.2s × 2 连接的短测粗排，再对粗排前 30 个做 6s × 8 连接精测。
+              粗测数值只用于排序，不写进结果；关闭则完全回到旧行为。
+            -->
+            <label class="switch-box" style="margin-top:12px">
+              <span class="sw-info">
+                <span class="sw-title">两轮测速 · 全量粗筛（推荐）</span>
+                <span class="sw-desc">先对所有 101 通过的 IP 短测粗排，再对速度最好的 30 个完整精测，避免快 IP 被延迟排序截掉。约多花 2~3 分钟 / 0.3GB；关闭则按延迟取前 30 个</span>
+              </span>
+              <input type="checkbox" id="optTwoStageSpeed" checked />
+              <span class="switch"></span>
+            </label>
 
             <!--
               实验性功能（默认全部关闭）

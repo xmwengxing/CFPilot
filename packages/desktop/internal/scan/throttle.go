@@ -107,6 +107,10 @@ func progressStepFor(stage string) int {
 		return progressStepTCP
 	case "tls":
 		return progressStepTLS
+	case "coarse":
+		// 两轮测速的粗筛最多 120 个，GUI 日志不必逐个刷屏；
+		// CLI 终端仍逐个打印（那是最快的验证闭环）。
+		return 5
 	default:
 		// 阶段二（WS ≤120）与阶段三（测速 ≤30）候选数少，逐个报
 		return 1

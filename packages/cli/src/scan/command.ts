@@ -13,6 +13,7 @@ import {
   type ParsedArgs,
 } from '../shared/args'
 import {
+  COARSE_SPEED_DEFAULTS,
   formatCopyable,
   formatHost,
   runScan,
@@ -662,6 +663,14 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
     probeLimit: flagNumber(args, 'probe-limit', 120),
     probeTimeoutMs: flagNumber(args, 'probe-timeout', 3000),
     speedLimit: flagNumber(args, 'speed-limit', 30),
+    // 两轮测速：默认关闭（脚本行为不变），--two-stage-speed 开启。
+    // 桌面版界面默认开启，两边语义一致：true = 全量短测粗排 + 前 N 精测。
+    twoStageSpeed: flagBool(args, 'two-stage-speed'),
+    coarseSpeedLimit: flagNumber(args, 'coarse-speed-limit', COARSE_SPEED_DEFAULTS.limit),
+    coarseDurationMs: flagNumber(args, 'coarse-duration', COARSE_SPEED_DEFAULTS.durationMs),
+    coarseConnections: flagNumber(args, 'coarse-conns', COARSE_SPEED_DEFAULTS.connections),
+    coarseTimeoutMs: flagNumber(args, 'coarse-timeout', COARSE_SPEED_DEFAULTS.timeoutMs),
+    coarseBudgetMs: flagNumber(args, 'coarse-budget', COARSE_SPEED_DEFAULTS.budgetMs),
     speedTimeoutMs: flagNumber(args, 'speed-timeout', 12000),
     speedBytes: flagNumber(args, 'speed-bytes', 5 * 1024 * 1024),
     speedMode,

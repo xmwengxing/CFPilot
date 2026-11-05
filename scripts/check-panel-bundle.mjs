@@ -69,6 +69,16 @@ if (!html.includes('navigator.clipboard') && !html.includes('data-copy')) {
   problems.push('主应用脚本疑似丢失（找不到复制相关逻辑）')
 }
 
+// 6) 故障切换开关必须「定义 + 读取 + 保存」三处齐全。
+//    只加 DOM 不接保存，用户勾了刷新就丢，且构建与单测都不会报错。
+const redialHits = [...html.matchAll(/cfgAggressiveRedial/g)].length
+if (redialHits < 4) {
+  problems.push(`故障切换开关绑定不完整（cfgAggressiveRedial 只出现 ${redialHits} 次，应为 4 次）`)
+}
+if (!html.includes('aggressiveRedial:')) {
+  problems.push('故障切换开关没有进入配置保存对象')
+}
+
 if (problems.length > 0) {
   console.error('[check-panel-bundle] 失败：')
   for (const p of problems) console.error(`  - ${p}`)

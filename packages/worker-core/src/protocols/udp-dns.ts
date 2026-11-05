@@ -41,6 +41,18 @@ const MAX_PACKET = 65535
 /** 缓冲上限：超过说明对端不是 DNS，直接丢弃，避免内存被撑爆 */
 const MAX_BUFFER = 256 * 1024
 
+/**
+ * 单连接同时在飞的 DoH 查询上限。
+ *
+ * 完全串行会让浏览器一次解析十几个域名时的响应延迟逐个累加；
+ * 但也不能无限并发 —— 那正是客户端一次灌几百个查询打满 CPU 的形态。
+ * DNS 响应自带 16-bit Transaction ID，乱序返回是协议允许的。
+ */
+export const MAX_CONCURRENT_QUERIES = 4
+
+/** 等待队列长度上限，超出直接丢弃并计数 */
+export const MAX_QUEUED_QUERIES = 32
+
 function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
   if (a.byteLength === 0) return b
   if (b.byteLength === 0) return a
@@ -80,12 +92,14 @@ export interface DnsUdpOptions {
 /**
  * 一条 WebSocket 连接上的 DNS 会话。
  *
- * 串行处理：DNS 查询之间没有顺序要求，但串行能天然限流，
- * 避免客户端一次灌 100 个查询把 CPU 打满（单连接并发上限就是 1）。
+ * **有界并发**：同时最多 `MAX_CONCURRENT_QUERIES` 条 DoH 在飞，其余进有界等待队列。
+ * 早期用一条串行 Promise 链做限流，虽然绝对安全，但慢查询会把后面所有查询
+ * 一起拖住（队头阻塞）。现在保留限流语义，同时让并发查询互不等待。
  */
 export class DnsUdpSession {
   private pending: Uint8Array<ArrayBufferLike> = new Uint8Array(0)
-  private queue: Promise<void> = Promise.resolve()
+  private waiting: Uint8Array[] = []
+  private inflight = 0
   private dropped = 0
 
   constructor(private readonly options: DnsUdpOptions) {}
@@ -102,12 +116,22 @@ export class DnsUdpSession {
     this.drain()
   }
 
-  /** 已丢弃的异常帧数（诊断用） */
+  /** 已丢弃的异常帧 / 超出队列上限的帧数（诊断用） */
   get droppedCount(): number {
     return this.dropped
   }
 
-  /** 按长度前缀切帧，逐帧排队解析 */
+  /** 当前在飞的 DoH 查询数（诊断与回归测试用） */
+  get activeQueries(): number {
+    return this.inflight
+  }
+
+  /** 当前排队等待的帧数 */
+  get queuedCount(): number {
+    return this.waiting.length
+  }
+
+  /** 按长度前缀切帧，放进有界等待队列 */
   private drain(): void {
     while (this.pending.byteLength >= 2) {
       const len = (this.pending[0]! << 8) | this.pending[1]!
@@ -116,14 +140,31 @@ export class DnsUdpSession {
         this.pending = this.pending.subarray(2)
         continue
       }
-      if (this.pending.byteLength < 2 + len) return
+      if (this.pending.byteLength < 2 + len) {
+        this.pump()
+        return
+      }
       const packet = this.pending.slice(2, 2 + len)
       this.pending = this.pending.subarray(2 + len)
-      this.queue = this.queue
-        .then(() => this.resolve(packet))
-        .catch(() => {
-          /* 单帧失败不影响后续帧 */
-        })
+      if (this.waiting.length >= MAX_QUEUED_QUERIES) {
+        this.dropped += 1
+        continue
+      }
+      this.waiting.push(packet)
+    }
+    this.pump()
+  }
+
+  /** 在不越过并发上限的前提下，尽量把等待队列里的帧发出去 */
+  private pump(): void {
+    while (this.inflight < MAX_CONCURRENT_QUERIES && this.waiting.length > 0) {
+      const packet = this.waiting.shift()!
+      this.inflight += 1
+      // resolve() 内部已吞掉所有异常，只会正常结束
+      void this.resolve(packet).finally(() => {
+        this.inflight -= 1
+        this.pump()
+      })
     }
   }
 

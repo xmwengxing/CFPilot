@@ -54,7 +54,8 @@ export async function httpConnect(
       `CONNECT ${target} HTTP/1.1`,
       `Host: ${target}`,
       'Proxy-Connection: keep-alive',
-      'User-Agent: CFPilot/1.0',
+      // 上游代理日志里不要留下专属工具指纹；用常见浏览器 UA。
+      'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       authHeader,
       '',
       '',

@@ -69,6 +69,23 @@ function ipv4ToInt(ip: string): number | null {
 }
 
 /**
+ * 判定表在模块初始化时一次性编译成 `[网络号, 掩码]` 整数对。
+ *
+ * 原先每次判断都要对 21 个 base 重复 `split('.')` + 正则校验，
+ * 而这条判定在每次出站的候选排序里会跑很多次。现在只剩纯位运算。
+ *
+ * ⚠️ **表内容一个字都没改**：阶段 0 真机对照没有复现「缺失官方段导致失败」，
+ * 重建判定表已暂缓，本轮只优化解析开销，判定结果必须与改动前完全一致。
+ */
+const CF_IPV4_MASKS: ReadonlyArray<readonly [number, number]> = CF_IPV4_RANGES.map(
+  ([base, prefix]) => {
+    const baseValue = ipv4ToInt(base) ?? 0
+    const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0
+    return [((baseValue & mask) >>> 0), mask] as const
+  }
+)
+
+/**
  * 判断一个 IPv4 地址是否属于 Cloudflare 网段。
  *
  * 用于**降权**而不是**拦截**：优选 IP 库里可能混有 CF 网段，
@@ -77,11 +94,9 @@ function ipv4ToInt(ip: string): number | null {
 export function isCloudflareIpv4(ip: string): boolean {
   const value = ipv4ToInt(ip)
   if (value === null) return false
-  for (const [base, prefix] of CF_IPV4_RANGES) {
-    const baseValue = ipv4ToInt(base)
-    if (baseValue === null) continue
-    const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0
-    if ((value & mask) === (baseValue & mask)) return true
+  for (const [net, mask] of CF_IPV4_MASKS) {
+    // 位运算结果可能是有符号负数，两边统一转无符号再比较
+    if (((value & mask) >>> 0) === net) return true
   }
   return false
 }

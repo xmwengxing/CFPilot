@@ -124,6 +124,9 @@ export async function handleXhttp(
     relayPool: {
       userEntries: config.relayPool || undefined,
       useBuiltin: config.useBuiltinRelay,
+      // 与 WS 入站路径一致：按当前边缘机房优先选邻近地区的反代入口。
+      // 缺了它，XHTTP 永远回落到 US 排序。
+      colo: typeof request.cf?.colo === 'string' ? request.cf.colo : undefined,
     },
     // 失败分级上报：XHTTP 出站失败此前**完全不可诊断**（表现就是客户端延迟 -1），
     // 排查时看不到任何线索。现在记录到诊断端点。

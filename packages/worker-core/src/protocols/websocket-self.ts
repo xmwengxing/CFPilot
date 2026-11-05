@@ -622,7 +622,14 @@ export async function handleWebSocket(
         void redialViaRelay('eof')
         return
       }
-      closeWith(1000, 'done')
+      // 把实际出口写进 close reason。
+      //
+      // `/__diag` 的 routes / counters 都是 isolate 级，跨请求可能落在别的
+      // isolate 上读不到；而 close frame 客户端每次都能收到。判定表重建后
+      // 「这条连接到底走了直连还是反代」需要一个可靠的真机判据，这里就是。
+      // reason 会被统一截断到 123 字节，超长不会丢掉整个 close frame。
+      const used = dialed
+      closeWith(1000, used ? `done via=${used.via} ep=${used.endpoint}` : 'done')
     }
   }
 

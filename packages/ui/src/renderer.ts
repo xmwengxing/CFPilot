@@ -346,7 +346,7 @@
    * 不再需要额外的「新建账户」按钮 —— 早前那个按钮用 `prompt()` 取名字，
    * 在 Electron 里没有反应，而且即使能弹也容易被误解成「已经建好了」。
    */
-  async function refreshProfiles(): Promise<void> {
+  async function refreshProfiles(selectId?: string): Promise<void> {
     profiles = await window.cfpilot.listProfiles()
     const sel = $sel('profileSelect')
     const previous = sel.value
@@ -370,9 +370,15 @@
     newOpt.textContent = '＋ 新建账户'
     sel.appendChild(newOpt)
 
-    // 对齐：优先保持用户刚选的那一项，其次激活项
+    // 对齐：优先显式指定（新建账户成功后要切到新账户），
+    // 其次保持用户刚选的那一项，其次激活项。
+    //
+    // ⚠️ 早前无条件「previous === __new__ 就保持 __new__」，于是
+    // 「新建账户 → 填 Token → 添加并保存」之后下拉仍停在「＋ 新建账户」，
+    // 用户看不到刚建好的账户，还会以为没保存成功。
     const active = profiles.find((p) => p.active)
-    if (previous === NEW_PROFILE_VALUE) sel.value = NEW_PROFILE_VALUE
+    if (selectId && profiles.some((p) => p.id === selectId)) sel.value = selectId
+    else if (previous === NEW_PROFILE_VALUE) sel.value = NEW_PROFILE_VALUE
     else if (active) sel.value = active.id
     else sel.value = NEW_PROFILE_VALUE
 
@@ -421,8 +427,7 @@
     }
     if (hint) {
       hint.textContent =
-        '当前使用该账户。要换 Token 就粘贴新的再点「修改并保存」；' +
-        '要新增账号请选「＋ 新建账户」。'
+        '当前使用该账户。修改 Token 请右侧粘贴后「修改并保存」；'
     }
   }
 
@@ -936,7 +941,9 @@
         }
         log(`✅ 已新建账户并保存 Token（${created.name}）`, 'ok')
         resetAccountContext()
-        await refreshProfiles()
+        // 显式选中刚创建的账户：后端 Create 已将 ActiveID 指向它，
+        // 这里不能再沿用「保持 __new__」的旧规则。
+        await refreshProfiles(created.id)
         await refreshCredState()
         // 新建后自动检测，省得用户再点一次
         await detectAccountAndGuide()
@@ -1858,34 +1865,61 @@
   }
 
   /**
+   * 进度条只属于「一次优选」，不属于页面上的其它按钮。
+   *
+   * ⚠️ 日志流是全局的：部署、取令牌、反代体检都往同一个 log 事件里写。
+   * 早前 updateScanProgress 只判断日志文案里有没有「阶段 / 扫描」，于是点
+   * 「增量回填 / 覆盖回填」时，第一步取令牌推回来的
+   * 「✅ 已自动获取扫描令牌（有效期 10 分钟）」也会命中「扫描」——
+   * 这条日志没有（n/m）计数，兜底 local=0.05、stage=处理中，算出 1%，
+   * 把上一次优选刚收尾好的 100% 冲掉。用户看到的就是「回填时冒出 1% 进度条」。
+   *
+   * 因此只有「点开始优选 → 收到 scan-result」这段时间内，日志才可以驱动进度条；
+   * 其余时间日志只进日志框，不碰进度条。
+   */
+  let scanProgressActive = false
+  /** 本次优选已显示过的最大百分比：乱序或无计数的日志不该把进度条拉回去 */
+  let scanProgressPct = 0
+
+  /**
    * 总进度条：贴着结果框下边框，一条贯穿全程。
    *
    * 百分比按**阶段加权**映射（连通性 0–25%、协议验证 25–55%、测速 55–95%），
    * 否则用户看到的是「第一阶段就 100%」的假进度。
    */
   function updateScanProgress(message: string): void {
+    if (!scanProgressActive) return
     const wrap = document.getElementById('scanProgressWrap')
     const bar = document.getElementById('scanProgressBar')
     const stageEl = document.getElementById('scanProgressStage')
     const textEl = document.getElementById('scanProgressText')
     if (!wrap || !bar) return
     const match = /（(\d+)\/(\d+)）/.exec(message)
-    const stage = message.includes('阶段一') || message.includes('TCP') ? '连通性'
+    // 两轮测速多出「全量粗筛」这一档，插在协议验证与精测之间（45–55%）。
+    // 文案含「粗筛」但不带「阶段三 / 测速」，所以必须放在最前面判断。
+    const stage = message.includes('粗筛') ? '全量粗筛'
+      : message.includes('阶段一') || message.includes('TCP') ? '连通性'
       : message.includes('阶段二') || message.includes('TLS') || message.includes('101') ? '协议验证'
       : message.includes('阶段三') || message.includes('测速') ? '性能测速'
       : '处理中'
     const local = match && Number(match[2]) > 0 ? Math.max(0, Math.min(1, Number(match[1]) / Number(match[2]))) : 0.05
-    const base = stage === '连通性' ? 0 : stage === '协议验证' ? 25 : stage === '性能测速' ? 55 : 0
-    const span = stage === '连通性' ? 25 : stage === '协议验证' ? 30 : stage === '性能测速' ? 40 : 5
+    const base = stage === '连通性' ? 0 : stage === '协议验证' ? 25 : stage === '全量粗筛' ? 45 : stage === '性能测速' ? 55 : 0
+    const span = stage === '连通性' ? 25 : stage === '协议验证' ? 20 : stage === '全量粗筛' ? 10 : stage === '性能测速' ? 40 : 5
     const pct = Math.max(1, Math.min(99, Math.round(base + local * span)))
+    // 单调不减：日志到达顺序不严格按阶段，且不少日志没有（n/m）计数，
+    // 早前一条「阶段三：…」就能把已经跑到 90% 的条子拉回 57%。
+    scanProgressPct = Math.max(scanProgressPct, pct)
     wrap.hidden = false
-    bar.style.width = pct + '%'
-    if (stageEl) stageEl.textContent = `${stage} · 总进度 ${pct}%`
+    bar.style.width = scanProgressPct + '%'
+    if (stageEl) stageEl.textContent = `${stage} · 总进度 ${scanProgressPct}%`
     // 按钮行只放阶段数字进度，进度条不再挤在这里。
     if (textEl) textEl.textContent = match ? `${stage} ${match[1]}/${match[2]}` : stage
   }
 
   function finishScanProgress(ok: boolean): void {
+    // 收尾即关闭门控：之后取令牌 / 回填 / 部署等日志都不再改动进度条。
+    scanProgressActive = false
+    scanProgressPct = ok ? 100 : 0
     const wrap = document.getElementById('scanProgressWrap')
     const bar = document.getElementById('scanProgressBar')
     const stageEl = document.getElementById('scanProgressStage')
@@ -2599,6 +2633,9 @@
       const speedUrl = probeInput && !probeInput.startsWith('/') ? probeInput : ''
 
       setBusy(true)
+      // 开启门控：Go 版是异步扫描，之后几分钟的 SSE 日志都算这一次优选。
+      scanProgressActive = true
+      scanProgressPct = 0
       updateScanProgress('开始优选')
        $('scanOut').textContent = '正在优选，请稍候…'
       try {
@@ -2615,6 +2652,9 @@
           skipSpeed: ($('optNoSpeed') as unknown as HTMLSelectElement).value === 'off',
           sample: Number($('optSample').value) || 6556,
           top: Number($('optTop').value) || 15,
+          // 两轮测速：默认勾选。开启 = 全量短测粗排 + 前 30 精测；
+          // 关闭 = 旧的「按 TLS/延迟截前 30 个直接精测」。
+          twoStageSpeed: ($('optTwoStageSpeed') as HTMLInputElement).checked,
           countries: readOptCountries(),
           speedMode: speedUrl ? 'url' : 'auto',
           speedUrl,
@@ -4103,7 +4143,17 @@
   }
 
   function bindPush(): void {
-    window.cfpilot.onLog((entry) => { log(entry.message, entry.level as never); if (entry.message.includes('阶段') || entry.message.includes('扫描')) updateScanProgress(entry.message) })
+    window.cfpilot.onLog((entry) => {
+      log(entry.message, entry.level as never)
+      // 只有「真优选进度日志」才交给进度条：后端 Progress 节流后的文案带
+      // 「阶段」或（done/total）计数。⚠️ 不要再按「扫描」二字宽泛匹配 ——
+      // 取令牌、回填、体检都会推含「扫描」的日志（如「已自动获取扫描令牌」），
+      // 它们没有计数，会把进度条算成兜底的 1%。
+      // 是否真正生效还由 updateScanProgress 里的 scanProgressActive 门控决定。
+      if (entry.message.includes('阶段') || /（\d+\/\d+）/.test(entry.message)) {
+        updateScanProgress(entry.message)
+      }
+    })
 
     /**
      * 渲染部署状态，并**同步驱动部署按钮的语义**。
@@ -4349,16 +4399,20 @@
     })
 
     window.cfpilot.onScanResult((payload) => {
-      renderScanResult(payload)
+      // ⚠️ 先收尾、再渲染：失败的 payload 只有 { ok:false, error }，没有 entries，
+      // 直接读 payload.entries.length 会抛 TypeError，进度条门控就一直关不掉
+      // （之后回填 / 部署的日志又来改进度条）。收尾放在最前面，无论后面怎样都生效。
+      const entries = Array.isArray(payload && payload.entries) ? payload.entries : []
       // 优选结束 → 总进度条收尾到 100%。
       //
       // ⚠️ 早前只有**失败**路径会调 `finishScanProgress`，成功时进度条永远停在
       // 最后一条日志映射出的百分比上（常见是「处理中 · 总进度 1%」）——
       // 桌面版跑完优选后进度条一直卡着，就是这里漏了收尾。
-      finishScanProgress(payload.entries.length > 0)
+      finishScanProgress(entries.length > 0)
+      renderScanResult(payload)
       // 优选成功后端已自动留底 —— 顺手刷新历史列表，
       // 用户不用手动点「刷新」就能看到刚跑完的这批结果。
-      if (payload && payload.entries && payload.entries.length > 0) {
+      if (entries.length > 0) {
         void loadScanHistory()
       }
     })

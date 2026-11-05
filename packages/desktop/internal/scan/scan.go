@@ -61,6 +61,22 @@ const (
 	defSpeedTimeoutMs = 12000
 	defSpeedBytes     = defMeasureBytes
 	defTop            = 8
+
+	// ---- 两轮测速（全量短测粗排）的默认参数 ----
+	//
+	// ⚠️ 必须逐项对齐 CLI packages/cli/src/scan/scan.ts 的 COARSE_SPEED_DEFAULTS
+	// （AGENTS.md §2.2：CLI 是优选扫描的权威实现）。
+	//
+	// 粗筛只回答「谁相对更快」，不回答「绝对带宽多少」：
+	// 1.2s / 2 连接的数值与 6s / 8 连接的精测**不可比**，因此粗测值
+	// 只进排序 Map，绝不写进 Entry.Speed（对外速度仍由精测给出）。
+	defCoarseSpeedLimit  = 120  // 粗筛候选上限（带地区筛选时阶段二可达 500）
+	defCoarseDurationMs  = 1200 // 单次粗测时长（精测 6s 的 1/5）
+	defCoarseWarmupMs    = 300  // 短测不能沿用精测的 1s 预热，否则没有稳态样本
+	defCoarseWindowMs    = 300
+	defCoarseConnections = 2      // 精测 8 条的 1/4
+	defCoarseTimeoutMs   = 3000   // 单次整体预算，失败候选最多占 3s
+	defCoarseBudgetMs    = 240000 // 整个粗筛阶段总预算（4 分钟），到点剩余按延迟兜底
 )
 
 // Options 是扫描参数。
@@ -104,7 +120,19 @@ type Options struct {
 	ProbeConcurrency int
 	ProbeTimeoutMs   int
 	SpeedLimit       int
-	SpeedConcurrency int
+	// TwoStageSpeed 开启「两轮测速」：对全部 101 通过候选先做短测粗排，
+	// 再对粗排前 SpeedLimit 个做原有的完整精测。
+	//
+	// 零值 = 关闭（保持旧行为），由外壳（桌面版界面 / CLI flag）显式开启。
+	// 对照 CLI packages/cli/src/scan/scan.ts 的 twoStageSpeed。
+	TwoStageSpeed bool
+	// 以下粗筛参数留 0 用 defCoarse* 默认值。
+	CoarseSpeedLimit  int
+	CoarseDurationMs  int
+	CoarseConnections int
+	CoarseTimeoutMs   int
+	CoarseBudgetMs    int
+	SpeedConcurrency  int
 	// SpeedConnections 是每个候选的并发连接数（0 = 默认 8）。
 	//
 	// 阶段三的「并发」有两层，别混淆：
@@ -199,6 +227,11 @@ func (o Options) withDefaults() Options {
 	set(&o.ProbeConcurrency, defProbeConcurrency)
 	set(&o.ProbeTimeoutMs, defProbeTimeoutMs)
 	set(&o.SpeedLimit, defSpeedLimit)
+	set(&o.CoarseSpeedLimit, defCoarseSpeedLimit)
+	set(&o.CoarseDurationMs, defCoarseDurationMs)
+	set(&o.CoarseConnections, defCoarseConnections)
+	set(&o.CoarseTimeoutMs, defCoarseTimeoutMs)
+	set(&o.CoarseBudgetMs, defCoarseBudgetMs)
 	set(&o.SpeedConcurrency, defSpeedConcurrency)
 	set(&o.SpeedConnections, defSpeedConnections)
 	set(&o.SpeedDurationMs, defSpeedDurationMs)
@@ -470,7 +503,12 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 		return wsFiltered[i].Latency < wsFiltered[j].Latency
 	})
 	stage3 := wsFiltered
-	if len(stage3) > opt.SpeedLimit {
+	if opt.TwoStageSpeed && !opt.SkipSpeed {
+		// 两轮测速：先给全部 101 通过候选做短测粗排，再对粗排前 SpeedLimit 个精测。
+		// 关闭时（默认零值）完全走上面的旧路径，行为逐字节不变。
+		stage3 = coarsePreRank(ctx, opt, wsFiltered, report)
+		stats["coarseTested"] = min(len(wsFiltered), opt.CoarseSpeedLimit)
+	} else if len(stage3) > opt.SpeedLimit {
 		stage3 = pickWSDiverse(wsFiltered, opt.SpeedLimit)
 	}
 	stats["stage3Input"] = len(stage3)
@@ -852,6 +890,80 @@ func PickWithDiversity(entries []Entry, top int) []Entry {
 	}
 	half := (top + 1) / 2 // 与 CLI 的 Math.round(top/2) 一致
 	return append(roundRobinBy(v4, half, keyOf), roundRobinBy(v6, half, keyOf)...)
+}
+
+// selectForFineTest 按粗测速度挑出进入精测的候选（纯逻辑，便于单测）。
+// 对照 CLI packages/cli/src/scan/scan.ts 的 rankByCoarseSpeed。
+//
+// 语义：
+//  1. 有粗测速度的按速度降序；未测 / 粗测失败记 0，排在后面
+//     （SliceStable 保证同速时保留阶段二的 101 延迟顺序）；
+//  2. 排序后仍走 pickWSDiverse 按网段轮流取，避免某一 /16 独占；
+//  3. 粗测全失败时自动退化为旧的「延迟序 + 网段轮流」，不会产出空结果。
+func selectForFineTest(items []WSResult, coarse map[string]float64, limit int) []WSResult {
+	sort.SliceStable(items, func(i, j int) bool {
+		return coarse[items[i].IP] > coarse[items[j].IP]
+	})
+	// 与 CLI 的 rankByCoarseSpeed 一致：候选不足上限时整批返回，
+	// 不进 pickWSDiverse（它会按网段轮流，把顺序排成与 CLI 不同的样子）。
+	if len(items) <= limit {
+		return items
+	}
+	return pickWSDiverse(items, limit)
+}
+
+// coarsePreRank 是两轮测速的第一轮：对全部 101 通过候选做短测粗排。
+// 对照 CLI 的 coarsePreRank。
+//
+// ⚠️ 三点硬约束：
+//   - 串行（带宽共享，并行粗测会互相抢，相对排序同样失真）；
+//   - 候选上限 + 阶段总预算双保险，带地区筛选时阶段二会放大到 500 个；
+//   - 粗测数值只进排序 Map，**绝不写进 Entry.Speed**，对外速度仍来自精测。
+func coarsePreRank(ctx context.Context, opt Options, candidates []WSResult, report func(Progress)) []WSResult {
+	pool := candidates
+	if len(pool) > opt.CoarseSpeedLimit {
+		pool = pickWSDiverse(pool, opt.CoarseSpeedLimit)
+	}
+	// 文案里不要自带（x/y）：server 的 Progress → SSE 日志会统一附加计数。
+	report(Progress{Stage: "coarse", Total: len(pool), Message: "全量粗筛：短测粗排"})
+
+	coarseCtx, cancel := context.WithTimeout(ctx, msDuration(opt.CoarseBudgetMs))
+	defer cancel()
+
+	speeds := make(map[string]float64, len(pool))
+	// concurrency=1 串行，fn 与 onProgress 在同一个 worker goroutine 内，无需加锁。
+	measured := 0
+	forEachIP(coarseCtx, pool, 1, func(r WSResult) (struct{}, bool) {
+		if coarseCtx.Err() != nil {
+			return struct{}{}, false
+		}
+		dl := MeasureThroughput(coarseCtx, MeasureOptions{
+			IP:          r.IP,
+			Port:        opt.Port,
+			Host:        opt.Host,
+			BytesWanted: defMeasureBytes,
+			Path:        opt.ProbePath,
+			Connections: opt.CoarseConnections,
+			Duration:    msDuration(opt.CoarseDurationMs),
+			Warmup:      msDuration(defCoarseWarmupMs),
+			Window:      msDuration(defCoarseWindowMs),
+			Timeout:     msDuration(opt.CoarseTimeoutMs),
+		})
+		measured++
+		if dl.OK {
+			speeds[r.IP] = dl.SteadyMBps
+		}
+		return struct{}{}, true
+	}, func(done int) {
+		report(Progress{Stage: "coarse", Done: done, Total: len(pool),
+			Message: "全量粗筛 · 短测"})
+	})
+	if coarseCtx.Err() != nil {
+		report(Progress{Stage: "coarse", Done: measured, Total: len(pool),
+			Message: fmt.Sprintf("粗筛已达总预算 %ds，剩余 %d 个按延迟兜底",
+				opt.CoarseBudgetMs/1000, len(pool)-measured)})
+	}
+	return selectForFineTest(candidates, speeds, opt.SpeedLimit)
 }
 
 // pickWSDiverse 对阶段二候选做同样的「分族 + 族内网段轮流」截断。

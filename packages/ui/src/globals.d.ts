@@ -263,6 +263,11 @@ interface Window {
       skipSpeed: boolean
       sample: number
       top: number
+      /**
+       * 两轮测速开关（界面默认开启）：对全部 101 通过候选先做全量短测粗排，
+       * 再对粗排前 speedLimit 个做完整精测；关闭则维持旧的「按延迟截前 N」。
+       */
+      twoStageSpeed?: boolean
       /** 机房国家筛选（可多选，空 = 不筛选） */
       countries?: string[]
       speedMode?: 'auto' | 'probe' | 'url'

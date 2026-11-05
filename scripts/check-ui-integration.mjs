@@ -142,6 +142,25 @@ const ambiguous = rendererSrc.includes('线上内核')
 console.log(`${ambiguous ? 'FAIL' : 'PASS'}  状态卡不再使用有歧义的「线上内核」`)
 if (ambiguous) bad++
 
+/* ---------------- 5. 新建账户后「当前使用」必须切到新账户 ---------------- */
+//
+// 2026-11-05 真机：选「＋ 新建账户」→ 填 Token → 点「添加并保存」，
+// 账户其实已建好并激活（store.Create 会写 ActiveID），但 refreshProfiles
+// 无条件「previous === __new__ 就保持 __new__」，下拉仍停在「＋ 新建账户」，
+// 用户以为没保存成功，还会再点一次多建一个空账户。
+console.log('\n=== 新建账户后的「当前使用」归属 ===\n')
+
+const profileChecks = [
+  ['refreshProfiles 支持显式选中', /async function refreshProfiles\(selectId\?: string\)/, '新建后要能指定选中项'],
+  ['新建成功分支传入 created.id', /refreshProfiles\(created\.id\)/, '保存成功后切到新账户'],
+  ['显式选中优先于保持 __new__', /if \(selectId && profiles\.some/, '否则仍会被 __new__ 覆盖'],
+]
+for (const [label, re, desc] of profileChecks) {
+  const ok = re.test(rendererSrc)
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}  —— ${desc}`)
+  if (!ok) bad++
+}
+
 console.log(
   bad === 0 ? '\n全部通过：界面 ↔ 适配层 ↔ 后端 三方接口一致。' : `\n${bad} 项不一致 —— 界面会静默失效。`
 )

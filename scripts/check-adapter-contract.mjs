@@ -19,7 +19,8 @@
 //
 // 本脚本静态分析 adapter.js，检查每个方法是否产出了界面期望的字段。
 // 这是「源码级断言」，能抓住接口测试抓不到的结构不匹配。
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
 
 const adapter = readFileSync('packages/desktop/webui/adapter.js', 'utf8')
 
@@ -126,6 +127,52 @@ for (const [name, re, desc] of mappings) {
   const hit = re.test(adapter)
   console.log(`${hit ? 'PASS' : 'FAIL'}  ${name}  —— ${desc}`)
   if (!hit) bad++
+}
+
+/* ---------------- SSE 事件订阅表完整性 ---------------- */
+//
+// 2026-11-05 真机故障：relay-result / relay-progress 没在 listeners 里登记，
+// 界面启动调 onRelayResult 时 subscribe() 里的 `listeners[name].push(cb)` 抛
+// 「Cannot read properties of undefined (reading 'push')」，被 safeBind 兜住后
+// 每次开界面都打一条「初始化「反代优选」失败」，且这两类推送永远收不到。
+// 这类漏键必须静态挡住，不能等用户看日志才发现。
+console.log('\n=== SSE 事件订阅表完整性 ===\n')
+
+const listenersBlock = /const listeners = \{([\s\S]*?)\n  \}/.exec(adapter)
+const declared = new Set()
+if (listenersBlock) {
+  for (const m of listenersBlock[1].matchAll(/^\s*['"]?([a-z][\w-]*)['"]?\s*:/gm)) {
+    declared.add(m[1])
+  }
+} else {
+  console.log('FAIL  找不到 listeners 声明')
+  bad++
+}
+
+// 适配层实际订阅的事件名
+const subscribed = new Set()
+for (const m of adapter.matchAll(/\bsubscribe\(\s*['"]([\w-]+)['"]/g)) subscribed.add(m[1])
+
+// 后端实际发布的事件名（单一事实来源 = Go 服务端源码，排除测试桩）
+const published = new Set()
+const serverDir = 'packages/desktop/internal/server'
+for (const f of readdirSync(serverDir)) {
+  if (!f.endsWith('.go') || f.endsWith('_test.go')) continue
+  const src = readFileSync(join(serverDir, f), 'utf8')
+  for (const m of src.matchAll(/\bpublish\(\s*"([\w-]+)"/g)) published.add(m[1])
+}
+
+const needed = [...new Set([...subscribed, ...published])].sort()
+for (const name of needed) {
+  const ok = declared.has(name)
+  console.log(
+    `${ok ? 'PASS' : 'FAIL'}  事件 ${name} 已登记${published.has(name) ? '（后端有推送）' : ''}`
+  )
+  if (!ok) bad++
+}
+if (needed.length === 0) {
+  console.log('FAIL  没解析到任何 SSE 事件，检查脚本可能已失效')
+  bad++
 }
 
 console.log(

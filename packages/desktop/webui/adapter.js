@@ -194,17 +194,61 @@
   /* SSE 事件总线                                                        */
   /* ------------------------------------------------------------------ */
 
-  /** 各事件的订阅者列表 */
+  /**
+   * 各事件的订阅者列表。
+   *
+   * ⚠️ 这里必须与后端 `s.events.publish(...)` 的**全部 7 个事件**一一对应：
+   * deploy-status / log / relay-progress / relay-result / scan-result /
+   * update-done / update-progress。
+   *
+   * 漏一个键的后果（2026-11-05 真机）：relay-result / relay-progress 没声明，
+   * 界面启动调 onRelayResult / onRelayProgress 时 subscribe() 里的
+   * `listeners[name].push(cb)` 直接抛
+   * 「Cannot read properties of undefined (reading 'push')」，
+   * 被 safeBind 捕获成「初始化「反代优选」失败」，且这两类 SSE 推送永远收不到。
+   *
+   * 新增 SSE 事件时，除了在这里登记，还要跑
+   * `node scripts/check-adapter-contract.mjs`（会静态核对订阅名 ⊆ 本表）。
+   */
   const listeners = {
     log: [],
     'deploy-status': [],
     'scan-result': [],
+    'relay-result': [],
+    'relay-progress': [],
     'update-progress': [],
     'update-done': [],
   }
 
   let es = null
   let esReady = false
+
+  /**
+   * 给 SSE 连接注册单个事件的分发器。
+   *
+   * 抽成独立函数，是为了让 subscribe() 遇到「运行时才出现的事件名」时
+   * 也能补注册 —— openStream 只在建连那一刻遍历一次 Object.keys(listeners)，
+   * 之后新增的键不会再 addEventListener，推送会静默丢失。
+   */
+  function bindEvent(name) {
+    es.addEventListener(name, function (e) {
+      let payload = null
+      try {
+        payload = JSON.parse(e.data)
+      } catch {
+        return
+      }
+      const cbs = listeners[name] || []
+      cbs.forEach(function (cb) {
+        try {
+          cb(payload)
+        } catch (err) {
+          // 单个回调出错不能影响其它订阅者
+          console.error('[cfpilot] 事件回调异常', name, err)
+        }
+      })
+    })
+  }
 
   /**
    * 真正建立 SSE 连接。
@@ -219,24 +263,8 @@
       esReady = true
     })
 
-    Object.keys(listeners).forEach(function (name) {
-      es.addEventListener(name, function (e) {
-        let payload = null
-        try {
-          payload = JSON.parse(e.data)
-        } catch {
-          return
-        }
-        listeners[name].forEach(function (cb) {
-          try {
-            cb(payload)
-          } catch (err) {
-            // 单个回调出错不能影响其它订阅者
-            console.error('[cfpilot] 事件回调异常', name, err)
-          }
-        })
-      })
-    })
+    // 只遍历「已登记」的事件名；漏登记的事件在 subscribe() 里会被补注册。
+    Object.keys(listeners).forEach(bindEvent)
 
     es.addEventListener('error', function () {
       esReady = false
@@ -296,6 +324,12 @@
    */
   function subscribe(name, cb) {
     if (typeof cb !== 'function') return function () {}
+    if (!listeners[name]) {
+      // 兜底：即使将来新增事件忘了在 listeners 里登记，也不能让界面初始化
+      // 崩在 `undefined.push` 上；同时补注册分发器，保证推送真的能收到。
+      listeners[name] = []
+      if (es) bindEvent(name)
+    }
     listeners[name].push(cb)
     ensureStream()
     return function () {

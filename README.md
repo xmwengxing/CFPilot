@@ -411,19 +411,19 @@ npx -y cfpilot@latest scan
 在 [Cloudflare 控制台 → API Tokens](https://dash.cloudflare.com/profile/api-tokens)
 创建**自定义 Token**，按下面三项勾选（分类都是 **Account**，权限级别都是 **Read/**Edit）：
 
-| 权限项（控制台显示名）                  | 级别   | 用途                                   |
-| ---------------------------- | ---- | ------------------------------------ |
-| **Account Settings Read**    | Read | 读取账号列表（`GET /accounts`）              |
-| **Workers KV Storage Write** | Edit | 建 KV、读写部署清单与 `CONFIG`                |
-| **Pages Write**              | Edit | 建/删 Pages 项目、上传内核、绑 KV、配环境变量、绑自定义域名  |
-| **Account API Tokens**       | Read | 可选，仅用于显示 Token 有效期                   |
-| **Account Analytics Read**   | Read | 可选，仅用于「用量/额度」面板（查 Workers 与 KV 的已用量） |
+| 权限项（控制台显示名）             | 级别   | 分类                 | 用途                                   |
+| ----------------------- | ---- | ------------------ | :----------------------------------- |
+| **Account Settings**    | Read |                    | 读取账号列表（`GET /accounts`）              |
+| **Workers KV Storage**  | Edit | Developer Platform | 建 KV、读写部署清单与 `CONFIG`                |
+| **Pages**               | Edit | Developer Platform | 建/删 Pages 项目、上传内核、绑 KV、配环境变量、绑自定义域名  |
+| **Account API Tokens**  | Read | Account & Billing  | 可选，仅用于显示 Token 有效期                   |
+| **Account Analytics**   | Read | Analytics & Logs   | 可选，仅用于「用量/额度」面板（查 Workers 与 KV 的已用量） |
 
 **数据面用 Workers 模式时，再加一项**：
 
-| 权限项（控制台显示名）         | 级别   | 分类      | 用途                   |
-| ------------------- | ---- | ------- | -------------------- |
-| **Workers Scripts** | Edit | Account | 上传 / 更新数据面 Worker 脚本 |
+| 权限项（控制台显示名） | 级别    | 分类                 | 用途                   |
+| ----------- | ----- | ------------------ | -------------------- |
+| **Workers** | Admin | Developer Platform | 上传 / 更新数据面 Worker 脚本 |
 
 > ✅ **不需要** `Workers Routes`，也**不需要** `DNS` —— 工具不碰自定义域名：
 > Workers 模式只把数据面部署到 `*.workers.dev`，自定义域名请你在控制台自行绑定，
@@ -722,4 +722,3 @@ XHTTP 是 Xray 的专有传输，sing-box 与 mihomo 没有这个传输类型 �
 - 分发或修改本项目代码，须以 AGPL-3.0 开源并注明修改；
 
 - **将修改版部署为网络服务**（含 Cloudflare Pages 等托管形态）向他人提供时，同样须向使用者提供修改后的源码。
-

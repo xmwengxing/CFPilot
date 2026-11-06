@@ -6,7 +6,7 @@
  * ② 解析结果**不**在这里过滤 Cloudflare 网段 —— 降权是 route.ts 的职责
  * ③ 解析失败不能抛异常（不能阻断出站）
  */
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   clearDnsCache,
   isIpLiteral,
@@ -109,6 +109,10 @@ describe('parseTxtIps', () => {
   })
 })
 
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
 describe('resolveEndpointIps', () => {
   it('IP 字面量直接返回自身，不发起 DoH 请求', async () => {
     clearDnsCache()
@@ -129,9 +133,16 @@ describe('resolveEndpointIps', () => {
 
   it('DoH 不可用时返回空数组而不是抛异常', async () => {
     clearDnsCache()
-    // 该域名刻意不存在，且测试环境不应有真实 DoH 可用性保证。
-    // 关键断言：**不抛异常** —— 解析失败不能阻断出站（直连候选仍在）。
+    // 打桩而不是依赖真实网络：真实 DoH 逐个超时会让用例在 4~10 秒之间抖动，
+    // 而且联网失败与 DNS 无记录是两回事。这里只验证「全部 provider 失败」的语义：
+    // **不抛异常** —— 解析失败不能阻断出站（直连候选仍在）。
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new Error('network down')
+      })
+    )
     const result = await resolveEndpointIps('this-domain-should-not-exist-cfpilot.invalid', 443)
-    expect(Array.isArray(result)).toBe(true)
+    expect(result).toEqual([])
   })
 })

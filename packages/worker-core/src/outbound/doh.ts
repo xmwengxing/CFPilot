@@ -62,9 +62,19 @@ declare const __CFP_SENTINEL__: string
 export const TXT_LIST_SENTINEL = __CFP_SENTINEL__
 
 
-/** DoH 提供商（按优先级，任一可用即可） */
+/**
+ * DoH 提供商（按优先级）。
+ *
+ * ⚠️ 前两家在海外：`cloudflare-dns.com` 与边缘同网，Google 是海外低延迟。
+ * 国内两家只作**最后兜底** —— 晚高峰海外节点回连国内 DoH 的链路最拥堵，
+ * 只有前两家都失败时才轮到它们；配合下面的「空应答短路」，
+ * 正常路径根本走不到国内这两家。
+ *
+ * 不用 `1.1.1.1`：Worker 连回自家 Anycast 会被拒（架构铁律 9）。
+ */
 const DOH_PROVIDERS = [
   'https://cloudflare-dns.com/dns-query',
+  'https://dns.google/resolve',
   'https://dns.alidns.com/resolve',
   'https://doh.pub/dns-query',
 ]
@@ -111,8 +121,8 @@ export interface ResolveEndpointOptions {
    * 跳过 TXT（社区「优选 IP 库」）查询。
    *
    * 用于**反代入口域名**这类确定没有 TXT 记录的场合：
-   * 反代域名无 TXT，逐提供商试错纯属浪费 —— 每个域名白烧 3 次子请求，
-   * 14 个域名就是 42 次，直接顶穿 Worker 免费计划 50 次/调用 的上限。
+   * 反代域名无 TXT，查询纯属浪费。空应答短路后它只多 1 次子请求，
+   * 但 14 个域名就是 14 次 —— 免费计划单请求 50 次子请求的配额仍要省着用。
    */
   skipTxt?: boolean
 }
@@ -148,33 +158,49 @@ export function splitHostPort(text: string, defaultPort: number): { host: string
   return { host, port: Number.isInteger(port) && port > 0 ? port : defaultPort }
 }
 
-/** 带超时的 DoH JSON 查询 */
+/**
+ * 带超时的 DoH JSON 查询。
+ *
+ * ## 返回值的两类语义不能混
+ *
+ * - `null`：**请求失败 / 非权威应答**（网络错误、HTTP 非 2xx、非法 JSON、Status 异常）
+ *   → 调用方应继续尝试下一个 provider。
+ * - `[]`：**服务器正常应答，但该域名没有该类型记录**
+ *   （NOERROR 无 Answer、NXDOMAIN、或 Answer 里没有目标类型）
+ *   → 这是权威结论，调用方必须立即停止轮询。
+ *
+ * 早前两者都返回 `[]`，于是「绝大多数域名没有 TXT 优选库」被当成查询失败：
+ * 每个未命中缓存的新域名在真正拨号前，都要把 CF → 国内阿里 → 国内腾讯
+ * 三家 DoH 串行问一遍；晚高峰跨回国链路拥堵时，这一段就是首包延迟的主要来源。
+ */
 async function dohQuery(
   provider: string,
   name: string,
   type: 'TXT' | 'A' | 'AAAA',
   timeoutMs = DOH_TIMEOUT_MS
-): Promise<string[]> {
+): Promise<string[] | null> {
   try {
     const url = `${provider}?name=${encodeURIComponent(name)}&type=${type}`
     const response = await fetch(url, {
       headers: { accept: 'application/dns-json' },
       signal: AbortSignal.timeout(timeoutMs),
     })
-    if (!response.ok) return []
+    if (!response.ok) return null
     const body = (await response.json()) as {
       Status?: number
       Answer?: Array<{ type: number; data: string }>
     }
-    if (!body || body.Status !== 0 || !Array.isArray(body.Answer)) return []
+    // Status 0 = NOERROR，3 = NXDOMAIN，两者都是权威应答
+    if (!body || (body.Status !== 0 && body.Status !== 3)) return null
+    if (!Array.isArray(body.Answer)) return []
     const wanted = type === 'TXT' ? 16 : type === 'A' ? 1 : 28
     return body.Answer.filter((a) => a.type === wanted).map((a) => String(a.data))
   } catch {
-    return []
+    return null
   }
 }
 
-/** 依次尝试所有 DoH 提供商 */
+/** 依次尝试所有 DoH 提供商；任一给出权威应答（哪怕为空）即停止 */
 async function queryAll(
   name: string,
   type: 'TXT' | 'A' | 'AAAA',
@@ -187,7 +213,8 @@ async function queryAll(
     const remaining = opts.deadline !== undefined ? opts.deadline - Date.now() : Number.POSITIVE_INFINITY
     const budget = Math.max(50, Math.min(perQuery, remaining))
     const answers = await dohQuery(provider, name, type, budget)
-    if (answers.length > 0) return answers
+    // 空数组也是权威应答：立即停止，别为了「没有记录」再跨回国问一遍
+    if (answers !== null) return answers
   }
   return []
 }

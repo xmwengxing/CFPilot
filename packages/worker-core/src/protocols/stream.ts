@@ -314,8 +314,18 @@ export async function awaitSendCapacity(
   })
 }
 
-/** 每累计这么多下行字节，让出一次事件循环 */
-export const DOWNLINK_YIELD_BYTES = 1024 * 1024
+/**
+ * 每累计这么多下行字节，让出一次事件循环。
+ *
+ * 与 `DOWNLINK_HIGH_WATER` 对齐（4 MiB）。原先取 1 MiB 时，
+ * 一次 4 MiB 下载会在 1032 个 4 KiB 帧之间插入 4 次无条件让步；
+ * 平台并没有可观测的发送队列（没有 bufferedAmount / drain），
+ * 这种「按字节数拍脑袋」的让出既挡不住慢客户端，也可能打断上游预读节奏。
+ * 放大到 4 MiB 把无条件打扰降到 1 次，同时保留一个让步点作为兜底。
+ *
+ * ⚠️ 这是保守的主动让步，不是响应式背压；真正的条件背压在本平台无法实现。
+ */
+export const DOWNLINK_YIELD_BYTES = 4 * 1024 * 1024
 
 /**
  * 不依赖运行时属性的下行节流器（每条连接一个实例）。

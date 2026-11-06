@@ -11,7 +11,7 @@ describe('DownlinkPacer 按累计字节让步', () => {
   it('默认阈值 1 MiB，且累计未达阈值时完全不让步', async () => {
     const yieldFn = vi.fn(async () => {})
     const pacer = new DownlinkPacer(DOWNLINK_YIELD_BYTES, yieldFn)
-    expect(DOWNLINK_YIELD_BYTES).toBe(1024 * 1024)
+    expect(DOWNLINK_YIELD_BYTES).toBe(4 * 1024 * 1024)
 
     await pacer.onChunk(64 * 1024)
     await pacer.onChunk(128 * 1024)

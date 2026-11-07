@@ -250,6 +250,12 @@ func (s *Server) RunQuickScanFor(ctx context.Context, profile *store.Profile, on
 		Candidates: candidates,
 		SkipSpeed:  true, // 一键优选不测速：要的是「可用」，不是「快」
 		Top:        8,    // 与 CLI / 界面的默认 top 一致（2026-10-28 起 15 → 8）
+		// 一键优选直接对齐 CLI 的严格模式：PING/PONG 内容校验 + 真实隧道校验。
+		// 目标没有探针端点时扫描器会自动降级回纯 101；隧道全失败时保留阶段二结果。
+		// 凭据来自部署清单，只用于本地校验，不写日志、不回传前端。
+		VerifyPayload:  true,
+		UUID:           strings.TrimSpace(m.Credentials.UUID),
+		TrojanPassword: strings.TrimSpace(m.Credentials.TrojanPassword),
 		// 实验性：把真实成败喂给网络档案（未开启时为 nil）。
 		ProbeObserver: s.observer(adaptive),
 		// 一键优选要跑一分多钟，没有进度用户会以为卡住了。

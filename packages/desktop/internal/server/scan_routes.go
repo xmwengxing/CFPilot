@@ -113,6 +113,17 @@ type scanRequest struct {
 	// 同上：界面 optSpeedDur 一直有传，后端此前丢弃。
 	SpeedDurationMs int `json:"speedDurationMs"`
 	SpeedBytes      int `json:"speedBytes"`
+
+	// VerifyPayload 开启阶段二的 PING/PONG 响应体内容校验（CLI 默认严格模式）。
+	// 不传（旧客户端 / 0 值）保持「只看 101」行为；目标没有探针端点时
+	// 扫描器会自动降级回纯 101。
+	VerifyPayload bool `json:"verifyPayload"`
+	// 给了 UUID 或 TrojanPassword 时才跑阶段二点五真实隧道校验。
+	// 这些是本地桌面版接口的参数，不要写进日志。
+	UUID             string `json:"uuid"`
+	TrojanPassword   string `json:"trojanPassword"`
+	VerifyTargetHost string `json:"verifyTargetHost"`
+	VerifyTargetPort int    `json:"verifyTargetPort"`
 }
 
 // handleScanRun 启动扫描（异步）。
@@ -213,6 +224,12 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 		SpeedDurationMs:  req.SpeedDurationMs,
 		SpeedBytes:       req.SpeedBytes,
 		Top:              req.Top,
+		// 阶段二严格校验与阶段二点五真实隧道校验（可选，默认保持旧行为）。
+		VerifyPayload:    req.VerifyPayload,
+		UUID:             strings.TrimSpace(req.UUID),
+		TrojanPassword:   strings.TrimSpace(req.TrojanPassword),
+		VerifyTargetHost: strings.TrimSpace(req.VerifyTargetHost),
+		VerifyTargetPort: req.VerifyTargetPort,
 		// 实验性：把每个候选的真实成败喂给网络档案（未开启时为 nil）。
 		ProbeObserver: s.observer(adaptive),
 		Progress: func(p scan.Progress) {

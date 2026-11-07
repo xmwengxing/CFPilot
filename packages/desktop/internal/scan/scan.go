@@ -156,6 +156,23 @@ type Options struct {
 	// ⚠️ 与 CLI 的 --no-speed 语义一致（packages/cli/src/scan/scan.ts）。
 	SkipSpeed bool
 
+	// VerifyPayload 开启阶段二的 PING/PONG 响应体校验（CLI 默认的严格模式）。
+	//
+	// 开启后阶段二打 **ProbePath**（探针端点）而不是 WSPath —— 对 VLESS/Trojan
+	// 入站路径发 PING 永远等不到响应（真机实测探针路径 16/20 通过、入站路径 0/20）。
+	// 同时会对真实 WSPath 补一次纯 101 校验。
+	//
+	// 零值 = 关闭，保持旧的「只看 101」行为，由外壳显式开启；目标没有探针端点时
+	// 会自动降级回纯 101（见 Run 里的 DetectProbeEndpoint）。
+	VerifyPayload bool
+
+	// 以下四项用于阶段二点五真实隧道校验。给了 UUID 或 TrojanPassword
+	// 且 WSPath 有效时才会跑（与 CLI verifyTunnel 的触发条件一致）。
+	UUID             string
+	TrojanPassword   string
+	VerifyTargetHost string
+	VerifyTargetPort int
+
 	// ProbeObserver 在每个候选完成一次阶段探测后被调用一次。
 	//
 	// 用途：把真实成败喂给**网络档案**，让下一轮采样能按本机网络情况调整权重
@@ -415,7 +432,28 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 	stats["stage2Input"] = len(stage2)
 
 	// ================= 阶段二：WS 101 校验（强制前置） =================
-	report(Progress{Stage: "probe", Total: len(stage2), Message: "阶段二：WebSocket 101 校验"})
+	// 严格模式自动降级：目标没有 CFPilot 探针端点时 PING/PONG 必然等不到响应，
+	// 阶段二会全军覆没。只有**确认没有**才降级；网络错误导致结论未知时保持严格
+	// （对齐 CLI command.ts 的 true/false/null 三态，避免放进一批假活 IP）。
+	strictProbe := opt.VerifyPayload
+	if strictProbe {
+		found, known := DetectProbeEndpoint(ctx, opt.Host, opt.ProbePath, 8*time.Second)
+		if known && !found {
+			strictProbe = false
+			stats["verifyPayloadDegraded"] = 1
+			report(Progress{Stage: "probe", Message: "目标无探针端点，已自动关闭响应体校验（退回纯 101 校验）"})
+		} else if !known {
+			stats["verifyPayloadUnknown"] = 1
+		}
+	}
+	if strictProbe {
+		stats["verifyPayload"] = 1
+	}
+	stage2Message := "阶段二：WebSocket 101 校验"
+	if strictProbe {
+		stage2Message = "阶段二：WS 101 + PING/PONG 内容校验"
+	}
+	report(Progress{Stage: "probe", Total: len(stage2), Message: stage2Message})
 
 	// 早期退出判据：带地区筛选时，攒够够用的目标地区节点就收工。
 	//
@@ -428,10 +466,30 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 	// 机房代码（LAX）直接匹配 —— 与 CLI 版语义一致。
 	wantCountries := ExpandCountryFilter(opt.Countries)
 
+	// 严格模式打探针端点（ProbePath），而不是 VLESS/Trojan 入站路径：
+	// 对入站路径发 PING 永远等不到响应（真机实测探针路径 16/20 通过、入站路径 0/20）。
+	probePath := opt.WSPath
+	if strictProbe {
+		probePath = opt.ProbePath
+	}
 	wsOK := forEachIP(ctx, stage2, opt.ProbeConcurrency, func(ip string) (WSResult, bool) {
 		var last WSResult
 		for attempt := 0; attempt < opt.Retries; attempt++ {
-			last = ProbeWS101(ctx, ip, opt.Port, opt.Host, msDuration(opt.ProbeTimeoutMs), opt.WSPath)
+			if strictProbe {
+				last = ProbeWSPing(ctx, ip, opt.Port, opt.Host, msDuration(opt.ProbeTimeoutMs), probePath)
+			} else {
+				last = ProbeWS101(ctx, ip, opt.Port, opt.Host, msDuration(opt.ProbeTimeoutMs), probePath)
+			}
+			// 严格模式用的是探针端点，还要确认真实代理路径也能 101，
+			// 否则会出现「探针能过、客户端全 -1」（对齐 CLI scan.ts:699-706）。
+			// 路径相同时无需重复探测。
+			if last.OK && strictProbe && opt.WSPath != probePath {
+				pathProbe := ProbeWS101(ctx, ip, opt.Port, opt.Host, msDuration(opt.ProbeTimeoutMs), opt.WSPath)
+				if !pathProbe.OK {
+					last.OK = false
+					last.Error = "真实 WS 路径 101 校验失败：" + pathProbe.Error
+				}
+			}
 			if last.OK {
 				// 统计命中目标地区的数量（早期退出判据）
 				if len(wantCountries) > 0 && wantCountries[strings.ToUpper(last.Colo)] {
@@ -468,6 +526,48 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 		report(Progress{Stage: "probe", Done: len(stage2), Total: len(stage2),
 			Message: "阶段二全部失败：没有 IP 能完成 WebSocket 101 升级（检查 WS 路径）"})
 		return &Summary{Entries: []Entry{}, Stats: stats}, nil
+	}
+
+	// ---- 阶段二点五：真实隧道校验（可选）----
+	//
+	// 阶段二只证明「这个 IP 能把请求送到我们的数据面」；它证明不了真实 wsPath、
+	// 认证配置、数据面出站是否可用 —— 这三类都会表现为「优选结果正常、
+	// 导入客户端全是 -1」。只有给了真实凭据才跑（对齐 CLI scan.ts:749-784）。
+	if opt.UUID != "" || opt.TrojanPassword != "" {
+		limit := opt.SpeedLimit
+		if limit > len(wsOK) {
+			limit = len(wsOK)
+		}
+		passed := make(map[string]bool, limit)
+		failed := 0
+		for _, r := range wsOK[:limit] {
+			res := VerifyTunnel(ctx, TunnelVerifyOptions{
+				IP: r.IP, Port: opt.Port, Host: opt.Host, WSPath: opt.WSPath,
+				UUID: opt.UUID, TrojanPassword: opt.TrojanPassword,
+				TargetHost: opt.VerifyTargetHost, TargetPort: opt.VerifyTargetPort,
+				Timeout: msDuration(opt.ProbeTimeoutMs),
+			})
+			if res.OK {
+				passed[r.IP] = true
+			} else {
+				failed++
+			}
+		}
+		stats["tunnelTested"] = limit
+		stats["tunnelFailed"] = failed
+		if len(passed) > 0 {
+			kept := make([]WSResult, 0, len(passed))
+			for _, r := range wsOK {
+				if passed[r.IP] {
+					kept = append(kept, r)
+				}
+			}
+			wsOK = kept
+			stats["tunnelOk"] = len(wsOK)
+		}
+		// 全失败时保留阶段二结果，避免直接空结果（与 CLI 一致）
+		report(Progress{Stage: "probe",
+			Message: fmt.Sprintf("真实隧道校验完成（通过 %d / %d）", len(passed), limit)})
 	}
 
 	// 地区过滤（机房信息来自阶段二的 101 响应）

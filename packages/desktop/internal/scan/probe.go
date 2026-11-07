@@ -167,6 +167,12 @@ type WSResult struct {
 	Status  int
 	Latency int64
 	Error   string
+	// PongVerified 是响应体内容校验（PING → PONG）的三态结果：
+	// nil = 没做校验（纯 101 或握手就失败），&true = 通过，&false = 未通过。
+	// 与 CLI WsProbeResult.pongVerified 语义一致。
+	PongVerified *bool
+	// ProbeColo 是 PONG 里回带的机房，比 cf-ray 响应头更可靠。
+	ProbeColo string
 }
 
 // ProbeWS101 携带用户域名做 WebSocket 101 升级校验。

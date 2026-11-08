@@ -475,29 +475,43 @@ func ReleasePoolLock() {
 	_ = os.Remove(lock)
 }
 
+// WithConfigDirLock 是 `~/.cfpilot` 共享目录的**全局锁**。
+//
+// Phase 2 起这个目录下不止池一个文件：还有数据源配置与采集记录。
+// 它们全部复用同一把 `external-candidates.json.lock`：
+//  1. CLI 与 Go 两端只需维护一套 O_EXCL 锁语义；
+//  2. 绝不会出现「A 持池锁等配置锁、B 持配置锁等池锁」的交叉死锁；
+//  3. 一次同步里「读配置 → 拉清单 → 写池 → 写记录」天然是原子的。
+//
+// 代价是配置写入也要等池操作，但这些都是毫秒级的本地磁盘 I/O。
+func WithConfigDirLock(fn func() error) error {
+	if err := AcquirePoolLock(); err != nil {
+		return err
+	}
+	defer ReleasePoolLock()
+	return fn()
+}
+
 // WithPool 是读-改-写的唯一入口：持锁加载 → 回调修改 → 内容有变化才原子落盘。
 //
 // 「内容未变不写」既是省 I/O，也避免两个进程交替刷新 updatedAt 造成无意义写。
 // 回调返回 error 时不落盘（与 CLI 的 await fn 抛错跳过写一致），锁仍会释放。
 func WithPool(fn func(*ExternalPool) error) error {
-	if err := AcquirePoolLock(); err != nil {
-		return err
-	}
-	defer ReleasePoolLock()
-
-	before := ReadPoolRaw()
-	pool := ParsePool(before)
-	if err := fn(pool); err != nil {
-		return err
-	}
-	after, err := SerializePool(pool)
-	if err != nil {
-		return err
-	}
-	if after != before {
-		return WritePoolAtomic(after)
-	}
-	return nil
+	return WithConfigDirLock(func() error {
+		before := ReadPoolRaw()
+		pool := ParsePool(before)
+		if err := fn(pool); err != nil {
+			return err
+		}
+		after, err := SerializePool(pool)
+		if err != nil {
+			return err
+		}
+		if after != before {
+			return WritePoolAtomic(after)
+		}
+		return nil
+	})
 }
 
 // ------------------------------------------------------------------

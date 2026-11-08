@@ -101,6 +101,9 @@ scan 选项:
   --cidr <a,b>           自定义网段（可重复，用逗号分隔）
   --ip-file <path>       使用本地 IP 列表文件
   --ip-url <链接>        使用远程 IP 列表（http/https，上限 2MB，与 --ip-file 二选一）
+  --from-pool            从本地外部候选池分层取样（默认关闭，关闭时行为完全不变）
+                         池由 cfpilot source sync 长期积累；取样只取端口 == --port 的条目
+  --pool-sample <n>      --from-pool 的取样上限，默认 200（不会放大测速并发）
   --max-latency <ms>     阶段一 TCP 延迟上限，默认 0（不限）
   --tls-timeout <ms>     阶段一 TLS 握手超时，默认 2000
                          超时不再重试（该 IP 在当前网络下就是不可用）

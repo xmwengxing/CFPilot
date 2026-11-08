@@ -760,6 +760,40 @@
       return post('/api/scan/quick')
     },
 
+    /* ---------------- 外部 IP 数据源（Phase 5） ---------------- */
+
+    /** 数据源配置 + 池统计 + 定时器状态，一次取齐 */
+    sourcesList: function () {
+      return get('/api/sources/list')
+    },
+    /** 保存整份数据源配置（增删改 / 启停都在前端编辑好后整体提交） */
+    sourcesSave: function (config) {
+      return post('/api/sources/save', { config: config })
+    },
+    /** 测试连接：只拉清单不写池 */
+    sourcesTest: function (id) {
+      return post('/api/sources/test', { id: id })
+    },
+    /** 立即同步；ids 为空表示同步全部启用源（含 TCP/TLS 轻量校验） */
+    sourcesSync: function (ids) {
+      return post('/api/sources/sync', { ids: ids || [] })
+    },
+    sourcesStatus: function () {
+      return get('/api/sources/status')
+    },
+    /** 本地池全量候选（上限 5000，分页 / 筛选 / 导出都在前端做） */
+    sourcesPool: function () {
+      return get('/api/sources/pool')
+    },
+    /** 批量禁用 / 启用 / 删除候选 */
+    sourcesPoolUpdate: function (keys, action) {
+      return post('/api/sources/pool/update', { keys: keys, action: action })
+    },
+    /** 从本地池取样跑完整优选 + 回填（唯一会写 KV 的动作，默认 replace） */
+    sourcesQuick: function (poolSample) {
+      return post('/api/sources/quick', { poolSample: poolSample || 200 })
+    },
+
     /* ---------------- 优选历史与复测（Go 版新增） ---------------- */
 
     /**

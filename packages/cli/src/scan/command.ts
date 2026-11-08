@@ -47,6 +47,12 @@ import {
   pickAvailableSpeedUrl,
 } from './speed-url'
 import { BUILTIN_IPV4_CIDRS, BUILTIN_IPV6_CIDRS, readIpFile, readIpUrl } from './ip-ranges'
+import { parsePool, readPoolRaw } from '../sources/pool'
+import {
+  POOL_SAMPLE_LIMIT,
+  applyFullTestResults,
+  sampleFromPool,
+} from '../sources/sample'
 
 /** 校验并归一化 WS 路径（导出供 `scan compare` 复用，避免两处实现漂移）。 */
 export function normalizeWsPath(raw: string | undefined, fallback: string): string {
@@ -204,8 +210,25 @@ function familyFromArgs(args: ParsedArgs): FamilyChoice {
  */
 async function resolveCandidatesFromArgs(
   args: ParsedArgs,
-  extraHosts: readonly string[] = []
+  extraHosts: readonly string[] = [],
+  port = 443
 ): Promise<CandidatePlan> {
+  // Phase 4：--from-pool 从本地候选池分层取样。默认关闭，不传时下面所有
+  // 分支都不进入，候选生成与改动前逐字节一致。
+  if (flagBool(args, 'from-pool')) {
+    const limit = flagNumber(args, 'pool-sample', POOL_SAMPLE_LIMIT)
+    const sample = sampleFromPool(parsePool(readPoolRaw()), { limit, port })
+    poolSamples.set(args, { keys: sample.keys, port })
+    return {
+      candidates: sample.candidates,
+      family: sample.family === 'both' ? 'both' : sample.family,
+      ipv6Env: null,
+      v6Prefixes: [],
+      v6Discovered: [],
+      counts: sample.counts,
+      note: sample.note,
+    }
+  }
   const ipFile = flagString(args, 'ip-file')
   const ipUrl = flagString(args, 'ip-url')
   if (ipFile || ipUrl) {
@@ -261,6 +284,12 @@ async function resolveCandidatesFromArgs(
 
 /** 本次命令使用的自适应上下文（扫描结束后回写观测用）。 */
 const adaptiveContexts = new WeakMap<ParsedArgs, AdaptiveContext>()
+
+/**
+ * 本次 `--from-pool` 取样到的池 key，扫描结束后用于回写 `fullTest` / `status`。
+ * 只有开启 --from-pool 才有值 —— 关闭时完全不碰本地池。
+ */
+const poolSamples = new WeakMap<ParsedArgs, { keys: string[]; port: number }>()
 
 /** 把本轮观测写回网络档案（仅在开启自适应时执行）。 */
 async function saveAdaptiveObservations(args: ParsedArgs, observations: ScanObservation[]): Promise<void> {
@@ -517,10 +546,14 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
 
   if (!quiet && !asJson) process.stdout.write('正在准备 Cloudflare 网段…\n')
 
-  const candidatePlan = await resolveCandidatesFromArgs(args, [host, panelHost])
+  const candidatePlan = await resolveCandidatesFromArgs(args, [host, panelHost], port)
   const candidates = candidatePlan.candidates
   if (candidates.length === 0) {
-    process.stderr.write('候选 IP 为空，请检查 --ip-file / --cidr 参数\n')
+    process.stderr.write(
+      flagBool(args, 'from-pool')
+        ? '本地候选池没有可取样条目，请先跑 `cfpilot source sync`（或去掉 --from-pool 用官方网段）\n'
+        : '候选 IP 为空，请检查 --ip-file / --cidr 参数\n'
+    )
     if (candidatePlan.ipv6Env && candidatePlan.ipv6Env.status !== 'ok') {
       process.stderr.write(`  ${candidatePlan.ipv6Env.message}\n`)
       for (const line of candidatePlan.ipv6Env.advice) process.stderr.write(`   · ${line}\n`)
@@ -702,6 +735,18 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
 
   // 实验性：把本轮观测写回网络档案（仅在开启 --adaptive 时有档案）。
   await saveAdaptiveObservations(args, summary.observations)
+
+  // ---- Phase 4：把完整优选结果回写本地池（只在 --from-pool 时）----
+  // 池是本地历史，与 KV 回填解耦：即使没给 token、回填失败，历史也照记。
+  const sampled = poolSamples.get(args)
+  if (sampled && sampled.keys.length > 0) {
+    const applied = await applyFullTestResults(sampled.keys, sampled.port, summary)
+    if (!quiet && !asJson) {
+      process.stdout.write(
+        `本地池已回写：active ${applied.active} 条 / failed ${applied.failed} 条\n`
+      )
+    }
+  }
 
   // 本次用于「可复制列表 + 回填」的条目（v4 与 v6 都进，族标记在备注里）
   const fillable = summary.entries

@@ -17,6 +17,7 @@ Cloudflare Pages 代理部署与优选工具
   ${NAME}                     交互菜单（推荐首次使用）
   ${NAME} deploy [选项]       部署 Pages 双项目
   ${NAME} scan [选项]         本地真连接优选
+  ${NAME} source <动作>       外部 IP 数据源与本地候选池管理
   ${NAME} test [选项]         测试单个 IP 的完整链路
   ${NAME} egress-identify     实验性指定传输路径出口识别
   ${NAME} website-check       实验性网站兼容性检测
@@ -72,6 +73,11 @@ async function main(): Promise<void> {
     case 'scan': {
       const { runScanCommand } = await import('./scan/command')
       await runScanCommand(args)
+      return
+    }
+    case 'source': {
+      const { runSourceCommand } = await import('./sources/command')
+      await runSourceCommand(args)
       return
     }
     case 'test': {

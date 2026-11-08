@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -49,8 +51,27 @@ func (s *Server) handleScanQuick(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	res := s.RunQuickScan(ctx)
+	// Phase 4：可选 fromPool。零值时行为与改造前完全一致。
+	// ⚠️ 空 body 必须容忍：旧前端 / 托盘发的就是 {}，托盘甚至不经过本 handler。
+	var body struct {
+		FromPool   bool `json:"fromPool"`
+		PoolSample int  `json:"poolSample"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体不是合法 JSON"})
+		return
+	}
+	res := s.RunQuickScanWithPool(ctx, QuickScanPoolOptions{
+		FromPool: body.FromPool, PoolSample: body.PoolSample,
+	})
 	writeJSON(w, http.StatusOK, res)
+}
+
+// QuickScanPoolOptions 是「从本地候选池取样」的可选参数（Phase 4）。
+// 零值 = 关闭，一律走原来的官方网段采样，保证旧行为逐字节一致。
+type QuickScanPoolOptions struct {
+	FromPool   bool
+	PoolSample int
 }
 
 // QuickScanResult 是一键优选的结果（也用作 HTTP 响应体）。
@@ -116,7 +137,13 @@ func (s *Server) QuickScanProfile(id string) (*store.Profile, error) {
 //
 // HTTP 端点 /api/scan/quick 用的就是它 —— 行为与改造前完全一致。
 func (s *Server) RunQuickScan(ctx context.Context) QuickScanResult {
-	return s.RunQuickScanFor(ctx, nil, nil)
+	return s.RunQuickScanWithPool(ctx, QuickScanPoolOptions{})
+}
+
+// RunQuickScanWithPool 是带「本地池取样」选项的入口（HTTP /api/scan/quick 用）。
+// 零值选项等价于 RunQuickScan。
+func (s *Server) RunQuickScanWithPool(ctx context.Context, poolOpts QuickScanPoolOptions) QuickScanResult {
+	return s.runQuickScanFor(ctx, nil, nil, poolOpts)
 }
 
 // RunQuickScanFor 用指定账号跑一次一键优选，并逐条回调进度。
@@ -138,6 +165,12 @@ func (s *Server) RunQuickScan(ctx context.Context) QuickScanResult {
 // 调用方（托盘）自己负责节流：菜单标题最多每几百毫秒刷一次，
 // 日志走另一条路（scan.ProgressThrottle），两者互不影响。
 func (s *Server) RunQuickScanFor(ctx context.Context, profile *store.Profile, onProgress func(scan.Progress)) QuickScanResult {
+	// 托盘直接调这个方法：保持签名不变，且恒走官方采样（零值选项）
+	return s.runQuickScanFor(ctx, profile, onProgress, QuickScanPoolOptions{})
+}
+
+// runQuickScanFor 是真实实现；poolOpts 为零值时与改造前逐字节一致。
+func (s *Server) runQuickScanFor(ctx context.Context, profile *store.Profile, onProgress func(scan.Progress), poolOpts QuickScanPoolOptions) QuickScanResult {
 	// ---- 0. 抢扫描互斥（同一时刻只允许一个扫描）----
 	s.scan.mu.Lock()
 	if s.scan.running {
@@ -225,7 +258,26 @@ func (s *Server) RunQuickScanFor(ctx context.Context, profile *store.Profile, on
 	adaptive := s.prepareAdaptive()
 	// 地址族：一键优选同样走 auto（预检通过才让 IPv6 参与）
 	family, ipv6Env, extraIPv6 := s.resolveFamily("", host)
-	candidates := s.sampleCandidates(adaptive, 1500, false, family, extraIPv6)
+	var candidates []string
+	var sampledKeys []string
+	if poolOpts.FromPool {
+		limit := poolOpts.PoolSample
+		if limit <= 0 {
+			limit = scan.PoolSampleLimit
+		}
+		ps := scan.SampleFromPool(scan.ParsePool(scan.ReadPoolRaw()), limit, 443)
+		if len(ps.Candidates) > 0 {
+			candidates = ps.Candidates
+			sampledKeys = ps.Keys
+			s.logf(ps.Note)
+		} else {
+			// 池为空不能让按钮直接失效：回落官方采样，保证不回归
+			candidates = s.sampleCandidates(adaptive, 1500, false, family, extraIPv6)
+			s.logf("本地候选池没有可取样条目，已回落官方网段采样")
+		}
+	} else {
+		candidates = s.sampleCandidates(adaptive, 1500, false, family, extraIPv6)
+	}
 	if len(candidates) == 0 {
 		return QuickScanResult{OK: false, Error: "未能生成候选 IP"}
 	}
@@ -285,6 +337,17 @@ func (s *Server) RunQuickScanFor(ctx context.Context, profile *store.Profile, on
 		return QuickScanResult{OK: false, Error: "没有找到可用的 IP（可稍后重试，或先检查实例是否正常）"}
 	}
 	s.logf(fmt.Sprintf("扫描完成，%d 个可用节点", len(summary.Entries)))
+
+	// Phase 4：把完整优选结论回写本地池（只在 fromPool 模式）。
+	// 池是本地历史，与 KV 回填解耦：即使后面取令牌 / 回填失败，历史也照记。
+	if len(sampledKeys) > 0 {
+		a, f, err := scan.ApplyFullTestResults(sampledKeys, 443, summary, 0)
+		if err != nil {
+			s.logLevel("本地池结果回写失败："+err.Error(), "warn")
+		} else {
+			s.logf(fmt.Sprintf("本地池已回写：active %d 条 / failed %d 条", a, f))
+		}
+	}
 
 	// ---- 4.5 写入优选历史（与本地真连接优选共用同一份留底）----
 	s.saveScanHistory("quick", host, wsPath, scan.ProbeDefaultPath, true, summary.Entries, adaptive.profileID, historyStats(summary), adaptive.enabled, s.exploreRateOf())

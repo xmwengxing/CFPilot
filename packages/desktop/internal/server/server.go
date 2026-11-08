@@ -77,6 +77,9 @@ type Server struct {
 	// usage 是用量查询的缓存与本地调用风控（首次使用时创建）
 	usage     *usageState
 	usageOnce sync.Once
+	// sourceSched 是外部 IP 数据源定时同步（Phase 3）。Start 启动、Stop 停止；
+	// 与「立即同步」按钮共用同一把进程内互斥，避免叠加跑。
+	sourceSched *sourceScheduler
 }
 
 // New 创建一个服务实例（不启动监听）。
@@ -86,11 +89,12 @@ func New(settings config.DesktopSettings) (*Server, error) {
 		return nil, err
 	}
 	return &Server{
-		settings:  settings,
-		bootToken: boot,
-		startedAt: time.Now(),
-		store:     store.New(""),
-		events:    newEventBus(),
+		settings:    settings,
+		bootToken:   boot,
+		startedAt:   time.Now(),
+		store:       store.New(""),
+		events:      newEventBus(),
+		sourceSched: &sourceScheduler{},
 	}, nil
 }
 
@@ -179,6 +183,8 @@ func (s *Server) Start() error {
 		}
 	}()
 	log.Printf("[cfpilot] 已启动：http://%s", addr)
+	// 外部数据源定时同步跟随服务生命周期；start 内部防重复启动（换端口会再调 Start）
+	s.startSourceScheduler()
 	return nil
 }
 
@@ -198,6 +204,8 @@ func (s *Server) Start() error {
 // 真正的换端口流程已经改成「先 flush 响应再后台执行」，
 // 所以这里 800ms 足够覆盖正常收尾，超时就强关。
 func (s *Server) Stop() error {
+	// 先停定时同步，避免服务关闭后还有 goroutine 在写本地池
+	s.stopSourceScheduler()
 	s.mu.Lock()
 	srv := s.httpSrv
 	s.httpSrv = nil
@@ -334,6 +342,9 @@ func (s *Server) routes() http.Handler {
 
 	// 链式代理（自建落地节点）API
 	s.registerChainRoutes(mux)
+
+	// 外部 IP 数据源管理页（Phase 5，唯一 UI 入口；面板零改动）
+	s.registerSourcesRoutes(mux)
 
 	return s.withCommonHeaders(mux)
 }

@@ -382,6 +382,24 @@ interface Window {
      * 后台跑完整优选 + 回填面板，完成后弹系统通知。
      */
     quickScan(): Promise<QuickScanResult>
+
+    /* ---------------- 外部 IP 数据源（Phase 5） ---------------- */
+    /** 数据源配置 + 池统计 + 定时器状态，一次取齐 */
+    sourcesList(): Promise<SourcesListResult>
+    /** 保存整份数据源配置（增删改 / 启停整体提交） */
+    sourcesSave(config: SourcesFileView): Promise<{ ok: boolean; config?: SourcesFileView; error?: string }>
+    /** 测试连接：只拉清单，不写池 */
+    sourcesTest(id: string): Promise<{ ok: boolean; outcome: SourceSyncOutcomeView; error?: string }>
+    /** 立即同步（ids 为空 = 全部启用源），含 TCP/TLS 轻量校验 */
+    sourcesSync(ids?: string[]): Promise<{ ok: boolean; report?: SourcesSyncReportView; error?: string }>
+    sourcesStatus(): Promise<{ ok: boolean; running: boolean; lastRun: number; lastError: string }>
+    /** 本地池全量候选（上限 5000，分页 / 筛选 / 导出在前端做） */
+    sourcesPool(): Promise<{ ok: boolean; updatedAt: number; candidates: PoolCandidateView[] }>
+    /** 批量禁用 / 启用 / 删除候选 */
+    sourcesPoolUpdate(keys: string[], action: 'disable' | 'enable' | 'delete'): Promise<{ ok: boolean; changed: number; error?: string }>
+    /** 从本地池取样跑完整优选 + 回填（唯一会写 KV 的动作，默认 replace） */
+    sourcesQuick(poolSample?: number): Promise<QuickScanResult>
+
     /**
      * 读取本机保存的优选历史（最新在前）。
      *
@@ -947,3 +965,91 @@ interface ReTestIPResult {
   /** 第一道失败层的原因 */
   error?: string
 }
+
+/* ---------------- 外部 IP 数据源（Phase 5）视图类型 ---------------- */
+
+/** 与 CLI ~/.cfpilot/external-sources.json 同 schema */
+interface SourcesFileView {
+  schema: number
+  updatedAt: number
+  sources: SourceConfigView[]
+  runs: SourceSyncRunView[]
+}
+
+interface SourceConfigView {
+  id: string
+  name: string
+  type: ExternalSourceType
+  url: string
+  mirrors: string[]
+  enabled: boolean
+  intervalHours: number
+  etag: string
+  lastModified: string
+  lastSyncAt: number
+  lastError: string
+  failCount: number
+  query: string
+  maxResults: number
+}
+
+interface SourceSyncRunView {
+  at: number
+  sourceId: string
+  ok: boolean
+  added: number
+  updated: number
+  rejected: number
+  error: string
+  durationMs: number
+  notModified: boolean
+}
+
+interface SourceSyncOutcomeView {
+  sourceId: string
+  ok: boolean
+  added: number
+  updated: number
+  rejected: number
+  reasons: Record<string, number>
+  notModified: boolean
+  error: string
+  durationMs: number
+  url: string
+}
+
+interface SourcesSyncReportView {
+  at: number
+  outcomes: SourceSyncOutcomeView[]
+  poolCandidates: number
+}
+
+interface PoolCandidateView {
+  key: string
+  ip: string
+  port: number
+  ipVersion: 4 | 6
+  candidateType: string
+  sources: string[]
+  firstSeen: number
+  lastSeen: number
+  lightCheck: { tcpOk: boolean; tlsOk: boolean; tlsMs?: number; at: number } | null
+  fullTest: { at: number | null; wsOk: boolean | null; speedMBps: number | null; colo: string | null } | null
+  status: 'pending' | 'active' | 'failed' | 'disabled' | 'expired'
+  failCount: number
+  successCount: number
+}
+
+interface SourcesListResult {
+  ok: boolean
+  config: SourcesFileView
+  pool: {
+    total: number
+    byStatus: Record<string, number>
+    byFamily: Record<string, number>
+    updatedAt: number
+  }
+  scheduler: { running: boolean; lastRun: number; lastError: string }
+}
+
+type ExternalSourceType = 'github-raw' | 'custom-url' | 'ripe-stat'

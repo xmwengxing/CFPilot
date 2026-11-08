@@ -44,6 +44,9 @@
    */
   let autoLoadLogs: (() => void) | null = null
 
+  /** 切到「数据源」页时首次自动加载（切回来不重拉，避免冲掉用户勾选）。 */
+  let autoLoadSources: (() => void) | null = null
+
   function switchPage(name: string): void {
     document.querySelectorAll('#nav button').forEach((b) => {
       b.classList.toggle('active', (b as HTMLElement).dataset.page === name)
@@ -60,6 +63,10 @@
     // 日志页：第一次切进来时自动加载一次（已加载过就不重复拉）
     if (name === 'logs' && autoLoadLogs) {
       autoLoadLogs()
+    }
+    // 数据源页：第一次切进来时拉一次配置 / 池 / 采集记录
+    if (name === 'sources' && autoLoadSources) {
+      autoLoadSources()
     }
     // 部署页：切进来后重算横向滚动。
     //
@@ -4538,7 +4545,477 @@
     })
   }
 
+  /* ==================== 外部 IP 数据源（Phase 5） ====================
+   *
+   * 数据源配置、采集记录、本地池表格都只读写 ~/.cfpilot 下的本地文件。
+   * 唯一会写 KV 的动作是「一键完整优选」，且必须二次确认。
+   * 编辑数据源是「先改内存草稿 → 点保存整体落盘」，避免每改一个字段就写盘。
+   */
+
+  const SRC_PAGE_SIZE = 20
+  let srcConfig: SourcesFileView = { schema: 1, updatedAt: 0, sources: [], runs: [] }
+  let srcCandidates: PoolCandidateView[] = []
+  let srcSelected = new Set<string>()
+  let srcPage = 1
+  let srcLoaded = false
+  let srcBusy = false
+  let srcEditingId = ''
+
+  function srcErr(err: unknown): string {
+    return err instanceof Error ? err.message : String(err)
+  }
+
+  function srcNote(text: string, isError = false): void {
+    $text('srcLastAction').textContent = text
+    log(text, isError ? 'err' : undefined)
+  }
+
+  /** HTML 转义：数据源 id / URL 是用户填的，不能直接拼进 innerHTML。 */
+  function srcEsc(s: string): string {
+    return s.replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    })[c] || c)
+  }
+
+  function srcTime(ms: number): string {
+    if (!ms) return '从未'
+    try { return new Date(ms).toLocaleString() } catch { return '—' }
+  }
+
+  function srcBusySet(on: boolean): void {
+    srcBusy = on
+    const ids = ['btnSrcSync', 'btnSrcQuick', 'btnSrcConfigSave', 'btnSrcRefresh']
+    ids.forEach((id) => {
+      const el = document.getElementById(id) as HTMLButtonElement | null
+      if (el) el.disabled = on
+    })
+  }
+
+  /** 拉配置 + 池 + 采集记录 + 定时状态，一次刷齐四个卡片。 */
+  async function loadSourcesData(force = false): Promise<void> {
+    if (srcLoaded && !force) return
+    if (srcBusy) return
+    srcBusySet(true)
+    try {
+      const r = await window.cfpilot.sourcesList()
+      if (!r.ok) throw new Error('读取数据源配置失败')
+      srcConfig = r.config
+      const pool = await window.cfpilot.sourcesPool()
+      srcCandidates = pool.candidates || []
+      srcLoaded = true
+      $text('srcPoolBadge').textContent = String(r.pool.total) + ' 条'
+      $text('srcPoolSummary').textContent =
+        r.pool.total + ' 条（v4 ' + (r.pool.byFamily.v4 || 0) + ' / v6 ' + (r.pool.byFamily.v6 || 0) +
+        '；active ' + (r.pool.byStatus.active || 0) + ' / pending ' + (r.pool.byStatus.pending || 0) +
+        ' / failed ' + (r.pool.byStatus.failed || 0) + ' / disabled ' + (r.pool.byStatus.disabled || 0) + '）'
+      $text('srcSchedSummary').textContent = r.scheduler.running
+        ? '正在同步…'
+        : '空闲（上次 ' + srcTime(r.scheduler.lastRun) + '）' + (r.scheduler.lastError ? ' · ' + r.scheduler.lastError : '')
+      renderSourceFilter()
+      renderSourcesTable()
+      renderRuns()
+      renderPool()
+    } catch (err) {
+      srcNote('加载失败：' + srcErr(err), true)
+    } finally {
+      srcBusySet(false)
+    }
+  }
+  autoLoadSources = () => { void loadSourcesData(false) }
+
+  function isApiSourceType(t: string): boolean {
+    return t === 'ripe-stat'
+  }
+
+  /** 按来源类型切换表单可用字段与提示，避免清单型/API 型参数混填。 */
+  function syncFormTypeHint(): void {
+    const type = $sel('srcFormType').value
+    const api = isApiSourceType(type)
+    $('srcFormUrl').disabled = api
+    $('srcFormMirrors').disabled = api
+    $('srcFormQuery').disabled = !api
+    $('srcFormMaxResults').disabled = !api
+    $text('srcFormTypeHint').textContent = api
+      ? 'API 型：endpoint 由程序固定，只需填查询串与取样上限。RIPEstat 零 Key，可直接测试。'
+      : '清单型：填 HTTPS 主链接（可加镜像），查询串留空。'
+  }
+
+  /** 来源下拉从池里实际出现过的 sources 聚合，不写死。 */
+  function renderSourceFilter(): void {
+    const sel = $sel('srcFilterSource')
+    const keep = sel.value
+    const all = new Set<string>()
+    srcConfig.sources.forEach((s) => all.add(s.id))
+    srcCandidates.forEach((c) => c.sources.forEach((s) => all.add(s)))
+    sel.replaceChildren(new Option('全部', ''))
+    ;[...all].sort().forEach((s) => sel.add(new Option(s, s)))
+    sel.value = [...all].includes(keep) ? keep : ''
+  }
+
+  function renderSourcesTable(): void {
+    const tbody = $text('srcSourcesBody')
+    const table = $text('srcSourcesTable') as unknown as HTMLTableElement
+    $text('srcSourcesBadge').textContent = srcConfig.sources.length + ' 个'
+    if (srcConfig.sources.length === 0) {
+      table.hidden = true
+      $text('srcSourcesEmpty').hidden = false
+      tbody.replaceChildren()
+      return
+    }
+    table.hidden = false
+    $text('srcSourcesEmpty').hidden = true
+    tbody.innerHTML = srcConfig.sources.map((s) => {
+      const state = s.lastError
+        ? '<span style="color:var(--danger,#e55)">' + srcEsc(s.lastError) + '</span>'
+        : (s.failCount ? '失败 ' + s.failCount + ' 次' : '正常')
+      return '<tr>' +
+        '<td><b>' + srcEsc(s.id) + '</b><br><span class="muted">' + srcEsc(s.name) + '</span></td>' +
+        '<td>' + srcEsc(s.type) + '</td>' +
+        '<td style="max-width:220px;word-break:break-all">' + srcEsc(s.url || s.query || '—') +
+        (s.url ? '' : '<br><span class="muted">上限 ' + (s.maxResults || 200) + '</span>') + '</td>' +
+        '<td>' + (s.enabled ? '✅' : '⏸') + '</td>' +
+        '<td>' + s.intervalHours + '</td>' +
+        '<td>' + srcTime(s.lastSyncAt) + '</td>' +
+        '<td>' + state + '</td>' +
+        '<td>' +
+          '<button class="btn btn-ghost btn-sm" data-src-act="test" data-src-id="' + srcEsc(s.id) + '">测试</button> ' +
+          '<button class="btn btn-ghost btn-sm" data-src-act="edit" data-src-id="' + srcEsc(s.id) + '">编辑</button> ' +
+          '<button class="btn btn-ghost btn-sm" data-src-act="toggle" data-src-id="' + srcEsc(s.id) + '">' + (s.enabled ? '停用' : '启用') + '</button> ' +
+          '<button class="btn btn-ghost btn-sm" data-src-act="remove" data-src-id="' + srcEsc(s.id) + '">删除</button>' +
+        '</td></tr>'
+    }).join('')
+  }
+
+  function renderRuns(): void {
+    const tbody = $text('srcRunsBody')
+    const table = $text('srcRunsTable') as unknown as HTMLTableElement
+    const runs = [...srcConfig.runs].reverse().slice(0, 10)
+    $text('srcRunsBadge').textContent = srcConfig.runs.length + ' 条'
+    if (runs.length === 0) {
+      table.hidden = true
+      $text('srcRunsEmpty').hidden = false
+      tbody.replaceChildren()
+      return
+    }
+    table.hidden = false
+    $text('srcRunsEmpty').hidden = true
+    tbody.innerHTML = runs.map((r) =>
+      '<tr><td>' + srcTime(r.at) + '</td><td>' + srcEsc(r.sourceId) + '</td>' +
+      '<td>' + (r.ok ? (r.notModified ? '未变更(304)' : '<span style="color:var(--ok,#2a8)">成功</span>') : '<span style="color:var(--danger,#e55)">' + srcEsc(r.error) + '</span>') + '</td>' +
+      '<td>' + r.added + '</td><td>' + r.updated + '</td><td>' + r.rejected + '</td><td>' + r.durationMs + 'ms</td></tr>'
+    ).join('')
+  }
+
+  function filteredCandidates(): PoolCandidateView[] {
+    const q = $('srcFilterText').value.trim().toLowerCase()
+    const status = $sel('srcFilterStatus').value
+    const family = $sel('srcFilterFamily').value
+    const source = $sel('srcFilterSource').value
+    const sort = $sel('srcSort').value
+    const rows = srcCandidates.filter((c) => {
+      if (status && c.status !== status) return false
+      if (family && String(c.ipVersion) !== family) return false
+      if (source && !c.sources.includes(source)) return false
+      if (q && !(c.ip.toLowerCase().includes(q) || c.key.toLowerCase().includes(q) || c.sources.join(',').toLowerCase().includes(q))) return false
+      return true
+    })
+    rows.sort((a, b) => {
+      if (sort === 'ip') return a.key.localeCompare(b.key)
+      if (sort === 'successCount') return b.successCount - a.successCount || b.lastSeen - a.lastSeen
+      if (sort === 'status') return a.status.localeCompare(b.status) || a.key.localeCompare(b.key)
+      return b.lastSeen - a.lastSeen
+    })
+    return rows
+  }
+
+  function renderPool(): void {
+    const rows = filteredCandidates()
+    const pages = Math.max(1, Math.ceil(rows.length / SRC_PAGE_SIZE))
+    if (srcPage > pages) srcPage = pages
+    const slice = rows.slice((srcPage - 1) * SRC_PAGE_SIZE, srcPage * SRC_PAGE_SIZE)
+    const tbody = $text('srcPoolBody')
+    const table = $text('srcPoolTable') as unknown as HTMLTableElement
+    $text('srcTableBadge').textContent = rows.length + ' / ' + srcCandidates.length + ' 条'
+    $text('srcPageInfo').textContent = '第 ' + srcPage + ' / ' + pages + ' 页（每页 ' + SRC_PAGE_SIZE + '）'
+    if (rows.length === 0) {
+      table.hidden = true
+      $text('srcPoolEmpty').hidden = false
+      tbody.replaceChildren()
+      return
+    }
+    table.hidden = false
+    $text('srcPoolEmpty').hidden = true
+    tbody.innerHTML = slice.map((c) => {
+      const light = c.lightCheck
+        ? (c.lightCheck.tcpOk && c.lightCheck.tlsOk ? '✅ ' + (c.lightCheck.tlsMs || 0) + 'ms' : '❌')
+        : '未测'
+      const full = c.fullTest && c.fullTest.wsOk
+        ? '✅ ' + (c.fullTest.speedMBps || 0).toFixed(1) + ' MB/s ' + (c.fullTest.colo || '')
+        : (c.fullTest && c.fullTest.wsOk === false ? '❌' : '—')
+      return '<tr>' +
+        '<td><input type="checkbox" data-src-key="' + srcEsc(c.key) + '"' + (srcSelected.has(c.key) ? ' checked' : '') + ' /></td>' +
+        '<td><code>' + srcEsc(c.key) + '</code></td>' +
+        '<td>' + srcEsc(c.status) + '</td>' +
+        '<td>' + srcEsc(c.sources.join(', ')) + '</td>' +
+        '<td>' + light + '</td><td>' + srcEsc(full) + '</td>' +
+        '<td>' + c.successCount + ' / ' + c.failCount + '</td>' +
+        '<td>' + srcTime(c.lastSeen) + '</td></tr>'
+    }).join('')
+  }
+
+  /** 保存整份配置草稿（URL 校验在后端做，失败会把原因带回来）。 */
+  async function saveSourceConfig(): Promise<void> {
+    if (srcBusy) return
+    srcBusySet(true)
+    try {
+      const r = await window.cfpilot.sourcesSave(srcConfig)
+      if (!r.ok) throw new Error(r.error || '保存失败')
+      if (r.config) srcConfig = r.config
+      srcNote('数据源配置已保存（' + srcConfig.sources.length + ' 个）')
+      renderSourceFilter()
+      renderSourcesTable()
+      renderRuns()
+    } catch (err) {
+      srcNote('保存失败：' + srcErr(err), true)
+    } finally {
+      srcBusySet(false)
+    }
+  }
+
+  function clearSourceForm(): void {
+    srcEditingId = ''
+    $('srcFormId').value = ''
+    $('srcFormId').disabled = false
+    $('srcFormName').value = ''
+    $('srcFormUrl').value = ''
+    $('srcFormMirrors').value = ''
+    $('srcFormQuery').value = ''
+    $('srcFormMaxResults').value = '200'
+    $('srcFormInterval').value = '12'
+    $('srcFormEnabled').checked = true
+    $sel('srcFormType').value = 'custom-url'
+    $text('srcFormTitle').textContent = '新增数据源'
+    syncFormTypeHint()
+  }
+
+  /** 把表单内容加入/更新内存草稿，不落盘。 */
+  function upsertDraft(): void {
+    const id = $('srcFormId').value.trim()
+    if (!id) { srcNote('请填写数据源 ID', true); return }
+    const type = $sel('srcFormType').value as ExternalSourceType
+    const api = isApiSourceType(type)
+    const url = api ? '' : $('srcFormUrl').value.trim()
+    const query = api ? $('srcFormQuery').value.trim() : ''
+    const maxResults = Math.max(1, Math.min(2000, Number($('srcFormMaxResults').value) || 200))
+    if (!api && (!url || !/^https:\/\//i.test(url))) { srcNote('主链接必须是 https:// 开头', true); return }
+    const mirrors = api ? [] : $('srcFormMirrors').value.split(',').map((s) => s.trim()).filter(Boolean)
+    for (const m of mirrors) {
+      if (!/^https:\/\//i.test(m)) { srcNote('镜像链接也必须是 https:// 开头', true); return }
+    }
+    if (api && !query) { srcNote('API 型数据源需要填查询串', true); return }
+    if (type === 'ripe-stat' && !/^AS\d{1,10}$/i.test(query)) {
+      srcNote('RIPEstat 的查询串必须是 ASN，如 AS13335', true); return
+    }
+    const hours = Math.max(1, Math.min(720, Number($('srcFormInterval').value) || (type === 'github-raw' ? 12 : 24)))
+    const draft: SourceConfigView = {
+      id, name: $('srcFormName').value.trim() || id, type, url, mirrors,
+      enabled: $('srcFormEnabled').checked, intervalHours: hours,
+      etag: '', lastModified: '', lastSyncAt: 0, lastError: '', failCount: 0,
+      query, maxResults,
+    }
+    const idx = srcConfig.sources.findIndex((s) => s.id === id)
+    if (idx >= 0) {
+      // 编辑时保留条件请求头与同步历史，避免下次全量重拉
+      draft.etag = srcConfig.sources[idx]!.etag
+      draft.lastModified = srcConfig.sources[idx]!.lastModified
+      draft.lastSyncAt = srcConfig.sources[idx]!.lastSyncAt
+      srcConfig.sources[idx] = draft
+    } else {
+      srcConfig.sources.push(draft)
+    }
+    renderSourcesTable()
+    renderSourceFilter()
+    clearSourceForm()
+    srcNote('已' + (idx >= 0 ? '更新' : '加入') + '「' + id + '」，记得点「保存数据源配置」')
+  }
+
+  async function sourceAction(act: string, id: string): Promise<void> {
+    const s = srcConfig.sources.find((x) => x.id === id)
+    if (!s) return
+    if (act === 'edit') {
+      srcEditingId = id
+      $('srcFormId').value = s.id
+      $('srcFormId').disabled = true
+      $('srcFormName').value = s.name
+      $sel('srcFormType').value = s.type
+      $('srcFormUrl').value = s.url
+      $('srcFormMirrors').value = s.mirrors.join(', ')
+      $('srcFormQuery').value = s.query || ''
+      $('srcFormMaxResults').value = String(s.maxResults || 200)
+      $('srcFormInterval').value = String(s.intervalHours)
+      $('srcFormEnabled').checked = s.enabled
+      $text('srcFormTitle').textContent = '编辑数据源：' + id
+      syncFormTypeHint()
+      return
+    }
+    if (act === 'toggle') {
+      s.enabled = !s.enabled
+      await saveSourceConfig()
+      return
+    }
+    if (act === 'remove') {
+      if (!confirm('删除数据源「' + id + '」？\n只会移除配置与来源关联，仍被其它来源引用的候选会保留。')) return
+      srcConfig.sources = srcConfig.sources.filter((x) => x.id !== id)
+      await saveSourceConfig()
+      srcNote('已删除数据源 ' + id + '；池内候选请点「刷新」查看关联变化')
+      return
+    }
+    if (act === 'test') {
+      srcNote('正在测试 ' + id + ' …')
+      try {
+        const r = await window.cfpilot.sourcesTest(id)
+        // API 型源返回 note/upstreamCount，清单型返回 durationMs；两者都带 ok/added/error
+        const o = r.outcome as SourceSyncOutcomeView & { note?: string; upstreamCount?: number }
+        const detail = o.note || ('解析出 ' + o.added + ' 条' + (o.durationMs ? '（' + o.durationMs + 'ms）' : ''))
+        srcNote(o.ok ? id + ' 可用：' + detail : id + ' 不可用：' + (o.error || '未知错误'), !o.ok)
+      } catch (err) { srcNote('测试失败：' + srcErr(err), true) }
+    }
+  }
+
+  /** 批量操作候选；删除需要二次确认。 */
+  async function updateSelected(action: 'disable' | 'enable' | 'delete'): Promise<void> {
+    if (srcSelected.size === 0) { srcNote('请先勾选候选', true); return }
+    if (action === 'delete' && !confirm('确定删除选中的 ' + srcSelected.size + ' 条候选？此操作不可撤销。')) return
+    if (srcBusy) return
+    srcBusySet(true)
+    try {
+      const keys = [...srcSelected]
+      const r = await window.cfpilot.sourcesPoolUpdate(keys, action)
+      if (!r.ok) throw new Error(r.error || '操作失败')
+      srcSelected.clear()
+      srcNote('已' + (action === 'delete' ? '删除' : action === 'disable' ? '禁用' : '启用') + ' ' + r.changed + ' 条')
+      await loadSourcesData(true)
+    } catch (err) {
+      srcNote('操作失败：' + srcErr(err), true)
+    } finally {
+      srcBusySet(false)
+    }
+  }
+
+  /** 导出当前筛选结果（不只是本页），前端生成，不需要后端路由。 */
+  function exportPool(format: 'txt' | 'csv'): void {
+    const rows = filteredCandidates()
+    if (rows.length === 0) { srcNote('当前筛选没有可导出的候选', true); return }
+    let text = ''
+    if (format === 'txt') {
+      text = rows.map((c) => (c.ipVersion === 6 ? '[' + c.ip + ']:' + c.port : c.ip + ':' + c.port) + '#' + c.status).join('\n') + '\n'
+    } else {
+      const cell = (v: string): string => '"' + v.replace(/"/g, '""') + '"'
+      const head = 'ip,port,status,sources,lightCheck,fullTest,successCount,failCount,lastSeen'
+      text = [head, ...rows.map((c) => [
+        c.ip, String(c.port), c.status, c.sources.join('|'),
+        c.lightCheck ? String(c.lightCheck.tcpOk && c.lightCheck.tlsOk) : '',
+        c.fullTest && c.fullTest.wsOk ? String(c.fullTest.speedMBps || 0) : '',
+        String(c.successCount), String(c.failCount), String(c.lastSeen),
+      ].map(cell).join(','))].join('\n') + '\n'
+    }
+    const blob = new Blob([text], { type: format === 'csv' ? 'text/csv;charset=utf-8' : 'text/plain;charset=utf-8' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = 'cfpilot-external-candidates.' + format
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(a.href)
+    srcNote('已导出 ' + rows.length + ' 条（' + format.toUpperCase() + '）')
+  }
+
+  /** 绑定数据源页的全部交互；DOMContentLoaded 时调用一次。 */
+  function bindSourcesPage(): void {
+    autoLoadSources = () => { void loadSourcesData(false) }
+    const on = (id: string, fn: () => void): void => {
+      document.getElementById(id)?.addEventListener('click', fn)
+    }
+    syncFormTypeHint()
+    $sel('srcFormType').addEventListener('change', syncFormTypeHint)
+    on('btnSrcRefresh', () => { void loadSourcesData(true) })
+    on('btnSrcSync', () => {
+      if (srcBusy) return
+      void (async () => {
+        srcBusySet(true)
+        srcNote('正在同步全部启用源（含 TCP/TLS 轻量校验）…')
+        try {
+          const r = await window.cfpilot.sourcesSync([])
+          if (!r.ok) throw new Error(r.error || '同步失败')
+          const os = r.report ? r.report.outcomes : []
+          const ok = os.filter((o) => o.ok).length
+          srcNote('同步完成：' + ok + '/' + os.length + ' 个源成功，池内 ' + (r.report ? r.report.poolCandidates : 0) + ' 条')
+          await loadSourcesData(true)
+        } catch (err) {
+          srcNote('同步失败：' + srcErr(err), true)
+        } finally { srcBusySet(false) }
+      })()
+    })
+    on('btnSrcQuick', () => {
+      if (srcBusy) return
+      if (!confirm('将从本地池分层取样跑完整优选（WS101 + 隧道 + 测速），并用 top 8【覆盖】当前订阅的优选 IP。\n\n这会用掉一次测速时间且会写 KV，确定继续？')) return
+      void (async () => {
+        srcBusySet(true)
+        srcNote('完整优选进行中（约 1–3 分钟），请不要关闭程序…')
+        try {
+          const r = await window.cfpilot.sourcesQuick(200)
+          srcNote(r.ok ? (r.message || '完整优选完成') : ('完整优选失败：' + (r.error || '未知错误')), !r.ok)
+          await loadSourcesData(true)
+        } catch (err) {
+          srcNote('完整优选失败：' + srcErr(err), true)
+        } finally { srcBusySet(false) }
+      })()
+    })
+    on('btnSrcFormSave', upsertDraft)
+    on('btnSrcFormClear', clearSourceForm)
+    on('btnSrcConfigSave', () => { void saveSourceConfig() })
+    on('btnSrcSelectAll', () => {
+      filteredCandidates()
+        .slice((srcPage - 1) * SRC_PAGE_SIZE, srcPage * SRC_PAGE_SIZE)
+        .forEach((c) => srcSelected.add(c.key))
+      renderPool()
+    })
+    on('btnSrcDisable', () => { void updateSelected('disable') })
+    on('btnSrcEnable', () => { void updateSelected('enable') })
+    on('btnSrcDelete', () => { void updateSelected('delete') })
+    on('btnSrcExportTxt', () => exportPool('txt'))
+    on('btnSrcExportCsv', () => exportPool('csv'))
+    on('btnSrcPrev', () => { if (srcPage > 1) { srcPage--; renderPool() } })
+    on('btnSrcNext', () => { srcPage++; renderPool() })
+
+    ;['srcFilterText', 'srcFilterStatus', 'srcFilterFamily', 'srcFilterSource', 'srcSort'].forEach((id) => {
+      const el = document.getElementById(id)
+      if (!el) return
+      el.addEventListener('input', () => { srcPage = 1; renderPool() })
+      el.addEventListener('change', () => { srcPage = 1; renderPool() })
+    })
+    $text('srcSourcesBody').addEventListener('click', (e) => {
+      const btn = (e.target as HTMLElement).closest('button[data-src-act]') as HTMLElement | null
+      if (btn) void sourceAction(btn.dataset.srcAct!, btn.dataset.srcId!)
+    })
+    $text('srcPoolBody').addEventListener('change', (e) => {
+      const box = e.target as HTMLInputElement
+      const key = box.dataset.srcKey
+      if (!key) return
+      if (box.checked) srcSelected.add(key)
+      else srcSelected.delete(key)
+    })
+    const checkAll = document.getElementById('srcPoolCheckAll') as HTMLInputElement | null
+    checkAll?.addEventListener('change', () => {
+      filteredCandidates()
+        .slice((srcPage - 1) * SRC_PAGE_SIZE, srcPage * SRC_PAGE_SIZE)
+        .forEach((c) => { if (checkAll.checked) srcSelected.add(c.key); else srcSelected.delete(c.key) })
+      renderPool()
+    })
+  }
+
   document.addEventListener('DOMContentLoaded', async () => {
+    bindSourcesPage()
     document.getElementById('nav')!.addEventListener('click', (e) => {
       const btn = (e.target as HTMLElement).closest('button[data-page]') as HTMLElement | null
       if (btn) switchPage(btn.dataset.page!)
@@ -4762,7 +5239,7 @@
      */
     const pageParam = new URLSearchParams(location.search).get('page')
     if (pageParam) {
-      const valid = ['cred', 'deploy', 'scan', 'about', 'logs']
+      const valid = ['cred', 'deploy', 'scan', 'sources', 'about', 'logs']
       if (valid.includes(pageParam)) {
         switchPage(pageParam)
         log('已跳转到「' + pageParam + '」页')

@@ -1199,6 +1199,7 @@
       <button type="button" data-page="cred" class="active">🔑 凭据</button>
       <button type="button" data-page="deploy">🚀 部署</button>
       <button type="button" data-page="scan">⚡ 优选</button>
+      <button type="button" data-page="sources">🌐 数据源</button>
       <button type="button" data-page="about">📘 说明</button>
       <button type="button" data-page="logs">📄 日志</button>
     </nav>
@@ -2139,6 +2140,129 @@
           <div class="card">
             <h2><span class="dot"></span>🖨️ 日志内容</h2>
             <pre class="result-box logview" id="logsView">（尚未加载日志）</pre>
+          </div>
+        </section>
+
+        <!-- ============ 外部 IP 数据源 ============ -->
+        <section class="page" id="page-sources">
+          <div class="card">
+            <h2><span class="dot"></span>🌐 外部 IP 本地候选池 <span class="badge info" id="srcPoolBadge">—</span></h2>
+            <p class="desc">
+              外部清单定期同步到本机 <code>~/.cfpilot/external-candidates.json</code>，与 CLI 版共用同一份池。
+              入池只做 <b>TCP + TLS 轻量校验</b>；只有点「一键完整优选」才会跑 WS101 + 隧道 + 测速，
+              并把 top 8 回填订阅（<code>replace</code>）。面板与 Worker 内核零改动。
+            </p>
+            <p class="kv-row" style="margin:0 0 6px">
+              <span class="k">池内候选</span><span class="v" id="srcPoolSummary">—</span>
+            </p>
+            <p class="kv-row" style="margin:0 0 6px">
+              <span class="k">定时同步</span><span class="v" id="srcSchedSummary">—</span>
+            </p>
+            <p class="kv-row" style="margin:0">
+              <span class="k">最近操作</span><span class="v" id="srcLastAction">—</span>
+            </p>
+            <div class="btn-row" style="margin-top:12px">
+              <button class="btn btn-primary" id="btnSrcSync" type="button">立即同步</button>
+              <button class="btn btn-ghost" id="btnSrcQuick" type="button">一键完整优选（写订阅）</button>
+              <button class="btn btn-ghost" id="btnSrcRefresh" type="button">刷新</button>
+            </div>
+            <p class="tip" id="srcTopHint" style="margin-top:8px">
+              「立即同步」只写本地磁盘、不写 KV；「一键完整优选」是唯一会更新订阅的动作，耗时约 1–3 分钟。
+            </p>
+          </div>
+
+          <div class="card">
+            <h2><span class="dot"></span>📡 数据源 <span class="badge info" id="srcSourcesBadge">0 个</span></h2>
+            <p class="desc">
+              清单型（GitHub Raw / 自定义 HTTPS）与 API 型（RIPEstat）共存。默认只接受 HTTPS，
+              私网 / 本机 / 云元数据地址一律拒绝。删除数据源只会清理来源关联，仍被其它来源引用的候选会保留。
+            </p>
+            <table id="srcSourcesTable" hidden>
+              <thead><tr><th>ID / 名称</th><th>类型</th><th>链接 / 查询</th><th>启用</th><th>间隔(h)</th><th>上次同步</th><th>状态</th><th>操作</th></tr></thead>
+              <tbody id="srcSourcesBody"></tbody>
+            </table>
+            <p class="tip" id="srcSourcesEmpty">还没有数据源，请在下方添加。</p>
+
+            <div class="note" style="margin-top:14px">
+              <b id="srcFormTitle">新增数据源</b>
+              <div class="row" style="margin-top:8px">
+                <div class="field"><label for="srcFormId">ID（唯一）</label><input type="text" id="srcFormId" placeholder="如 cf_ips_github" /></div>
+                <div class="field"><label for="srcFormName">显示名称</label><input type="text" id="srcFormName" placeholder="可留空，默认同 ID" /></div>
+                <div class="field"><label for="srcFormType">类型</label>
+                  <select id="srcFormType">
+                    <option value="github-raw">GitHub Raw（自动镜像回退）</option>
+                    <option value="custom-url">自定义 HTTPS 链接</option>
+                    <option value="ripe-stat">RIPEstat 宣告前缀（零 Key）</option>
+                  </select>
+                </div>
+              </div>
+              <div class="row" style="margin-top:6px">
+                <div class="field" style="flex:2"><label for="srcFormUrl">主链接（仅清单型）</label><input type="text" id="srcFormUrl" placeholder="https://…/ips.txt" /></div>
+                <div class="field"><label for="srcFormMirrors">镜像链接（逗号分隔，可空）</label><input type="text" id="srcFormMirrors" placeholder="https://…" /></div>
+                <div class="field"><label for="srcFormInterval">同步间隔（小时）</label><input type="number" id="srcFormInterval" min="1" max="720" value="12" /></div>
+              </div>
+              <div class="row" style="margin-top:6px">
+                <div class="field" style="flex:3"><label for="srcFormQuery">API 查询串（ripe-stat 填 ASN）</label><input type="text" id="srcFormQuery" placeholder="AS13335" /></div>
+                <div class="field"><label for="srcFormMaxResults">单次取样上限</label><input type="number" id="srcFormMaxResults" min="1" max="2000" value="200" /></div>
+              </div>
+              <p class="tip" id="srcFormTypeHint" style="margin-top:6px">清单型填「主链接」，API 型填「查询串」；两者互斥。</p>
+              <label style="display:inline-flex;align-items:center;gap:6px;margin-top:8px">
+                <input type="checkbox" id="srcFormEnabled" checked /> 启用
+              </label>
+              <div class="btn-row" style="margin-top:10px">
+                <button class="btn btn-primary btn-sm" id="btnSrcFormSave" type="button">加入列表</button>
+                <button class="btn btn-ghost btn-sm" id="btnSrcFormClear" type="button">清空表单</button>
+                <button class="btn btn-ghost btn-sm" id="btnSrcConfigSave" type="button">保存数据源配置</button>
+              </div>
+              <p class="tip" style="margin-top:6px">「加入列表」只改页面上的草稿，点「保存数据源配置」才真正落盘。</p>
+            </div>
+          </div>
+
+          <div class="card">
+            <h2><span class="dot"></span>🧾 采集记录 <span class="badge info" id="srcRunsBadge">0 条</span></h2>
+            <table id="srcRunsTable" hidden>
+              <thead><tr><th>时间</th><th>数据源</th><th>结果</th><th>新增</th><th>刷新</th><th>拒绝</th><th>耗时</th></tr></thead>
+              <tbody id="srcRunsBody"></tbody>
+            </table>
+            <p class="tip" id="srcRunsEmpty">还没有采集记录。</p>
+          </div>
+
+          <div class="card">
+            <h2><span class="dot"></span>🗂️ 本地候选池 <span class="badge info" id="srcTableBadge">0 条</span></h2>
+            <div class="row" style="margin-bottom:8px">
+              <div class="field" style="flex:2"><label for="srcFilterText">搜索 IP / 来源</label><input type="text" id="srcFilterText" placeholder="104.16 / github…" /></div>
+              <div class="field"><label for="srcFilterStatus">状态</label>
+                <select id="srcFilterStatus"><option value="">全部</option><option value="pending">pending</option><option value="active">active</option><option value="failed">failed</option><option value="disabled">disabled</option><option value="expired">expired</option></select>
+              </div>
+              <div class="field"><label for="srcFilterFamily">地址族</label>
+                <select id="srcFilterFamily"><option value="">全部</option><option value="4">IPv4</option><option value="6">IPv6</option></select>
+              </div>
+              <div class="field"><label for="srcFilterSource">来源</label><select id="srcFilterSource"><option value="">全部</option></select></div>
+              <div class="field"><label for="srcSort">排序</label>
+                <select id="srcSort"><option value="lastSeen">最近发现</option><option value="ip">IP</option><option value="successCount">历史成功</option><option value="status">状态</option></select>
+              </div>
+            </div>
+            <div class="btn-row" style="margin-bottom:8px">
+              <button class="btn btn-ghost btn-sm" id="btnSrcSelectAll" type="button">全选本页</button>
+              <button class="btn btn-ghost btn-sm" id="btnSrcDisable" type="button">禁用选中</button>
+              <button class="btn btn-ghost btn-sm" id="btnSrcEnable" type="button">启用选中</button>
+              <button class="btn btn-ghost btn-sm" id="btnSrcDelete" type="button">删除选中</button>
+              <button class="btn btn-ghost btn-sm" id="btnSrcExportTxt" type="button">导出 TXT</button>
+              <button class="btn btn-ghost btn-sm" id="btnSrcExportCsv" type="button">导出 CSV</button>
+            </div>
+            <table id="srcPoolTable" hidden>
+              <thead><tr>
+                <th style="width:28px"><input type="checkbox" id="srcPoolCheckAll" /></th>
+                <th>IP:端口</th><th>状态</th><th>来源</th><th>轻量校验</th><th>完整优选</th><th>成功/失败</th><th>最近发现</th>
+              </tr></thead>
+              <tbody id="srcPoolBody"></tbody>
+            </table>
+            <p class="tip" id="srcPoolEmpty">本地池还是空的，先添加数据源并同步。</p>
+            <div class="btn-row" style="margin-top:10px">
+              <button class="btn btn-ghost btn-sm" id="btnSrcPrev" type="button">上一页</button>
+              <span class="tip" id="srcPageInfo" style="margin:0">第 1 页</span>
+              <button class="btn btn-ghost btn-sm" id="btnSrcNext" type="button">下一页</button>
+            </div>
           </div>
         </section>
       </div>

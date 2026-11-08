@@ -21,9 +21,11 @@ import {
   SCANNER_TOKEN_KEY,
   loadDomainLibrary,
   loadLocalIps,
+  loadRouteProfile,
   mergeConfig,
   saveConfig,
   saveDomainLibrary,
+  saveRouteProfile,
 } from './config'
 import { collectNodes, parseLocalList } from './sub-engine'
 import { loadSubSecret, rotateSubSecret, signSubToken, verifySubToken } from './sub-token'
@@ -523,6 +525,26 @@ export async function handleApi(
     const list = Array.isArray(body.domains) ? body.domains.map((v) => String(v)) : []
     await saveDomainLibrary(store, list)
     return json({ ok: true, count: list.filter((d) => d.trim()).length })
+  }
+
+  // ---- Clash 分流规则（ROUTE_PROFILE ini 原文，渲染进 clash 订阅的 rules/groups）----
+  if (path === '/route-profile' && method === 'GET') {
+    const raw = await loadRouteProfile(store)
+    return json({ ok: true, raw, isCustom: raw.trim().length > 0 })
+  }
+
+  if (path === '/route-profile' && method === 'PUT') {
+    let body: { raw?: unknown }
+    try {
+      body = (await request.json()) as { raw?: unknown }
+    } catch {
+      return error('请求体解析失败', 400)
+    }
+    if (typeof body.raw !== 'string') return error('缺少 raw 字段', 400)
+    if (body.raw.length > 20000) return error('分流规则过长（上限 20000 字符）', 400)
+    await saveRouteProfile(store, body.raw)
+    const saved = await loadRouteProfile(store)
+    return json({ ok: true, raw: saved, isCustom: saved.trim().length > 0 })
   }
 
   if (path === '/scanner-token' && method === 'POST') {

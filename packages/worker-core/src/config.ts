@@ -302,6 +302,21 @@ export async function loadDomainLibrary(store: Store): Promise<string[]> {
     .filter((line) => line.length > 0)
 }
 
+/** 读取 KV 中自定义分流规则原文（空串 = 用内置规则） */
+export async function loadRouteProfile(store: Store): Promise<string> {
+  return (await store.get(ROUTE_PROFILE_KEY)) ?? ''
+}
+
+/** 保存分流规则（空串表示清空自定义、回落内置；删前先读避免写配额浪费） */
+export async function saveRouteProfile(store: Store, raw: string): Promise<void> {
+  const cleaned = raw.trim()
+  if (!cleaned) {
+    if ((await store.get(ROUTE_PROFILE_KEY)) !== null) await store.delete(ROUTE_PROFILE_KEY)
+    return
+  }
+  if ((await loadRouteProfile(store)) !== cleaned) await store.put(ROUTE_PROFILE_KEY, cleaned)
+}
+
 /** 保存优选域名库（空数组表示清空自定义库、回落到内置库） */
 export async function saveDomainLibrary(store: Store, domains: string[]): Promise<void> {
   const cleaned = domains

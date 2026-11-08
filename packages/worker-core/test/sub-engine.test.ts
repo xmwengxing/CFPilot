@@ -5,6 +5,7 @@ import {
   cleanIpLine,
   collectNodes,
   filterByCountries,
+  finalizeGroups,
   mergePools,
   parseAddList,
   parseApiList,
@@ -240,6 +241,93 @@ describe('mergePools', () => {
       { key: 'domain', name: '优选域名', entries: [{ ...parseAddList('1.1.1.1:8443')[0]!, source: 'domain' }] },
     ])
     expect(merged.nodes).toHaveLength(2)
+  })
+})
+
+describe('finalizeGroups（C-1：去重与 maxNodes 作用于 groups）', () => {
+  const e = (ip: string, port = 443): import('../src/types').NodeEntry => ({
+    ip,
+    port,
+    remark: '',
+    colo: '',
+    latency: 0,
+    speed: 0,
+    source: 'add',
+  })
+
+  it('跨组去重：groups 展开后与 nodes 完全一致', () => {
+    const result = finalizeGroups(
+      [
+        { key: 'official', name: '官方优选IP', entries: [e('1.1.1.1'), e('2.2.2.2')] },
+        { key: 'domain', name: '优选域名', entries: [e('1.1.1.1'), e('3.3.3.3')] },
+      ],
+      0
+    )
+    expect(result.nodes).toHaveLength(3) // 1.1.1.1 只保留官方侧
+    expect(result.deduped).toBe(1)
+    expect(result.limited).toBe(0)
+    const flat = result.groups.flatMap((g) => g.entries)
+    expect(flat).toEqual(result.nodes)
+    expect(result.groups.filter((g) => g.entries.length === 0)).toHaveLength(0)
+  })
+
+  it('maxNodes 按展开顺序截断，截断数写进 limited', () => {
+    const result = finalizeGroups(
+      [
+        { key: 'official', name: '官方优选IP', entries: [e('1.1.1.1'), e('2.2.2.2')] },
+        { key: 'domain', name: '优选域名', entries: [e('3.3.3.3'), e('4.4.4.4')] },
+      ],
+      1
+    )
+    expect(result.nodes).toHaveLength(1)
+    expect(result.nodes[0]!.ip).toBe('1.1.1.1')
+    expect(result.limited).toBe(3)
+    expect(result.groups).toHaveLength(1)
+    expect(result.groups[0]!.entries).toHaveLength(1)
+  })
+})
+
+describe('collectNodes 一致性（C-1：订阅与预览同一口径）', () => {
+  const baseConfig: UserConfig = {
+    ...config,
+    poolOfficial: false,
+    poolDomain: false,
+    poolManual: true,
+  }
+
+  it('重复 IP 在订阅渲染里只出现一次（groups 已去重）', async () => {
+    // 本地池: 1.1.1.1, 2.2.2.2；手填: 1.1.1.1, 1.1.1.1
+    // 去重前 manual 组有 4 条，实际唯一 IP 只有 2 个
+    const result = await collectNodes(
+      { ...baseConfig, add: '1.1.1.1\n1.1.1.1' },
+      '1.1.1.1\n2.2.2.2',
+      {}
+    )
+    expect(result.nodes).toHaveLength(2)
+    expect(result.stats.deduped).toBe(2)
+    const flat = result.groups.flatMap((g) => g.entries)
+    expect(flat).toEqual(result.nodes)
+    // 用渲染验证：clash 输出里 server: 1.1.1.1 只出现一条
+    const out = renderClash({
+      nodes: result.nodes,
+      groups: result.groups,
+      config: baseConfig,
+      domain: 'worker.example.com',
+      port: 443,
+      ports: [443],
+      protocol: 'vless',
+      transport: 'ws',
+    })
+    expect(out.match(/^\s+server: 1\.1\.1\.1$/gm)).toHaveLength(1)
+    expect(out.match(/^\s+server: 2\.2\.2\.2$/gm)).toHaveLength(1)
+  })
+
+  it('maxNodes=1 时订阅 proxy 数 == 1（不再是全部）', async () => {
+    const ips = Array.from({ length: 20 }, (_, i) => `10.0.${i}.1`).join('\n')
+    const result = await collectNodes({ ...baseConfig, maxNodes: 1 }, ips, {})
+    expect(result.nodes).toHaveLength(1)
+    expect(result.groups.flatMap((g) => g.entries)).toHaveLength(1)
+    expect(result.stats.limited).toBe(19)
   })
 })
 

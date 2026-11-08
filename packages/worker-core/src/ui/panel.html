@@ -1306,6 +1306,12 @@
     }).join('');
     if (!html) html = '<span class="muted">暂无节点分布数据</span>';
     html += '<span class="pill">合并去重 -' + ((r.stats && r.stats.deduped) || 0) + '</span>';
+    if (r.stats && r.stats.limited) {
+      html += '<span class="pill">节点上限截断 -' + r.stats.limited + '</span>';
+    }
+    if (r.stats && r.stats.errors && r.stats.errors.length) {
+      html += '<span class="pill">提示 ' + r.stats.errors.length + ' 条</span>';
+    }
     if (r.stats && r.stats.countries && r.stats.countries.length) {
       html += '<span class="pill">地区过滤 ' + esc(r.stats.countries.join('/')) + '</span>';
     }

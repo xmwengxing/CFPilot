@@ -30,28 +30,26 @@ import {
 describe('内置反代入口精选', () => {
   it('默认选 6 个入口（固定 IP 不需要 DoH，不再受子请求预算约束）', () => {
     expect(RELAY_DOMAIN_LIMIT).toBe(6)
-    expect(selectRelayDomains('HKG')).toHaveLength(6)
-    expect(selectRelayDomains(undefined)).toHaveLength(6)
+    expect(selectRelayDomains()).toHaveLength(6)
+    expect(selectRelayDomains(6)).toHaveLength(6)
   })
 
   it('内置表是固定 IP：选中项全部来自表内且无重复', () => {
-    const picked = selectRelayDomains('HKG')
+    const picked = selectRelayDomains()
     expect(new Set(picked).size).toBe(picked.length)
     expect(picked.every((d) => BUILTIN_RELAY_DOMAINS.includes(d))).toBe(true)
     for (const entry of picked) expect(entry).toMatch(/^\d{1,3}(\.\d{1,3}){3}$/)
   })
 
-  it('没有地区信息时按表顺序取（顺序即实测质量排序）', () => {
-    // 内置表已从「地区域名」换成固定 IP：IP 没有地区信息，
-    // 选路退化为「表内顺序」，也就是我们的实测排序 —— 确定性、出口稳定。
-    expect(selectRelayDomains('HKG', 3)).toEqual(BUILTIN_RELAY_DOMAINS.slice(0, 3))
-    expect(selectRelayDomains('LAX', 3)).toEqual(BUILTIN_RELAY_DOMAINS.slice(0, 3))
-    expect(selectRelayDomains('ZZZ', 3)).toEqual(BUILTIN_RELAY_DOMAINS.slice(0, 3))
+  it('按表顺序取前 N 个（顺序即实测质量排序）', () => {
+    // 内置表是固定 IP：按表顺序取，确定性、出口稳定。
+    expect(selectRelayDomains(3)).toEqual(BUILTIN_RELAY_DOMAINS.slice(0, 3))
+    expect(selectRelayDomains(0)).toEqual([])
   })
 
   it('limit 可覆盖（测试 / 调试用）', () => {
-    expect(selectRelayDomains('HKG', 1)).toEqual([BUILTIN_RELAY_DOMAINS[0]])
-    expect(selectRelayDomains('HKG', 99)).toHaveLength(BUILTIN_RELAY_DOMAINS.length)
+    expect(selectRelayDomains(1)).toEqual([BUILTIN_RELAY_DOMAINS[0]])
+    expect(selectRelayDomains(99)).toHaveLength(BUILTIN_RELAY_DOMAINS.length)
   })
 
   it('连接批次 ≤8：32 个并发 connect 会顶穿子请求上限', () => {

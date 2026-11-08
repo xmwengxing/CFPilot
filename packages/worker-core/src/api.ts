@@ -169,7 +169,14 @@ export async function handleApi(
   // ---- 公开接口 ----
   if (path === '/session' && method === 'GET') {
     const authenticated = await verifySession(store, request)
-    return json({ ok: true, authenticated, panelPath: auth.panelPath })
+    // ⚠️ 未鉴权时**绝不返回 panelPath**（C-2）：面板路径是「未登录者不应
+    // 知道入口」这层防护的全部依据，免费泄露等于把爆破面提前交出去。
+    // 面板/向导在登录成功后拿到的路径已足够用（auth panelPath 由登录响应下发）。
+    return json(
+      authenticated
+        ? { ok: true, authenticated, panelPath: auth.panelPath }
+        : { ok: true, authenticated }
+    )
   }
 
   if (path === '/login' && method === 'POST') {
@@ -467,17 +474,27 @@ export async function handleApi(
       // 预览若也吃缓存，用户改完远端 CSV/TXT 池会以为没生效。
       bypassRemoteCache: true,
     })
+    // 收集结束后复核预算：collectNodes 内部的 check 只覆盖循环中段，
+    // 收尾的去重/截断/统计仍可能把墙钟推过上限。超限不抛 500，
+    // 而是把"已截断"写进 stats.errors —— 面板 warn 区直接展示。
+    const stats = { ...result.stats, errors: [...result.stats.errors] }
+    try {
+      budget.check()
+    } catch {
+      stats.errors.push('CPU 预算不足，预览结果可能已截断')
+    }
     return json({
       ok: true,
       count: result.nodes.length,
       // 附带机房中文名（`香港 HKG`）：面板表格直接显示，省得用户去查三字码。
       // 映射表只在 worker-core 维护一份（data/pools.ts 的 COLO_CITIES）。
+      // 预览只下发前 200 条（面板表格只渲染前 100 行），全量在 count 里。
       nodes: result.nodes.slice(0, 200).map((n) => ({
         ...n,
         coloLabel: n.colo ? coloLabel(n.colo) : '',
       })),
       groups: result.groups.map((g) => ({ key: g.key, name: g.name, count: g.entries.length })),
-      stats: result.stats,
+      stats,
     })
   }
 

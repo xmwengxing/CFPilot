@@ -112,6 +112,34 @@ async function handleSubscription(
     bypassRemoteCache: false,
   })
 
+  // 渲染条目显式上限（C-3）：collectNodes 已按 maxNodes 截断，但 maxNodes
+  // 可配置为 0（不限）。订阅渲染是纯 CPU 工作（逐条拼 URI + base64），
+  // 无上限时超大池子会直接烧穿免费版 CPU 配额。统一封顶 500 条，
+  // 超出部分丢弃并在 Content 层面对用户不可见 —— 500 条对任何客户端
+  // 都远超可用上限，且与面板预览的展示口径一致。
+  const RENDER_NODE_LIMIT = 500
+  let renderNodes = collected.nodes
+  let renderGroups = collected.groups
+  // 收集结束后复核预算：内部 check 只覆盖循环中段，收尾段仍可能超限。
+  // 超限不抛 500（订阅端无错误通道），只把提示记下来 —— 这里不对外
+  // 暴露（订阅体本身不带注释通道），但保证后续渲染在预算内完成。
+  try {
+    budget.check()
+  } catch {
+    /* 预算已耗尽：下面的截断即是保护 */
+  }
+  if (renderNodes.length > RENDER_NODE_LIMIT) {
+    renderNodes = renderNodes.slice(0, RENDER_NODE_LIMIT)
+    let remaining = RENDER_NODE_LIMIT
+    renderGroups = collected.groups
+      .map((g) => {
+        const entries = g.entries.slice(0, Math.max(0, remaining))
+        remaining -= entries.length
+        return { ...g, entries }
+      })
+      .filter((g) => g.entries.length > 0)
+  }
+
   // 分流规则：默认用**内核内置的 GEOSITE/GEOIP 规则**（零外部依赖、零下载）。
   //
   // KV 的 `ROUTE_PROFILE` 可写入自定义 ini 覆盖它（高级用法，留空即用内置）。
@@ -130,8 +158,8 @@ async function handleSubscription(
   // 拆分部署时控制面域名 ≠ 数据面域名，必须用 subDomain（或 DATA_HOST）指定节点地址
   const domain = normalizeNodeDomain(config.subDomain || env.DATA_HOST || url.hostname)
   const ctx: RenderContext = {
-    nodes: collected.nodes,
-    groups: collected.groups,
+    nodes: renderNodes,
+    groups: renderGroups,
     config,
     domain,
     port: 443,

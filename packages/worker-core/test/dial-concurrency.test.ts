@@ -6,9 +6,10 @@
  * Cloudflare Workers **单个请求内同时打开的出站 TCP 连接上限是 6 条**。
  * 收敛前：
  *
- *   - `relay.ts` 的 `RELAY_BATCH_SIZE = 8`；
- *   - 目标是 Cloudflare 网段时，反代第一批（8 个）通过 `relayAsPrimary`
- *     与直连 / 优选候选进入**同一个竞速池**；
+ *   - `relay.ts` 的 `RELAY_BATCH_SIZE = 8`（现已收敛为 6）；
+ *   - 目标是 Cloudflare 网段时，反代第一批（8 个）曾通过 `relayAsPrimary`
+ *     与直连 / 优选候选进入**同一个竞速池**（2026-11-08 起反代永不主竞速，
+ *     只走 `dialRelay()` 的兜底分批，见 `dial.ts`）；
  *   - `raceDial()` 对池里的候选**全部同时**发起 `connect()`。
  *
  * 最坏情况 = 1（目标直连）+ N（DoH 解析出的优选 IP）+ 8（反代）
@@ -231,10 +232,11 @@ describe('拨号并发宽度收敛到平台上限（6 条）', () => {
     expect(message).toContain(OPTIMIZED_HOSTS[0]!)
   })
 
-  it('反代第一批与优选候选同池竞速时也受同一窗口约束（最坏情况）', async () => {
+  it('反代只在主竞速全失败后分批兜底，且每批 ≤ 6 并发', async () => {
     failAll = true
-    // 目标在 CF 网段 → 反代第一批通过 relayAsPrimary 进入主竞速池，
-    // 与 12 个优选 IP 同池 —— 这正是原先 10+ 条并发的最坏情况
+    // 目标是 CF 网段 IP 字面量 → relayNeeded → 预解析反代入口。
+    // 新策略：反代**永不参与主竞速**，只在 direct 组（12 个优选）全失败后
+    // 由 dialRelay 分批兜底 —— 原先「反代第一批与优选同池」的最坏情况已消除。
     const relayHosts = Array.from({ length: 6 }, (_, i) => `198.51.100.${i + 1}`)
 
     await expect(
@@ -249,11 +251,44 @@ describe('拨号并发宽度收敛到平台上限（6 条）', () => {
       })
     ).rejects.toThrow()
 
-    // 18 个主竞速候选（12 优选 + 6 反代）也必须收敛到 6 条并发
+    // 反代兜底批量同样必须收敛到 6 条并发
     expect(peak).toBeLessThanOrEqual(MAX_SIMULTANEOUS_CONNECTS)
     // 且每一个候选都真的被试过（窗口化不丢候选）
     for (const ip of [...OPTIMIZED_HOSTS, ...relayHosts]) {
       expect(records.some((r) => r.host === ip)).toBe(true)
     }
+    // 反代只在优选全部试过之后才被碰（兜底语义）
+    const firstRelayIndex = records.findIndex((r) => relayHosts.includes(r.host))
+    const lastOptIndex = Math.max(
+      ...OPTIMIZED_HOSTS.map((h) => records.findIndex((r) => r.host === h))
+    )
+    expect(firstRelayIndex).toBeGreaterThanOrEqual(0)
+    expect(firstRelayIndex).toBeGreaterThan(lastOptIndex - 5) // 去掉并发窗口噪声
+  })
+
+  it('反代全失败时每条恰好试一次（锁定现状：不重拨、不重复试）', async () => {
+    failAll = true
+    const relayHosts = Array.from({ length: 8 }, (_, i) => `198.51.100.${i + 1}`)
+
+    await expect(
+      dial({
+        hostname: '104.16.0.1',
+        port: 443,
+        optimizedIps: OPTIMIZED_HOSTS.map((ip) => ({ ip, port: 443 })),
+        relay: relayHosts.map((ip) => ({ ip, port: 443, label: ip })),
+        resolvePreferred: false,
+        concurrent: true,
+        timeoutMs: 2000,
+      })
+    ).rejects.toThrow()
+
+    const counts = new Map<string, number>()
+    for (const r of records) counts.set(r.host, (counts.get(r.host) ?? 0) + 1)
+    for (const ip of [...OPTIMIZED_HOSTS, ...relayHosts]) {
+      expect(counts.get(ip)).toBe(1)
+    }
+    // 反代共两批（6 + 2），总尝试数 = 优选 12 + 反代 8（目标字面量走 fallback 也恰好一次）。
+    expect(records).toHaveLength(OPTIMIZED_HOSTS.length + relayHosts.length + 1)
+    expect(counts.get('104.16.0.1')).toBe(1)
   })
 })

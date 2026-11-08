@@ -193,27 +193,25 @@ export interface RouteInput {
     serverName?: string
   }>
   /**
-   * 是否把「直连目标」降权。
+   * 是否把「直连目标」降权（见 2) 注释）。
    *
-   * 场景：目标域名解析到的全是 Cloudflare 网段 —— 此时把域名丢给 `connect()`
-   * 让运行时自己解析，必然连回 CF 自家 Anycast 并被拒绝。
-   * 此时应优先用解析出的第三方 IP 建连（见 `outbound/dial.ts` 的实测记录）。
+   * 仅用于目标是 **CF 网段 IP 字面量**的场景。域名直连即便解析到 CF
+   * 网段也不降权：失败是快速拒绝，直连优先能给大流量留下直达之路。
    */
   deprioritizeDirect?: boolean
   /**
    * 反代入口候选（第三方反代，按 SNI 转发到目标）。
    *
    * 这是打通 Cloudflare 网段目标的唯一手段，详见 `outbound/relay.ts`。
+   *
+   * ⚠️ **反代永不参与主竞速**，只走兜底（`dialRelay()` 分批）与
+   * 反代重拨路径（`redialViaRelay()`）。原因（2026-11-08 真机实测）：**内置反代入口对大上传
+   * 有 ~64 KiB 的转发上限** —— ≤64 KiB 必通，>64 KiB 必在约 4.8 KB 下行后断开；
+   * 而直连路径 256 KiB 可正常完成。若让反代进入主竞速池，它会**抢先于直连被选中**，
+   * 大流量在反代上必然中途断流。直连/优选全失败之后再试反代（失败回退），
+   * 同一目标能走直连时永远不会被反代的单连接上传上限拖死。
    */
   relay?: Array<{ ip: string; port: number; label: string }>
-  /**
-   * 反代入口是否参与**主竞速**（而非仅作兜底）。
-   *
-   * - true  目标解析结果全是 CF 网段时设 true —— 此时直连/优选必然失败，
-   *         反代是唯一出路，让它参与竞速可避免先白等两次超时。
-   * - false 其它情况 —— 优先走正常线路（直连 / 优选），反代只作最后兜底。
-   */
-  relayAsPrimary?: boolean
 }
 
 /**
@@ -280,9 +278,14 @@ export function buildRouteCandidates(input: RouteInput): RouteCandidate[] {
 
   // 2) 直连目标
   const targetIsCf = isCloudflareIpv4(input.targetHost)
-  // 直连是否降权：
-  //   - 目标本身是 CF 网段 IP → 降权（Worker 连不回 CF 自己的 Anycast 入口）
-  //   - 调用方告知「解析结果全是 CF 网段」→ 降权（域名直连必然解析到 CF IP）
+  // 直连是否降权：仅当目标本身是 **CF 网段 IP 字面量**时降权 ——
+  // 那种地址连域名都没有，运行时解析也没有变数，必然被 TCP Loop 拒。
+  //
+  // ⚠️ 「目标域名解析到 CF 网段」**不再降权域名直连**（2026-11-08 改）：
+  // 此前 `deprioritizeDirect` 会在解析全 CF 时把直连压到兜底、同时把
+  // 反代第一批放进主竞速，大流量随后在反代入口（~64 KiB 转发上限）上断流。
+  // 现在直连永远优先，反代只兜底；域名直连在 CF 前置域名上快速失败后，
+  // 再走反代分批，失败回退语义不变。
   const directDowngraded = targetIsCf || input.deprioritizeDirect === true
   push({
     source: 'direct',
@@ -320,9 +323,8 @@ export function buildRouteCandidates(input: RouteInput): RouteCandidate[] {
   // 目标就在 CF 网段里，从哪个 Cloudflare 边缘出去都会撞同一堵墙；
   // 只有从第三方反代出去（出口是第三方 VPS）才不受 TCP Loop 限制。
   //
-  // 何时参与竞速由调用方决定（见 `outbound/dial.ts`）：
-  //   - 目标解析结果全是 CF 网段 → 参与竞速（此时直连/优选必然失败）
-  //   - 否则 → 进降权组作兜底（优先走正常线路）
+  // ⚠️ 永远降权到兜底组（见 relay 字段注释）：反代入口的大上传有上限，
+  // 能走直连时绝不走反代；反代只在直连/优选全失败后分批兜底。
   const relay = input.relay ?? []
   for (const r of relay) {
     push({
@@ -330,7 +332,7 @@ export function buildRouteCandidates(input: RouteInput): RouteCandidate[] {
       host: r.ip,
       port: r.port,
       label: `反代 ${r.label}`,
-      deprioritized: !input.relayAsPrimary,
+      deprioritized: true,
     })
   }
 

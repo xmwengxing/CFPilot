@@ -337,6 +337,19 @@ export async function handleWebSocket(
   // `Sec-WebSocket-Protocol` 随升级请求送达（不再作为首帧重发）——
   // 直接作为种子；忽略该头时行为与原来完全一致。
   let buffer = decodeEarlyData(request.headers.get('sec-websocket-protocol'))
+  /**
+   * 拨号 / 换出站期间暂存的上行**分块**（协议头之后、writer 就绪之前到达的帧）。
+   *
+   * ⚠️ 必须是分块数组，不能「每帧 concatBytes 到一块」：
+   * `concatBytes` 每次都会新分配「旧长度 + 新长度」并整段复制，逐帧拼接就是 O(n²)。
+   * 实测（16 KiB/帧，本机）：1 MiB → 12.9 ms、2 MiB → 56.7 ms、8 MiB → 668 ms。
+   * 免费版单请求 CPU 只有 10 ms —— 客户端在拨号窗口里传 1 MB 就会被判超限，
+   * 表现为连接莫名其妙地断（客户端只看到 -1）。
+   *
+   * 合并推迟到真正写入时（见 `drainPendingUplink`），复杂度回到线性。
+   */
+  let pendingUplink: Uint8Array[] = []
+  let pendingUplinkBytes = 0
   let established = false
   let dialed: DialResult | null = null
   let writer: WritableStreamDefaultWriter<Uint8Array> | null = null
@@ -438,6 +451,8 @@ export async function handleWebSocket(
     if (cleanupDone) return
     cleanupDone = true
     clearRetained()
+    pendingUplink = []
+    pendingUplinkBytes = 0
     clearFirstPacketTimer()
     if (handshakeTimer) {
       clearTimeout(handshakeTimer)
@@ -629,7 +644,14 @@ export async function handleWebSocket(
       // 「这条连接到底走了直连还是反代」需要一个可靠的真机判据，这里就是。
       // reason 会被统一截断到 123 字节，超长不会丢掉整个 close frame。
       const used = dialed
-      closeWith(1000, used ? `done via=${used.via} ep=${used.endpoint}` : 'done')
+      // `dl/ret/rd`：下行字节 / 未确认留存 / 重拨次数，定位「零下行直接 done」时区分
+      // 「上行没发出去」与「发了但目标没回」。
+      closeWith(
+        1000,
+        used
+          ? `done via=${used.via} ep=${used.endpoint} dl=${downlinkBytes} ret=${retainedBytes} rd=${relayRedialCount}`
+          : 'done'
+      )
     }
   }
 
@@ -659,14 +681,22 @@ export async function handleWebSocket(
 
   /** 上行：客户端 → 出站（经串行链，顺序 = 调用顺序） */
   const pumpUp = async (bytes: Uint8Array): Promise<void> => {
-    const target = writer
-    if (!target) return
+    const sink = writer
+    if (!sink) return
     try {
       // 执行时若 writer 已被换掉（反代重拨），就跳过这一段：
       // 重拨只在「下行未收到任何字节」时发生，此时 `retained` 包含上述全部字节，
       // 新连接会整体重放它们 —— 再写一遍就是重复发送。
-      await uplink.write(() => (writer === target ? target : null), bytes)
-    } catch {
+      await uplink.write(() => (writer === sink ? sink : null), bytes)
+    } catch (err) {
+      // ⚠️ 写失败必须留痕：此前这里只 cleanup()，`/__diag` 看不到任何记录，
+      // 真机上表现为「close 1000 done + 0 字节下行」，看起来像目标站没响应，
+      // 实际上是我们自己的出站写入被拒绝（对端已关闭 / 流已 errored）。
+      recordDiagnostics(
+        target ? `${target.hostname}:${target.port}` : '未建立出站',
+        [],
+        `上行写入失败：${String(err)}`
+      )
       cleanup()
     }
   }
@@ -676,9 +706,9 @@ export async function handleWebSocket(
    *
    * ## 为什么必须有
    *
-   * `writer` 在反代重拨时会被置空，客户端在此期间继续发的帧只能落进 `buffer`
-   * （message 处理器里 `if (!writer)` 那一支）。重拨成功后若不补写，
-   * 这些字节会**永远留在 buffer 里**：出站再也收不到它们，
+   * `writer` 在反代重拨时会被置空，客户端在此期间继续发的帧只能落进
+   * `pendingUplink`（message 处理器里 `if (!writer)` 那一支）。重拨成功后若不补写，
+   * 这些字节会**永远留在暂存区里**：出站再也收不到它们，
    * 客户端等不到响应，表现为「切换反代之后隧道静默挂起，直到超时变 -1」。
    *
    * ## 为什么只能在串行链内部调用
@@ -692,11 +722,17 @@ export async function handleWebSocket(
   const drainPendingUplink = async (
     target: WritableStreamDefaultWriter<Uint8Array>
   ): Promise<void> => {
-    if (buffer.byteLength === 0) return
-    const pending = buffer
-    buffer = new Uint8Array(0)
-    retain(pending)
-    await target.write(pending)
+    if (pendingUplink.length === 0) return
+    // 先摘链再写：写入期间新到的帧会看到 `writer` 已就绪而走 `pumpUp`，
+    // 排在本任务之后（顺序由 `UplinkQueue` 保证），不会被本次循环再写一遍。
+    const pending = pendingUplink
+    pendingUplink = []
+    pendingUplinkBytes = 0
+    for (const chunk of pending) {
+      // 逐块留存：重放需要的是**原始帧边界**，拼成一块既多一次复制、也让留存配额失真。
+      retain(chunk)
+      await target.write(chunk)
+    }
   }
 
   /** 解析协议头 */
@@ -864,8 +900,6 @@ export async function handleWebSocket(
         relayPool: {
           userEntries: config.relayPool || undefined,
           useBuiltin: config.useBuiltinRelay,
-          // 当前边缘机房 → 决定优先用哪个地区的反代入口
-          colo: typeof request.cf?.colo === 'string' ? request.cf.colo : undefined,
         },
         onFailure: (failure) => {
           failures.push(failure)
@@ -892,24 +926,43 @@ export async function handleWebSocket(
       return
     }
 
-    writer = dialed.writable.getWriter()
+    const establishedWriter = dialed.writable.getWriter()
+    writer = establishedWriter
     recordRoute(`${parsed.hostname}:${parsed.port}`, dialed, 'initial')
 
-    // 通用做法：把协议头之后已收到的数据整体补写。
-    // buffer 里可能不只有首帧的负载——拨号期间到达的后续帧也会暂存进
-    // buffer（见 message 处理器里 `if (!writer)` 分支），
-    // 因此这里必须整段补写，而不是只写第一帧。
+    // 通用做法：把协议头之后已收到的数据补写。
+    //
+    // 首帧的负载仍在 `buffer` 里（协议头与它是连续字节，≤ `MAX_HEADER_BYTES`）；
+    // 拨号期间到达的后续帧在 `pendingUplink` 里（见 message 处理器的 `if (!writer)` 分支）。
+    //
+    // ⚠️ 「首包 + 暂存帧」必须写在**同一个串行任务**里：拆成两次排队时，
+    // 两者之间到达的新帧会插到暂存帧前面，TLS 分片一换序就是 bad_record_mac。
+    //
     // 用 subarray 而不是 slice：这里只是给「协议头之后的负载」一个视图，
     // 复制一遍纯属浪费（大首包 / TLS ClientHello 有几 KB）。
-    // 视图指向的 buffer 紧接着会被置空，retain 留存的是视图本身，重放时会真正复制。
+    // 视图指向的 buffer 紧接着会被重置，retain 留存的是视图本身，重放时会真正复制。
     const payload =
       buffer.byteLength > parsed.headerLength ? buffer.subarray(parsed.headerLength) : new Uint8Array(0)
-    if (payload.byteLength > 0) {
-      // 先留存再写：直连可能假活，首字节确认前上行必须可重放
-      retain(payload)
-      await pumpUp(payload)
-    }
     buffer = new Uint8Array(0)
+    try {
+      await uplink.run(async () => {
+        if (payload.byteLength > 0) {
+          // 先留存再写：直连可能假活，首字节确认前上行必须可重放
+          retain(payload)
+          await establishedWriter.write(payload)
+        }
+        await drainPendingUplink(establishedWriter)
+      })
+    } catch (err) {
+      // 与 `pumpUp` 一致：写失败视为出站不可用，交给清理 + 下行泵走重拨判定。
+      // 同样必须留痕（否则真机上只看到 close 1000 + 0 字节，无法与「目标站不回数据」区分）。
+      recordDiagnostics(
+        `${parsed.hostname}:${parsed.port}`,
+        [],
+        `上行首包写入失败：${String(err)}`
+      )
+      cleanup()
+    }
 
     ctx?.waitUntil(pumpDown())
   }
@@ -987,13 +1040,12 @@ export async function handleWebSocket(
         : '出站零下行即 EOF/Reset，立即改走反代入口'
     )
 
-    // 收反代入口候选：用户自配优先，其次内置表（按当前 colo 选地区）
+    // 收反代入口候选：用户自配优先，其次内置表（按表顺序取前 N 个）
     let endpoints: RelayEndpoint[] = []
     try {
       endpoints = await collectRelayEndpoints({
         userEntries: config.relayPool || undefined,
         useBuiltin: config.useBuiltinRelay,
-        colo: typeof request.cf?.colo === 'string' ? request.cf.colo : undefined,
       })
     } catch {
       endpoints = []
@@ -1076,8 +1128,8 @@ export async function handleWebSocket(
         // 「重放, 新帧, 旧缓存帧」，TLS 分片一换序就是 bad_record_mac。
         await uplink.run(async () => {
           if (replay.byteLength > 0) await nextWriter.write(replay)
-          // 重拨期间客户端继续发的帧暂存在 buffer 里 —— 这里补写，
-          // 否则它们会一直留在 buffer 中等待一个永远不会到来的 establish。
+          // 重拨期间客户端继续发的帧暂存在 `pendingUplink` 里 —— 这里补写，
+          // 否则它们会一直留在暂存区等待一个永远不会到来的 establish。
           await drainPendingUplink(nextWriter)
         })
 
@@ -1138,12 +1190,14 @@ export async function handleWebSocket(
       // 而 writer 仍为 null → `if (!writer) return` 静默丢弃 →
       // 表现为「VLESS 认证通过但隧道挂起、永远等不到响应」。
       //
-      // 实测形态：暂存回 buffer，writer 就绪后与首包一起补写：
-      //   i ? (s ? await s.write(e) : l = l ? concat(l, e) : e) : await u(e)
+      // 处理方式：按帧暂存（**不拼接**），writer 就绪后与首包一起补写。
+      // ⚠️ 不能写成 `concatBytes(buffer, bytes)`：那会把已有全部字节每帧重拷一遍，
+      // 是 O(n²)，拨号窗口里传 1 MB 就会撞穿 10 ms CPU 预算（见 `pendingUplink` 注释）。
       if (!writer) {
-        buffer = concatBytes(buffer, bytes)
+        pendingUplink.push(bytes)
+        pendingUplinkBytes += bytes.byteLength
         // 兜底防内存膨胀：拨号期间暂存上限（协议头之后就是负载，允许较大值）
-        if (buffer.byteLength > MAX_RELAY_BUFFER_BYTES) {
+        if (pendingUplinkBytes > MAX_RELAY_BUFFER_BYTES) {
           closeWith(1009, '拨号期间数据过多')
           return
         }

@@ -696,6 +696,55 @@ export function mergePools(groups: PoolGroup[]): { nodes: NodeEntry[]; deduped: 
   return { nodes: out, deduped }
 }
 
+/**
+ * 把分组后的节点产出 `nodes` + `groups` 一致的结果。
+ *
+ * ## 为什么必须有这个函数（C-1）
+ *
+ * 早前 `collectNodes` 返回的 `groups` 是**去重与 `maxNodes` 截断之前的原样**，
+ * 而渲染器优先用 `groups`。后果：预览 `nodes` 与 `stats.deduped` 是对的，
+ * 但订阅渲染出来的是未去重、未截断的完整列表 —— 面板显示「已去重 / 已限制」，
+ * 订阅里却完全没生效（含重复节点、`maxNodes` 形同虚设）。
+ *
+ * 本函数把去重与截断作用在**分组**上，产出的 `nodes` 与 `groups`
+ * 来自同一次遍历，扁平化起来严格一致。
+ *
+ * 语义：
+ * 1. 按组顺序展开；`ip:port` 重复（含跨组）只保留第一次，重复条数计 `deduped`；
+ * 2. 去重后若超过 `maxNodes`（>0），按展开顺序截断，截掉的计 `limited`；
+ * 3. 保留组名、丢弃被清空的组；`nodes` = 各组被保留条目的拼接。
+ */
+export function finalizeGroups(
+  groups: PoolGroup[],
+  maxNodes: number
+): { groups: PoolGroup[]; nodes: NodeEntry[]; deduped: number; limited: number } {
+  const seen = new Set<string>()
+  const cap = maxNodes > 0 ? maxNodes : Number.POSITIVE_INFINITY
+  const outNodes: NodeEntry[] = []
+  const outGroups: PoolGroup[] = []
+  let deduped = 0
+  let limited = 0
+  for (const group of groups) {
+    const kept: NodeEntry[] = []
+    for (const entry of group.entries) {
+      const key = `${entry.ip}:${entry.port}`
+      if (seen.has(key)) {
+        deduped++
+        continue
+      }
+      seen.add(key)
+      if (outNodes.length >= cap) {
+        limited++
+        continue
+      }
+      kept.push(entry)
+      outNodes.push(entry)
+    }
+    if (kept.length > 0) outGroups.push({ key: group.key, name: group.name, entries: kept })
+  }
+  return { groups: outGroups, nodes: outNodes, deduped, limited }
+}
+
 export interface CollectStats {
   official: number
   domain: number
@@ -705,6 +754,8 @@ export interface CollectStats {
   addcsv: number
   filtered: number
   deduped: number
+  /** 被 `maxNodes` 上限截掉的去重后节点数（0 表示未截断） */
+  limited: number
   /** 已应用的国家筛选 */
   countries: string[]
   errors: string[]
@@ -977,12 +1028,14 @@ export async function collectNodes(
     }
   }
 
-  const { nodes, deduped } = mergePools(groups)
-  const limited = config.maxNodes > 0 ? nodes.slice(0, config.maxNodes) : nodes
+  // 去重与 maxNodes 截断作用在 groups 上（见 finalizeGroups 注释 C-1）：
+  // 返回的 nodes 与 groups 来自同一次遍历，订阅渲染不会再出现
+  // 「预览已去重、订阅未去重」的分歧。
+  const { groups: finalGroups, nodes, deduped, limited } = finalizeGroups(groups, config.maxNodes)
 
   return {
-    nodes: limited,
-    groups,
+    nodes,
+    groups: finalGroups,
     stats: {
       official: official.length,
       domain: domain.length,
@@ -992,6 +1045,7 @@ export async function collectNodes(
       addcsv: addcsv.length,
       filtered,
       deduped,
+      limited,
       countries,
       errors,
     },

@@ -12,7 +12,6 @@
 import { describe, expect, it, beforeEach } from 'vitest'
 import {
   BUILTIN_RELAY_DOMAINS,
-  BUILTIN_RELAY_REGION,
   clearRelayCache,
   coloToCountry,
   collectRelayEndpoints,
@@ -28,7 +27,7 @@ describe('反代入口解析', () => {
 
   it('IP 字面量直接可用，无需解析', async () => {
     const result = await resolveRelayEntry('1.2.3.4')
-    expect(result).toEqual([{ ip: '1.2.3.4', port: 443, label: '1.2.3.4', regionCode: '??' }])
+    expect(result).toEqual([{ ip: '1.2.3.4', port: 443, label: '1.2.3.4' }])
   })
 
   it('IP 带端口时按给定端口', async () => {
@@ -108,16 +107,16 @@ describe('反代候选进入选路', () => {
     expect(groups.fallback.filter((c) => c.source === 'relay')).toHaveLength(2)
   })
 
-  it('relayAsPrimary 时参与主竞速', () => {
+  it('relay 候选永远降权兜底（直连优先、反代只兜底）', () => {
     const list = buildRouteCandidates({
       targetHost: 'example.com',
       targetPort: 443,
       relay,
-      relayAsPrimary: true,
-      deprioritizeDirect: true,
     })
     const groups = groupCandidates(list)
-    expect(groups.direct.filter((c) => c.source === 'relay')).toHaveLength(2)
+    // 反代永不进入主竞速组：能走直连时绝不走反代（反代入口对大上传有上限）
+    expect(groups.direct.filter((c) => c.source === 'relay')).toHaveLength(0)
+    expect(groups.fallback.filter((c) => c.source === 'relay')).toHaveLength(2)
   })
 
   it('反代候选在代理之后（用户显式配置的代理优先）', () => {
@@ -125,7 +124,6 @@ describe('反代候选进入选路', () => {
       targetHost: 'example.com',
       targetPort: 443,
       relay,
-      relayAsPrimary: true,
       proxies: [{ host: 'p.example', port: 1080, kind: 'socks5' }],
     })
     expect(list[0]!.source).toBe('proxy')

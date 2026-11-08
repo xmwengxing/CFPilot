@@ -778,27 +778,35 @@ export async function dial(options: DialOptions): Promise<DialResult> {
   // ⚠️ **解析必须按需进行**：内置表有 14 个域名，DoH 解析要几百毫秒。
   // 无条件预解析会拖慢**每一次**出站（实测把正常目标的成功率从 100% 打到 70%）。
   // 因此：
-  //   - 已知目标是 CF 网段 → 预解析，并把**第一批**放进主竞速
-  //     （此时直连/优选必然失败，让它们先白等超时没有意义）
+  //   - 已知目标是 CF 网段 → 预解析备用（直连/优选全失败后分批试反代，见 dialRelay）
   //   - 否则 → 完全不解析，等 primary 全失败后再分批解析（正常路径零开销）
+  //
+  // 反代与 CF 网段目标的竞速策略见下面注释。
   let relay = [...(options.relay ?? [])]
   const relayNeeded = resolvedAllCf || targetIsCfIp
   if (relayNeeded && options.relayPool) {
     relay = await collectRelay(relay, { ...options.relayPool, deadline })
   }
-  // 只有第一批进主竞速；其余在 primary 失败后分批继续（见 tryRelayInBatches）
-  const relayFirstBatch = relayNeeded ? relay.slice(0, RELAY_BATCH_SIZE) : []
-  const relayRest = relayNeeded ? relay.slice(RELAY_BATCH_SIZE) : []
+  // 反代**永不参与主竞速**：全部进 relayRest 作兜底（见 dialRelay）。
+  // 原因（2026-11-08 真机实测）：内置反代入口对大上传有 ~64 KiB 转发上限，
+  // ≤64 KiB 必通、>64 KiB 必断（连接被入口直接掐掉，目标都等不来响应）；
+  // 直连路径 256 KiB 可完整完成。若把反代放进主竞速池，它会先于直连被选中，
+  // 大流量在反代上必然中途断流且无从恢复（redial 护栏要求零下行）。
+  const relayRest = relay
 
   const candidates = buildRouteCandidates({
     targetHost: options.hostname,
     targetPort: options.port,
     optimizedIps: optimized,
     proxies,
-    // 目标域名解析结果全是 CF 网段 → 域名直连降权（必然被拒）
-    deprioritizeDirect: targetIsCfIp || resolvedAllCf,
-    relay: relayFirstBatch,
-    relayAsPrimary: relayFirstBatch.length > 0,
+    // 域名直连**不再以「解析结果全是 CF 网段」为由降权**（2026-11-08 改）：
+    // 从前 `resolvedAllCf` 会同时把直连降权、把反代第一批放进主竞速，
+    // 大流量在反代入口上必断。改为：直连（域名 + 优选）永远先跑，
+    // 失败后分批走反代兜底（见 dialRelay）。CF 目标上域名直连的失败
+    // 是快速拒绝（TCP Loop detected），不是挂起等待，代价可控。
+    // 降权只留给**字面量 CF 网段目标**（那种连域名都没有，必然被拒）。
+    deprioritizeDirect: targetIsCfIp,
+    relay: [],
   })
 
   if (candidates.length === 0) {

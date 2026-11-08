@@ -46,91 +46,6 @@ export interface RelayEndpoint {
   port: number
   /** 展示用描述（来自哪个入口） */
   label: string
-  /** 地区码（HK / US / SG …）；未知时为 '??' */
-  regionCode: string
-}
-
-/** 未知地区码（排序时排最后） */
-export const UNKNOWN_REGION = '??'
-
-/**
- * 从入口字符串推断地区码。
- *
- * 只认内置表里的入口（`BUILTIN_RELAY_REGION`），其余（用户自配域名 / IP）
- * 一律返回未知 —— 我们无法可靠推断一个陌生入口挂在哪个地区。
- *
- * `regions` 可注入：内置表现在是固定 IP、没有地区信息，
- * 地区排序逻辑本身仍要能被测试覆盖（传入自造表）。
- */
-export function regionOfEntry(
-  entry: string,
-  regions: Readonly<Record<string, string>> = BUILTIN_RELAY_REGION
-): string {
-  const text = entry.trim().toLowerCase()
-  // 去掉可能的端口后缀再匹配
-  const bare = text.replace(/:\d{1,5}$/, '')
-  return regions[bare] ?? UNKNOWN_REGION
-}
-
-/**
- * 地区邻接表（社区常见做法）。
- *
- * 用途：**按当前地区优先，其次地理/线路上邻近的地区**，
- * 最后才是其余地区。邻接比「按表顺序轮转」更符合实际：
- * 美国用户走新加坡反代通常比走芬兰快。
- *
- * 只覆盖有内置入口的地区；未列出的地区走「本地区 → 其余」。
- */
-export const REGION_ADJACENCY: Readonly<Record<string, readonly string[]>> = {
-  US: ['SG', 'JP', 'KR'],
-  SG: ['JP', 'KR', 'US'],
-  JP: ['SG', 'KR', 'US'],
-  KR: ['JP', 'SG', 'US'],
-  DE: ['NL', 'GB', 'SE', 'FI'],
-  SE: ['DE', 'NL', 'FI', 'GB'],
-  NL: ['DE', 'GB', 'SE', 'FI'],
-  FI: ['SE', 'DE', 'NL', 'GB'],
-  GB: ['DE', 'NL', 'SE', 'FI'],
-}
-
-/** 参与邻接排序的地区全集（顺序即「其余」的兜底顺序） */
-export const REGION_ORDER: readonly string[] = ['US', 'SG', 'JP', 'KR', 'DE', 'SE', 'NL', 'FI', 'GB']
-
-/**
- * 按「当前地区 → 邻近 → 其余」对地区码排序。
- *
- * @param current 当前地区码（通常由边缘机房 colo 推出）；空表示未知
- */
-export function rankRegions(current: string | undefined | null): string[] {
-  const cur = (current ?? '').trim().toUpperCase()
-  if (!cur) return [...REGION_ORDER]
-  const adjacent = REGION_ADJACENCY[cur] ?? []
-  const rest = REGION_ORDER.filter((r) => r !== cur && !adjacent.includes(r))
-  return [cur, ...adjacent, ...rest]
-}
-
-/**
- * 按当前地区优先 + 邻接排序，重排反代入口候选。
- *
- * 稳定排序：同地区内保持传入顺序（用户自配的在前）。
- */
-export function sortEndpointsByRegion(
-  endpoints: readonly RelayEndpoint[],
-  currentRegion: string | undefined | null
-): RelayEndpoint[] {
-  const rank = rankRegions(currentRegion)
-  const rankOf = (code: string): number => {
-    const idx = rank.indexOf(code)
-    return idx >= 0 ? idx : rank.length
-  }
-  return endpoints
-    .map((e, i) => ({ e, i }))
-    .sort((x, y) => {
-      const rx = rankOf(x.e.regionCode)
-      const ry = rankOf(y.e.regionCode)
-      return rx !== ry ? rx - ry : x.i - y.i
-    })
-    .map((x) => x.e)
 }
 
 /**
@@ -142,17 +57,6 @@ export function sortEndpointsByRegion(
  * ⚠️ **这是对第三方服务的依赖**：该服务不可用时，内置入口会一起失效
  * （但用户自配的入口不受影响）。用 `useBuiltinRelay: false` 可完全关闭。
  */
-/**
- * 内置反代入口 → 地区码。
- *
- * ⚠️ 现在内置表是**已验证的固定 IP**，没有地区信息（IP 归属地要额外查库，
- * 而那会把每次出站变成一次外部请求）。留空对象是有意的：
- * `regionOfEntry()` 对不认识的入口返回 `UNKNOWN_REGION`，
- * `selectRelayDomains()` 于是按**表内顺序**取前 N 个 —— 顺序就是实测质量排序，
- * 既确定性又不会每次换出口。
- */
-export const BUILTIN_RELAY_REGION: Readonly<Record<string, string>> = {}
-
 /**
  * 内置反代入口（**固定 IP**，按实测质量排序）。
  *
@@ -330,10 +234,9 @@ const BUILTIN_PER_DOMAIN = 4
  * ## ⚠️ 一批 = 一个并发窗口，**不能超过平台上限**
  *
  * Workers **单请求同时出站 TCP 连接上限是 6 条**。
- * 这里的一批会被 `dial.ts` 直接放进同一个竞速池 —— 目标在 CF 网段时，
- * 反代第一批还会通过 `relayAsPrimary` 与直连/优选候选同池竞速。
- * 因此批次大小必须 ≤ 6：原先取 8 时，一批 8 条加上直连/优选候选
- * 会同时发起 10 条以上，超出上限的连接立刻抛错 —— 候选被白白浪费，
+ * 这里的一批会被 `dial.ts` 直接放进同一个竞速池，因此批次大小必须 ≤ 6：
+ * 原先取 8 时，一批 8 条加上直连/优选候选会同时发起 10 条以上，
+ * 超出上限的连接立刻抛错 —— 候选被白白浪费，
  * `onFailure` 分级诊断里混进假失败，用户侧表现为偶发
  *「明明有可用候选却失败」（详见 `dial.ts` 的 `MAX_SIMULTANEOUS_CONNECTS`）。
  *
@@ -355,12 +258,6 @@ export const RELAY_BATCH_SIZE = 6
  * 既给了竞速足够的选择，又不会一次顶穿 `MAX_SIMULTANEOUS_CONNECTS`。
  */
 export const RELAY_DOMAIN_LIMIT = 6
-
-/** 当前地区域名取几个 IP（vendor: 2） */
-const CURRENT_REGION_IPS = 2
-
-/** 备用地区域名取几个 IP（vendor: 1） */
-const OTHER_REGION_IPS = 1
 
 /**
  * 单个入口的解析结果缓存（ms）。
@@ -449,12 +346,10 @@ export async function resolveRelayEntry(
 
   let out: RelayEndpoint[] = []
   if (isIpv4(hostPart) || isIpv6(hostPart)) {
-    // 字面量入口：地区未知（除非它正好是内置表里的域名，字面量不是）
     out = [{
       ip: hostPart,
       port: Number.isInteger(port) && port > 0 ? port : defaultPort,
       label: text,
-      regionCode: regionOfEntry(text),
     }]
   } else {
     try {
@@ -467,7 +362,6 @@ export async function resolveRelayEntry(
         ip: r.hostname,
         port: r.port,
         label: `${hostPart} → ${r.hostname}`,
-        regionCode: regionOfEntry(text),
       }))
     } catch {
       out = []
@@ -496,47 +390,24 @@ export interface RelayPoolOptions {
   domainLimit?: number
   /** 整体截止时间（epoch ms）—— 把反代解析纳入拨号总预算 */
   deadline?: number
-  /**
-   * 当前 Cloudflare 边缘机房（colo）。
-   *
-   * 用于**按地区优先**选反代入口：边缘机房 ≈ 用户位置，
-   * 同地区的反代入口最快也最稳（与 vendor 的 `_Zc()` 同构）。
-   */
-  colo?: string
 }
 
 /**
- * 按地区精选内置反代域名（**纯函数**，便于测试）。
+ * 按表顺序精选内置反代入口（**纯函数**，便于测试）。
  *
- * 顺序：当前 colo 所在地区最前，其余按 `BUILTIN_RELAY_REGION` 键顺序
- * （与 vendor 的 `Rt` 一致）；最多取 `limit` 个。
+ * 内置表是固定 IP，没有地区信息 —— 顺序本身就是实测质量排序，
+ * 取前 N 个即「当前地区优先」的替代：确定性、出口稳定。
+ * （2026-11-08 起删除了按 colo 的地区排序分支：固定 IP 无地区可分，
+ * 留着只会让「当前地区 2 个 / 备用 1 个」这类分支长期走不到。）
  *
- * ⚠️ 这是子请求预算的关键：14 个域名全解析 = 42+ 次 DoH，
- * 精选 3 个后最坏也只有 ~9 次，加上连接竞速仍在 50 的上限内。
+ * @param limit 最多取几个（默认 `RELAY_DOMAIN_LIMIT`）
+ * @param table 候选表（默认内置表；测试可注入）
  */
 export function selectRelayDomains(
-  colo: string | undefined | null,
   limit: number = RELAY_DOMAIN_LIMIT,
-  table: readonly string[] = BUILTIN_RELAY_DOMAINS,
-  regions: Readonly<Record<string, string>> = BUILTIN_RELAY_REGION
+  table: readonly string[] = BUILTIN_RELAY_DOMAINS
 ): string[] {
-  const current = coloToCountry(colo)
-
-  // 地区排序：当前机房所在国家 → 地理/线路邻近 → 其余。
-  // 邻接关系见 REGION_ADJACENCY。
-  const rank = rankRegions(current)
-  const regionRank = (entry: string): number => {
-    const region = regions[entry]
-    if (!region) return rank.length + 1
-    const idx = rank.indexOf(region)
-    return idx >= 0 ? idx : rank.length
-  }
-
-  return table
-    .map((d, i) => ({ d, i, rank: regionRank(d) }))
-    .sort((x, y) => (x.rank !== y.rank ? x.rank - y.rank : x.i - y.i))
-    .map((x) => x.d)
-    .slice(0, Math.max(0, limit))
+  return table.slice(0, Math.max(0, limit))
 }
 
 /**
@@ -574,18 +445,9 @@ export async function collectRelayEndpoints(options: RelayPoolOptions = {}): Pro
         .filter(Boolean)
     : []
 
-  // 2) 内置入口表：按地区排序后只取前 N 个域名
+  // 2) 内置入口表：按表顺序取前 N 个
   const domainLimit = options.domainLimit ?? RELAY_DOMAIN_LIMIT
-  const domains = options.useBuiltin !== false ? selectRelayDomains(options.colo, domainLimit) : []
-
-  // 每个域名取几个 IP：显式指定 perDomain 时全局统一（配置/测试覆盖），
-  // 否则按 vendor 形态差异化 —— 当前地区 2 个、备用地区 1 个。
-  const ipsForDomain = (domain: string): number => {
-    if (options.perDomain !== undefined) return perDomain
-    return BUILTIN_RELAY_REGION[domain] === coloToCountry(options.colo)
-      ? CURRENT_REGION_IPS
-      : OTHER_REGION_IPS
-  }
+  const domains = options.useBuiltin !== false ? selectRelayDomains(domainLimit) : []
 
   // ⚠️ **必须并行解析**：串行解析在 DoH 不可达时会累积成
   // N × 4s 的超时（首包直接超时，用户侧表现为「连不上」）。
@@ -596,7 +458,7 @@ export async function collectRelayEndpoints(options: RelayPoolOptions = {}): Pro
     ),
     // 内置域名：跳过 TXT（无记录，纯浪费子请求）
     ...domains.map((domain) =>
-      resolveRelayEntry(domain, 443, ipsForDomain(domain), {
+      resolveRelayEntry(domain, 443, perDomain, {
         skipTxt: true,
         deadline: options.deadline,
         timeoutMs: options.timeoutMs,
@@ -604,16 +466,10 @@ export async function collectRelayEndpoints(options: RelayPoolOptions = {}): Pro
     ),
   ])
 
-  // 顺序：先用户自配，再内置
-  const userStart = out.length
+  // 顺序：先用户自配，再内置（内置按表顺序交错 round-robin，
+  // 保证前几个候选就覆盖多个入口，而不是同一入口的多个 IP）
   for (let i = 0; i < userEntries.length; i++) push(batches[i]!)
-  const userCount = out.length - userStart
 
-  // ⚠️ **内置候选按「地区分散」交错排列**。
-  //
-  // 每个域名取 1~2 个 IP，按 round-robin 交错：
-  // round 0 = [当前地区IP1, 备用1IP1, 备用2IP1]，round 1 = [当前地区IP2]。
-  // 这样前几个候选就覆盖了所有已选地区 —— 与 vendor 的 `Rt` 排序同构。
   const builtinBatches = batches.slice(userEntries.length)
   const depth = builtinBatches.reduce((m, b) => Math.max(m, b.length), 0)
   for (let round = 0; round < depth; round++) {
@@ -622,17 +478,7 @@ export async function collectRelayEndpoints(options: RelayPoolOptions = {}): Pro
     }
   }
 
-  // 最后按「当前地区 → 邻接 → 其余」重排**内置部分**。
-  //
-  // 上面的交错只保证「前几个候选覆盖多个地区」，顺序仍是表顺序
-  // （HK → JP → SG → US → …）。加上这步后，与美国机房相邻的地区
-  // （SG/JP/KR）会排到欧洲地区（DE/GB/SE/NL/FI）前面 —— 更符合实际线路
-  // （见 REGION_ADJACENCY）。
-  //
-  // ⚠️ 用户自配部分**不参与重排**：用户显式指定即表示最可信，保持原样在最前。
-  const head = out.slice(0, userCount)
-  const tail = sortEndpointsByRegion(out.slice(userCount), coloToCountry(options.colo))
-  return [...head, ...tail]
+  return out
 }
 
 /** 清空解析缓存（测试用） */

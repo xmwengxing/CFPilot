@@ -199,6 +199,44 @@ describe('拨号期间的数据帧暂存（自研 WS 入站）', () => {
     expect(text).toBe('AAABBBCCC')
   })
 
+  it('拨号期间大量分帧按帧暂存：顺序与字节完全一致，且不合并成一次大写入', async () => {
+    const ctx = setup()
+    await handleWebSocket(request, 'vless', config, [])
+
+    // 帧1：协议头（触发拨号，dial 挂起中）
+    ctx.server.emit('message', { data: buildVlessHeader('example.com', 80).buffer as ArrayBuffer })
+    await new Promise((r) => setTimeout(r, 5))
+
+    // 拨号期间客户端继续上行：100 帧 × 16 KiB = 1.6 MiB。
+    // 这里正是旧实现 O(n²) 复制的位置（逐帧把已有字节重拷一遍）。
+    const FRAMES = 100
+    const SIZE = 16 * 1024
+    for (let i = 0; i < FRAMES; i++) {
+      const frame = new Uint8Array(SIZE)
+      frame.fill(0x5a)
+      frame[0] = i & 0xff
+      frame[1] = (i >> 8) & 0xff
+      ctx.server.emit('message', { data: frame.buffer })
+    }
+
+    const dial = collectingDial()
+    ctx.releaseDial(dial.result)
+    await new Promise((r) => setTimeout(r, 50))
+
+    const written = dial.written()
+    // 每帧一次写入：退回「逐帧拼接」时这里会变成一次大写入，
+    // 而那正是二次复制的来源（见 `pendingUplink` 与 `drainPendingUplink` 注释）。
+    expect(written).toHaveLength(FRAMES)
+    expect(written.reduce((n, c) => n + c.byteLength, 0)).toBe(FRAMES * SIZE)
+    written.forEach((chunk, i) => {
+      expect(chunk.byteLength).toBe(SIZE)
+      // 顺序：第 i 帧的首两字节就是 i 本身
+      expect(chunk[0]).toBe(i & 0xff)
+      expect(chunk[1]).toBe((i >> 8) & 0xff)
+      expect(chunk[SIZE - 1]).toBe(0x5a)
+    })
+  })
+
   it('拨号完成后到达的帧走 pumpUp 正常写入', async () => {
     const ctx = setup()
     await handleWebSocket(request, 'vless', config, [])

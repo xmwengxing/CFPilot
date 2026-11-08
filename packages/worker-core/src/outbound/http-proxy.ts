@@ -6,6 +6,7 @@
  *   - `https://` 代理服务器本身走 TLS（由 Workers 的 `secureTransport:'on'` 终结，
  *     本函数在 TLS 之上发明文 CONNECT）
  */
+import { assertSafeConnectAuthority } from '../protocols/address'
 import { ByteStream } from '../protocols/stream'
 
 const CRLF_CRLF = [0x0d, 0x0a, 0x0d, 0x0a]
@@ -35,6 +36,10 @@ export async function httpConnect(
   port: number,
   auth: HttpProxyAuth = {}
 ): Promise<ReadableStream<Uint8Array>> {
+  // 目标主机名来自客户端请求头，是任意字节。必须在拿 writable 锁之前校验：
+  // 含 \r\n 的 host 能往 CONNECT 请求里注入额外头、甚至伪造第二个请求。
+  // 抛错时上层按「代理握手失败」分级上报，不留半开的 socket。
+  assertSafeConnectAuthority(hostname, port)
   const stream = new ByteStream(readable)
   const writer = writable.getWriter()
   // 权威串（authority）必须按 RFC 3986 拼：IPv6 字面量要加方括号，

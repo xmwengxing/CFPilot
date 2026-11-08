@@ -1299,8 +1299,22 @@ export function trojanUri(entry: NodeEntry, ctx: RenderContext, label?: string):
   return `${scheme}://${encodeURIComponent(ctx.config.trojanPassword)}@${hostForUri(entry.ip)}:${entry.port}?${params.toString()}${echParam(ctx)}#${name}`
 }
 
+/**
+ * YAML 双引号标量（用户输入字段专用）。
+ *
+ * 节点备注来自本地优选 IP 池 / CSV 的 `#备注`，属于用户输入，可能混入
+ * 换行、NUL、双引号、反斜杠。双引号标量里 `:` / `#` / `{}` 都是字面量，
+ * 真正会破坏解析的只有**控制字符**与未转义的 `\` / `"`：
+ *   - 控制字符（含 \r\n \t \u0000）直接剔除，否则整份订阅解析失败；
+ *   - 先转义反斜杠、再转义双引号，顺序不能反。
+ *
+ * 刻意**不改成单引号**：模板里 `- name: "CFPilot"`、`- "自动选择"` 等
+ * 固定文案是双引号硬编码，混用两种引号会让输出不一致，还会波及按引号
+ * 提取名字的一致性校验。保持双引号即可把修复范围收敛到一个函数。
+ */
 function yamlQuote(value: string): string {
-  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+  const safe = String(value).replace(/[\u0000-\u001f\u007f]/g, '')
+  return `"${safe.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
 }
 
 /**

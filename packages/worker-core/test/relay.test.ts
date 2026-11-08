@@ -16,6 +16,7 @@ import {
   clearRelayCache,
   coloToCountry,
   collectRelayEndpoints,
+  relayCacheSize,
   resolveRelayEntry,
 } from '../src/outbound/relay'
 import { buildRouteCandidates, groupCandidates } from '../src/outbound/route'
@@ -161,5 +162,19 @@ describe('colo → 地区映射（与 vendor 的 _Zc 同构）', () => {
   it('已是国家码时原样返回', () => {
     expect(coloToCountry('JP')).toBe('JP')
     expect(coloToCountry('SG')).toBe('SG')
+  })
+})
+
+describe('反代入口解析缓存的容量上限', () => {
+  it('不同入口持续写入不会让 Map 无限增长', async () => {
+    clearRelayCache()
+    // IP 字面量入口不走 DoH，纯内存路径，可以快速造出大量不同 key
+    for (let i = 0; i < 300; i++) {
+      await resolveRelayEntry(`10.0.${(i >> 8) & 255}.${i & 255}`)
+    }
+    expect(relayCacheSize()).toBeLessThanOrEqual(256)
+    expect(relayCacheSize()).toBeGreaterThan(200)
+    clearRelayCache()
+    expect(relayCacheSize()).toBe(0)
   })
 })

@@ -84,17 +84,33 @@ function loginThrottled(ip: string, now: number): boolean {
   return entry.count >= LOGIN_MAX_FAILURES
 }
 
+/**
+ * 容量兜底：先删过期项，仍满则 **FIFO 淘汰最旧一条**，绝不全量清空。
+ *
+ * 全量清空会让 500 个 IP 的限速记录一次性失效 —— 攻击者只要持续灌不同来源 IP
+ * 就能把暴力破解防御整体抹掉。导出是为了让淘汰策略可以单独回归。
+ */
+export function pruneLoginFailures(
+  map: Map<string, LoginFailure>,
+  now: number,
+  max: number = LOGIN_MAX_TRACKED
+): void {
+  if (map.size < max) return
+  for (const [key, value] of map) {
+    if (now >= value.resetAt) map.delete(key)
+  }
+  while (map.size >= max) {
+    const oldest = map.keys().next().value
+    if (oldest === undefined) break
+    map.delete(oldest)
+  }
+}
+
 /** 记录一次失败 */
 function recordLoginFailure(ip: string, now: number): void {
   const entry = LOGIN_FAILURES.get(ip)
   if (!entry || now >= entry.resetAt) {
-    if (LOGIN_FAILURES.size >= LOGIN_MAX_TRACKED) {
-      for (const [key, value] of LOGIN_FAILURES) {
-        if (now >= value.resetAt) LOGIN_FAILURES.delete(key)
-      }
-      // 清完仍满：直接清空（宁可短暂放宽，也不让 Map 无限增长）
-      if (LOGIN_FAILURES.size >= LOGIN_MAX_TRACKED) LOGIN_FAILURES.clear()
-    }
+    pruneLoginFailures(LOGIN_FAILURES, now)
     LOGIN_FAILURES.set(ip, { count: 1, resetAt: now + LOGIN_WINDOW_MS })
     return
   }

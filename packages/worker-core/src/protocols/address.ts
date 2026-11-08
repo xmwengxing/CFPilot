@@ -46,6 +46,32 @@ export function isDomain(host: string): boolean {
   return DOMAIN_RE.test(host) && host.length <= 253
 }
 
+/**
+ * HTTP CONNECT 权威串（authority）的主机名校验。
+ *
+ * `hostname` 来自客户端 VLESS / Trojan 请求头，是**任意字节**。
+ * 直接拼进 `CONNECT <authority> HTTP/1.1\r\nHost: <authority>\r\n` 时，
+ * 含 `\r\n` 的主机名能注入额外请求头、甚至伪造第二个 CONNECT（请求走私）。
+ * SOCKS5 用长度前缀二进制编码主机名、直连 `connect()` 也不是文本协议，
+ * 因此只需守住 HTTP CONNECT 这一条文本链路。
+ *
+ * 策略：控制字符黑名单（注入的根因）+ 形态白名单（复用 isIpv4 / isIpv6 /
+ * isDomain，并放行 `localhost` 这类单标签主机名）。这里**不做** DNS 解析 ——
+ * SSRF 由 outbound/guard.ts 的 blockedTarget 负责，那是另一道门。
+ */
+export function isSafeConnectHost(host: string): boolean {
+  if (!host || host.length > 253) return false
+  if (/[\u0000-\u001f\u007f]/.test(host)) return false
+  return isIpv4(host) || isIpv6(host) || isDomain(host) || /^[a-zA-Z0-9_-]+$/.test(host)
+}
+
+/** 校验 CONNECT authority；失败抛错，由上层按「代理握手失败」分级上报 */
+export function assertSafeConnectAuthority(hostname: string, port: number): void {
+  if (!isSafeConnectHost(hostname) || !Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('Invalid CONNECT authority')
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* IPv6 辅助                                                            */
 /* ------------------------------------------------------------------ */

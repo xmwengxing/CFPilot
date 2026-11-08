@@ -372,12 +372,33 @@ const OTHER_REGION_IPS = 1
  */
 const CACHE_TTL_MS = 30 * 1000
 
+/**
+ * 解析缓存的条数上限。
+ *
+ * 原实现只在 `get` 命中时判过期、从不清理，不同入口域名（用户自配、
+ * 动态轮换域名）持续写入会让 Map 无限增长。TTL 只保证「读不到旧值」，
+ * 不保证「旧条目被释放」—— 条数上限要单独兜住。
+ */
+const CACHE_MAX_ENTRIES = 256
+
 interface CacheEntry {
   at: number
   ips: RelayEndpoint[]
 }
 
 const cache = new Map<string, CacheEntry>()
+
+/** 写入前清理：先删过期项，再按 FIFO 把条数压到上限以内 */
+function pruneRelayCache(now: number): void {
+  for (const [k, entry] of cache) {
+    if (now - entry.at >= CACHE_TTL_MS) cache.delete(k)
+  }
+  while (cache.size >= CACHE_MAX_ENTRIES) {
+    const oldest = cache.keys().next().value
+    if (oldest === undefined) break
+    cache.delete(oldest)
+  }
+}
 
 /**
  * 解析一条入口配置。
@@ -453,7 +474,11 @@ export async function resolveRelayEntry(
     }
   }
 
-  if (out.length > 0) cache.set(key, { at: Date.now(), ips: out })
+  if (out.length > 0) {
+    const now = Date.now()
+    pruneRelayCache(now)
+    cache.set(key, { at: now, ips: out })
+  }
   return out
 }
 
@@ -613,4 +638,9 @@ export async function collectRelayEndpoints(options: RelayPoolOptions = {}): Pro
 /** 清空解析缓存（测试用） */
 export function clearRelayCache(): void {
   cache.clear()
+}
+
+/** 当前缓存条数（测试用：验证条数上限与 FIFO 淘汰） */
+export function relayCacheSize(): number {
+  return cache.size
 }

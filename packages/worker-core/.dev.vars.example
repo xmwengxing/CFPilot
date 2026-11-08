@@ -1,0 +1,4 @@
+# 本地开发变量（复制为 .dev.vars 后改值，.dev.vars 已 gitignore 不入库）
+# wrangler dev --local 会自动读取 .dev.vars，优先级高于 wrangler.jsonc 的 vars
+PANEL_PASSWORD=test123
+PANEL_PATH=/cfpilot

@@ -9,7 +9,7 @@
   "scripts": {
     "gen:panel": "node scripts/gen-panel.mjs",
     "build": "node scripts/gen-panel.mjs && node scripts/build.mjs",
-    "dev": "node scripts/gen-panel.mjs && wrangler dev --local",
+    "dev": "node scripts/gen-panel.mjs && wrangler dev --local --define __CFP_SENTINEL__:'@同类项目' --define __CFP_BUILD__:'dev' --define __CFP_PKG_VERSION__:'dev'",
     "deploy": "node scripts/gen-panel.mjs && wrangler deploy",
     "e2e:echo": "node scripts/selfdp-e2e/echo-server.mjs",
     "e2e:socks": "node scripts/selfdp-e2e/socks5-proxy.mjs",

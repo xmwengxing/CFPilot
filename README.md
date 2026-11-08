@@ -339,7 +339,12 @@ Cloudflare 控制台 → **存储和数据库 → KV** → 创建命名空间，
    | `WS_PATH`        | 与数据面相同                                                    |
    | `DATA_HOST`      | 第 2 步记下的**数据面域名**（Pages 的 `*.pages.dev` 或 Workers 的自定义域名） |
    | `PANEL_PATH`     | 面板路径，如 `/mypanel`                                         |
-   | `ADMIN_PASSWORD` | 面板登录密码                                                    |
+   | `PANEL_PASSWORD` | 面板登录密码                                                    |
+
+   > ⚠️ **变量名是 `PANEL_PASSWORD`，不是 `ADMIN_PASSWORD`。** 写成后者内核读不到，
+   > 会随机生成一个密码写进 KV 的 `ADMIN_PW_PLAIN`，表现就是「一直用自带的密码」。
+   > 保存变量后必须做第 4 步**重新部署一次**（Pages 的变量只对之后的部署生效）；
+   > 重新部署后内核会按 `PANEL_PASSWORD` 刷新密码并自动清掉旧的明文，不用手动清 KV。
 
 3. **设置 → 函数 → KV 命名空间绑定**：`KV` → 同一个命名空间
 
@@ -347,7 +352,7 @@ Cloudflare 控制台 → **存储和数据库 → KV** → 创建命名空间，
 
 **第 4 步：访问**
 
-打开 `https://<控制面域名><PANEL_PATH>`，用 `ADMIN_PASSWORD` 登录。
+打开 `https://<控制面域名><PANEL_PATH>`，用 `PANEL_PASSWORD` 的值登录。
 订阅地址：`https://<控制面域名>/sub/<UUID>`
 
 **更新时**：
@@ -636,7 +641,7 @@ CFPilot/
 | `TROJAN_PASSWORD`                              | Trojan 密码                                                |
 | `ENABLE_TROJAN` / `ENABLE_XHTTP`               | 入站开关                                                     |
 | `DATA_HOST`                                    | 数据面域名（拆分部署时控制面用它生成订阅）                                    |
-| `PANEL_PATH` / `PANEL_PASSWORD`                | 面板路径与初始密码                                                |
+| `PANEL_PATH` / `PANEL_PASSWORD`                | 面板路径与初始密码（**不是 `ADMIN_PASSWORD`**）                         |
 | `PROXYIP`                                      | ProxyIP 池（按直连落地语义解析）                                     |
 | `SOCKS5` / `HTTP_PROXY`                        | 落地代理（仅自研数据面）。`https://` 前缀表示代理本身走 TLS，可用 `#sni=域名` 指定握手名 |
 | `NAT64`                                        | NAT64 前缀，如 `64:ff9b::`                                   |

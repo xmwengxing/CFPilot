@@ -143,11 +143,11 @@
   .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
   .grid-3 { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
   #tab-advanced .grid, #tab-advanced .grid-3, #tab-sub .grid, #tab-sub .grid-3 { gap: 10px; }
-  #tab-advanced .grid-2col { grid-template-columns: 1fr 1fr; }
-  @media (max-width: 760px) { #tab-advanced .grid-2col { grid-template-columns: 1fr; } }
-  #tab-advanced .grid-2col > div { display: grid; gap: 16px; align-content: start; }
-  #tab-advanced .grid-pair { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; align-content: start; }
-  @media (max-width: 760px) { #tab-advanced .grid-pair { grid-template-columns: 1fr; } }
+  #tab-advanced .grid-2col, #tab-inbound .grid-2col { grid-template-columns: 1fr 1fr; }
+  @media (max-width: 760px) { #tab-advanced .grid-2col, #tab-inbound .grid-2col { grid-template-columns: 1fr; } }
+  #tab-advanced .grid-2col > div, #tab-inbound .grid-2col > div { display: grid; gap: 16px; align-content: start; }
+  #tab-advanced .grid-pair, #tab-inbound .grid-pair { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; align-content: start; }
+  @media (max-width: 760px) { #tab-advanced .grid-pair, #tab-inbound .grid-pair { grid-template-columns: 1fr; } }
   #tab-advanced .field .tip { font-size: 11px; line-height: 1.35; margin-top: 4px; }
 
   /* === Cards === */
@@ -701,37 +701,47 @@
       <h2><span class="dot"></span>核心鉴权与传输路径</h2>
       <p class="hint">配置数据面支持的入站协议凭证与 WebSocket / XHTTP 监听路径。建议自定义复杂的路径以提升隐蔽性。</p>
 
-      <div class="grid">
-        <div class="field">
-          <label>Clash 订阅名</label>
-          <input id="cfgSubName" placeholder="CFPilot" maxlength="64" />
-        </div>
-        <div class="field">
-          <label>VLESS UUID（用户凭证）</label>
-          <div class="row nowrap">
-            <input id="cfgUuid" class="mono" placeholder="留空保存将自动生成随机 UUID" />
-            <button type="button" class="ghost" id="btnGenUuid" title="随机生成 UUID">🎲 随机</button>
+      <div class="grid grid-2col">
+        <div>
+          <div class="grid-pair">
+            <div class="field">
+              <label>Clash 订阅名</label>
+              <input id="cfgSubName" placeholder="CFPilot" maxlength="64" />
+            </div>
+            <div class="field">
+              <label>Trojan 认证密码</label>
+              <input id="cfgTrojan" class="mono" placeholder="留空保存将自动生成随机密码" />
+            </div>
+          </div>
+          <div class="grid-pair">
+            <div class="field">
+              <label>VLESS-XHTTP 监听路径</label>
+              <input id="cfgXhttpPath" class="mono" placeholder="/xhttp" />
+            </div>
+            <div class="field">
+              <label>自定义订阅域名（SNI / Host）</label>
+              <input id="cfgSubDomain" class="mono" placeholder="留空则默认使用当前数据面域名" />
+            </div>
           </div>
         </div>
-        <div class="field">
-          <label>Trojan 认证密码</label>
-          <input id="cfgTrojan" class="mono" placeholder="留空保存将自动生成随机密码" />
-        </div>
-        <div class="field">
-          <label>VLESS-WS 监听路径</label>
-          <input id="cfgWsPath" class="mono" placeholder="/vless" />
-        </div>
-        <div class="field">
-          <label>Trojan-WS 监听路径</label>
-          <input id="cfgTrojanPath" class="mono" placeholder="/trojan" />
-        </div>
-        <div class="field">
-          <label>VLESS-XHTTP 监听路径</label>
-          <input id="cfgXhttpPath" class="mono" placeholder="/xhttp" />
-        </div>
-        <div class="field">
-          <label>自定义订阅域名（SNI / Host）</label>
-          <input id="cfgSubDomain" class="mono" placeholder="留空则默认使用当前数据面域名" />
+        <div>
+          <div class="grid-pair">
+            <div class="field">
+              <label>VLESS-WS 监听路径</label>
+              <input id="cfgWsPath" class="mono" placeholder="/vless" />
+            </div>
+            <div class="field">
+              <label>Trojan-WS 监听路径</label>
+              <input id="cfgTrojanPath" class="mono" placeholder="/trojan" />
+            </div>
+          </div>
+          <div class="field">
+            <label>VLESS UUID（用户凭证）</label>
+            <div class="row nowrap">
+              <input id="cfgUuid" class="mono" placeholder="留空保存将自动生成随机 UUID" />
+              <button type="button" class="ghost" id="btnGenUuid" title="随机生成 UUID">🎲 随机</button>
+            </div>
+          </div>
         </div>
       </div>
 

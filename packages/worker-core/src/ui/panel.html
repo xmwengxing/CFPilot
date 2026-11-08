@@ -140,7 +140,7 @@
   .field { margin-bottom: 16px; }
   .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
   .grid-3 { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
-  #tab-advanced .grid, #tab-advanced .grid-3 { gap: 10px; }
+  #tab-advanced .grid, #tab-advanced .grid-3, #tab-sub .grid, #tab-sub .grid-3 { gap: 10px; }
   #tab-advanced .field .tip { font-size: 11px; line-height: 1.35; margin-top: 4px; }
 
   /* === Cards === */
@@ -392,7 +392,7 @@
         · 三种节点来源自由组合，系统按 <b>官方优选 IP → 优选域名 → 手动指定 IP</b> 顺序合并去重。<br>
         · 若三项均未勾选，系统将自动生成 <b>20 个官方优选 IP + 10 个优选域名</b> 确保订阅始终可用。<br>
         · <b>独立来源</b>：<b>远程第三方优选订阅源</b>（TXT 列表 / CSV 测速表）——
-        「出站与高级」页填写，<b>不受本页三个勾选项影响</b>，配置即生效。
+        「订阅中心」页填写，<b>不受本页三个勾选项影响</b>，配置即生效。
       </p>
 
       <!-- 来源 1：官方优选 -->
@@ -628,6 +628,28 @@
         </table>
       </div>
     </div>
+
+    <div class="card">
+      <h2><span class="dot"></span>远程第三方优选订阅源（可选扩展）</h2>
+      <p class="hint">
+        挂载外部维护的优选节点来源，订阅生成时会自动拉取并**独立成池**追加进去。<br>
+        <b>TXT 列表</b>：每行一个 <code>IP:端口</code> 或 <code>IP:端口#备注</code>，按行解析。<br>
+        <b>CSV 测速表</b>：第三方测速工具 导出的 <code>result.csv</code>，
+        额外受下方的「最低准入下行速度 / 最高准入延迟」过滤（<b>仅对 CSV 生效</b>）。<br>
+        ⚠️ 远程池<b>不受</b>「节点来源」页那三个勾选项影响 —— 配了就生效。
+        拉取失败会在「节点来源 → 实时下发节点预览」里报出来。
+      </p>
+      <div class="grid">
+        <div class="field"><label>远程 TXT 列表地址（ADDAPI，每行一个 https URL）</label><textarea id="cfgAddApi" class="mono" placeholder="https://example.com/ips.txt"></textarea></div>
+        <div class="field"><label>远程 CSV 测速表地址（ADDCSV，每行一个 URL）</label><textarea id="cfgAddCsv" class="mono" placeholder="https://example.com/result.csv"></textarea></div>
+      </div>
+      <div class="grid-3">
+        <div class="field"><label>最低准入下行速度 DLS（MB/s，0 = 不限，仅 CSV 生效）</label><input id="cfgDls" type="number" min="0" step="1" /><p class="tip">仅过滤 CSV。</p></div>
+        <div class="field"><label>最高准入延迟 MAX_LATENCY（ms，0 = 不限，仅 CSV 生效）</label><input id="cfgMaxLatency" type="number" min="0" step="1" /><p class="tip">仅过滤 CSV。</p></div>
+        <div class="field"><label>订阅节点总数上限（0 = 不限）</label><input id="cfgMaxNodes" type="number" min="0" step="1" /><p class="tip">限制订阅节点总数。</p></div>
+      </div>
+      <div class="row end"><button class="primary" id="btnSaveRemote">保存远程订阅源配置</button></div>
+    </div>
   </section>
 
   <!-- Tab 5: 入站配置 -->
@@ -757,12 +779,12 @@
         <div class="field">
           <label>ProxyIP 池</label>
           <textarea id="cfgProxyIp" class="mono" placeholder="1.2.3.4:443"></textarea>
-          <p class="tip">每行一个 host:port。</p>
+          <p class="tip">链式代理落地：连接此地址、由它转发到目标站（按上方调度模式参与选路）。与「自定义反代入口池」不等同 —— 那个只在直连失败后兜底。</p>
         </div>
         <div class="field">
           <label>自定义反代入口池</label>
           <textarea id="cfgRelayPool" class="mono" placeholder="1.2.3.4:443&#10;relay.example.com:443"></textarea>
-          <p class="tip">用于 Cloudflare 网段目标。</p>
+          <p class="tip">反代兜底入口（relayPool）：用户自配的第三方反代入口，排在内置反代之前；仅在直连/优选失败、目标在 Cloudflare 网段时启用。</p>
         </div>
         <div class="field">
           <label>NAT64 转换前缀</label>
@@ -861,28 +883,6 @@
       </div>
 
       <div class="row end" style="margin-top:12px"><button class="primary" id="btnSaveAdvanced">保存出站与高级配置</button></div>
-    </div>
-
-    <div class="card">
-      <h2><span class="dot"></span>远程第三方优选订阅源（可选扩展）</h2>
-      <p class="hint">
-        挂载外部维护的优选节点来源，订阅生成时会自动拉取并**独立成池**追加进去。<br>
-        <b>TXT 列表</b>：每行一个 <code>IP:端口</code> 或 <code>IP:端口#备注</code>，按行解析。<br>
-        <b>CSV 测速表</b>：第三方测速工具 导出的 <code>result.csv</code>，
-        额外受下方的「最低准入下行速度 / 最高准入延迟」过滤（<b>仅对 CSV 生效</b>）。<br>
-        ⚠️ 远程池<b>不受</b>「节点来源」页那三个勾选项影响 —— 配了就生效。
-        拉取失败会在「节点来源 → 实时下发节点预览」里报出来。
-      </p>
-      <div class="grid">
-        <div class="field"><label>远程 TXT 列表地址（ADDAPI，每行一个 https URL）</label><textarea id="cfgAddApi" class="mono" placeholder="https://example.com/ips.txt"></textarea></div>
-        <div class="field"><label>远程 CSV 测速表地址（ADDCSV，每行一个 URL）</label><textarea id="cfgAddCsv" class="mono" placeholder="https://example.com/result.csv"></textarea></div>
-      </div>
-      <div class="grid-3">
-        <div class="field"><label>最低准入下行速度 DLS（MB/s，0 = 不限，仅 CSV 生效）</label><input id="cfgDls" type="number" min="0" step="1" /><p class="tip">仅过滤 CSV。</p></div>
-        <div class="field"><label>最高准入延迟 MAX_LATENCY（ms，0 = 不限，仅 CSV 生效）</label><input id="cfgMaxLatency" type="number" min="0" step="1" /><p class="tip">仅过滤 CSV。</p></div>
-        <div class="field"><label>订阅节点总数上限（0 = 不限）</label><input id="cfgMaxNodes" type="number" min="0" step="1" /><p class="tip">限制订阅节点总数。</p></div>
-      </div>
-      <div class="row end"><button class="primary" id="btnSaveRemote">保存远程订阅源配置</button></div>
     </div>
 
     <div class="card">

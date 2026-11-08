@@ -608,31 +608,28 @@
       </div>
     </div>
 
-    <details class="fold" id="subTokenFold">
-      <summary>订阅链接安全（进阶）· 切换前请先读风险</summary>
+    <div class="card">
+      <h2><span class="dot"></span>订阅生成参数</h2>
+      <p class="hint">控制订阅里节点的准入与数量。只影响订阅生成，不影响数据面转发。</p>
+      <div class="grid-3">
+        <div class="field"><label>最低准入下行速度 DLS（MB/s，0 = 不限，仅 CSV 生效）</label><input id="cfgDls" type="number" min="0" step="1" /><p class="tip">仅过滤 CSV。</p></div>
+        <div class="field"><label>最高准入延迟 MAX_LATENCY（ms，0 = 不限，仅 CSV 生效）</label><input id="cfgMaxLatency" type="number" min="0" step="1" /><p class="tip">仅过滤 CSV。</p></div>
+        <div class="field"><label>订阅节点总数上限（0 = 不限）</label><input id="cfgMaxNodes" type="number" min="0" step="1" /><p class="tip">限制订阅节点总数。</p></div>
+      </div>
+      <div class="row end"><button class="primary" id="btnSaveSubGen">保存订阅生成参数</button></div>
+    </div>
+
+    <details class="fold" id="subNodesFold">
+      <summary>订阅下发节点清单（前 100 条）</summary>
       <div class="fold-body">
-        <div class="warn err"><b>⚠ 切到「签名模式」后，经典链接（/sub/&lt;UUID&gt;）立即返回 403，每台设备都要重新导入；「轮换密钥」不可撤销。</b><br>正确顺序：① 签发 → ② 逐台导入验证 → ③ 再切模式。绝大多数用户不需要开启本功能。</div>
-        <div class="field">
-          <label>签名链接 <span class="muted" id="subTokenState"></span></label>
-          <div class="row nowrap"><input class="mono" id="subSigned" readonly placeholder="点「① 签发」生成" /><button class="ghost" data-copy="subSigned">复制</button></div>
-        </div>
-        <div class="row">
-          <button class="ghost" id="btnSignSub">① 签发</button>
-          <button class="danger" id="btnRotateSub">轮换密钥</button>
-          <button class="primary" id="btnToggleSubMode">② 切换模式</button>
+        <div class="table-wrap">
+          <table id="subTable">
+            <thead><tr><th>#</th><th>来源类型</th><th>节点地址</th><th>边缘机房</th></tr></thead>
+            <tbody></tbody>
+          </table>
         </div>
       </div>
     </details>
-
-    <div class="card">
-      <h2><span class="dot"></span>订阅下发节点清单（前 100 条）</h2>
-      <div class="table-wrap">
-        <table id="subTable">
-          <thead><tr><th>#</th><th>来源类型</th><th>节点地址</th><th>边缘机房</th></tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
-    </div>
 
     <div class="card">
       <h2><span class="dot"></span>远程第三方优选订阅源（可选扩展）</h2>
@@ -649,17 +646,6 @@
         <div class="field"><label>远程 CSV 测速表地址（ADDCSV，每行一个 URL）</label><textarea id="cfgAddCsv" class="mono" placeholder="https://example.com/result.csv"></textarea></div>
       </div>
       <div class="row end"><button class="primary" id="btnSaveRemote">保存远程订阅源配置</button></div>
-    </div>
-
-    <div class="card">
-      <h2><span class="dot"></span>订阅生成参数</h2>
-      <p class="hint">控制订阅里节点的准入与数量。只影响订阅生成，不影响数据面转发。</p>
-      <div class="grid-3">
-        <div class="field"><label>最低准入下行速度 DLS（MB/s，0 = 不限，仅 CSV 生效）</label><input id="cfgDls" type="number" min="0" step="1" /><p class="tip">仅过滤 CSV。</p></div>
-        <div class="field"><label>最高准入延迟 MAX_LATENCY（ms，0 = 不限，仅 CSV 生效）</label><input id="cfgMaxLatency" type="number" min="0" step="1" /><p class="tip">仅过滤 CSV。</p></div>
-        <div class="field"><label>订阅节点总数上限（0 = 不限）</label><input id="cfgMaxNodes" type="number" min="0" step="1" /><p class="tip">限制订阅节点总数。</p></div>
-      </div>
-      <div class="row end"><button class="primary" id="btnSaveSubGen">保存订阅生成参数</button></div>
     </div>
 
     <div class="card">
@@ -689,6 +675,20 @@
         <button class="ghost" data-copy="clashYamlPreview">复制 YAML</button>
         <div class="spacer"></div>
         <button class="ghost" id="btnGotoRelay">填写反代入口池 →</button>
+      </div>
+    </div>
+
+    <div class="card" id="subTokenCard">
+      <h2><span class="dot"></span>订阅链接安全（进阶）· 切换前请先读风险</h2>
+      <div class="warn err"><b>⚠ 切到「签名模式」后，经典链接（/sub/&lt;UUID&gt;）立即返回 403，每台设备都要重新导入；「轮换密钥」不可撤销。</b><br>正确顺序：① 签发 → ② 逐台导入验证 → ③ 再切模式。绝大多数用户不需要开启本功能。</div>
+      <div class="field">
+        <label>签名链接 <span class="muted" id="subTokenState"></span></label>
+        <div class="row nowrap"><input class="mono" id="subSigned" readonly placeholder="点「① 签发」生成" /><button class="ghost" data-copy="subSigned">复制</button></div>
+      </div>
+      <div class="row">
+        <button class="ghost" id="btnSignSub">① 签发</button>
+        <button class="danger" id="btnRotateSub">轮换密钥</button>
+        <button class="primary" id="btnToggleSubMode">② 切换模式</button>
       </div>
     </div>
   </section>

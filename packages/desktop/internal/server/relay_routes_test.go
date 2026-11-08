@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// TestRelayParseCandidates 候选清洗：只收 IPv4，并报告被跳过的条数。
+// TestRelayParseCandidates 候选清洗：收 IPv4 / 域名，并报告被跳过的条数。
 func TestRelayParseCandidates(t *testing.T) {
 	s, base := newTestServer(t)
 	s.SetStore(newEmptyStore(t))
@@ -23,6 +23,27 @@ func TestRelayParseCandidates(t *testing.T) {
 	}
 	if body["skipped"] != float64(1) {
 		t.Fatalf("应跳过 1 条非 IPv4，实际 %v", body["skipped"])
+	}
+}
+
+// TestRelayParseCandidatesAcceptsDomain 放宽后的过滤：域名与 IPv4 都收，
+// IPv6 与畸形输入（无点、含空格）仍拒。
+func TestRelayParseCandidatesAcceptsDomain(t *testing.T) {
+	s, base := newTestServer(t)
+	s.SetStore(newEmptyStore(t))
+	cookie := loginCookie(t, s, base)
+
+	raw := "cf.example.com\n1.2.3.4\n2606:4700::1\nnot-an-ip\nhas space.com\n"
+	code, body := postJSON(t, base+"/api/relay/parse-candidates", cookie, map[string]any{"raw": raw})
+	if code != http.StatusOK {
+		t.Fatalf("解析候选失败：%d", code)
+	}
+	if body["count"] != float64(2) || body["skipped"] != float64(1) {
+		t.Fatalf("应识别域名 + IPv4 共 2 个、跳过 IPv6 1 个：%v", body)
+	}
+	candidates, _ := body["candidates"].([]any)
+	if len(candidates) != 2 || candidates[0] != "cf.example.com" || candidates[1] != "1.2.3.4" {
+		t.Fatalf("畸形输入 / IPv6 不该进候选：%v", candidates)
 	}
 }
 
@@ -74,6 +95,32 @@ func TestRelayFetchCandidatesOK(t *testing.T) {
 	}
 	if body["count"] != float64(1) || body["skipped"] != float64(1) {
 		t.Fatalf("应识别 1 个 IPv4 并跳过 1 个 IPv6：%v", body)
+	}
+}
+
+// TestRelayFetchCandidatesAcceptsDomain 远程清单只有域名时也应成功，
+// 不再因「没有可识别的 IPv4」被拒。
+func TestRelayFetchCandidatesAcceptsDomain(t *testing.T) {
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("cf.example.com\nanother.example.com\n"))
+	}))
+	defer listener.Close()
+
+	// 测试机上的 httptest 只监听 127.0.0.1，临时替换守卫放行。
+	oldGuard := relayFetchGuard
+	relayFetchGuard = func(raw string) (*url.URL, error) { return url.Parse(raw) }
+	defer func() { relayFetchGuard = oldGuard }()
+
+	s, base := newTestServer(t)
+	s.SetStore(newEmptyStore(t))
+	cookie := loginCookie(t, s, base)
+
+	code, body := postJSON(t, base+"/api/relay/fetch-candidates", cookie, map[string]any{"url": listener.URL})
+	if code != http.StatusOK || body["ok"] != true {
+		t.Fatalf("只有域名的清单也应导入：%d %v", code, body)
+	}
+	if body["count"] != float64(2) {
+		t.Fatalf("两个域名都应被识别：%v", body)
 	}
 }
 

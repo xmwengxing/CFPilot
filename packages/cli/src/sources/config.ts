@@ -10,11 +10,13 @@
  * `internal/scan/sources.go` 的 struct 字段顺序必须与这里的 interface 一致，
  * 否则「内容未变不写」会在两端来回刷新时失效。
  *
- * ## 默认不预置任何来源
+ * ## 配置文件不存在时才播种内置清单
  *
- * 外部清单 URL 会失效、会改版，硬编码一个「看起来能用」的地址只会让用户
- * 第一次同步就撞 404。由 `cfpilot source add` / 桌面版页面显式添加；
- * `github-raw` 类型的源会自动获得镜像回退。
+ * 首次使用（配置文件不存在 / 为空）时，用随版本内置的来源清单播种，
+ * 让用户一进来就有可挑选的源。播种只发生在这一步：保存过一次之后
+ * 一律以用户文件为准，因此用户删掉的内置条目不会被回灌。
+ * 内置条目默认停用（外部链接会失效），需用户显式启用；`github-raw`
+ * 类型的源会自动获得镜像回退。
  */
 import {
   existsSync,
@@ -26,6 +28,7 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { BUILTIN_SOURCES_JSON } from './builtin.generated'
 import {
   poolDir,
   poolLockPath,
@@ -91,7 +94,24 @@ export function sourcesLockPath(): string {
   return poolLockPath()
 }
 
+/**
+ * 配置文件不存在 / 为空时的初始内容：播种随版本内置的来源清单。
+ *
+ * 只在「没有用户文件」这一步生效。写盘之后 `parseSources` 一律以用户文件
+ * 为准（正常路径返回文件里的 sources，损坏降级见 `blankSources`），
+ * 所以用户删掉的内置条目不会再被补回来。
+ */
 export function emptySources(): SourcesFile {
+  return {
+    schema: SOURCES_SCHEMA,
+    updatedAt: 0,
+    sources: JSON.parse(BUILTIN_SOURCES_JSON) as SourceConfig[],
+    runs: [],
+  }
+}
+
+/** 损坏 / 不兼容 schema 降级用的真正空配置，绝不播种（避免回灌用户删掉的条目）。 */
+function blankSources(): SourcesFile {
   return { schema: SOURCES_SCHEMA, updatedAt: 0, sources: [], runs: [] }
 }
 
@@ -179,8 +199,9 @@ function normalizeRun(v: SyncRun): SyncRun {
 }
 
 /**
- * 解析；schema 1 自动迁移到 2（只补两个字段，不丢数据），
- * 其它不兼容版本 / JSON 损坏 → 备份 + 空配置（不阻断启动）。
+ * 解析；空文本（文件不存在 / 为空）→ 播种内置清单；
+ * schema 1 自动迁移到 2（只补两个字段，不丢数据），
+ * 其它不兼容版本 / JSON 损坏 → 备份 + 真正的空配置（不阻断启动、不回灌）。
  */
 export function parseSources(raw: string): SourcesFile {
   if (!raw.trim()) return emptySources()
@@ -207,7 +228,7 @@ export function parseSources(raw: string): SourcesFile {
     } catch {
       /* 备份失败不阻断 */
     }
-    return emptySources()
+    return blankSources()
   }
 }
 

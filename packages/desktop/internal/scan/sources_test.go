@@ -94,7 +94,7 @@ func TestSourcesGoldenRoundTrip(t *testing.T) {
 
 func TestSourcesEmptySerialization(t *testing.T) {
 	sourcesTestDir(t)
-	got, err := SerializeSources(EmptySources())
+	got, err := SerializeSources(emptySourcesFile())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,8 +110,9 @@ func TestSourcesCorruptBackedUp(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{ 不是 json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// 损坏文件只备份、降级为空，不把内置清单重新灌回来（与 CLI 一致）
 	if cfg := ParseSources(ReadSourcesRaw()); len(cfg.Sources) != 0 {
-		t.Fatal("损坏配置应降级为空")
+		t.Fatalf("损坏配置应降级为空：%d 条", len(cfg.Sources))
 	}
 	matches, err := filepath.Glob(filepath.Join(dir, SourcesFilename+".corrupt-*"))
 	if err != nil || len(matches) != 1 {
@@ -121,6 +122,12 @@ func TestSourcesCorruptBackedUp(t *testing.T) {
 
 func TestSourcesConfigPersistsAcrossRestarts(t *testing.T) {
 	sourcesTestDir(t)
+	// 先落一份用户文件，把「首次播种」隔开，专注验证重启后的持久化。
+	if err := SaveSources(&SourcesFile{
+		Schema: SourcesSchema, Sources: []SourceConfig{}, Runs: []SyncRun{},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := WithSources(func(cfg *SourcesFile) error {
 		cfg.Sources = append(cfg.Sources, githubTestSource(), customTestSource())
 		AppendRun(cfg, SyncRun{At: sourcesNow, SourceID: "github_ips", OK: true, Added: 3})
@@ -135,6 +142,51 @@ func TestSourcesConfigPersistsAcrossRestarts(t *testing.T) {
 	}
 	if cfg.Sources[0].IntervalHours != 12 || cfg.Sources[1].IntervalHours != 24 {
 		t.Fatalf("默认间隔不对：%+v", cfg.Sources)
+	}
+}
+
+func TestEmptySourcesSeedsBuiltin(t *testing.T) {
+	cfg := EmptySources()
+	if cfg.Schema != SourcesSchema || len(cfg.Sources) != BuiltinSourcesCount {
+		t.Fatalf("应播种 %d 条内置源，实际 %d 条", BuiltinSourcesCount, len(cfg.Sources))
+	}
+	if len(cfg.Runs) != 0 {
+		t.Fatal("内置种子不应带采集记录")
+	}
+	seen := make(map[string]bool, len(cfg.Sources))
+	for _, s := range cfg.Sources {
+		if seen[s.ID] {
+			t.Fatalf("内置源 ID 重复：%s", s.ID)
+		}
+		seen[s.ID] = true
+		if s.Enabled {
+			t.Fatalf("内置源默认必须禁用：%s", s.ID)
+		}
+	}
+}
+
+func TestBuiltinNotReinjectedAfterDelete(t *testing.T) {
+	sourcesTestDir(t)
+	// 文件不存在时播种；用户删空内置源并保存后，再读不应被回灌。
+	if got := LoadSources(); len(got.Sources) != BuiltinSourcesCount {
+		t.Fatalf("文件不存在时应播种 %d 条，实际 %d 条", BuiltinSourcesCount, len(got.Sources))
+	}
+	if err := SaveSources(&SourcesFile{
+		Schema: SourcesSchema, Sources: []SourceConfig{}, Runs: []SyncRun{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadSources(); len(got.Sources) != 0 {
+		t.Fatalf("删除内置源后被回灌：%d 条", len(got.Sources))
+	}
+	// 用户文件里有自定义源时，解析也不能把内置源追加回来。
+	if err := SaveSources(&SourcesFile{
+		Schema: SourcesSchema, Sources: []SourceConfig{githubTestSource()}, Runs: []SyncRun{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := LoadSources(); len(got.Sources) != 1 || got.Sources[0].ID != "github_ips" {
+		t.Fatalf("解析用户文件不该回灌内置源：%+v", got.Sources)
 	}
 }
 

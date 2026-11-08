@@ -399,6 +399,15 @@ interface Window {
     sourcesPoolUpdate(keys: string[], action: 'disable' | 'enable' | 'delete'): Promise<{ ok: boolean; changed: number; error?: string }>
     /** 从本地池取样跑完整优选 + 回填（唯一会写 KV 的动作，默认 replace） */
     sourcesQuick(poolSample?: number): Promise<QuickScanResult>
+    /** 「加载数据源清单」：按 ID 拉取并合并清单原文（不写池、不要求来源已启用） */
+    sourcesFetchCandidates(ids: string[]): Promise<{
+      ok: boolean
+      raw: string
+      count: number
+      selected?: number
+      truncated?: boolean
+      errors?: string[]
+    }>
 
     /**
      * 读取本机保存的优选历史（最新在前）。
@@ -624,7 +633,9 @@ interface Window {
       candidates: string
     }): Promise<{ ok?: boolean; started?: boolean; count?: number; error?: string }>
     cancelRelay(): Promise<{ ok: boolean; error?: string }>
-    /** 候选预览：返回可识别的 IPv4 与被跳过的条数 */
+    /** 候选预览（通用）：IP 与域名都识别，界面当前用这个 */
+    parseScanCandidates(raw: string): Promise<{ candidates: string[]; count: number }>
+    /** 候选预览（反代链路保留）：返回可识别的 IPv4 与被跳过的条数 */
     parseRelayCandidates(raw: string): Promise<{
       candidates: string[]
       count: number

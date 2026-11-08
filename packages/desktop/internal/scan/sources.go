@@ -112,12 +112,24 @@ func SourcesPath() (string, error) {
 	return filepath.Join(dir, SourcesFilename), nil
 }
 
-func EmptySources() *SourcesFile {
+// emptySourcesFile 构造不含内置源的空配置，只作为解析已有用户文件的基底。
+// 与 EmptySources 的区别是刻意保留的：解析用户文件时若用内置清单作基底，
+// 用户删掉的条目每次读文件都会被 append 回来，等于把配置回灌成内置态。
+func emptySourcesFile() *SourcesFile {
 	return &SourcesFile{
 		Schema:  SourcesSchema,
 		Sources: make([]SourceConfig, 0),
 		Runs:    make([]SyncRun, 0),
 	}
+}
+
+// EmptySources 只在配置文件不存在 / 为空时作为种子返回：
+// 内置清单此时才出现，用户一保存就以用户文件为准；损坏 / 不兼容版本
+// 走 backupCorruptSources 返回空配置，不播种，避免把删掉的条目回灌回来。
+func EmptySources() *SourcesFile {
+	f := emptySourcesFile()
+	f.Sources = BuiltinSources()
+	return f
 }
 
 func ReadSourcesRaw() string {
@@ -171,7 +183,9 @@ func normalizeSource(s SourceConfig) SourceConfig {
 	return out
 }
 
-// ParseSources 解析配置；schema 1 自动迁移到 2，其它不兼容版本 → 备份 + 空配置。
+// ParseSources 解析配置；空文本播种内置清单，schema 1 自动迁移到 2，
+// 其它不兼容版本 / 损坏 → 备份 + 空配置。合法用户文件一律以文件自身内容
+// 为准（基底是空配置），避免把内置源回灌进去。
 func ParseSources(raw string) *SourcesFile {
 	if strings.TrimSpace(raw) == "" {
 		return EmptySources()
@@ -188,7 +202,7 @@ func ParseSources(raw string) *SourcesFile {
 	if env.Schema == nil || (*env.Schema != SourcesSchema && *env.Schema != SourcesSchemaV1) {
 		return backupCorruptSources()
 	}
-	out := EmptySources()
+	out := emptySourcesFile()
 	if env.UpdatedAt != nil {
 		out.UpdatedAt = *env.UpdatedAt
 	}
@@ -222,18 +236,21 @@ func ParseSources(raw string) *SourcesFile {
 	return out
 }
 
+// 损坏文件只备份 + 返回空配置，不重新播种内置清单：
+// 原文件里可能记录着「用户删掉过哪些内置条目」，此时灌回全量清单等于回灌。
+// 与 CLI 的 blankSources() 降级语义一致。真正需要播种的只有「文件不存在 / 为空」。
 func backupCorruptSources() *SourcesFile {
 	path, err := SourcesPath()
 	if err != nil {
-		return EmptySources()
+		return emptySourcesFile()
 	}
 	_ = os.Rename(path, fmt.Sprintf("%s.corrupt-%d", path, nowMS()))
-	return EmptySources()
+	return emptySourcesFile()
 }
 
 func SerializeSources(f *SourcesFile) (string, error) {
 	if f == nil {
-		f = EmptySources()
+		f = emptySourcesFile()
 	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)

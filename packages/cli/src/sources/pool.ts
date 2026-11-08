@@ -72,7 +72,8 @@ export interface ExternalCandidate {
   key: string
   ip: string
   port: number
-  ipVersion: 4 | 6
+  /** 4 = IPv4，6 = IPv6，0 = 域名（域名不是 IP，是否落在 CF 段由后续探测决定） */
+  ipVersion: 0 | 4 | 6
   candidateType: CandidateType
   /** 同一 IP 可以来自多个数据源，合并时只增不删 */
   sources: string[]
@@ -139,15 +140,37 @@ export function poolLockPath(): string {
 // ------------------------------------------------------------------
 
 /**
+ * 合法域名：至少两段 label，每段以字母数字开头结尾（中间允许连字符），
+ * 只含字母 / 数字 / 连字符 / 点（空白、控制字符、冒号、方括号等一律拒绝）。
+ * 域名必含 `.`，不会与 IPv6 字面量混淆。
+ *
+ * 纯数字点分串一律不算域名：它意图是 IPv4 字面量，若 isIP 没认（段越界），
+ * 就是非法 IP，不能伪装成域名入池、让后续探测去连一个不存在的地址。
+ */
+function isDomainHost(host: string): boolean {
+  if (!host || host.length > 253) return false
+  if (!/^[A-Za-z0-9.-]+$/.test(host)) return false
+  const labels = host.split('.')
+  if (labels.length < 2) return false
+  if (/^[\d.]+$/.test(host)) return false
+  return labels.every((label) =>
+    label.length > 0 && label.length <= 63 &&
+    /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(label)
+  )
+}
+
+/**
  * 生成候选唯一键。
  *
- * IPv4 → `ip:port`，IPv6 → `[ip]:port`（避免 IPv6 自带冒号造成歧义）。
- * 非法 IP / 非法端口返回 null。
+ * IPv4 → `ip:port`，IPv6 → `[ip]:port`（避免 IPv6 自带冒号造成歧义），
+ * 域名 → `域名:port`。域名与 IPv4 共用 `host:port` 形态，但域名必含 `.`
+ * 且至少一段含字母，不会与合法 IP 撞键。
+ * 非法 IP / 非法域名 / 非法端口返回 null。
  */
 export function normalizeCandidateKey(ip: string, port: number): string | null {
   const clean = ip.trim()
   const family = isIP(clean)
-  if (family !== 4 && family !== 6) return null
+  if (family !== 4 && family !== 6 && !isDomainHost(clean)) return null
   if (!Number.isInteger(port) || port < 1 || port > 65535) return null
   return family === 6 ? `[${clean}]:${port}` : `${clean}:${port}`
 }
@@ -208,7 +231,7 @@ function isValidCandidate(value: unknown): value is ExternalCandidate {
     typeof c.key !== 'string' || !c.key ||
     typeof c.ip !== 'string' || !c.ip ||
     !Number.isInteger(c.port) || (c.port ?? 0) < 1 || (c.port ?? 0) > 65535 ||
-    (c.ipVersion !== 4 && c.ipVersion !== 6) ||
+    (c.ipVersion !== 0 && c.ipVersion !== 4 && c.ipVersion !== 6) ||
     c.candidateType !== ENTRY_IP ||
     !Array.isArray(c.sources) || !c.sources.every((s) => typeof s === 'string') ||
     typeof c.firstSeen !== 'number' || !Number.isFinite(c.firstSeen) || c.firstSeen < 0 ||
@@ -464,12 +487,16 @@ export function upsertCandidates(
       bumpReason(result.reasons, 'invalidIp')
       continue
     }
-    if (!isCloudflareEntryIp(input.ip)) {
+    const clean = input.ip.trim()
+    const family = isIP(clean)
+    const domain = family === 0 && isDomainHost(clean)
+    // 域名不是 IP：跳过官方段校验，是否可达由后续探测决定；IP 必须落在官方段内
+    if (!domain && !isCloudflareEntryIp(clean)) {
       result.rejected++
       bumpReason(result.reasons, 'notCloudflare')
       continue
     }
-    const family = isIP(input.ip.trim()) as 4 | 6
+    const ipVersion: 0 | 4 | 6 = domain ? 0 : (family === 6 ? 6 : 4)
     const existing = byKey.get(key)
     if (existing) {
       if (!existing.sources.includes(input.source)) existing.sources.push(input.source)
@@ -485,9 +512,9 @@ export function upsertCandidates(
     }
     const created: ExternalCandidate = {
       key,
-      ip: input.ip.trim(),
+      ip: clean,
       port,
-      ipVersion: family,
+      ipVersion,
       candidateType: ENTRY_IP,
       sources: [input.source],
       firstSeen: now,

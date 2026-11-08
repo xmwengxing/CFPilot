@@ -1634,7 +1634,7 @@
             <!-- 候选来源单独一行：与上面两个输入框同宽，表格高度才对得齐 -->
             <div class="grid" style="margin-top:12px">
               <div class="field">
-                <label title="默认：入口优选按网段权重采样 Cloudflare 候选；反代优选使用内置 Proxy IP 源。&#10;自定义列表：直接用你导入的 IP，跳过网段采样。">候选来源</label>
+                <label title="默认：入口优选按网段权重采样 Cloudflare 候选；反代优选使用内置 Proxy IP 源。&#10;自定义列表：直接用你导入的 IP 或域名，跳过网段采样。">候选来源</label>
                 <select id="optSourceMode">
                   <option value="default">默认（入口＝网段采样 / 反代＝内置 Proxy IP 源）</option>
                   <option value="custom">自定义列表</option>
@@ -1643,14 +1643,14 @@
             </div>
             <div id="customSourceBox" hidden style="margin-top:12px">
               <div class="field">
-                <label title="每行一个：IP、IP:Port、IP:Port#备注 都行；CSV 整行粘贴也可以（会自动找 IP 那一列）。">IP 列表</label>
-                <textarea id="optCandidateText" rows="6" placeholder="1.2.3.4&#10;5.6.7.8:443&#10;9.9.9.9:443#SJC&#10;（也可以整行粘贴 CSV）"></textarea>
+                <label title="每行一个：IP、IP:Port、域名、域名:Port、带 #备注 都行；CSV 整行粘贴也可以（会自动找地址那一列）。">IP / 域名列表</label>
+                <textarea id="optCandidateText" rows="6" placeholder="1.2.3.4&#10;5.6.7.8:443&#10;cdn.example.com:443#优选域名&#10;（也可以整行粘贴 CSV）"></textarea>
               </div>
               <div class="btn-row">
                 <button class="btn btn-ghost" id="btnImportFile">选择文件…</button>
                 <button class="btn btn-ghost" id="btnImportUrl">从链接导入…</button>
-                <button class="btn btn-ghost" id="btnLoadBuiltin"
-                  title="随版本发布的内置反代清单，用户不可修改；发版时由我们重新实测更新。">加载内置清单</button>
+                <button class="btn btn-ghost" id="btnLoadSourceList"
+                  title="从数据源清单里勾选多个来源，合并成候选 IP 或域名。">加载数据源清单</button>
                 <input type="file" id="fileImportInput" accept=".csv,.txt,text/plain,text/csv" hidden />
               </div>
               <p class="hint" id="candidateHint">粘贴或导入后这里会显示识别结果。</p>
@@ -2215,6 +2215,7 @@
                 <button class="btn btn-ghost btn-sm" id="btnSrcConfigSave" type="button">保存数据源配置</button>
               </div>
               <p class="tip" style="margin-top:6px">「加入列表」只改页面上的草稿，点「保存数据源配置」才真正落盘。</p>
+              <p class="tip" style="margin-top:6px">随版本内置的来源默认停用，勾选「启用」后才会参与定时同步；在「⚡ 优选」页点「加载数据源清单」可直接勾选任意来源作为候选，不要求启用。内置条目和普通来源一样可以编辑、停用或删除。</p>
             </div>
           </div>
 
@@ -2276,6 +2277,32 @@
           <button id="btnClearLog" type="button">清空</button>
         </div>
         <div class="log" id="logBox"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 数据源清单选择弹窗（优选页） ============ -->
+  <div class="modal-mask" id="sourceListModal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="sourceListModalTitle">
+      <div class="modal-head">
+        <b id="sourceListModalTitle">加载数据源清单</b>
+        <span class="spacer"></span>
+        <button class="btn btn-ghost btn-sm" id="btnSourceListClose" type="button">关闭</button>
+      </div>
+      <div class="modal-tools">
+        <input type="text" id="sourceListSearch" placeholder="搜索来源名称，如 天诚 / 域名 / CM" />
+        <button class="btn btn-ghost btn-sm" id="btnSourceListAll" type="button">全选</button>
+        <button class="btn btn-ghost btn-sm" id="btnSourceListNone" type="button">清空</button>
+      </div>
+      <div class="modal-body" id="sourceListBody">
+        <p class="country-empty">（正在加载数据源…）</p>
+      </div>
+      <div class="modal-foot">
+        <span class="tip" id="sourceListCount" style="margin:0">已选 0 个来源</span>
+        <span>
+          <button class="btn btn-ghost" id="btnSourceListCancel" type="button">取消</button>
+          <button class="btn btn-primary" id="btnSourceListApply" type="button">加载所选来源</button>
+        </span>
       </div>
     </div>
   </div>

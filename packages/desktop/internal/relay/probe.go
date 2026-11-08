@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -87,6 +88,35 @@ func FetchExpectedBuild(ctx context.Context, host string, timeout time.Duration)
 	return parsed.Build, nil
 }
 
+// probeLookupIP 是域名 → IP 的解析入口，做成变量只为单测能注入，
+// 避免测试依赖真实 DNS / 网络；生产恒走 net.DefaultResolver。
+var probeLookupIP = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+	return net.DefaultResolver.LookupIPAddr(ctx, host)
+}
+
+// resolveProbeTarget 把候选解析成 VLESS 请求用的 IPv4。
+//
+// BuildVLESSRequest 只实现 IPv4 地址类型（atyp=0x01），所以域名不另起协议
+// 分支，而是先取 A 记录里的第一个 IPv4 再复用原有头——改动最小、协议零风险。
+// 解析失败或没有 IPv4 必须显式报错，不能静默跳过（否则失败会被误判成候选全挂）。
+func resolveProbeTarget(ctx context.Context, candidate string) ([4]byte, error) {
+	if target, err := ParseIPv4(candidate); err == nil {
+		return target, nil
+	}
+	addrs, err := probeLookupIP(ctx, candidate)
+	if err != nil {
+		return [4]byte{}, fmt.Errorf("域名解析失败（%s）：%w", candidate, err)
+	}
+	for _, a := range addrs {
+		if v4 := a.IP.To4(); v4 != nil {
+			var out [4]byte
+			copy(out[:], v4)
+			return out, nil
+		}
+	}
+	return [4]byte{}, fmt.Errorf("域名没有可用的 IPv4 记录：%s", candidate)
+}
+
 // Probe 体检一个候选。
 //
 // 链路：本机 →（WS/VLESS 隧道）→ Worker →（明文 TCP）→ 候选:443
@@ -115,7 +145,7 @@ func Probe(ctx context.Context, opt Options, ip string) Result {
 		result.Error = err.Error()
 		return result
 	}
-	target, err := ParseIPv4(ip)
+	target, err := resolveProbeTarget(probeCtx, ip)
 	if err != nil {
 		result.Error = err.Error()
 		return result

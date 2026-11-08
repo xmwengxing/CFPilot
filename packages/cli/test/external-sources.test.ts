@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import {
   MAX_SYNC_RUNS,
   SOURCES_FILENAME,
+  emptySources,
   loadSources,
   parseSources,
   serializeSources,
@@ -96,6 +97,30 @@ describe('数据源配置契约', () => {
     expect(serializeSources(parseSources(SOURCES_GOLDEN))).toBe(SOURCES_GOLDEN)
   })
 
+  it('emptySources 播种随版本内置的来源清单：88 条、id 唯一、默认停用', () => {
+    const file = emptySources()
+    expect(file.updatedAt).toBe(0)
+    expect(file.runs).toEqual([])
+    expect(file.sources).toHaveLength(88)
+    expect(new Set(file.sources.map((s) => s.id)).size).toBe(88)
+    expect(file.sources.every((s) => s.enabled === false)).toBe(true)
+    expect(file.sources.every((s) => s.type === 'custom-url')).toBe(true)
+  })
+
+  it('播种的 88 条落盘后读回不丢失（字段都过 validSource）', async () => {
+    // 空回调也会把播种内容落盘；再次解析时不能被字段校验丢掉
+    await withSources(() => {})
+    expect(loadSources().sources).toHaveLength(88)
+  })
+
+  it('删除内置条目后重新加载不会被回灌（以用户文件为准）', async () => {
+    // 首次保存触发播种并落盘，随后把内置条目全部换成用户自己的源
+    await withSources((file) => {
+      file.sources = [makeSource({ id: 'mine', type: 'custom-url', url: 'https://example.com/a.txt' })]
+    })
+    expect(loadSources().sources.map((s) => s.id)).toEqual(['mine'])
+  })
+
   it('损坏 / 不兼容 schema 降级为空配置并保留备份', () => {
     writeFileSync(sourcesPath(), '{ 不是 json')
     expect(parseSources(readFileSync(sourcesPath(), 'utf8')).sources).toHaveLength(0)
@@ -162,6 +187,15 @@ describe('清单内容归一（复用 readIpFile，只补 JSON 与端口）', ()
 
   it('JSON 顶层对象用常见别名字段找列表', () => {
     expect(parseSourcePayload('{"data":["104.16.0.1"]}')).toEqual([{ ip: '104.16.0.1', port: null }])
+  })
+
+  it('域名:port 也能被 collectPorts 识别并补全端口', () => {
+    const parsed = parseSourcePayload('bestcf.pages.dev:2053\nexample.com\ncdn.example.org:443')
+    expect(parsed).toEqual([
+      { ip: 'bestcf.pages.dev', port: 2053 },
+      { ip: 'example.com', port: null },
+      { ip: 'cdn.example.org', port: 443 },
+    ])
   })
 
   it('toCandidateInputs 只做映射，合法性交给 upsertCandidates', () => {

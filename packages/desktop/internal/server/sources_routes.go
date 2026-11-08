@@ -29,6 +29,8 @@ func (s *Server) registerSourcesRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/sources/pool", s.guard(s.handleSourcesPool))
 	mux.HandleFunc("/api/sources/pool/update", s.guard(s.handleSourcesPoolUpdate))
 	mux.HandleFunc("/api/sources/quick", s.guard(s.handleSourcesQuick))
+	// 「加载数据源清单」弹窗：按选中 ID 拉原文合并，不写本地池
+	mux.HandleFunc("/api/sources/fetch", s.guard(s.handleSourcesFetch))
 }
 
 func (s *Server) handleSourcesList(w http.ResponseWriter, r *http.Request) {

@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -87,6 +88,42 @@ func TestReadVLESSReplySkipsAddons(t *testing.T) {
 	rest, _ := io.ReadAll(r)
 	if string(rest) != "DATA" {
 		t.Fatalf("addons 之后的字节应保持原样，实际 %q", string(rest))
+	}
+}
+
+// TestResolveProbeTarget IPv4 直通；域名取第一个 A 记录；解析失败 / 只有 IPv6 明确报错。
+func TestResolveProbeTarget(t *testing.T) {
+	if got, err := resolveProbeTarget(context.Background(), "1.2.3.4"); err != nil || got != [4]byte{1, 2, 3, 4} {
+		t.Fatalf("IPv4 应直通、不走 DNS：%v %v", got, err)
+	}
+
+	old := probeLookupIP
+	defer func() { probeLookupIP = old }()
+
+	probeLookupIP = func(_ context.Context, _ string) ([]net.IPAddr, error) {
+		return []net.IPAddr{
+			{IP: net.ParseIP("2606:4700::1")},
+			{IP: net.ParseIP("104.16.0.1")},
+			{IP: net.ParseIP("104.16.0.2")},
+		}, nil
+	}
+	got, err := resolveProbeTarget(context.Background(), "cf.example.com")
+	if err != nil || got != [4]byte{104, 16, 0, 1} {
+		t.Fatalf("域名应解析成第一个 IPv4：%v %v", got, err)
+	}
+
+	probeLookupIP = func(_ context.Context, _ string) ([]net.IPAddr, error) {
+		return nil, errors.New("no such host")
+	}
+	if _, err := resolveProbeTarget(context.Background(), "bad.example.com"); err == nil {
+		t.Fatal("解析失败必须明确报错")
+	}
+
+	probeLookupIP = func(_ context.Context, _ string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("2606:4700::1")}}, nil
+	}
+	if _, err := resolveProbeTarget(context.Background(), "v6.example.com"); err == nil {
+		t.Fatal("只有 IPv6 记录、没有 IPv4 时必须报错")
 	}
 }
 

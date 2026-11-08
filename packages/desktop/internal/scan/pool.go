@@ -198,19 +198,49 @@ func ipFamily(ip string) int {
 	return 4
 }
 
+// IsValidDomain 判断是否是符合主机名形态的域名（必须含 .、排除 IP 字面量）。
+// 复用 ParseCandidateList 的 isHostname 口径，并额外排除纯数字点分串：
+// 那种串意图是 IPv4 字面量，段越界时不能伪装成域名入池（与 CLI isDomainHost 一致）。
+func IsValidDomain(host string) bool {
+	token := strings.TrimSpace(host)
+	if token == "" || net.ParseIP(token) != nil {
+		return false
+	}
+	onlyDigitsAndDots := true
+	for _, c := range token {
+		if (c < '0' || c > '9') && c != '.' {
+			onlyDigitsAndDots = false
+			break
+		}
+	}
+	if onlyDigitsAndDots {
+		return false
+	}
+	return isHostname(token)
+}
+
 // NormalizeCandidateKey 生成候选唯一键。
 //
-// IPv4 → `ip:port`，IPv6 → `[ip]:port`（避免 IPv6 自带冒号造成歧义）。
-// 非法 IP / 非法端口返回 ok=false。
+// IPv4 → `ip:port`，IPv6 → `[ip]:port`，合法域名 → `域名:port`。
+// 域名沿用不带方括号的 `host:port` 形态（域名本身不含冒号）。
+// 非法 IP / 非法域名 / 非法端口返回 ok=false。
 //
 // ⚠️ IPv6 **不做地址压缩归一**，保留输入原样：CLI 侧同样只做 trim。
 // 代价是 `2606:4700::1` 与 `2606:4700:0:0:0:0:0:1` 会是两个 key ——
 // 这是已知限制，由 Phase 2 采集器在入池前统一清洗，不在本层偷偷改语义。
 func NormalizeCandidateKey(ip string, port int) (string, bool) {
 	clean := strings.TrimSpace(ip)
-	parsed := net.ParseIP(clean)
-	if parsed == nil || port < 1 || port > 65535 {
+	if port < 1 || port > 65535 {
 		return "", false
+	}
+	parsed := net.ParseIP(clean)
+	if parsed == nil {
+		// 不是 IP 字面量：符合主机名形态的域名按 域名:port 入池，
+		// 连通性留给后续探测，本层不判 CF 段。
+		if !IsValidDomain(clean) {
+			return "", false
+		}
+		return fmt.Sprintf("%s:%d", clean, port), true
 	}
 	if ipFamily(clean) == 6 {
 		if parsed.To4() != nil { // IPv4-mapped 形式不是合法入口 IPv6
@@ -313,11 +343,12 @@ func ReadPoolRaw() string {
 //
 // candidateType 是**隔离断言**：异类型条目（ProxyIP / NAT64 / Relay）
 // 直接丢弃，不进池；结构损坏的条目同样丢弃。
+// ipVersion 额外放行 0 = 域名：否则域名候选写入后下次读池就会被丢掉，无法持久化。
 func validCandidate(c *ExternalCandidate) bool {
 	return c.Key != "" &&
 		c.IP != "" &&
 		c.Port >= 1 && c.Port <= 65535 &&
-		(c.IPVersion == 4 || c.IPVersion == 6) &&
+		(c.IPVersion == 0 || c.IPVersion == 4 || c.IPVersion == 6) &&
 		c.CandidateType == EntryIP &&
 		c.Sources != nil &&
 		c.FirstSeen >= 0 && c.LastSeen >= 0 &&
@@ -522,6 +553,15 @@ func bumpReason(reasons map[string]int, reason string) {
 	reasons[reason]++
 }
 
+// candidateIPVersion 给出落盘的 ipVersion：IP 字面量按地址族，域名统一 0。
+// 0 = 域名（与 CLI 侧一致），validCandidate 也据此放行域名条目。
+func candidateIPVersion(clean string, isDomain bool) int {
+	if isDomain {
+		return 0
+	}
+	return ipFamily(clean)
+}
+
 // UpsertCandidates 把一批新发现的候选并入池。
 //
 // 状态规则（对齐执行计划 §3.2 / §8.3）：
@@ -553,7 +593,10 @@ func UpsertCandidates(pool *ExternalPool, inputs []CandidateInput, now int64, ma
 			bumpReason(result.Reasons, "invalidIp")
 			continue
 		}
-		if !IsCloudflareEntryIP(input.IP) {
+		clean := strings.TrimSpace(input.IP)
+		isDomain := net.ParseIP(clean) == nil // 已过 NormalizeCandidateKey：非 IP 即合法域名
+		// 域名不是 IP 字面量，判不了 CF 段，跳过该校验留给后续探测。
+		if !isDomain && !IsCloudflareEntryIP(clean) {
 			result.Rejected++
 			bumpReason(result.Reasons, "notCloudflare")
 			continue
@@ -587,9 +630,9 @@ func UpsertCandidates(pool *ExternalPool, inputs []CandidateInput, now int64, ma
 
 		created := ExternalCandidate{
 			Key:           key,
-			IP:            strings.TrimSpace(input.IP),
+			IP:            clean,
 			Port:          port,
-			IPVersion:     ipFamily(strings.TrimSpace(input.IP)),
+			IPVersion:     candidateIPVersion(clean, isDomain),
 			CandidateType: EntryIP,
 			Sources:       []string{input.Source},
 			FirstSeen:     now,

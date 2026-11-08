@@ -125,7 +125,9 @@ func TestPoolNormalizeCandidateKey(t *testing.T) {
 		{" 104.16.0.1 ", 8443, "104.16.0.1:8443", true},
 		{"2606:4700::1", 443, "[2606:4700::1]:443", true},
 		{"999.999.999.999", 443, "", false},
-		{"example.com", 443, "", false},
+		{"example.com", 443, "example.com:443", true},
+		{"not a domain", 443, "", false},
+		{"singlelabel", 443, "", false},
 		{"104.16.0.1", 0, "", false},
 		{"104.16.0.1", 65536, "", false},
 	}
@@ -187,7 +189,7 @@ func TestPoolUpsertRejectsInvalidAndForeign(t *testing.T) {
 	badPort := 0
 	inputs := []CandidateInput{
 		candidate("999.999.999.999", "src"),
-		candidate("example.com", "src"),
+		candidate("not a domain", "src"), // 含空格的畸形域名仍按非法 IP 拒绝
 		{IP: "104.16.0.1", Port: &badPort, Source: "src"},
 		candidate("223.5.5.5", "src"), // 公共 DNS，不是 CF 段
 		candidate("8.8.8.8", "src"),
@@ -200,6 +202,28 @@ func TestPoolUpsertRejectsInvalidAndForeign(t *testing.T) {
 	}
 	if r.Reasons["invalidIp"] != 3 || r.Reasons["notCloudflare"] != 2 || r.Reasons["candidateType"] != 2 {
 		t.Fatalf("拒绝原因分类不对：%v", r.Reasons)
+	}
+}
+
+func TestPoolUpsertAcceptsDomain(t *testing.T) {
+	poolTestDir(t)
+	pool := EmptyPool()
+	r := UpsertCandidates(pool, []CandidateInput{
+		candidate("cdn.example.com", "src"),
+	}, testNow, PoolMaxCandidates)
+	if r.Added != 1 || len(pool.Candidates) != 1 {
+		t.Fatalf("域名应能入池：%+v / %+v", r, pool.Candidates)
+	}
+	c := pool.Candidates[0]
+	if c.Key != "cdn.example.com:443" || c.IPVersion != 0 || c.CandidateType != EntryIP {
+		t.Fatalf("域名条目不对（0 = 域名）：%+v", c)
+	}
+	// 写盘再读回：validCandidate 必须放行 ipVersion=0，否则域名无法持久化
+	if err := WritePoolAtomic(mustSerialize(t, pool)); err != nil {
+		t.Fatal(err)
+	}
+	if got := ParsePool(ReadPoolRaw()); len(got.Candidates) != 1 {
+		t.Fatalf("域名条目应在重启后保留：%+v", got.Candidates)
 	}
 }
 

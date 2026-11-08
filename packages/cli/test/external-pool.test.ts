@@ -191,12 +191,16 @@ describe('路径与只读语义', () => {
 })
 
 describe('合法性与 CF 段判定', () => {
-  it('IPv4 / IPv6 key 归一，非法 IP 与端口拒绝', () => {
+  it('IPv4 / IPv6 / 域名 key 归一，非法 IP 与端口拒绝', () => {
     expect(normalizeCandidateKey('104.16.0.1', 443)).toBe('104.16.0.1:443')
     expect(normalizeCandidateKey(' 104.16.0.1 ', 8443)).toBe('104.16.0.1:8443')
     expect(normalizeCandidateKey('2606:4700::1', 443)).toBe('[2606:4700::1]:443')
+    // 域名与 IPv4 共用 `host:port` 形态，但域名必含 `.` 且至少一段含字母
+    expect(normalizeCandidateKey('example.com', 443)).toBe('example.com:443')
+    expect(normalizeCandidateKey('bestcf.pages.dev', 2053)).toBe('bestcf.pages.dev:2053')
     expect(normalizeCandidateKey('999.999.999.999', 443)).toBeNull()
-    expect(normalizeCandidateKey('example.com', 443)).toBeNull()
+    expect(normalizeCandidateKey('', 443)).toBeNull()
+    expect(normalizeCandidateKey('ex ample.com', 443)).toBeNull()
     expect(normalizeCandidateKey('104.16.0.1', 0)).toBeNull()
     expect(normalizeCandidateKey('104.16.0.1', 65536)).toBeNull()
   })
@@ -232,7 +236,6 @@ describe('合并语义', () => {
     const pool = emptyPool()
     const inputs: CandidateInput[] = [
       input('999.999.999.999'),
-      input('example.com'),
       { ip: '104.16.0.1', port: 0, source: 'src' },
       input('223.5.5.5'),
       input('8.8.8.8'),
@@ -243,7 +246,7 @@ describe('合并语义', () => {
     expect(r.added).toBe(0)
     expect(r.rejected).toBe(inputs.length)
     expect(pool.candidates).toHaveLength(0)
-    expect(r.reasons).toEqual({ invalidIp: 3, notCloudflare: 2, candidateType: 2 })
+    expect(r.reasons).toEqual({ invalidIp: 2, notCloudflare: 2, candidateType: 2 })
   })
 
   it('IPv6 入池生成方括号 key，新候选是 pending 且 fullTest=null', () => {
@@ -320,6 +323,50 @@ describe('合并语义', () => {
     expect(pool.candidates.map((c) => c.key)).toEqual([
       '104.16.0.1:443', '104.16.0.5:443', '104.16.0.6:443',
     ])
+  })
+})
+
+describe('域名候选（优选域名来源）', () => {
+  it('合法域名入池：key=域名:port、ipVersion=0、candidateType 仍是 ENTRY_IP', () => {
+    const pool = emptyPool()
+    const r = upsertCandidates(pool, [
+      { ip: 'bestcf.pages.dev', port: 2053, source: 'domain_src' },
+      input('example.com', 'domain_src'),
+    ], NOW)
+    expect(r.added).toBe(2)
+    expect(r.rejected).toBe(0)
+    expect(pool.candidates.map((c) => c.key)).toEqual(['bestcf.pages.dev:2053', 'example.com:443'])
+    for (const c of pool.candidates) {
+      expect(c.ipVersion).toBe(0)
+      expect(c.candidateType).toBe(ENTRY_IP)
+      expect(c.status).toBe('pending')
+    }
+    // 域名不是 IP：跳过官方段校验，即便不在任何 CF 段也能入池
+    expect(isCloudflareEntryIp('example.com')).toBe(false)
+  })
+
+  it('非法字符串仍被拒：空串 / 空格 / 控制字符 / 无点主机 / 非法 IP 字面量', () => {
+    const pool = emptyPool()
+    const r = upsertCandidates(pool, [
+      input(''),
+      input('  '),
+      input('ex ample.com'),
+      input('example\x00.com'),
+      input('localhost'),
+      input('999.999.999.999'),
+    ], NOW)
+    expect(r.added).toBe(0)
+    expect(r.rejected).toBe(6)
+    expect(pool.candidates).toHaveLength(0)
+    expect(r.reasons.invalidIp).toBe(6)
+  })
+
+  it('域名候选落盘后 parsePool 不丢弃（ipVersion=0 是合法值）', () => {
+    const pool = emptyPool()
+    upsertCandidates(pool, [input('example.com')], NOW)
+    const reloaded = parsePool(serializePool(pool))
+    expect(reloaded.candidates).toHaveLength(1)
+    expect(reloaded.candidates[0]!.ipVersion).toBe(0)
   })
 })
 

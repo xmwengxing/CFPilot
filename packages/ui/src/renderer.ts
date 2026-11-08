@@ -3633,10 +3633,9 @@
       return
     }
     try {
-      const res = await window.cfpilot.parseRelayCandidates(raw)
-      const parts = ['已识别 ' + res.count + ' 个 IPv4']
-      if (res.skipped > 0) parts.push('跳过 ' + res.skipped + ' 条非 IPv4')
-      hint.textContent = parts.join('，')
+      // 通用解析器同时接受 IP 与域名；反代链路那个只数 IPv4 的接口不再用于预览
+      const res = await window.cfpilot.parseScanCandidates(raw)
+      hint.textContent = '已识别 ' + res.count + ' 个候选（IP 或域名）'
     } catch (err) {
       hint.textContent = '识别失败：' + (err instanceof Error ? err.message : String(err))
     }
@@ -3692,7 +3691,7 @@
           }
           if (text) text.value = res.raw || ''
           await refreshCandidateHint()
-          log('已从链接导入 ' + (res.count || 0) + ' 个 IP', 'ok')
+          log('已从链接导入 ' + (res.count || 0) + ' 个候选（IP 或域名）', 'ok')
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           if (hint) hint.textContent = '导入失败：' + msg
@@ -3700,31 +3699,122 @@
       })()
     })
 
-    // 内置清单：随版本发布、用户不可修改（我们发版时重新实测更新）
-    document.getElementById('btnLoadBuiltin')?.addEventListener('click', () => {
+    // 「加载数据源清单」：从数据源页的链接里多选，合并原文填入候选框。
+    // 原来的「加载内置清单」只加载随版本发布、用户改不了的反代清单，
+    // 与「候选来源 = 默认」功能重复；现在改成挑数据源，且数据源本身可增删改查。
+    const sourceListMask = document.getElementById('sourceListModal')
+    const sourceListBody = document.getElementById('sourceListBody')
+    const sourceListCount = document.getElementById('sourceListCount')
+    const esc = (s: string): string =>
+      s.replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      })[c] || c)
+
+    const updateSourceListCount = (): void => {
+      const picked = sourceListBody
+        ? sourceListBody.querySelectorAll<HTMLInputElement>('input[data-src-id]:checked').length
+        : 0
+      if (sourceListCount) sourceListCount.textContent = '已选 ' + picked + ' 个来源'
+    }
+
+    const renderSourceList = (list: Array<{ id: string; name: string }>): void => {
+      if (!sourceListBody) return
+      if (list.length === 0) {
+        sourceListBody.innerHTML = '<p class="country-empty">（还没有数据源，请到「数据源」页添加）</p>'
+        updateSourceListCount()
+        return
+      }
+      sourceListBody.innerHTML = list
+        .map((s) =>
+          '<label data-src-row="' + esc(s.name) + '" style="display:flex;align-items:center;gap:8px;padding:5px 2px;cursor:pointer">' +
+          '<input type="checkbox" data-src-id="' + esc(s.id) + '" />' +
+          '<span>' + esc(s.name) + '</span></label>'
+        )
+        .join('')
+      sourceListBody.querySelectorAll<HTMLInputElement>('input[data-src-id]').forEach((box) => {
+        box.addEventListener('change', updateSourceListCount)
+      })
+      updateSourceListCount()
+    }
+
+    const closeSourceListModal = (): void => {
+      if (sourceListMask) sourceListMask.hidden = true
+    }
+
+    const openSourceListModal = (): void => {
+      if (sourceListMask) sourceListMask.hidden = false
+      const search = document.getElementById('sourceListSearch') as HTMLInputElement | null
+      if (search) search.value = ''
+      if (sourceListBody) sourceListBody.innerHTML = '<p class="country-empty">（正在加载数据源…）</p>'
       void (async () => {
-        const hint = document.getElementById('candidateHint')
-        if (hint) hint.textContent = '正在读取内置清单…'
         try {
-          const res = await window.cfpilot.relayBuiltin()
-          if (!res.ok || res.count === 0) {
-            if (hint) hint.textContent = '内置清单为空：' + (res.error || '请升级到更新版本')
+          const res = await window.cfpilot.sourcesList()
+          const list = (res?.config?.sources || []).map((s) => ({ id: s.id, name: s.name || s.id }))
+          renderSourceList(list)
+        } catch (err) {
+          if (sourceListBody) {
+            sourceListBody.innerHTML =
+              '<p class="country-empty">加载失败：' + esc(err instanceof Error ? err.message : String(err)) + '</p>'
+          }
+        }
+      })()
+    }
+
+    document.getElementById('sourceListSearch')?.addEventListener('input', (ev) => {
+      const q = String((ev.target as HTMLInputElement).value || '').trim().toLowerCase()
+      sourceListBody?.querySelectorAll<HTMLElement>('[data-src-row]').forEach((row) => {
+        row.style.display = (row.getAttribute('data-src-row') || '').toLowerCase().includes(q) ? '' : 'none'
+      })
+    })
+    const setAllSources = (checked: boolean): void => {
+      sourceListBody?.querySelectorAll<HTMLInputElement>('input[data-src-id]').forEach((box) => {
+        box.checked = checked
+      })
+      updateSourceListCount()
+    }
+    document.getElementById('btnSourceListAll')?.addEventListener('click', () => setAllSources(true))
+    document.getElementById('btnSourceListNone')?.addEventListener('click', () => setAllSources(false))
+    document.getElementById('btnSourceListClose')?.addEventListener('click', closeSourceListModal)
+    document.getElementById('btnSourceListCancel')?.addEventListener('click', closeSourceListModal)
+    sourceListMask?.addEventListener('click', (ev) => {
+      if (ev.target === sourceListMask) closeSourceListModal()
+    })
+
+    document.getElementById('btnSourceListApply')?.addEventListener('click', () => {
+      const boxes = sourceListBody
+        ? Array.from(sourceListBody.querySelectorAll<HTMLInputElement>('input[data-src-id]:checked'))
+        : []
+      const ids = boxes.map((box) => box.getAttribute('data-src-id') || '').filter(Boolean)
+      const hint = document.getElementById('candidateHint')
+      if (ids.length === 0) {
+        if (hint) hint.textContent = '请先勾选至少一个数据源。'
+        return
+      }
+      if (hint) hint.textContent = '正在拉取 ' + ids.length + ' 个数据源清单…'
+      closeSourceListModal()
+      void (async () => {
+        try {
+          const res = await window.cfpilot.sourcesFetchCandidates(ids)
+          if (!res.ok || !res.raw) {
+            if (hint) hint.textContent = '加载失败：' + ((res.errors && res.errors[0]) || '没有拿到清单内容')
             return
           }
           if (text) text.value = res.raw
-          await refreshCandidateHint()
-          // 内置清单只在「自定义列表」模式下才会被用到，顺手切过去
           if (modeSel) {
             modeSel.value = 'custom'
             syncBox()
           }
-          log('已加载内置反代清单：' + res.count + ' 条', 'ok')
+          await refreshCandidateHint()
+          log('已从 ' + (res.selected || ids.length) + ' 个数据源加载 ' + res.count + ' 个候选', 'ok')
+          if (res.truncated) log('一次最多加载 30 个来源，多选项未生效', 'warn')
+          if (res.errors && res.errors.length > 0) log('部分来源失败：' + res.errors.join('；'), 'warn')
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          if (hint) hint.textContent = '读取内置清单失败：' + msg
+          if (hint) hint.textContent = '加载失败：' + (err instanceof Error ? err.message : String(err))
         }
       })()
     })
+
+    document.getElementById('btnLoadSourceList')?.addEventListener('click', openSourceListModal)
   }
 
   /** 渲染反代体检结果表 */

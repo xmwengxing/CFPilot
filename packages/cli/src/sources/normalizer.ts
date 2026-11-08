@@ -1,5 +1,5 @@
 /**
- * 外部清单内容归一：TXT / CSV / 简单 JSON → 带端口的 IP 候选。
+ * 外部清单内容归一：TXT / CSV / 简单 JSON → 带端口的 IP / 域名候选。
  *
  * ## 铁律 6：清洗集中在既有实现
  *
@@ -21,8 +21,10 @@ export interface ParsedCandidate {
 
 const IPV4 = '\\d{1,3}(?:\\.\\d{1,3}){3}'
 const IPV6 = '[0-9a-fA-F:.]+'
-/** `1.2.3.4:8443` 或 `[2606:4700::1]:8443` */
-const HOST_PORT = new RegExp(`(?:\\[(${IPV6})\\]:|(${IPV4}):)(\\d{1,5})`)
+/** 域名：至少两段 label，label 以字母数字开头结尾（中间允许连字符） */
+const DOMAIN = '[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+'
+/** `1.2.3.4:8443` / `[2606:4700::1]:8443` / `example.com:8443`，端口一律是最后一个捕获组 */
+const HOST_PORT = new RegExp(`(?:\\[(${IPV6})\\]:|(${IPV4}):|(${DOMAIN}):)(\\d{1,5})`)
 
 /** JSON 清单里常见的「IP 字段」别名。 */
 const IP_KEYS = ['ip', 'address', 'addr', 'host', 'target', 'value'] as const
@@ -71,16 +73,16 @@ function splitHostPort(token: string): ParsedCandidate | null {
   return { ip: t, port: null }
 }
 
-/** 从原始文本里收集「host → port」映射，只用于补回 readIpFile 丢掉的端口。 */
+/** 从原始文本里收集「host → port」映射（IP 与域名都认），只用于补回 readIpFile 丢掉的端口。 */
 function collectPorts(text: string): Map<string, number> {
   const ports = new Map<string, number>()
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim()
     if (!line || line.startsWith('#')) continue
-    // 显式 `host:port`
+    // 显式 `host:port`（IPv4 / `[IPv6]` / 域名）
     for (const m of line.matchAll(new RegExp(HOST_PORT, 'g'))) {
-      const host = m[1] ?? m[2]
-      const port = Number(m[3])
+      const host = m[1] ?? m[2] ?? m[3]
+      const port = Number(m[4])
       if (host && port >= 1 && port <= 65535 && !ports.has(host)) ports.set(host, port)
     }
     // CSV 的 `IP,port` 形态（IP 列后面紧跟纯数字端口列）

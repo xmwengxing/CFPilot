@@ -630,7 +630,12 @@
       return post('/api/relay/cancel', {})
     },
 
-    // 候选预览：让用户立刻看到「实际会被测多少个」。
+    // 候选预览（通用）：IP 与域名都识别，界面用这个。
+    parseScanCandidates: function (raw) {
+      return post('/api/scan/parse-candidates', { raw: raw || '' })
+    },
+
+    // 候选预览（反代链路保留）：只数 IPv4。
     parseRelayCandidates: function (raw) {
       return post('/api/relay/parse-candidates', { raw: raw || '' })
     },
@@ -792,6 +797,10 @@
     /** 从本地池取样跑完整优选 + 回填（唯一会写 KV 的动作，默认 replace） */
     sourcesQuick: function (poolSample) {
       return post('/api/sources/quick', { poolSample: poolSample || 200 })
+    },
+    /** 「加载数据源清单」：按 ID 拉取并合并清单原文 */
+    sourcesFetchCandidates: function (ids) {
+      return post('/api/sources/fetch', { ids: ids || [] })
     },
 
     /* ---------------- 优选历史与复测（Go 版新增） ---------------- */

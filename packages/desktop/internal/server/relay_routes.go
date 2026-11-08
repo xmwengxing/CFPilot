@@ -69,6 +69,16 @@ type relayRunRequest struct {
 	Candidates string `json:"candidates"`
 }
 
+// relayCandidateOK 放宽反代入口候选：IPv4 字面量或合法域名都收。
+// 域名不含冒号，会在 Probe 里解析成 IPv4 再构造 VLESS 请求；IPv6 仍排除
+// （VLESS 请求头目前只实现 IPv4 地址类型）。
+func relayCandidateOK(s string) bool {
+	if !strings.Contains(s, ":") && net.ParseIP(s) != nil {
+		return true
+	}
+	return scan.IsValidDomain(s)
+}
+
 // handleRelayRun 启动一次反代体检（异步）。
 //
 // 与 /api/scan/run 一样是**异步**：一个候选要跑三跳（隧道 → TLS → HTTP），
@@ -96,7 +106,8 @@ func (s *Server) handleRelayRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 反代入口是「明文 TCP + 按 SNI 转发」，端口固定 443，只接受 IPv4。
+	// 反代入口是「明文 TCP + 按 SNI 转发」，端口固定 443，收 IPv4 或域名；
+	// 域名在 Probe 里解析成 IPv4 再拨，SNI 始终用数据面域名。
 	//
 	// ⚠️ 候选为空时用**内置清单**（随版本发布、用户不可修改）：
 	// 多数用户手上没有反代 IP 源，不给兜底这个功能对他们是死的。
@@ -108,7 +119,7 @@ func (s *Server) handleRelayRun(w http.ResponseWriter, r *http.Request) {
 		all := scan.ParseCandidateList(req.Candidates)
 		candidates = make([]string, 0, len(all))
 		for _, ip := range all {
-			if !strings.Contains(ip, ":") && net.ParseIP(ip) != nil {
+			if relayCandidateOK(ip) {
 				candidates = append(candidates, ip)
 			}
 		}
@@ -116,7 +127,7 @@ func (s *Server) handleRelayRun(w http.ResponseWriter, r *http.Request) {
 	if len(candidates) == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":    false,
-			"error": "候选列表为空（只接受 IPv4 地址）",
+			"error": "候选列表为空（只接受 IPv4 地址或域名）",
 		})
 		return
 	}
@@ -210,7 +221,7 @@ func (s *Server) handleRelayCancel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleRelayParseCandidates 清洗候选文本，返回可识别的 IPv4 与总条数。
+// handleRelayParseCandidates 清洗候选文本，返回可识别的 IPv4 / 域名与总条数。
 //
 // 界面上「自定义列表」在提交前先调这个，让用户立刻看到「实际会被测多少个」——
 // 避免粘了 1000 行结果只认了 3 个。
@@ -231,7 +242,7 @@ func (s *Server) handleRelayParseCandidates(w http.ResponseWriter, r *http.Reque
 	ipv4 := make([]string, 0, len(all))
 	skipped := 0
 	for _, ip := range all {
-		if !strings.Contains(ip, ":") && net.ParseIP(ip) != nil {
+		if relayCandidateOK(ip) {
 			ipv4 = append(ipv4, ip)
 		} else {
 			skipped++
@@ -317,7 +328,7 @@ func (s *Server) handleRelayFetchCandidates(w http.ResponseWriter, r *http.Reque
 	ipv4 := make([]string, 0, len(all))
 	skipped := 0
 	for _, ip := range all {
-		if !strings.Contains(ip, ":") && net.ParseIP(ip) != nil {
+		if relayCandidateOK(ip) {
 			ipv4 = append(ipv4, ip)
 		} else {
 			skipped++
@@ -326,7 +337,7 @@ func (s *Server) handleRelayFetchCandidates(w http.ResponseWriter, r *http.Reque
 	if len(ipv4) == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":    false,
-			"error": "链接内容里没有可识别的 IPv4",
+			"error": "链接内容里没有可识别的 IPv4 或域名",
 		})
 		return
 	}

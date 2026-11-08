@@ -68,15 +68,16 @@ func TestSourcesAPIRequiresSession(t *testing.T) {
 	}
 }
 
-func TestSourcesAPIListEmpty(t *testing.T) {
+func TestSourcesAPIListSeedsBuiltin(t *testing.T) {
 	_, client, base := newSourcesAPIServer(t)
 	code, body := sourcesRequest(t, client, http.MethodGet, base+"/api/sources/list", "")
 	if code != 200 || body["ok"] != true {
 		t.Fatalf("list 失败：code=%d body=%v", code, body)
 	}
 	cfg, ok := body["config"].(map[string]any)
-	if !ok || len(cfg["sources"].([]any)) != 0 {
-		t.Fatalf("空配置结构不对：%v", body["config"])
+	// 配置文件不存在时，列表接口应返回随版本内置的来源清单
+	if !ok || len(cfg["sources"].([]any)) != scan.BuiltinSourcesCount {
+		t.Fatalf("首次 list 应播种内置来源：%v", body["config"])
 	}
 	if _, ok := body["pool"].(map[string]any); !ok {
 		t.Fatal("缺少池统计")

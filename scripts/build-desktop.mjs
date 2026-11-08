@@ -224,7 +224,9 @@ if (picked.some((t) => t.goos === 'windows')) {
 }
 
 // ---- 3. 交叉编译 ----
-rmSync(outDir, { recursive: true, force: true })
+// 不递归删除整个 dist：Windows 下正在运行的 exe 会锁住目录，安全删除层
+// 也会拦下整目录 trash，导致构建莫名其妙失败。产物文件名带版本号，旧版本
+// 留着无害，同名产物由 go build 直接覆盖，因此只需确保目录存在。
 mkdirSync(outDir, { recursive: true })
 
 const ldflags = (extra) => ['-s', '-w', `-X main.Version=${version}`, ...extra].join(' ')

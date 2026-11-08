@@ -885,6 +885,15 @@
     table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 14px; }
     th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
     th { color: var(--text-secondary); font-weight: 500; font-size: 11.5px; }
+    /* 内置来源有几十条：展开后限高内部滚动 + 表头吸顶，不能把整页撑长 */
+    .src-table-scroll {
+      max-height: 320px; overflow-y: auto;
+      border: 1px solid var(--border); border-radius: var(--radius-sm);
+    }
+    .src-table-scroll table { margin-top: 0; }
+    .src-table-scroll th { position: sticky; top: 0; background: var(--bg-card); z-index: 1; }
+    /* 自定义列表时不参与本次优选的参数：连 label 一起变淡，避免看着像坏了 */
+    .field.is-disabled { opacity: 0.5; }
     tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
     body.light tbody tr:hover { background: rgba(15, 23, 42, 0.035); }
     .progress {
@@ -1641,6 +1650,9 @@
                 </select>
               </div>
             </div>
+            <p class="tip" id="srcModeParamsHint" hidden style="margin-top:8px">
+              自定义列表已启用：候选用导入的地址，<b>候选采样数 / 地址族</b>不参与本次优选（已置灰）；机房国家、测速与保留条数等仍照常生效。
+            </p>
             <div id="customSourceBox" hidden style="margin-top:12px">
               <div class="field">
                 <label title="每行一个：IP、IP:Port、域名、域名:Port、带 #备注 都行；CSV 整行粘贴也可以（会自动找地址那一列）。">IP / 域名列表</label>
@@ -1700,7 +1712,7 @@
               </div>
               <div class="pair">
                 <div class="field full">
-                  <label title="需要同时选多个分组、或只选部分国家时，点「自定义配置」。&#10;若结果未出现候选国家，请增加「候选采样数」。&#10;机房来自 101 握手响应，因此筛选在阶段二之后生效；带筛选会自动扩大 101 校验的候选池（120 → 最多 500）。">机房国家</label>
+                  <label title="需要同时选多个分组、或只选部分国家时，点「自定义配置」。&#10;若结果未出现候选国家，请增加「候选采样数」。&#10;机房来自 101 握手响应，因此筛选在阶段二之后生效；带筛选会自动扩大 101 校验的候选池（120 → 最多 500）。&#10;这是按机房筛选，不是采样：自定义列表模式下同样生效。">机房国家</label>
                   <div class="field-inline">
                     <select id="optCountryGroup" aria-label="机房国家快捷分组">
                       <option value="">全部国家（不筛选）</option>
@@ -1763,6 +1775,9 @@
             <details class="fold" style="margin-top:12px" id="expFold">
               <summary>实验性功能（默认关闭）</summary>
               <div class="fold-body">
+                <p class="tip" id="expModeHint" hidden style="margin:0 0 10px">
+                  当前是「自定义列表」：自适应网段权重与探索比例只作用于默认模式的网段采样，本次优选不生效；这里仍可保存，切回默认模式时会用上。
+                </p>
                 <!--
                   当前状态：让用户看得见「现在用的是哪个档案、学到了多少」。
                   没有这块，开了开关也像什么都没发生。
@@ -2161,10 +2176,11 @@
             <p class="kv-row" style="margin:0">
               <span class="k">最近操作</span><span class="v" id="srcLastAction">—</span>
             </p>
-            <div class="btn-row" style="margin-top:12px">
+            <div class="btn-row" style="margin-top:12px;align-items:center">
               <button class="btn btn-primary" id="btnSrcSync" type="button">立即同步</button>
               <button class="btn btn-ghost" id="btnSrcQuick" type="button">一键完整优选（写订阅）</button>
               <button class="btn btn-ghost" id="btnSrcRefresh" type="button">刷新</button>
+              <span class="tip" id="srcSyncScope" style="margin:0">当前 — 个来源参与同步</span>
             </div>
             <p class="tip" id="srcTopHint" style="margin-top:8px">
               「立即同步」只写本地磁盘、不写 KV；「一键完整优选」是唯一会更新订阅的动作，耗时约 1–3 分钟。
@@ -2177,13 +2193,54 @@
               清单型（GitHub Raw / 自定义 HTTPS）与 API 型（RIPEstat）共存。默认只接受 HTTPS，
               私网 / 本机 / 云元数据地址一律拒绝。删除数据源只会清理来源关联，仍被其它来源引用的候选会保留。
             </p>
-            <table id="srcSourcesTable" hidden>
-              <thead><tr><th>ID / 名称</th><th>类型</th><th>链接 / 查询</th><th>启用</th><th>间隔(h)</th><th>上次同步</th><th>状态</th><th>操作</th></tr></thead>
-              <tbody id="srcSourcesBody"></tbody>
-            </table>
-            <p class="tip" id="srcSourcesEmpty">还没有数据源，请在下方添加。</p>
+            <p class="tip" style="margin-top:6px">
+              <b>「参与同步」</b>指该来源是否会被定时自动同步或「立即同步」拉取（TCP + TLS 轻量校验后写入本地池）。
+              暂停同步只影响后续采集，已入池候选仍保留；「加载数据源清单」弹窗与行内「测试」不受影响。
+            </p>
+            <p class="kv-row" style="margin:0 0 8px">
+              <span class="k">清单概览</span><span class="v" id="srcSourcesSummary">—</span>
+            </p>
+            <div class="btn-row">
+              <button class="btn btn-primary" id="btnSrcListToggle" type="button" aria-expanded="false">展开来源清单</button>
+              <button class="btn btn-ghost" id="btnSrcFormToggle" type="button" aria-expanded="false">新增 / 编辑来源</button>
+              <button class="btn btn-ghost" id="btnSrcConfigSave" type="button">保存全部更改</button>
+            </div>
 
-            <div class="note" style="margin-top:14px">
+            <div id="srcSourcesListWrap" hidden style="margin-top:12px">
+              <div class="row" style="margin-bottom:8px">
+                <div class="field" style="flex:2"><label for="srcFilterKeyword">搜索名称 / ID / 链接</label><input type="text" id="srcFilterKeyword" placeholder="天诚 / 域名 / cmliu…" /></div>
+                <div class="field"><label for="srcFilterKind">类别</label>
+                  <select id="srcFilterKind">
+                    <option value="all">全部来源</option>
+                    <option value="domain">域名源</option>
+                    <option value="ip">IP / API 源</option>
+                    <option value="enabled">仅参与同步</option>
+                    <option value="disabled">仅不参与同步</option>
+                    <option value="builtin">仅内置</option>
+                    <option value="custom">仅自定义</option>
+                  </select>
+                </div>
+              </div>
+              <div class="btn-row" style="margin:0 0 8px;align-items:center">
+                <label style="display:inline-flex;align-items:center;gap:6px;margin:0">
+                  <input type="checkbox" id="srcSourcesCheckAll" /> 全选当前筛选
+                </label>
+                <span class="tip" id="srcSourcesSelected" style="margin:0">已选 0 条</span>
+                <button class="btn btn-ghost btn-sm" id="btnSrcBulkEnable" type="button">参与同步</button>
+                <button class="btn btn-ghost btn-sm" id="btnSrcBulkDisable" type="button">暂停同步</button>
+                <button class="btn btn-ghost btn-sm" id="btnSrcBulkDelete" type="button">删除选中</button>
+              </div>
+              <div class="src-table-scroll">
+                <table id="srcSourcesTable" hidden>
+                  <thead><tr><th style="width:32px"></th><th>ID / 名称</th><th>类型</th><th>链接 / 查询</th><th>参与同步</th><th>间隔(h)</th><th>上次同步</th><th>状态</th><th>操作</th></tr></thead>
+                  <tbody id="srcSourcesBody"></tbody>
+                </table>
+              </div>
+              <p class="tip" id="srcSourcesEmpty">还没有数据源，点「新增 / 编辑来源」添加。</p>
+              <p class="tip" id="srcSourcesFilterHint" hidden></p>
+            </div>
+
+            <div class="note" id="srcFormWrap" hidden style="margin-top:14px">
               <b id="srcFormTitle">新增数据源</b>
               <div class="row" style="margin-top:8px">
                 <div class="field"><label for="srcFormId">ID（唯一）</label><input type="text" id="srcFormId" placeholder="如 cf_ips_github" /></div>
@@ -2207,16 +2264,15 @@
               </div>
               <p class="tip" id="srcFormTypeHint" style="margin-top:6px">清单型填「主链接」，API 型填「查询串」；两者互斥。</p>
               <label style="display:inline-flex;align-items:center;gap:6px;margin-top:8px">
-                <input type="checkbox" id="srcFormEnabled" checked /> 启用
+                <input type="checkbox" id="srcFormEnabled" checked /> 参与同步
               </label>
               <div class="btn-row" style="margin-top:10px">
-                <button class="btn btn-primary btn-sm" id="btnSrcFormSave" type="button">加入列表</button>
+                <button class="btn btn-primary btn-sm" id="btnSrcFormSave" type="button">保存来源</button>
                 <button class="btn btn-ghost btn-sm" id="btnSrcFormClear" type="button">清空表单</button>
-                <button class="btn btn-ghost btn-sm" id="btnSrcConfigSave" type="button">保存数据源配置</button>
               </div>
-              <p class="tip" style="margin-top:6px">「加入列表」只改页面上的草稿，点「保存数据源配置」才真正落盘。</p>
-              <p class="tip" style="margin-top:6px">随版本内置的来源默认停用，勾选「启用」后才会参与定时同步；在「⚡ 优选」页点「加载数据源清单」可直接勾选任意来源作为候选，不要求启用。内置条目和普通来源一样可以编辑、停用或删除。</p>
+              <p class="tip" style="margin-top:6px">保存后立即生效；上方批量「参与同步 / 暂停同步 / 删除选中」也会立即保存，不需要再点一次。</p>
             </div>
+            <p class="tip" style="margin-top:8px">随版本内置的来源默认不参与同步，需要先用「参与同步」批量勾选；在「⚡ 优选」页点「加载数据源清单」可直接勾选任意来源作为候选，不要求参与同步。内置条目和普通来源一样可以编辑、暂停同步或删除。</p>
           </div>
 
           <div class="card">
@@ -2245,8 +2301,8 @@
             </div>
             <div class="btn-row" style="margin-bottom:8px">
               <button class="btn btn-ghost btn-sm" id="btnSrcSelectAll" type="button">全选本页</button>
-              <button class="btn btn-ghost btn-sm" id="btnSrcDisable" type="button">禁用选中</button>
-              <button class="btn btn-ghost btn-sm" id="btnSrcEnable" type="button">启用选中</button>
+              <button class="btn btn-ghost btn-sm" id="btnSrcDisable" type="button">禁用候选</button>
+              <button class="btn btn-ghost btn-sm" id="btnSrcEnable" type="button">启用候选</button>
               <button class="btn btn-ghost btn-sm" id="btnSrcDelete" type="button">删除选中</button>
               <button class="btn btn-ghost btn-sm" id="btnSrcExportTxt" type="button">导出 TXT</button>
               <button class="btn btn-ghost btn-sm" id="btnSrcExportCsv" type="button">导出 CSV</button>

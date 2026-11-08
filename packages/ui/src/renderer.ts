@@ -3649,6 +3649,20 @@
     const syncBox = (): void => {
       sourceMode = modeSel && modeSel.value === 'custom' ? 'custom' : 'default'
       if (box) box.hidden = sourceMode !== 'custom'
+      const custom = sourceMode === 'custom'
+      // 采样预算类参数只在「默认（网段采样）」下被消费：后端 scan_routes.go
+      // 仅在 len(candidates)==0 时调用 sampleCandidates，自定义列表时静默忽略。
+      // 置灰比让用户填了却没反应更诚实；用 .disabled 属性，切回默认可恢复。
+      ;['optSample', 'optFamily'].forEach((id) => {
+        const el = document.getElementById(id) as HTMLInputElement | HTMLSelectElement | null
+        if (!el) return
+        el.disabled = custom
+        el.closest('.field')?.classList.toggle('is-disabled', custom)
+      })
+      const hint = document.getElementById('srcModeParamsHint')
+      if (hint) hint.hidden = !custom
+      const expHint = document.getElementById('expModeHint')
+      if (expHint) expHint.hidden = !custom
     }
     modeSel?.addEventListener('change', syncBox)
     syncBox()
@@ -4650,6 +4664,49 @@
   let srcLoaded = false
   let srcBusy = false
   let srcEditingId = ''
+  let srcListOpen = false
+  let srcFormOpen = false
+  const srcSelectedSources = new Set<string>()
+
+  /** 批量工具条的选中计数与全选框状态。 */
+  function updateSourcesSelectedCount(): void {
+    const label = document.getElementById('srcSourcesSelected')
+    if (label) label.textContent = '已选 ' + srcSelectedSources.size + ' 条'
+    const boxes = [...$text('srcSourcesBody').querySelectorAll<HTMLInputElement>('input[data-src-key]')]
+    const all = document.getElementById('srcSourcesCheckAll') as HTMLInputElement | null
+    if (all) {
+      all.checked = boxes.length > 0 && boxes.every((b) => b.checked)
+      all.indeterminate = !all.checked && boxes.some((b) => b.checked)
+    }
+    ;['btnSrcBulkEnable', 'btnSrcBulkDisable', 'btnSrcBulkDelete'].forEach((id) => {
+      const btn = document.getElementById(id) as HTMLButtonElement | null
+      if (btn) btn.disabled = srcSelectedSources.size === 0
+    })
+  }
+
+  /** 来源清单默认折叠：几十条内置来源常驻会把下面的采集记录 / 候选池推到很下面 */
+  function setSrcListOpen(open: boolean): void {
+    srcListOpen = open
+    const wrap = document.getElementById('srcSourcesListWrap')
+    const btn = document.getElementById('btnSrcListToggle')
+    if (wrap) wrap.hidden = !open
+    if (btn) {
+      btn.textContent = open ? '收起来源清单' : '展开来源清单'
+      btn.setAttribute('aria-expanded', String(open))
+    }
+  }
+
+  function setSrcFormOpen(open: boolean): void {
+    srcFormOpen = open
+    const wrap = document.getElementById('srcFormWrap')
+    const btn = document.getElementById('btnSrcFormToggle')
+    if (wrap) wrap.hidden = !open
+    if (btn) {
+      btn.textContent = open ? '收起编辑表单' : '新增 / 编辑来源'
+      btn.setAttribute('aria-expanded', String(open))
+    }
+    if (open) wrap?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  }
 
   function srcErr(err: unknown): string {
     return err instanceof Error ? err.message : String(err)
@@ -4745,20 +4802,62 @@
   function renderSourcesTable(): void {
     const tbody = $text('srcSourcesBody')
     const table = $text('srcSourcesTable') as unknown as HTMLTableElement
-    $text('srcSourcesBadge').textContent = srcConfig.sources.length + ' 个'
-    if (srcConfig.sources.length === 0) {
+    const all = srcConfig.sources
+    const domains = all.filter((s) => s.name.startsWith('域名·')).length
+    const enabled = all.filter((s) => s.enabled).length
+    $text('srcSourcesBadge').textContent = all.length + ' 个'
+    $text('srcSourcesSummary').textContent =
+      all.length + ' 个来源 · ' + domains + ' 个域名源 / ' + (all.length - domains) + ' 个 IP / API 源 · ' + enabled + ' 个参与同步'
+    // 「立即同步」只拉 enabled 源：0 个时按钮看似没反应，必须把原因写在按钮旁
+    const syncScope = document.getElementById('srcSyncScope')
+    if (syncScope) {
+      syncScope.textContent = enabled === 0
+        ? '当前 0 个来源参与同步 —— 「立即同步」不会拉取任何清单，请先在下方把来源设为参与同步'
+        : '当前 ' + enabled + ' 个来源参与同步'
+      syncScope.style.color = enabled === 0 ? 'var(--danger, #e55)' : ''
+    }
+
+    const q = (document.getElementById('srcFilterKeyword') as HTMLInputElement | null)?.value.trim().toLowerCase() || ''
+    const kind = (document.getElementById('srcFilterKind') as HTMLSelectElement | null)?.value || 'all'
+    const rows = all.filter((s) => {
+      const isDomain = s.name.startsWith('域名·')
+      if (kind === 'enabled' && !s.enabled) return false
+      if (kind === 'disabled' && s.enabled) return false
+      if (kind === 'domain' && !isDomain) return false
+      if (kind === 'ip' && isDomain) return false
+      if (kind === 'builtin' && !s.id.startsWith('bestcf-')) return false
+      if (kind === 'custom' && s.id.startsWith('bestcf-')) return false
+      if (!q) return true
+      return (s.id + ' ' + s.name + ' ' + (s.url || s.query || '')).toLowerCase().includes(q)
+    })
+    // 删掉已不存在的选中项，避免批量操作指向幽灵条目
+    for (const id of [...srcSelectedSources]) {
+      if (!all.some((s) => s.id === id)) srcSelectedSources.delete(id)
+    }
+    const filterHint = document.getElementById('srcSourcesFilterHint')
+    if (filterHint) {
+      filterHint.hidden = rows.length === all.length
+      filterHint.textContent = rows.length === all.length ? '' : '显示 ' + rows.length + ' / ' + all.length + ' 条（可改搜索词或类别）'
+    }
+
+    if (rows.length === 0) {
       table.hidden = true
       $text('srcSourcesEmpty').hidden = false
+      $text('srcSourcesEmpty').textContent = all.length === 0
+        ? '还没有数据源，点「新增 / 编辑来源」添加。'
+        : '没有匹配的来源，换个搜索词或类别试试。'
       tbody.replaceChildren()
       return
     }
     table.hidden = false
     $text('srcSourcesEmpty').hidden = true
-    tbody.innerHTML = srcConfig.sources.map((s) => {
+    tbody.innerHTML = rows.map((s) => {
       const state = s.lastError
         ? '<span style="color:var(--danger,#e55)">' + srcEsc(s.lastError) + '</span>'
         : (s.failCount ? '失败 ' + s.failCount + ' 次' : '正常')
       return '<tr>' +
+        '<td><input type="checkbox" data-src-key="' + srcEsc(s.id) + '"' +
+        (srcSelectedSources.has(s.id) ? ' checked' : '') + ' /></td>' +
         '<td><b>' + srcEsc(s.id) + '</b><br><span class="muted">' + srcEsc(s.name) + '</span></td>' +
         '<td>' + srcEsc(s.type) + '</td>' +
         '<td style="max-width:220px;word-break:break-all">' + srcEsc(s.url || s.query || '—') +
@@ -4770,10 +4869,11 @@
         '<td>' +
           '<button class="btn btn-ghost btn-sm" data-src-act="test" data-src-id="' + srcEsc(s.id) + '">测试</button> ' +
           '<button class="btn btn-ghost btn-sm" data-src-act="edit" data-src-id="' + srcEsc(s.id) + '">编辑</button> ' +
-          '<button class="btn btn-ghost btn-sm" data-src-act="toggle" data-src-id="' + srcEsc(s.id) + '">' + (s.enabled ? '停用' : '启用') + '</button> ' +
+          '<button class="btn btn-ghost btn-sm" data-src-act="toggle" data-src-id="' + srcEsc(s.id) + '">' + (s.enabled ? '暂停同步' : '参与同步') + '</button> ' +
           '<button class="btn btn-ghost btn-sm" data-src-act="remove" data-src-id="' + srcEsc(s.id) + '">删除</button>' +
         '</td></tr>'
     }).join('')
+    updateSourcesSelectedCount()
   }
 
   function renderRuns(): void {
@@ -4926,13 +5026,38 @@
     renderSourcesTable()
     renderSourceFilter()
     clearSourceForm()
-    srcNote('已' + (idx >= 0 ? '更新' : '加入') + '「' + id + '」，记得点「保存数据源配置」')
+    // 加入 / 更新后展开清单，让用户立刻看到结果，不必自己再点一次
+    setSrcListOpen(true)
+    srcNote('已' + (idx >= 0 ? '更新' : '加入') + '「' + id + '」，正在保存…')
+    void saveSourceConfig()
+  }
+
+  /** 批量参与同步 / 暂停同步 / 删除：勾多个来源一次处理，操作后立即落盘。 */
+  async function bulkSourceAction(action: 'enable' | 'disable' | 'delete'): Promise<void> {
+    if (srcSelectedSources.size === 0) { srcNote('请先勾选来源', true); return }
+    if (srcBusy) return
+    const ids = [...srcSelectedSources]
+    if (action === 'delete' &&
+      !confirm('删除选中的 ' + ids.length + ' 个数据源？\n只会移除配置与来源关联，池内候选请点「刷新」查看关联变化。')) return
+    if (action === 'delete') {
+      srcConfig.sources = srcConfig.sources.filter((s) => !srcSelectedSources.has(s.id))
+    } else {
+      for (const s of srcConfig.sources) {
+        if (srcSelectedSources.has(s.id)) s.enabled = action === 'enable'
+      }
+    }
+    srcSelectedSources.clear()
+    renderSourcesTable()
+    renderSourceFilter()
+    await saveSourceConfig()
+    srcNote('已' + (action === 'delete' ? '删除 ' : action === 'enable' ? '设为参与同步 ' : '暂停同步 ') + ids.length + ' 个来源')
   }
 
   async function sourceAction(act: string, id: string): Promise<void> {
     const s = srcConfig.sources.find((x) => x.id === id)
     if (!s) return
     if (act === 'edit') {
+      setSrcFormOpen(true)
       srcEditingId = id
       $('srcFormId').value = s.id
       $('srcFormId').disabled = true
@@ -4983,7 +5108,7 @@
       const r = await window.cfpilot.sourcesPoolUpdate(keys, action)
       if (!r.ok) throw new Error(r.error || '操作失败')
       srcSelected.clear()
-      srcNote('已' + (action === 'delete' ? '删除' : action === 'disable' ? '禁用' : '启用') + ' ' + r.changed + ' 条')
+      srcNote('已' + (action === 'delete' ? '删除候选' : action === 'disable' ? '禁用候选' : '启用候选') + ' ' + r.changed + ' 条')
       await loadSourcesData(true)
     } catch (err) {
       srcNote('操作失败：' + srcErr(err), true)
@@ -5027,13 +5152,38 @@
       document.getElementById(id)?.addEventListener('click', fn)
     }
     syncFormTypeHint()
+    setSrcListOpen(false)
+    setSrcFormOpen(false)
+    on('btnSrcListToggle', () => setSrcListOpen(!srcListOpen))
+    on('btnSrcFormToggle', () => setSrcFormOpen(!srcFormOpen))
+    on('btnSrcBulkEnable', () => { void bulkSourceAction('enable') })
+    on('btnSrcBulkDisable', () => { void bulkSourceAction('disable') })
+    on('btnSrcBulkDelete', () => { void bulkSourceAction('delete') })
+    ;['srcFilterKeyword', 'srcFilterKind'].forEach((id) => {
+      const el = document.getElementById(id)
+      if (!el) return
+      // 换筛选条件时清空勾选，避免批量操作误伤当前看不见的行
+      const refresh = (): void => { srcSelectedSources.clear(); renderSourcesTable() }
+      el.addEventListener('input', refresh)
+      el.addEventListener('change', refresh)
+    })
+    const srcCheckAll = document.getElementById('srcSourcesCheckAll') as HTMLInputElement | null
+    srcCheckAll?.addEventListener('change', () => {
+      $text('srcSourcesBody').querySelectorAll<HTMLInputElement>('input[data-src-key]').forEach((box) => {
+        const id = box.dataset.srcKey || ''
+        box.checked = srcCheckAll.checked
+        if (srcCheckAll.checked) srcSelectedSources.add(id)
+        else srcSelectedSources.delete(id)
+      })
+      updateSourcesSelectedCount()
+    })
     $sel('srcFormType').addEventListener('change', syncFormTypeHint)
     on('btnSrcRefresh', () => { void loadSourcesData(true) })
     on('btnSrcSync', () => {
       if (srcBusy) return
       void (async () => {
         srcBusySet(true)
-        srcNote('正在同步全部启用源（含 TCP/TLS 轻量校验）…')
+        srcNote('正在同步所有参与同步的来源（含 TCP/TLS 轻量校验）…')
         try {
           const r = await window.cfpilot.sourcesSync([])
           if (!r.ok) throw new Error(r.error || '同步失败')
@@ -5087,6 +5237,14 @@
     $text('srcSourcesBody').addEventListener('click', (e) => {
       const btn = (e.target as HTMLElement).closest('button[data-src-act]') as HTMLElement | null
       if (btn) void sourceAction(btn.dataset.srcAct!, btn.dataset.srcId!)
+    })
+    $text('srcSourcesBody').addEventListener('change', (e) => {
+      const box = e.target as HTMLInputElement
+      const id = box.dataset.srcKey
+      if (!id) return
+      if (box.checked) srcSelectedSources.add(id)
+      else srcSelectedSources.delete(id)
+      updateSourcesSelectedCount()
     })
     $text('srcPoolBody').addEventListener('change', (e) => {
       const box = e.target as HTMLInputElement

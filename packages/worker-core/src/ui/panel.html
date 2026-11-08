@@ -703,6 +703,10 @@
 
       <div class="grid">
         <div class="field">
+          <label>Clash 订阅名</label>
+          <input id="cfgSubName" placeholder="CFPilot" maxlength="64" />
+        </div>
+        <div class="field">
           <label>VLESS UUID（用户凭证）</label>
           <div class="row nowrap">
             <input id="cfgUuid" class="mono" placeholder="留空保存将自动生成随机 UUID" />
@@ -728,11 +732,6 @@
         <div class="field">
           <label>自定义订阅域名（SNI / Host）</label>
           <input id="cfgSubDomain" class="mono" placeholder="留空则默认使用当前数据面域名" />
-        </div>
-        <div class="field">
-          <label>clash订阅名</label>
-          <input id="cfgSubName" placeholder="CFPilot" maxlength="64" />
-          <p class="hint" style="margin:6px 0 0">clash客户端导入后显示的卡片名。</p>
         </div>
       </div>
 

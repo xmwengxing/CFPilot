@@ -13,6 +13,7 @@
  * 变成日常开发的阻塞。
  */
 import { existsSync, readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -24,6 +25,24 @@ const rel = `.release-notes/${version}.md`
 if (!existsSync(file)) {
   console.log(`SKIP  ${rel}（当前版本还没有发布说明）`)
   process.exit(0)
+}
+
+// 「已入库」检查：`.release-notes/` 在 .gitignore 里，普通 git add -A 会跳过它。
+// 文件在磁盘上但没入库时，发布工作流检出后找不到说明文件会回退到提交信息
+// （2026-11-08 v0.16.1 实际发生：Release 正文只剩一行提交消息）。
+// 用 git ls-files 确认该文件已跟踪（工作区改动也算，因为发布前必提交）。
+try {
+  const tracked = execFileSync('git', ['ls-files', '--error-unmatch', rel], {
+    cwd: root,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  })
+    .toString()
+    .trim()
+  if (tracked !== rel) throw new Error('mismatch')
+} catch {
+  console.error(`FAIL  ${rel} —— 文件在磁盘上但未入库（.release-notes/ 被 .gitignore 忽略）`)
+  console.error(`      发布工作流检出后找不到它，必须先执行：git add -f ${rel}`)
+  process.exit(1)
 }
 
 const ALLOWED_HEADINGS = new Set(['新增', '修复', '优化'])

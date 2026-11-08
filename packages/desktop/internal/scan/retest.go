@@ -35,6 +35,11 @@ type IPTestResult struct {
 	Speed float64 `json:"speed"` // 仅 withSpeed=true 时有意义
 	// PeakSpeed 是复测测速的窗口峰值（MB/s），仅 withSpeed=true 时有意义。
 	PeakSpeed float64 `json:"peakSpeed,omitempty"`
+	// PongVerified 是 PING/PONG 内容校验三态：nil = 未做（非严格模式），其余见 WSResult。
+	PongVerified *bool `json:"pongVerified,omitempty"`
+	// TunnelOK 是真实隧道校验结论：nil = 未跑（未给凭据）。
+	TunnelOK    *bool  `json:"tunnelOk,omitempty"`
+	TunnelStage string `json:"tunnelStage,omitempty"`
 	// OK 表示三层（TCP + TLS + WS101）全部通过。
 	OK bool `json:"ok"`
 	// Error 是**第一道失败层**的原因（TCP 失败就不测后面了）。
@@ -47,6 +52,15 @@ type TestOptions struct {
 	WSPath    string
 	ProbePath string
 	WithSpeed bool
+	// VerifyPayload 开启 PING/PONG 内容校验（打 ProbePath 探针端点）。
+	// 目标无探针端点/握手即失败时降级回纯 101（与 scan.Run 的降级一致）。
+	VerifyPayload bool
+	// 以下四项用于真实隧道校验；给了 UUID 或 TrojanPassword 才跑，
+	// 只在内存透传，绝不落库。没给凭据时 TunnelOK 保持 nil（未跑）。
+	UUID             string
+	TrojanPassword   string
+	VerifyTargetHost string
+	VerifyTargetPort int
 	// Concurrency 是并发复测的 IP 数（0 → 默认 16）。
 	Concurrency int
 	// PerIPTimeout 是单 IP 的**整体预算**（0 → 默认 8 秒）。
@@ -90,14 +104,45 @@ func TestIP(ctx context.Context, t TestTarget, opt TestOptions) IPTestResult {
 	res.TLSMs = tls.TLSMs
 
 	// 阶段二：WS 101 校验（拿到机房码，确认是可用数据面）
-	ws := ProbeWS101(ipCtx, t.IP, t.Port, opt.Host, 3000*time.Millisecond, opt.WSPath)
+	// 严格模式先打探针端点做 PING/PONG 内容校验；握手即失败（通常是无探针
+	// 端点）时降级回真实 WS 路径的纯 101，与 scan.Run 的降级语义一致。
+	var ws WSResult
+	if opt.VerifyPayload {
+		probePath := opt.ProbePath
+		if probePath == "" {
+			probePath = ProbeDefaultPath
+		}
+		ws = ProbeWSPing(ipCtx, t.IP, t.Port, opt.Host, 3000*time.Millisecond, probePath)
+		if !ws.OK && ws.PongVerified == nil {
+			ws = ProbeWS101(ipCtx, t.IP, t.Port, opt.Host, 3000*time.Millisecond, opt.WSPath)
+		}
+	} else {
+		ws = ProbeWS101(ipCtx, t.IP, t.Port, opt.Host, 3000*time.Millisecond, opt.WSPath)
+	}
 	if !ws.OK {
+		res.PongVerified = ws.PongVerified
 		res.Error = ws.Error
 		return res
 	}
 	res.WSOK = true
 	res.Colo = ws.Colo
+	res.PongVerified = ws.PongVerified
 	res.OK = true
+
+	// 阶段二点五：真实隧道校验（给了凭据才跑；不改 OK 语义，只记证据）
+	if opt.UUID != "" || opt.TrojanPassword != "" {
+		tunnel := VerifyTunnel(ipCtx, TunnelVerifyOptions{
+			IP: t.IP, Port: t.Port, Host: opt.Host, WSPath: opt.WSPath,
+			UUID: opt.UUID, TrojanPassword: opt.TrojanPassword,
+			TargetHost: opt.VerifyTargetHost, TargetPort: opt.VerifyTargetPort,
+			Timeout: 3000 * time.Millisecond,
+		})
+		tunnelOK := tunnel.OK
+		res.TunnelOK = &tunnelOK
+		if !tunnel.OK {
+			res.TunnelStage = tunnel.Stage
+		}
+	}
 
 	if opt.WithSpeed {
 		// 阶段三：真实下行测速（复用阶段三计量实现）。

@@ -123,12 +123,20 @@ func (s *Server) handleScanReTest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		SessionID string            `json:"sessionId"`
-		Host      string            `json:"host"`
-		WSPath    string            `json:"wsPath"`
-		ProbePath string            `json:"probePath"`
-		WithSpeed bool              `json:"withSpeed"`
-		Targets   []scan.TestTarget `json:"targets"`
+		SessionID string `json:"sessionId"`
+		Host      string `json:"host"`
+		WSPath    string `json:"wsPath"`
+		ProbePath string `json:"probePath"`
+		WithSpeed bool   `json:"withSpeed"`
+		// VerifyPayload 开启 PING/PONG 内容校验（打 ProbePath 探针端点）。
+		VerifyPayload bool `json:"verifyPayload"`
+		// 给了 UUID 或 TrojanPassword 才跑真实隧道校验；
+		// 本地接口参数，**绝不写日志、绝不落盘**。
+		UUID             string            `json:"uuid"`
+		TrojanPassword   string            `json:"trojanPassword"`
+		VerifyTargetHost string            `json:"verifyTargetHost"`
+		VerifyTargetPort int               `json:"verifyTargetPort"`
+		Targets          []scan.TestTarget `json:"targets"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体不是合法 JSON"})
@@ -166,10 +174,15 @@ func (s *Server) handleScanReTest(w http.ResponseWriter, r *http.Request) {
 		len(req.Targets), host, map[bool]string{true: "带", false: "不带"}[req.WithSpeed]))
 
 	results := scan.TestIPs(ctx, req.Targets, scan.TestOptions{
-		Host:      host,
-		WSPath:    req.WSPath,
-		ProbePath: req.ProbePath,
-		WithSpeed: req.WithSpeed,
+		Host:             host,
+		WSPath:           req.WSPath,
+		ProbePath:        req.ProbePath,
+		WithSpeed:        req.WithSpeed,
+		VerifyPayload:    req.VerifyPayload,
+		UUID:             strings.TrimSpace(req.UUID),
+		TrojanPassword:   strings.TrimSpace(req.TrojanPassword),
+		VerifyTargetHost: strings.TrimSpace(req.VerifyTargetHost),
+		VerifyTargetPort: req.VerifyTargetPort,
 	})
 
 	okCount := 0

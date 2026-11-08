@@ -422,6 +422,15 @@ interface Window {
     /** 从本地历史聚合质量报告，不触发额外检测。 */
     getIPQualityReport(params: { sessionId: string; ip: string; port: number }): Promise<{ ok: boolean; report?: IPQualityReport; error?: string }>
     /**
+     * 识别**本机网络**的出口（实验性、显式触发）。
+     * 结果是本机直连/SOCKS5 路径的出口，不是候选 IP 的出口。
+     */
+    identifyEgress(params: { sessionId: string; ip: string; port: number; serviceUrl: string; bearerToken?: string; socks5Proxy?: string }): Promise<{ ok: boolean; egress?: { transport?: string; remoteIp?: string; observedAt?: string; ageMs?: number; egressKind?: string; colo?: string; status: string }; error?: string }>
+    /** 穿候选隧道检测目标站兼容性（实验性、显式触发） */
+    probeTunnelCompatibility(params: { sessionId: string; ip: string; port: number; host: string; wsPath: string; uuid?: string; trojanPassword?: string; targets: Array<{ label: string; spec: string; expectedText?: string }> }): Promise<{ ok: boolean; compatibility?: IPQualityReport['compatibility']; error?: string }>
+    /** 穿候选隧道识别候选出口（实验性、显式触发） */
+    identifyTunnelEgress(params: { sessionId: string; ip: string; port: number; host: string; wsPath: string; uuid?: string; trojanPassword?: string; serviceUrl: string }): Promise<{ ok: boolean; egress?: { transport?: string; remoteIp?: string; observedAt?: string; ageMs?: number; egressKind?: string; colo?: string; status: string }; error?: string }>
+    /**
      * 实验性功能开关（默认全部关闭）。
      *
      * 这些能力会改变优选行为，必须由用户显式开启才生效。
@@ -488,6 +497,13 @@ interface Window {
       wsPath?: string
       probePath?: string
       withSpeed?: boolean
+      /** 开启 PING/PONG 内容校验（打 probePath 探针端点） */
+      verifyPayload?: boolean
+      /** 给了凭据才跑真实隧道校验；只在内存透传，不落盘 */
+      uuid?: string
+      trojanPassword?: string
+      verifyTargetHost?: string
+      verifyTargetPort?: number
       targets: Array<{ ip: string; port: number }>
     }): Promise<{ ok: boolean; results?: ReTestIPResult[]; error?: string }>
     /**
@@ -764,6 +780,11 @@ interface ScanHistoryLastTest {
   wsOk: boolean
   colo: string
   speed: number
+  /** PING/PONG 内容校验三态：缺失/为 null = 未做 */
+  pongVerified?: boolean | null
+  /** 真实隧道校验：缺失/为 null = 未跑 */
+  tunnelOk?: boolean | null
+  tunnelStage?: string
   ok: boolean
   error?: string
 }
@@ -782,6 +803,11 @@ interface ScanHistoryEntry {
   tcpMs?: number
   /** 测速窗口峰值（MB/s）；旧历史没有该字段时为空 */
   peakSpeed?: number
+  /** 优选阶段二 PING/PONG 三态；旧历史没有时为空 */
+  pongVerified?: boolean | null
+  /** 优选阶段二点五真实隧道结论；旧历史没有时为空 */
+  tunnelOk?: boolean | null
+  tunnelStage?: string
   lastTest?: ScanHistoryLastTest
   tests?: ScanHistoryLastTest[]
   qualityReport?: IPQualityReport
@@ -971,6 +997,11 @@ interface ReTestIPResult {
   wsOk: boolean
   colo: string
   speed: number
+  /** PING/PONG 内容校验三态：缺失/为 null = 未做 */
+  pongVerified?: boolean | null
+  /** 真实隧道校验：缺失/为 null = 未跑（未给凭据） */
+  tunnelOk?: boolean | null
+  tunnelStage?: string
   /** 三层全部通过 */
   ok: boolean
   /** 第一道失败层的原因 */

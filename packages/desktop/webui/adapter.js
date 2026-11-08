@@ -834,6 +834,54 @@
       return get('/api/scan/quality-report?sessionId=' + encodeURIComponent(params.sessionId || '') + '&ip=' + encodeURIComponent(params.ip || '') + '&port=' + encodeURIComponent(params.port || 443))
     },
 
+    /**
+     * 识别**本机网络**的出口（实验性、显式触发）。
+     *
+     * ⚠️ 结果是本机直连/SOCKS5 路径的出口，不是候选 IP 的出口；
+     * 仅供判断目标站看到的出口类型，不得当作逐候选差异。
+     */
+    identifyEgress: function (params) {
+      return post('/api/scan/quality-egress', {
+        sessionId: (params && params.sessionId) || '',
+        ip: (params && params.ip) || '',
+        port: (params && params.port) || 443,
+        serviceUrl: (params && params.serviceUrl) || '',
+        bearerToken: (params && params.bearerToken) || '',
+        socks5Proxy: (params && params.socks5Proxy) || '',
+      })
+    },
+
+    /**
+     * 穿候选隧道检测目标站兼容性（实验性、显式触发，串行 ≤10 个目标）。
+     * targets: [{label, spec: 'host[:port]/path', expectedText?}]
+     */
+    probeTunnelCompatibility: function (params) {
+      return post('/api/scan/quality-compat', {
+        sessionId: (params && params.sessionId) || '',
+        ip: (params && params.ip) || '',
+        port: (params && params.port) || 443,
+        host: (params && params.host) || '',
+        wsPath: (params && params.wsPath) || '',
+        uuid: (params && params.uuid) || '',
+        trojanPassword: (params && params.trojanPassword) || '',
+        targets: (params && params.targets) || [],
+      })
+    },
+
+    /** 穿候选隧道识别**候选出口**（实验性、显式触发）。 */
+    identifyTunnelEgress: function (params) {
+      return post('/api/scan/quality-tunnel-egress', {
+        sessionId: (params && params.sessionId) || '',
+        ip: (params && params.ip) || '',
+        port: (params && params.port) || 443,
+        host: (params && params.host) || '',
+        wsPath: (params && params.wsPath) || '',
+        uuid: (params && params.uuid) || '',
+        trojanPassword: (params && params.trojanPassword) || '',
+        serviceUrl: (params && params.serviceUrl) || '',
+      })
+    },
+
     /** 读取实验性功能开关（默认全部关闭）。 */
     getExperimental: function () {
       return get('/api/experimental')
@@ -892,6 +940,11 @@
         wsPath: (params && params.wsPath) || '',
         probePath: (params && params.probePath) || '',
         withSpeed: !!(params && params.withSpeed),
+        verifyPayload: !!(params && params.verifyPayload),
+        uuid: (params && params.uuid) || '',
+        trojanPassword: (params && params.trojanPassword) || '',
+        verifyTargetHost: (params && params.verifyTargetHost) || '',
+        verifyTargetPort: (params && params.verifyTargetPort) || 0,
         targets: (params && params.targets) || [],
       }).then(function (r) {
         return {

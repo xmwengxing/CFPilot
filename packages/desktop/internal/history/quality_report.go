@@ -274,8 +274,42 @@ func BuildQualityReport(list []Session, sessionID, ip string, port int, now time
 	}
 	add("protocol.tlsMs", tlsStatus, *r.Protocol.TLSMs, protocolReason)
 	add("protocol.wsOk", wsStatus, *r.Protocol.WSOK, protocolReason)
-	for _, name := range []string{"protocol.pongOk", "protocol.realTunnelOk"} {
-		add(name, "not_implemented", nil, "当前历史未记录此项证据")
+	// PONG / 隧道证据取**最新一次**：复测有记录用复测，否则用优选快照。
+	// 三态：nil = 未做/未跑 → not_run；&true = 通过；&false = 失败。
+	// 绝不把「未做」报成失败，也绝不把 101 成功推断成 PONG/隧道通过。
+	var pongEvidence *bool
+	var tunnelEvidence *bool
+	var tunnelStage string
+	if entry.LastTest != nil {
+		pongEvidence = entry.LastTest.PongVerified
+		tunnelEvidence = entry.LastTest.TunnelOK
+		tunnelStage = entry.LastTest.TunnelStage
+	} else {
+		pongEvidence = entry.PongVerified
+		tunnelEvidence = entry.TunnelOK
+		tunnelStage = entry.TunnelStage
+	}
+	if pongEvidence == nil {
+		add("protocol.pongOk", "not_run", nil, "未做 PONG 校验（非严格模式、无探针端点，或从未复测）")
+	} else if *pongEvidence {
+		add("protocol.pongOk", "available", true, "")
+		r.Protocol.PongOK = pongEvidence
+	} else {
+		add("protocol.pongOk", "failed", false, "PONG 校验未通过（101 通但数据面未响应）")
+		r.Protocol.PongOK = pongEvidence
+	}
+	if tunnelEvidence == nil {
+		add("protocol.realTunnelOk", "not_run", nil, "未跑真实隧道校验（未提供凭据或未测到）")
+	} else if *tunnelEvidence {
+		add("protocol.realTunnelOk", "available", true, "")
+		r.Protocol.RealTunnelOK = tunnelEvidence
+	} else {
+		reason := "真实隧道校验未通过"
+		if tunnelStage != "" {
+			reason += "（卡在 " + tunnelStage + " 阶段）"
+		}
+		add("protocol.realTunnelOk", "failed", false, reason)
+		r.Protocol.RealTunnelOK = tunnelEvidence
 	}
 	if r.Performance.SpeedMBps != nil {
 		add("performance.speedMBps", "available", *r.Performance.SpeedMBps, "")
@@ -365,6 +399,15 @@ func (s *Store) SaveQualityReport(sessionID string, report QualityReport) error 
 		for j := range list[i].Entries {
 			e := &list[i].Entries[j]
 			if sameTarget(e.IP, e.Port, report.IP, report.Port) {
+				// 字段合并：出口与兼容性各自独立保存，互不覆盖。
+				if e.QualityReport != nil {
+					if report.Egress.Status == "" {
+						report.Egress = e.QualityReport.Egress
+					}
+					if len(report.Compatibility.Targets) == 0 && report.Compatibility.Status == "" {
+						report.Compatibility = e.QualityReport.Compatibility
+					}
+				}
 				e.QualityReport = &report
 				return s.write(list)
 			}

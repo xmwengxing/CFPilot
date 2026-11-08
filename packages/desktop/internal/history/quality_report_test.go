@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -88,7 +89,8 @@ func TestQualityReportEvidenceAndScope(t *testing.T) {
 	for _, f := range report.Fields {
 		statuses[f.Name] = f.Status
 	}
-	if statuses["protocol.pongOk"] != "not_implemented" || statuses["egress"] != "not_run" || statuses["performance.speedMBps"] != "available" {
+	// mkSession 无 PONG/隧道证据：如实标 not_run，不得谎报失败或通过。
+	if statuses["protocol.pongOk"] != "not_run" || statuses["protocol.realTunnelOk"] != "not_run" || statuses["egress"] != "not_run" || statuses["performance.speedMBps"] != "available" {
 		t.Fatalf("字段状态错误: %+v", statuses)
 	}
 	if report.History.Trend[0].SpeedMBps != nil {
@@ -187,5 +189,56 @@ func TestQualityHistoryRetestSamplesBounded(t *testing.T) {
 	}
 	if matches, _ := filepath.Glob(filepath.Join(st.dir, ".scan-history-*")); len(matches) != 0 {
 		t.Fatal("临时文件残留")
+	}
+}
+
+func boolPtrT(v bool) *bool { return &v }
+
+// PONG / 隧道三态：通过 → available；未通过 → failed；未测 → not_run。
+// 优选快照与最新复测都要能取到，复测优先。
+func TestQualityReportPongAndTunnelEvidence(t *testing.T) {
+	now := time.Date(2026, 11, 1, 3, 0, 0, 0, time.UTC)
+
+	// 优选快照有证据。
+	sess := mkSession("a", "2026-11-01T00:00:00Z")
+	sess.Entries[0].PongVerified = boolPtrT(true)
+	sess.Entries[0].TunnelOK = boolPtrT(true)
+	report, err := BuildQualityReport([]Session{sess}, "a", "104.16.1.1", 443, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Protocol.PongOK == nil || !*report.Protocol.PongOK || report.Protocol.RealTunnelOK == nil || !*report.Protocol.RealTunnelOK {
+		t.Fatalf("优选证据未落到报告: %+v", report.Protocol)
+	}
+	statuses := map[string]string{}
+	for _, f := range report.Fields {
+		statuses[f.Name] = f.Status
+	}
+	if statuses["protocol.pongOk"] != "available" || statuses["protocol.realTunnelOk"] != "available" {
+		t.Fatalf("字段状态错误: %+v", statuses)
+	}
+
+	// 复测失败覆盖优选通过；隧道卡在 data 阶段要带出阶段名。
+	sess.Entries[0].LastTest = &LastTest{
+		At: "2026-11-01T01:00:00Z", OK: true, TCPMs: 10, TLSMs: 20, WSOK: true,
+		PongVerified: boolPtrT(false), TunnelOK: boolPtrT(false), TunnelStage: "data",
+	}
+	report, err = BuildQualityReport([]Session{sess}, "a", "104.16.1.1", 443, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses = map[string]string{}
+	var tunnelReason string
+	for _, f := range report.Fields {
+		statuses[f.Name] = f.Status
+		if f.Name == "protocol.realTunnelOk" {
+			tunnelReason = f.Reason
+		}
+	}
+	if statuses["protocol.pongOk"] != "failed" || statuses["protocol.realTunnelOk"] != "failed" {
+		t.Fatalf("复测失败未覆盖: %+v", statuses)
+	}
+	if !strings.Contains(tunnelReason, "data") {
+		t.Fatalf("隧道失败原因应带阶段名: %q", tunnelReason)
 	}
 }

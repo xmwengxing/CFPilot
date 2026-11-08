@@ -219,6 +219,14 @@ type Entry struct {
 	//
 	// 对外排序仍用稳态速度（Speed）：真机实测单窗口突发能把峰值翻倍。
 	PeakSpeed float64 `json:"peakSpeed,omitempty"`
+	// PongVerified 是阶段二 PING/PONG 内容校验的三态结果（对照 CLI 的 pongVerified）：
+	// nil = 非严格模式/无探针端点，未做校验；&true = 通过；&false = 做了但没通过。
+	// 只供质量报告落库，不参与排序。
+	PongVerified *bool `json:"pongVerified,omitempty"`
+	// TunnelOK 是阶段二点五真实隧道校验结论：nil = 没跑（未给凭据或未测到）；
+	// TunnelStage 只在失败时记录卡在哪一层（handshake / protocol / data），供诊断。
+	TunnelOK    *bool  `json:"tunnelOk,omitempty"`
+	TunnelStage string `json:"tunnelStage,omitempty"`
 }
 
 // Summary 是扫描结果。
@@ -533,6 +541,7 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 	// 阶段二只证明「这个 IP 能把请求送到我们的数据面」；它证明不了真实 wsPath、
 	// 认证配置、数据面出站是否可用 —— 这三类都会表现为「优选结果正常、
 	// 导入客户端全是 -1」。只有给了真实凭据才跑（对齐 CLI scan.ts:749-784）。
+	tunnelRes := make(map[string]TunnelVerifyResult)
 	if opt.UUID != "" || opt.TrojanPassword != "" {
 		limit := opt.SpeedLimit
 		if limit > len(wsOK) {
@@ -547,6 +556,7 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 				TargetHost: opt.VerifyTargetHost, TargetPort: opt.VerifyTargetPort,
 				Timeout: msDuration(opt.ProbeTimeoutMs),
 			})
+			tunnelRes[r.IP] = res
 			if res.OK {
 				passed[r.IP] = true
 			} else {
@@ -613,6 +623,19 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 	}
 	stats["stage3Input"] = len(stage3)
 
+	// attachEvidence 把阶段二 PONG 与阶段二点五隧道结论带进条目（仅供质量报告落库）。
+	// 未做校验的保持 nil，报告里显示「未执行」，绝不伪装通过。
+	attachEvidence := func(e *Entry, r WSResult) {
+		e.PongVerified = r.PongVerified
+		if tr, ok := tunnelRes[r.IP]; ok {
+			tunnelOK := tr.OK
+			e.TunnelOK = &tunnelOK
+			if !tr.OK {
+				e.TunnelStage = tr.Stage
+			}
+		}
+	}
+
 	// ================= 阶段三：真实下行测速 =================
 	//
 	// SkipSpeed 时不做测速，直接把 101 通过的候选当作结果
@@ -621,7 +644,7 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 		report(Progress{Stage: "speed", Total: len(stage3), Message: "阶段三：跳过测速（按延迟排序）"})
 		entries := make([]Entry, 0, len(stage3))
 		for _, r := range stage3 {
-			entries = append(entries, Entry{
+			e := Entry{
 				IP:      r.IP,
 				Family:  FamilyOf(r.IP),
 				Port:    opt.Port,
@@ -630,7 +653,9 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 				TLSMs:   tlsMsOf[r.IP],
 				Speed:   0,
 				TCPMs:   tcpMsOf[r.IP],
-			})
+			}
+			attachEvidence(&e, r)
+			entries = append(entries, e)
 		}
 		sort.Slice(entries, func(i, j int) bool { return entries[i].Latency < entries[j].Latency })
 		entries = PickWithDiversity(entries, opt.Top)
@@ -681,7 +706,7 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 	// 组装结果：只保留测速成功的
 	entries := make([]Entry, 0, len(speedResults))
 	for _, sr := range speedResults {
-		entries = append(entries, Entry{
+		e := Entry{
 			IP:      sr.ws.IP,
 			Family:  FamilyOf(sr.ws.IP),
 			Port:    opt.Port,
@@ -693,7 +718,9 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 			// 峰值留档给质量报告展示，不参与排序。
 			PeakSpeed: sr.dl.PeakMBps,
 			TCPMs:     tcpMsOf[sr.ws.IP],
-		})
+		}
+		attachEvidence(&e, sr.ws)
+		entries = append(entries, e)
 	}
 
 	// 按速度降序，速度相同按延迟升序

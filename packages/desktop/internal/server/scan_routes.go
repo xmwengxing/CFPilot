@@ -56,6 +56,11 @@ func (s *Server) registerScanRoutes(mux *http.ServeMux) {
 	// 优选历史（读取 / 删除）与单 IP 复测
 	mux.HandleFunc("/api/scan/history", s.guard(s.handleScanHistory))
 	mux.HandleFunc("/api/scan/quality-report", s.guard(s.handleIPQualityReport))
+	// 本机出口识别（实验性、显式触发；测的是本机网络出口，非候选 IP 出口）
+	mux.HandleFunc("/api/scan/quality-egress", s.guard(s.handleQualityEgress))
+	// 穿候选隧道的兼容性与候选出口识别（实验性、显式触发）
+	mux.HandleFunc("/api/scan/quality-compat", s.guard(s.handleQualityCompat))
+	mux.HandleFunc("/api/scan/quality-tunnel-egress", s.guard(s.handleQualityTunnelEgress))
 	// 自适应效果 A/B 对照（同一档案、同一域名下的开/关对照）
 	mux.HandleFunc("/api/scan/adaptive-effect", s.guard(s.handleAdaptiveEffect))
 	mux.HandleFunc("/api/scan/re-test", s.guard(s.handleScanReTest))

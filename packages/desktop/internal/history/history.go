@@ -54,6 +54,11 @@ type Entry struct {
 	TCPMs int64 `json:"tcpMs,omitempty"`
 	// PeakSpeed 是优选时测速的窗口峰值（MB/s），只作诊断展示。
 	PeakSpeed float64 `json:"peakSpeed,omitempty"`
+	// PongVerified 是优选阶段二 PING/PONG 校验的三态结论（nil = 未做校验）。
+	PongVerified *bool `json:"pongVerified,omitempty"`
+	// TunnelOK 是优选阶段二点五真实隧道校验结论（nil = 未跑/未测到）。
+	TunnelOK    *bool  `json:"tunnelOk,omitempty"`
+	TunnelStage string `json:"tunnelStage,omitempty"`
 	// LastTest 是最近一次复测的状态（可为空，表示从未复测过）。
 	LastTest      *LastTest      `json:"lastTest,omitempty"`
 	Tests         []LastTest     `json:"tests,omitempty"`
@@ -70,9 +75,13 @@ type LastTest struct {
 	Speed float64 `json:"speed"` // 复测时的下行速度（仅复测带测速时有）
 	// PeakSpeed 是复测测速的窗口峰值（MB/s）。
 	PeakSpeed float64 `json:"peakSpeed,omitempty"`
-	OK        bool    `json:"ok"` // 复测三层是否全过
-	Error     string  `json:"error,omitempty"`
-	WithSpeed bool    `json:"withSpeed,omitempty"`
+	// PongVerified / TunnelOK 与 Entry 同语义（nil = 未做/未跑）。
+	PongVerified *bool  `json:"pongVerified,omitempty"`
+	TunnelOK     *bool  `json:"tunnelOk,omitempty"`
+	TunnelStage  string `json:"tunnelStage,omitempty"`
+	OK           bool   `json:"ok"` // 复测三层是否全过
+	Error        string `json:"error,omitempty"`
+	WithSpeed    bool   `json:"withSpeed,omitempty"`
 }
 
 // ScanStats 是一次优选的分阶段统计。
@@ -119,15 +128,18 @@ func FromScanEntries(in []scan.Entry) []Entry {
 	out := make([]Entry, 0, len(in))
 	for _, e := range in {
 		out = append(out, Entry{
-			IP:        e.IP,
-			Port:      e.Port,
-			Colo:      e.Colo,
-			City:      scan.ColoNameOf(e.Colo),
-			Latency:   e.Latency,
-			TLSMs:     e.TLSMs,
-			Speed:     e.Speed,
-			TCPMs:     e.TCPMs,
-			PeakSpeed: e.PeakSpeed,
+			IP:           e.IP,
+			Port:         e.Port,
+			Colo:         e.Colo,
+			City:         scan.ColoNameOf(e.Colo),
+			Latency:      e.Latency,
+			TLSMs:        e.TLSMs,
+			Speed:        e.Speed,
+			TCPMs:        e.TCPMs,
+			PeakSpeed:    e.PeakSpeed,
+			PongVerified: e.PongVerified,
+			TunnelOK:     e.TunnelOK,
+			TunnelStage:  e.TunnelStage,
 		})
 	}
 	return out
@@ -312,16 +324,19 @@ func (s *Store) UpdateEntryTests(id string, results []scan.IPTestResult, withSpe
 			e.Tests = append(e.Tests, *e.LastTest)
 		}
 		e.LastTest = &LastTest{
-			At:        at,
-			TCPMs:     r.TCPMs,
-			TLSMs:     r.TLSMs,
-			WSOK:      r.WSOK,
-			Colo:      r.Colo,
-			Speed:     r.Speed,
-			PeakSpeed: r.PeakSpeed,
-			OK:        r.OK,
-			Error:     r.Error,
-			WithSpeed: withSpeed,
+			At:           at,
+			TCPMs:        r.TCPMs,
+			TLSMs:        r.TLSMs,
+			WSOK:         r.WSOK,
+			Colo:         r.Colo,
+			Speed:        r.Speed,
+			PeakSpeed:    r.PeakSpeed,
+			PongVerified: r.PongVerified,
+			TunnelOK:     r.TunnelOK,
+			TunnelStage:  r.TunnelStage,
+			OK:           r.OK,
+			Error:        r.Error,
+			WithSpeed:    withSpeed,
 		}
 		e.Tests = append(e.Tests, *e.LastTest)
 		if len(e.Tests) > maxRetestSamples {

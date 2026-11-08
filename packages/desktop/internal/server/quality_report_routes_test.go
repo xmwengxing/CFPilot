@@ -47,3 +47,23 @@ func TestQualityReportAPI(t *testing.T) {
 		t.Fatal("报告不得绕过会话校验")
 	}
 }
+
+// 出口识别路由的参数校验（不发真实网络请求）。
+func TestQualityEgressValidatesParams(t *testing.T) {
+	s, base := newTestServer(t)
+	s.SetStore(newEmptyStore(t))
+	cookie := loginCookie(t, s, base)
+	url := base + "/api/scan/quality-egress"
+	code, _ := getJSON(t, url, cookie)
+	if code != http.StatusMethodNotAllowed {
+		t.Fatal("只支持 POST")
+	}
+	code, _ = postJSON(t, url, cookie, map[string]any{"sessionId": "x", "ip": "bad", "port": 443, "serviceUrl": "https://example.com"})
+	if code != http.StatusBadRequest {
+		t.Fatal("非法 IP 应拒绝")
+	}
+	code, _ = postJSON(t, url, cookie, map[string]any{"sessionId": "x", "ip": "104.16.1.1", "port": 443})
+	if code != http.StatusBadRequest {
+		t.Fatal("缺 serviceUrl 应拒绝")
+	}
+}

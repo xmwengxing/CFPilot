@@ -3162,7 +3162,7 @@
         try {
           const result = await window.cfpilot.getIPQualityReport({ sessionId: sess.id, ip: e.ip, port: e.port })
           if (!result.ok || !result.report) { reportCell.textContent = result.error || '报告不可用'; return }
-          renderIPQualityReport(reportCell, result.report)
+          renderIPQualityReport(reportCell, result.report, { sessionId: sess.id, host: sess.host, wsPath: sess.wsPath, probePath: sess.probePath })
           loaded = true
         } catch (error) { reportCell.textContent = error instanceof Error ? error.message : String(error) }
         finally { reportButton.disabled = false }
@@ -3201,13 +3201,13 @@
       label: 'PONG',
       unit: '',
       kind: 'bool',
-      tip: '【是什么】在 101 之后再发一帧探针数据，确认对端确实是数据面在应答，而不是静态页。\n【来源】CLI 侧支持；桌面版复测暂未实现。\n【影响】可排除「路径上只有静态资源」的假阳性 IP。\n【参考】通过表示握手后的数据面确实在线。',
+      tip: '【是什么】在 101 之后再发一帧探针数据，确认对端确实是数据面在应答，而不是静态页。\n【来源】优选阶段二（严格模式）或复测时实测；非严格模式/无探针端点时显示「未执行」。\n【影响】可排除「路径上只有静态资源」的假阳性 IP。\n【参考】通过表示握手后的数据面确实在线。',
     },
     'protocol.realTunnelOk': {
       label: '真实隧道',
       unit: '',
       kind: 'bool',
-      tip: '【是什么】用真实 VLESS/Trojan 凭据建立隧道并访问一个外部目标。\n【来源】CLI 侧支持；桌面版历史复测暂未实现。\n【影响】唯一能证明「节点能真正出网」的检查。\n【参考】通过表示整条代理链路可用。',
+      tip: '【是什么】用真实 VLESS/Trojan 凭据建立隧道并访问一个外部目标。\n【来源】优选阶段二点五或复测时实测；未提供凭据时显示「未执行」。\n【影响】唯一能证明「节点能真正出网」的检查。\n【参考】通过表示整条代理链路可用。',
     },
     'performance.speedMBps': {
       label: '稳态下行',
@@ -3274,8 +3274,9 @@
     return 'quality-bad'
   }
 
-  /** 报告仅呈现已记录证据；缺失指标保留状态，不伪造评分。 */
-  function renderIPQualityReport(container: HTMLElement, report: IPQualityReport): void {
+  /** 报告仅呈现已记录证据；缺失指标保留状态，不伪造评分。
+   * ctx 可选：给了才提供「重新检测 / 识别本机出口」两个显式动作。 */
+  function renderIPQualityReport(container: HTMLElement, report: IPQualityReport, ctx?: { sessionId: string; host: string; wsPath: string; probePath: string }): void {
     container.replaceChildren()
     const title = document.createElement('h4')
     title.textContent = `${report.ip}:${report.port} · IP 质量报告`
@@ -3283,6 +3284,74 @@
     const description = document.createElement('p')
     description.textContent = `生成于 ${fmtHistoryTime(report.generatedAt)} · 仅聚合本地已保留样本，查看不触发检测。样本 ${report.history.testCount} 次。`
     container.appendChild(description)
+    if (ctx) {
+      const actions = document.createElement('div')
+      actions.style.display = 'flex'
+      actions.style.gap = '8px'
+      actions.style.margin = '8px 0'
+      const reBtn = document.createElement('button')
+      reBtn.type = 'button'
+      reBtn.className = 'btn btn-ghost'
+      reBtn.textContent = '重新检测此 IP'
+      reBtn.title = '对该 IP 跑一遍 TCP/TLS/WS+PONG 复测，结论写回历史并刷新报告'
+      reBtn.addEventListener('click', async () => {
+        reBtn.disabled = true
+        try {
+          const res = await window.cfpilot.reTestIps({
+            sessionId: ctx.sessionId, host: ctx.host, wsPath: ctx.wsPath, probePath: ctx.probePath,
+            verifyPayload: true, targets: [{ ip: report.ip, port: report.port }],
+          })
+          if (!res.ok) { description.textContent = '重新检测失败：' + (res.error || '未知错误'); return }
+          const fresh = await window.cfpilot.getIPQualityReport({ sessionId: ctx.sessionId, ip: report.ip, port: report.port })
+          if (fresh.ok && fresh.report) renderIPQualityReport(container, fresh.report, ctx)
+        } catch (error) { description.textContent = '重新检测失败：' + (error instanceof Error ? error.message : String(error)) }
+        finally { reBtn.disabled = false }
+      })
+      const egressBtn = document.createElement('button')
+      egressBtn.type = 'button'
+      egressBtn.className = 'btn btn-ghost'
+      egressBtn.textContent = '识别本机出口'
+      egressBtn.title = '通过你自己的 HTTPS 识别服务，观察本机网络（或指定 SOCKS5 路径）的对外出口；不是候选 IP 的出口'
+      egressBtn.addEventListener('click', async () => {
+        const serviceUrl = window.prompt('出口识别服务 HTTPS 地址（返回 JSON 的 remote_ip / observed_at）', '')
+        if (!serviceUrl) return
+        egressBtn.disabled = true
+        try {
+          const res = await window.cfpilot.identifyEgress({ sessionId: ctx.sessionId, ip: report.ip, port: report.port, serviceUrl })
+          if (!res.ok) { description.textContent = '出口识别失败：' + (res.error || '未知错误'); return }
+          const fresh = await window.cfpilot.getIPQualityReport({ sessionId: ctx.sessionId, ip: report.ip, port: report.port })
+          if (fresh.ok && fresh.report) renderIPQualityReport(container, fresh.report, ctx)
+        } catch (error) { description.textContent = '出口识别失败：' + (error instanceof Error ? error.message : String(error)) }
+        finally { egressBtn.disabled = false }
+      })
+      const compatBtn = document.createElement('button')
+      compatBtn.type = 'button'
+      compatBtn.className = 'btn btn-ghost'
+      compatBtn.textContent = '检测目标站兼容性'
+      compatBtn.title = '穿该候选的隧道访问你指定的目标站（host[:port]/path），观察是否被挑战或拒绝；需要隧道 UUID'
+      compatBtn.addEventListener('click', async () => {
+        const spec = window.prompt('目标站（格式 host[:port]/path，缺省端口 443）', 'example.com:80/')
+        if (!spec) return
+        const uuid = window.prompt('隧道 UUID（VLESS 凭据，仅用于本次检测，不保存）', '')
+        if (!uuid) return
+        const expectedText = window.prompt('可选正文标记（留空则不校验正文）', '') || undefined
+        compatBtn.disabled = true
+        try {
+          const res = await window.cfpilot.probeTunnelCompatibility({
+            sessionId: ctx.sessionId, ip: report.ip, port: report.port, host: ctx.host, wsPath: ctx.wsPath,
+            uuid, targets: [{ label: spec, spec, expectedText }],
+          })
+          if (!res.ok) { description.textContent = '兼容性检测失败：' + (res.error || '未知错误'); return }
+          const fresh = await window.cfpilot.getIPQualityReport({ sessionId: ctx.sessionId, ip: report.ip, port: report.port })
+          if (fresh.ok && fresh.report) renderIPQualityReport(container, fresh.report, ctx)
+        } catch (error) { description.textContent = '兼容性检测失败：' + (error instanceof Error ? error.message : String(error)) }
+        finally { compatBtn.disabled = false }
+      })
+      actions.appendChild(reBtn)
+      actions.appendChild(egressBtn)
+      actions.appendChild(compatBtn)
+      container.appendChild(actions)
+    }
     const metric = document.createElement('div')
     const rate = Math.max(0, Math.min(1, report.history.successRate))
     metric.textContent = `已保留样本成功率 ${(rate * 100).toFixed(1)}%（非全部候选通过率）`
@@ -3516,6 +3585,8 @@
               wsPath: sess.wsPath,
               probePath: sess.probePath,
               withSpeed,
+              // 复测也做 PING/PONG 内容校验（打探针端点），结论进质量报告
+              verifyPayload: true,
               targets,
             })
             if (!res || !res.ok) {
@@ -3536,6 +3607,9 @@
                   wsOk: r.wsOk,
                   colo: r.colo,
                   speed: r.speed,
+                  pongVerified: r.pongVerified ?? null,
+                  tunnelOk: r.tunnelOk ?? null,
+                  tunnelStage: r.tunnelStage,
                   ok: r.ok,
                   error: r.error,
                 }

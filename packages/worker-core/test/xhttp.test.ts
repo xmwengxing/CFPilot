@@ -135,7 +135,7 @@ describe('XHTTP 生命周期', () => {
 
       const pending = handleXhttp(request, baseConfig, [])
       await vi.advanceTimersByTimeAsync(2500)
-      const response = await pending
+      const response = (await pending)!
 
       expect(response.status).toBe(400)
       // 半截头不应该建立任何出站连接
@@ -173,7 +173,7 @@ describe('XHTTP 生命周期', () => {
     try {
       const pending = handleXhttp(request, baseConfig, [])
       await vi.advanceTimersByTimeAsync(2500)
-      const response = await pending
+      const response = (await pending)!
       expect(response.status).toBe(400)
       expect(cancelled).toBe(true)
     } finally {
@@ -189,7 +189,7 @@ describe('XHTTP 生命周期', () => {
       body: Buffer.from(buildVlessRequest()),
     })
 
-    const response = await handleXhttp(request, baseConfig, [])
+    const response = (await handleXhttp(request, baseConfig, []))!
     expect(response.status).toBe(502)
     expect(await response.text()).toContain('出站不可用')
   })
@@ -210,7 +210,7 @@ describe('XHTTP 生命周期', () => {
       body: Buffer.from(buildVlessRequest()),
     })
 
-    const response = await handleXhttp(request, baseConfig, [])
+    const response = (await handleXhttp(request, baseConfig, []))!
     expect(response.status).toBe(200)
     await response.body!.cancel('客户端断开')
     expect(close).toHaveBeenCalledTimes(1)
@@ -225,7 +225,7 @@ describe('XHTTP stream-one', () => {
       body: Buffer.from(buildVlessRequest()),
     })
 
-    const response = await handleXhttp(request, baseConfig, [])
+    const response = (await handleXhttp(request, baseConfig, []))!
 
     expect(response.status).toBe(200)
     const body = await readAll(response.body!)
@@ -242,7 +242,7 @@ describe('XHTTP stream-one', () => {
       body: Buffer.from(buildVlessRequest({ addons: new Uint8Array([0xde, 0xad]) })),
     })
 
-    const response = await handleXhttp(request, baseConfig, [])
+    const response = (await handleXhttp(request, baseConfig, []))!
     const body = await readAll(response.body!)
 
     expect(body[0]).toBe(0x00)
@@ -258,7 +258,7 @@ describe('XHTTP stream-one', () => {
       body: Buffer.from(buildVlessRequest()),
     })
 
-    const response = await handleXhttp(request, baseConfig, [])
+    const response = (await handleXhttp(request, baseConfig, []))!
 
     expect(response.headers.get('X-Accel-Buffering')).toBe('no')
     expect(response.headers.get('Cache-Control')).toBe('no-store')
@@ -284,3 +284,5 @@ describe('XHTTP stream-one', () => {
     expect(Array.from(flat)).toEqual([7, 7, 7])
   })
 })
+
+

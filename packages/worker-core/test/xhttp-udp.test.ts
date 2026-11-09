@@ -59,7 +59,7 @@ describe('XHTTP + UDP 命令', () => {
       duplex: 'half',
     } as RequestInit)
 
-    const response = await handleXhttp(request, config(), [])
+    const response = (await handleXhttp(request, config(), []))!
     expect(response.status).toBe(400)
     expect(state.cancelled).toBe('unsupported UDP')
   })
@@ -77,3 +77,4 @@ describe('XHTTP + UDP 命令', () => {
     expect(state.cancelled).not.toBe('unsupported UDP')
   })
 })
+

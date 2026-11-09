@@ -15,7 +15,7 @@
 import type { Env, UserConfig } from '../types'
 import { handleEdgeProbe } from '../probe'
 import { handleWebSocket } from '../protocols/websocket-self'
-import { handleXhttp } from '../protocols/xhttp'
+import { handleXhttp, isXhttpPath } from '../protocols/xhttp'
 import { parseProxyPool, type ProxyEndpoint } from '../outbound/proxy-pool'
 import { VERSION_PATH, versionResponse, BUILD_VERSION } from '../version'
 import { timingSafeEqual } from '../util'
@@ -275,11 +275,9 @@ export async function routeDataPlane(
     return await handleWebSocket(request, 'trojan', config, collectProxies(config), ctx)
   }
 
-  if (config.enableXhttp && url.pathname === config.xhttpPath) {
-    if (request.method !== 'POST') {
-      // 同上：非 POST 访问静默化为普通静态站，别让 405 成为指纹。
-      return null
-    }
+  if (config.enableXhttp && isXhttpPath(url.pathname, config.xhttpPath)) {
+    // 非法方法（如对 stream-one 的 GET）由 handleXhttp 返回 null，
+    // 外层静默化为普通静态站，不暴露协议信息。
     return await handleXhttp(request, config, collectProxies(config))
   }
 

@@ -87,12 +87,31 @@ for (const artifact of ARTIFACTS) {
   }
 
   // 3) 数据面不允许协议关键字明文
+  //
+  // ⚠️ 词表是**枚举**的 —— 新写的协议参数名（新 XHTTP 模式的 `mode` 值、
+  // 订阅里的 `extra` 键名等）不在词表里就会**明文进产物**，
+  // 而明文协议关键字是 8000119 最直接的命中点。
+  // 所以：加了新的协议参数名，**必须同时加进这里**。
   if (artifact.name === 'dataplane.js') {
     const stripped = code.replace(/WebSocketPair/g, '')
-    const words = ['vless', 'trojan', 'xhttp', 'socks5', 'websocket', 'cfpilot']
+    const words = ['vless', 'trojan', 'xhttp', 'socks5', 'websocket', 'cfpilot', 'packet-up']
     const leaked = words.filter((w) => new RegExp(w, 'i').test(stripped))
     if (leaked.length > 0) {
       note(`dataplane.js: 明文残留协议关键字 ${leaked.join(', ')}`)
+    }
+  }
+
+  // 3b) 控制面不允许协议参数名明文
+  //
+  // 控制面走「literals」模式（只改字符串字面量，不改属性名），
+  // 订阅里 `s.set("mode", "packet-up")` 这类**值**会被编码，
+  // 但 `s.set("extra", JSON.stringify({noGRPCHeader:...}))` 的**键名**不会 ——
+  // 它是对象属性名，不是字符串字面量。因此控制面要单独查这批参数名。
+  if (artifact.name === 'control.js') {
+    const words = ['noGRPCHeader']
+    const leaked = words.filter((w) => new RegExp(w).test(code))
+    if (leaked.length > 0) {
+      note(`control.js: 明文残留协议参数名 ${leaked.join(', ')}`)
     }
   }
 

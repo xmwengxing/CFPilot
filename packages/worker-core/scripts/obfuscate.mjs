@@ -65,7 +65,7 @@ const DECODER =
 
 // 敏感词（对「解码后的值」做匹配，含中文报错）
 const SENSITIVE =
-  /vless|trojan|xhttp|socks\d?h?|socks5|websocket|sec-websocket|cfpilot|proxyip|同类项目|clash|vmess|shadowsocks|proxy-|CONNECT |优选|反代|代理|节点|订阅|测速|探针|诊断|网段|面板|分流|握手|头解析|解析失败|暂不支持|需要 WebSocket|需要 POST/i
+  /vless|trojan|xhttp|socks\d?h?|socks5|websocket|sec-websocket|cfpilot|proxyip|同类项目|clash|vmess|shadowsocks|proxy-|packet-up|noGRPCHeader|CONNECT |优选|反代|代理|节点|订阅|测速|探针|诊断|网段|面板|分流|握手|头解析|解析失败|暂不支持|需要 WebSocket|需要 POST/i
 
 // 中文文案：只要含 ≥2 个连续汉字就整段编码。
 //

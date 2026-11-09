@@ -1333,7 +1333,31 @@ export function vlessUri(
   params.set('type', transport)
   params.set('host', ctx.domain)
   params.set('path', path)
-  if (transport === 'xhttp') params.set('mode', 'stream-one')
+  if (transport === 'xhttp') {
+    // XHTTP 的模式必须选 packet-up（兼容性最强）：
+    // stream-one / stream-up 是单请求全双工流式上行，
+    // Cloudflare 边缘对 Pages/Workers 的 POST 会缓冲请求体，
+    // 服务端看不到首包、客户端等不到下行，表现就是全部 -1。
+    // packet-up 把上行拆成多个短 POST、下行独立 GET，不依赖全双工。
+    params.set('mode', 'packet-up')
+    // ALPN 显式 h2：Xray 默认 H2，但部分 GUI 客户端无 alpn 时会退到 HTTP/1.1，
+    // H2 才能走 XMUX 复用与 H3 降级，显式声明更稳。
+    params.set('alpn', 'h2')
+    const fp = (ctx.config.clientFingerprint || '').trim()
+    if (fp) params.set('fp', fp)
+    // 关闭 gRPC 头伪装：Xray 默认把上行 Content-Type 伪装成
+    // application/grpc，Cloudflare 边缘在未开启 gRPC 支持时直接 403
+    // （Pages 的 *.pages.dev 无法开启该选项），表现为全部连不上。
+    // noGRPCHeader 后上行走普通 Content-Type，边缘放行。
+    //
+    // ⚠️ 这里写成**整段 JSON 字符串字面量**，而不是 `JSON.stringify({ noGRPCHeader: true })`：
+    // 后者的键名是**标识符属性名**，静态脱敏的 literals 模式（控制面，
+    // 只改字符串字面量、不改属性名）不会碰它 —— 这个参数名就会明文进
+    // 控制面产物，成为部署期的静态特征。写成字符串字面量后它会被脱敏编码。
+    //
+    // 运行期输出**完全不变**：两者的结果都是 `{"noGRPCHeader":true}`。
+    params.set('extra', '{"noGRPCHeader":true}')
+  }
   const name = encodeURIComponent(label ?? nodeLabel(entry, 'vless', ctx.nodes.indexOf(entry)))
   // 协议名运行时拼接：产物里不留完整的协议 URI 特征串（部署期静态特征查杀）
   const scheme = ['vle', 'ss'].join('')

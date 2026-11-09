@@ -77,13 +77,62 @@ const newSecret = (): string => randomHex(32)
  * ⚠️ 与 `loadConfig` 里的 UUID 自愈同一条规矩：只有**持久化存储（KV）**才允许
  * 自动生成并写回。未绑定 KV 时每次请求都是新的 `MemoryStore`，
  * 自动生成等于每个请求一把新密钥 —— 签出来的链接下一个请求就校验失败。
+ *
+ * ⚠️ **同样要避开「陈旧读」**（KV 读最终一致，约 60 秒）：
+ * 若一次陈旧读读不到密钥，就会**生成一把新密钥**并写回 ⇒
+ * **此前签发的所有 `v1.` 订阅链接立刻全部失效**，
+ * 而且每次陈旧读都产生一次写。这类写用户点不到也拦不住。
+ *
+ * 办法：与 `loadConfig` 同一口径 —— **键持续缺失超过传播窗口**才生成
+ * （90 秒），期间只读不写；并把已生成的密钥缓存在模块级，
+ * 让同一隔离体在窗口内保持一致（不会签出「一把密钥一个链接」）。
  */
 export async function loadSubSecret(store: Store): Promise<string> {
   const existing = (await store.get(SUB_SECRET_KEY))?.trim()
   if (existing) return existing
+  // 未绑定 KV（本地调试）：不写回，每次一个新密钥。
+  // ⚠️ 这是**刻意**的行为：未绑定 KV 时每个请求都是新的 MemoryStore，
+  // 自动写回等于每个请求一把新密钥，签出来的链接下一个请求就校验失败。
+  if (!(store instanceof KvStore)) return newSecret()
+  // 持久化存储（KV）：先看模块级缓存（同一隔离体内保持一致）
+  if (localSecret) return localSecret
+  // 键持续缺失超过传播窗口才生成
+  const now = Date.now()
+  if (subSecretAbsentSince === 0) subSecretAbsentSince = now
+  if (now - subSecretAbsentSince <= SUB_SECRET_ABSENT_GRACE_MS) {
+    // 窗口内不生成、不写：返回一个隔离体内稳定的值，避免签出互相不认的令牌
+    if (!pendingSecret) pendingSecret = newSecret()
+    return pendingSecret
+  }
   const fresh = newSecret()
-  if (store instanceof KvStore) await store.put(SUB_SECRET_KEY, fresh)
+  await store.put(SUB_SECRET_KEY, fresh)
+  subSecretAbsentSince = 0
+  pendingSecret = fresh
+  localSecret = fresh
   return fresh
+}
+
+/** 本隔离体已确认写入 KV 的密钥。 */
+let localSecret: string | null = null
+
+/** 等待窗口内使用的临时密钥（未写入 KV，同一隔离体内稳定）。 */
+let pendingSecret: string | null = null
+
+/** 键「持续缺失」的起始时刻（隔离体级）。 */
+let subSecretAbsentSince = 0
+
+/**
+ * 键缺失后要等多久才允许生成密钥（毫秒）。
+ *
+ * 必须大于 Cloudflare KV 的读传播窗口（约 60 秒）。
+ */
+const SUB_SECRET_ABSENT_GRACE_MS = 90_000
+
+/** 只给测试隔离用：重置密钥缓存。 */
+export function resetSubSecretState(): void {
+  localSecret = null
+  pendingSecret = null
+  subSecretAbsentSince = 0
 }
 
 /** 轮换密钥：旧签名令牌立即全部失效（不可撤销） */

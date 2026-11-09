@@ -257,26 +257,79 @@ export async function loadConfig(store: Store, env: Env): Promise<UserConfig> {
   // 未配置时保持空值 fail-closed：所有实例行为一致（一律拒绝认证，
   // 含 Trojan 空口令防护），面板显示空 UUID 提示用户补配置。
   const canPersist = store instanceof KvStore
-  if (!config.uuid && canPersist) {
-    config.uuid = randomUuid()
-    dirty = true
+
+  // ⚠️ **「读不到键」有两种含义，必须分开处理**：
+  //
+  // 1. 键**从来没存在过** —— 真·首次引导，该生成凭据；
+  // 2. 键**存在，但这次读没读到** —— Cloudflare KV 的读是**最终一致**的
+  //    （边缘缓存约 60 秒）。部署流程刚把 CONFIG（含正确的 uuid）写进 KV，
+  //    本隔离体的头几次读**仍可能读不到**。
+  //
+  // 若把 2 当成 1，就会：重新生成一个**随机 UUID** 并把整份 CONFIG 写回
+  // ⇒ 部署时写进 KV 的正确 uuid 被覆盖（客户端全部掉线），
+  // 而且每次陈旧读都产生一次写 ⇒ 写配额放大。
+  // ⚠️ 这类写是**内核自己写的、用户点不到也拦不住**的。
+  //
+  // 办法：**要求键持续缺失超过 KV 的传播窗口**才引导（60 秒 ⇒ 等 90 秒），
+  // 期间只读不写。真正的首次引导会在 90 秒后正常完成。
+  const now = Date.now()
+  if (raw) {
+    configAbsentSince = 0
+  } else if (configAbsentSince === 0) {
+    configAbsentSince = now
   }
-  if (!config.trojanPassword && canPersist) {
-    config.trojanPassword = randomUuid().replace(/-/g, '').slice(0, 16)
-    dirty = true
+  const absentLongEnough = now - configAbsentSince > CONFIG_ABSENT_GRACE_MS
+  if (canPersist && absentLongEnough) {
+    if (!config.uuid) {
+      config.uuid = randomUuid()
+      dirty = true
+    }
+    if (!config.trojanPassword) {
+      config.trojanPassword = randomUuid().replace(/-/g, '').slice(0, 16)
+      dirty = true
+    }
+    configAbsentSince = 0
   }
+
   // 自愈：历史上 num() 的 bug 把未配置的官方 IP / 域名数量写成了 0，
   // 导致订阅为空。这里把「小于 1」视为未配置并回落到默认值。
-  if (config.officialCount < 1) {
-    config.officialCount = DEFAULT_CONFIG.officialCount
-    dirty = true
-  }
-  if (config.domainCount < 1) {
-    config.domainCount = DEFAULT_CONFIG.domainCount
-    dirty = true
+  //
+  // ⚠️ **只在「键确实存在」时**做：读不到键时（陈旧读）这两个值本来就来自
+  // 默认值，不需要自愈；而此时写回会把随机 uuid 一并写进 KV。
+  // 键存在但字段为 0 才是真的坏数据（历史 bug 的残留），必须修。
+  if (raw && (config.officialCount < 1 || config.domainCount < 1)) {
+    if (config.officialCount < 1) {
+      config.officialCount = DEFAULT_CONFIG.officialCount
+      dirty = true
+    }
+    if (config.domainCount < 1) {
+      config.domainCount = DEFAULT_CONFIG.domainCount
+      dirty = true
+    }
   }
   if (dirty) await saveConfig(store, config)
   return config
+}
+
+/**
+ * CONFIG 键「持续缺失」的起始时刻（隔离体级）。
+ *
+ * 0 = 当前键存在（正常状态）。
+ */
+let configAbsentSince = 0
+
+/**
+ * 键缺失后要等多久才允许引导（毫秒）。
+ *
+ * 必须**大于** Cloudflare KV 的读传播窗口（约 60 秒），
+ * 否则一次陈旧读就会触发「重新生成 UUID + 写回」。
+ * 取 90 秒留出余量。
+ */
+const CONFIG_ABSENT_GRACE_MS = 90_000
+
+/** 只给测试隔离用：重置「键缺失」计时。 */
+export function resetConfigBootstrapState(): void {
+  configAbsentSince = 0
 }
 
 /** 持久化配置到 KV */

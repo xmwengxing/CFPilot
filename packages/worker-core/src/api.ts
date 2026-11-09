@@ -28,8 +28,9 @@ import {
   saveRouteProfile,
 } from './config'
 import { collectNodes, parseLocalList } from './sub-engine'
+import { buildBuiltinProfileText, ROUTE_MAIN_GROUP } from './route-profile'
 import { loadSubSecret, rotateSubSecret, signSubToken, verifySubToken } from './sub-token'
-import { describeFieldErrors, validateConfigPatch } from './config-validate'
+import { describeFieldErrors, validateConfigPatch, validateIpList } from './config-validate'
 import { buildConfigExport, diffConfig, pickImportable } from './config-transfer'
 import { CF_IPV4_CIDRS, COUNTRY_NAMES, PREFERRED_DOMAINS, SUPPORTED_COUNTRIES, coloLabel } from './data/pools'
 import { randomHex } from './util'
@@ -447,6 +448,11 @@ export async function handleApi(
     }
     if (typeof body.raw !== 'string') return error('缺少 raw 字段', 400)
 
+    // 语法校验：解析层遇到看不懂的行会静默跳过，
+    // 用户只会看到「保存成功」但订阅里一条都没有 —— 必须在这里拦下并指出行号。
+    const issue = validateIpList(body.raw)
+    if (issue) return error(issue, 400)
+
     const cleaned = body.raw
       .split(/\r?\n/)
       .map((line) => line.trim())
@@ -528,9 +534,28 @@ export async function handleApi(
   }
 
   // ---- Clash 分流规则（ROUTE_PROFILE ini 原文，渲染进 clash 订阅的 rules/groups）----
+  //
+  // ## 返回的是**当前生效的规则**，不是 KV 里的原始值
+  //
+  // 用户没写自定义规则时，KV 里没有 `ROUTE_PROFILE` 键，
+  // 生效的却是内置的那一整套 GEOSITE/GEOIP 规则。
+  // 之前只回 KV 的原始值 → 面板拿到空串 → 用户以为「规则是空的」。
+  //
+  // 所以：
+  //   - `raw`：自定义原文（空 = 用内置）
+  //   - `text`：**生效中**的规则原文（自定义优先，否则内置）
+  //   - `isCustom`：是否用的是自定义
+  //
+  // 面板据此填充输入框，用户看到的就是真正生效的那份。
   if (path === '/route-profile' && method === 'GET') {
     const raw = await loadRouteProfile(store)
-    return json({ ok: true, raw, isCustom: raw.trim().length > 0 })
+    const isCustom = raw.trim().length > 0
+    return json({
+      ok: true,
+      raw,
+      text: isCustom ? raw : buildBuiltinProfileText(ROUTE_MAIN_GROUP),
+      isCustom,
+    })
   }
 
   if (path === '/route-profile' && method === 'PUT') {
@@ -542,9 +567,23 @@ export async function handleApi(
     }
     if (typeof body.raw !== 'string') return error('缺少 raw 字段', 400)
     if (body.raw.length > 20000) return error('分流规则过长（上限 20000 字符）', 400)
-    await saveRouteProfile(store, body.raw)
-    const saved = await loadRouteProfile(store)
-    return json({ ok: true, raw: saved, isCustom: saved.trim().length > 0 })
+
+    const cleaned = body.raw.trim()
+    // 与内置规则完全一致 ⇒ 走删键，不留一份与内置重复的自定义副本
+    // （否则之后的内置规则更新永远不生效）。
+    const isBuiltin = cleaned === buildBuiltinProfileText(ROUTE_MAIN_GROUP).trim()
+    await saveRouteProfile(store, isBuiltin ? '' : cleaned)
+
+    // ⚠️ **不要回读 KV 确认结果**：KV 读是最终一致的（边缘缓存约 60 秒），
+    // 刚写完再读可能拿到旧值 —— 面板会显示「保存了但内容没变」，
+    // 用户以为没生效又改一遍。写入后的状态由这里直接给出。
+    const isCustom = !isBuiltin && cleaned.length > 0
+    return json({
+      ok: true,
+      raw: isCustom ? cleaned : '',
+      text: isCustom ? cleaned : buildBuiltinProfileText(ROUTE_MAIN_GROUP),
+      isCustom,
+    })
   }
 
   if (path === '/scanner-token' && method === 'POST') {
@@ -575,67 +614,5 @@ export async function handleApi(
     })
   }
 
-  if (path === '/events' && method === 'GET') {
-    return await sseEvents(request, store)
-  }
-
   return error('接口不存在', 404)
-}
-
-/**
- * SSE：本地优选池变化时推送更新事件（面板一键扫描用）
- */
-async function sseEvents(request: Request, store: Store): Promise<Response> {
-  const encoder = new TextEncoder()
-  let lastValue = ''
-  let timer: ReturnType<typeof setTimeout> | undefined
-
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const close = (): void => {
-        if (timer) clearTimeout(timer)
-        try {
-          controller.close()
-        } catch {
-          /* 已关闭 */
-        }
-      }
-      request.signal.addEventListener('abort', close)
-
-      const tick = async (): Promise<void> => {
-        try {
-          const value = await loadLocalIps(store)
-          if (value !== lastValue) {
-            lastValue = value
-            const count = parseLocalList(value).length
-            controller.enqueue(encoder.encode(`event: ips\ndata: ${JSON.stringify({ count })}\n\n`))
-          } else {
-            controller.enqueue(encoder.encode(': keepalive\n\n'))
-          }
-        } catch {
-          /* 连接已断开 */
-        }
-        if (!request.signal.aborted) {
-          // 每个 tick 都会 loadLocalIps(store) 读一次 KV：3 秒一次等于
-          // 面板开着就 1200 次/小时，远超「回填完刷新页面能看到变化」的需要。
-          // 15 秒一次（240 次/小时）同样覆盖该体验，还能省掉大量 KV 读。
-          timer = setTimeout(() => void tick(), 15000)
-        }
-      }
-      await tick()
-    },
-    cancel() {
-      if (timer) clearTimeout(timer)
-    },
-  })
-
-  return new Response(stream, {
-    status: 200,
-    headers: {
-      'Content-Type': 'text/event-stream; charset=utf-8',
-      'Cache-Control': 'no-store',
-      Connection: 'keep-alive',
-      'X-Accel-Buffering': 'no',
-    },
-  })
 }

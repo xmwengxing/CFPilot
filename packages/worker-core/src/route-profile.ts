@@ -38,6 +38,57 @@ export interface RouteRule {
   value: string
   /** 是否为内联规则（`[]` 开头） */
   inline: boolean
+  /**
+   * Clash YAML 规则行的**原文**（如 `GEOSITE,youtube,CFPilot`）。
+   *
+   * 存在时渲染时**逐字输出**，不经过 ini 的动作推导 ——
+   * 内置规则里有 `REJECT` 目标与 `no-resolve` 后缀，
+   * ini 格式表达不了，必须原样保留。
+   */
+  raw?: string
+}
+
+/**
+ * Clash YAML 规则类型白名单。
+ *
+ * ⚠️ **不含 `RULE-SET`** —— 它需要配套的 `rule-providers:` 段，
+ * 缺了 Clash 报 `rule set [X] not found` 并**让整份订阅加载失败**。
+ * 远端 ruleset 一律忽略（见 `renderRouteProfile` 的说明）。
+ *
+ * 用「空格分隔的字符串」而不是数组字面量：内核体积预算紧张，
+ * 少几个引号和逗号都是字节。
+ */
+const YAML_RULE_TYPES = new Set(
+  'GEOSITE GEOIP GEOIP-CIDR DOMAIN DOMAIN-SUFFIX DOMAIN-KEYWORD IP-CIDR IP-CIDR6 SRC-IP-CIDR DST-PORT SRC-PORT PROCESS-NAME MATCH'.split(
+    ' '
+  )
+)
+
+/**
+ * 解析一行 Clash YAML 规则（形如 `- GEOSITE,youtube,CFPilot`）。
+ *
+ * 动作（策略组）在**渲染时**才校验 —— 因为可用的组名取决于订阅实际生成了哪些组，
+ * 解析时还不知道。
+ *
+ * @param body 去掉 `- ` 后的规则体
+ * @returns 规则；类型不认识时返回 null（该行被跳过）
+ */
+function parseYamlRule(body: string): RouteRule | null {
+  const tokens = body.split(',').map((t) => t.trim())
+  const type = (tokens[0] ?? '').toUpperCase()
+  if (!YAML_RULE_TYPES.has(type)) return null
+  // MATCH 只有「类型 + 动作」两段，其余规则是「类型 + 值 + 动作[+ no-resolve]」
+  const isMatch = type === 'MATCH'
+  const action = tokens[isMatch ? 1 : 2] ?? ''
+  if (!action) return null
+  if (!isMatch && tokens.length > 4) return null
+  if (!isMatch && tokens.length === 4 && !/^no-resolve$/i.test(tokens[3]!)) return null
+  return {
+    group: action,
+    value: tokens.slice(0, isMatch ? 1 : 2).join(','),
+    inline: true,
+    raw: body.trim(),
+  }
 }
 
 /** 一个代理组 */
@@ -74,6 +125,20 @@ export function parseRouteProfile(text: string): RouteProfile {
     // 空行 / 注释 / 节头
     if (!line || line.startsWith(';') || line.startsWith('#')) continue
     if (line.startsWith('[') && line.endsWith(']')) continue
+
+    // Clash YAML 规则行：`- GEOSITE,youtube,CFPilot`
+    //
+    // ## 为什么也要认这种写法
+    //
+    // 面板「分流规则原文」框现在展示的是**当前生效的规则**（内置或自定义），
+    // 而内置规则就是 YAML 形态（`buildBuiltinRules` 产出的就是 `- GEOSITE,...`）。
+    // 用户在框里看到 YAML、编辑后保存 —— 后端必须能读回来，
+    // 否则「读到的和保存的不是一回事」，改了就等于没改。
+    if (line.startsWith('- ')) {
+      const rule = parseYamlRule(line.slice(2).trim())
+      if (rule) rules.push(rule)
+      continue
+    }
 
     if (line.startsWith('ruleset=')) {
       const body = line.slice('ruleset='.length)
@@ -197,6 +262,12 @@ export function renderRouteProfile(
   const groupLines: string[] = []
   const emitted = new Set<string>()
 
+  // ini 里定义、且**实际会输出**的组名。
+  //
+  // YAML 规则行的动作必须指向真实存在的组，否则 Clash 报「找不到策略组」
+  // → 整份订阅加载失败。所以先收集名字，再校验 YAML 规则的动作。
+  const knownActions = new Set<string>(['DIRECT', 'REJECT', mainGroup, autoGroup])
+
   // ---- 代理组 ----
   for (const g of profile.groups) {
     if (emitted.has(g.name)) continue
@@ -220,6 +291,9 @@ export function renderRouteProfile(
     if (isMainSelector) continue
 
     emitted.add(g.name)
+    knownActions.add(g.name)
+    // ini 里带 emoji 前缀的组，用户在 YAML 规则里也可能写带前缀的名字
+    knownActions.add(bareName)
 
     groupLines.push(`  - name: ${yamlStr(g.name)}`)
     groupLines.push(`    type: ${yamlStr(g.type)}`)
@@ -274,6 +348,17 @@ export function renderRouteProfile(
   //
   // 远端 ruleset 一律忽略（它是「怎么下载规则」的元数据，与节点无关）。
   for (const r of profile.rules) {
+    // YAML 规则行：逐字输出（保留 REJECT 目标与 no-resolve 后缀）。
+    //
+    // ⚠️ 但**动作必须是我们真实存在的组**，否则 Clash 报
+    // `rule set [X] not found` / 找不到策略组，整份订阅加载失败。
+    // 用户写错组名时宁可跳过这条规则，也不要让整份订阅挂掉。
+    if (r.raw !== undefined) {
+      // 动作必须是我们真实存在的组，否则 Clash 报「找不到策略组」→ 整份订阅加载失败。
+      // 用户写错组名时宁可跳过这条规则，也不要让整份订阅挂掉。
+      if (knownActions.has(r.group)) ruleLines.push(`  - ${r.raw}`)
+      continue
+    }
     if (!r.inline) continue // 远端 ruleset 跳过 —— 见上方说明
     const inner = r.value.slice(2).trim()
     const action = /直连|direct/i.test(r.group) ? 'DIRECT' : mainGroup
@@ -288,7 +373,15 @@ export function renderRouteProfile(
 }
 
 /**
- * 生成**内置**分流规则（不依赖任何远端规则集）。
+ * 订阅里的主策略组名（节点都挂在它下面）。
+ *
+ * ⚠️ 单一来源：`sub-engine.ts` 生成 proxy-groups 时用它，
+ * 面板展示内置规则时也用它 —— 两处不一致会让用户看到
+ * 「框里的规则指向一个不存在的组」。
+ */
+export const ROUTE_MAIN_GROUP = 'CFPilot'
+
+/** 内置分流规则（不依赖任何远端规则集）。
  *
  * ## 设计原则
  *
@@ -404,4 +497,28 @@ export function renderRouteSections(
   if (!text.trim()) return { rules: [], groups: [] }
   const profile = parseRouteProfile(text)
   return renderRouteProfile(profile, { ...options, nodeNames: [] })
+}
+
+/**
+ * 内置分流规则的**可编辑文本**（YAML 规则行形态）。
+ *
+ * ## 为什么需要它
+ *
+ * 面板「分流规则原文」框要展示**当前生效的规则**。
+ * 用户没写自定义规则时，生效的就是内置规则 ——
+ * 框里必须能读到它们，用户才知道自己在改什么、改成什么样。
+ *
+ * 之前这个框只显示 KV 里的 `ROUTE_PROFILE`：
+ * 没写自定义规则时是**空字符串**，用户看到的是「什么都没有」，
+ * 而订阅里其实有一整套 GEOSITE/GEOIP 规则 ——
+ * **读到的东西和实际生效的不是一回事**，这正是「读取不到内置内容」的根因。
+ *
+ * ## 形态
+ *
+ * 输出 `- GEOSITE,youtube,CFPilot` 这样的 YAML 规则行：
+ * 与 `buildBuiltinRules()` 的产物同构，可被 `parseRouteProfile` 读回，
+ * 也能被用户直接编辑后保存（`renderRouteProfile` 对 YAML 行逐字输出）。
+ */
+export function buildBuiltinProfileText(mainGroup: string): string {
+  return buildBuiltinRules(mainGroup).join('\n')
 }

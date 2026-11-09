@@ -2,12 +2,16 @@
  * 本地 Loopback 桥接服务
  *
  * 在 127.0.0.1:19527 上提供：
- *   GET  /status      面板探测用
+ *   GET  /status      探测用
  *   POST /start-scan  下发扫描任务
  *   GET  /events      SSE 实时进度
  *   GET  /results     最近一次结果
  *
- * 只监听回环地址，且开启 CORS 以便面板网页跨域调用。
+ * 只监听回环地址，且开启 CORS 以便本机其它页面跨域调用。
+ *
+ * ⚠️ 面板的「本地优选」页只给使用说明，不再唤醒本服务 ——
+ * 优选由 `cfpilot scan` 命令行或桌面版承担。本服务保留下来，
+ * 供脚本 / 自动化按 HTTP 接口驱动扫描。
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { formatEntries, runScan, type ScanEvent, type ScanEntry } from './scan'
@@ -24,10 +28,10 @@ export const BRIDGE_VERSION = '0.2.0'
 export const DEFAULT_BRIDGE_PORT = 19527
 
 /**
- * POST /start-scan 请求体（面板「一键优选」与命令行手写请求共用）
+ * POST /start-scan 请求体
  *
  * 候选来源优先级：manual > candidates > 自动生成（sample / cidr / seed）。
- * 面板当前不传 candidates，因此服务端必须能自行生成，否则一键优选必然失败。
+ * 调用方不传 candidates 时，服务端必须能自行生成，否则扫描必然失败。
  */
 export interface StartScanRequest {
   /** Worker 自定义域名（TLS SNI 与 HTTP Host） */
@@ -40,7 +44,7 @@ export interface StartScanRequest {
   callback?: string
   /** 最终返回条数，默认 15 */
   top?: number
-  /** 面板手动优选 IP（优先于 candidates 与自动生成），支持 IP / IP:Port / IP:Port#备注 */
+  /** 手动指定的 IP（优先于 candidates 与自动生成），支持 IP / IP:Port / IP:Port#备注 */
   manual?: string[]
   /** 显式候选 IP 列表；为空时由服务端自动生成 */
   candidates?: string[]
@@ -78,7 +82,7 @@ export interface CandidatePlan {
   source: CandidateSource
   /** 解析后的地址族（`auto` 已解析成 v4 或 both） */
   family?: FamilyChoice
-  /** 候选生成结论，含 IPv6 预检提示；面板会把它打进扫描日志 */
+  /** 候选生成结论，含 IPv6 预检提示 */
   note?: string
 }
 
@@ -123,9 +127,9 @@ export async function resolveScanCandidates(body: StartScanRequest): Promise<Can
   return { candidates: plan.candidates, source: 'generated', family: plan.family, note: plan.note }
 }
 
-/** 生成进度文案（面板会把 message 打到扫描日志里） */
+/** 生成进度文案（随扫描事件下发） */
 function describePlan(plan: CandidatePlan): string {
-  if (plan.source === 'manual') return `使用面板手动指定的 ${plan.candidates.length} 个候选 IP`
+  if (plan.source === 'manual') return `使用手动指定的 ${plan.candidates.length} 个候选 IP`
   if (plan.source === 'request') return `使用请求携带的 ${plan.candidates.length} 个候选 IP`
   // 自动分支带上「地址族怎么定的」：用户需要知道 IPv6 到底有没有参与
   const note = plan.note ? `（${plan.note}）` : ''
@@ -374,7 +378,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
     // ---- 并发互斥 ----
     //
-    // 面板上重复点「一键优选」会同时跑多个 300 并发扫描，
+    // 重复下发会同时跑多个 300 并发扫描，
     // 打满本机端口与路由器 NAT 表 → **所有测速结果失真**。
     // 直接拒绝第二次请求。
     const running = hasRunningJob()
@@ -438,7 +442,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           //     阶段二会硬连默认探针路径 → 全军覆没
           //   verifyPayload —— 目标没有探针端点时，内容校验必然失败，
           //     应自动退回纯 101 校验
-          //   speedMode / speedUrl —— 面板可以指定用探针端点还是公开测速地址
+          //   speedMode / speedUrl —— 调用方可以指定用探针端点还是公开测速地址
           probeTransport: body.probeTransport,
           xhttpPath: body.xhttpPath,
           wsPath: body.wsPath,

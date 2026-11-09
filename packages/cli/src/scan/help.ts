@@ -15,7 +15,7 @@ CFPilot 本地真连接优选器 —— 用你自己的 Worker 域名做 SNI/Hos
   ${NAME} scan [选项]        执行三阶优选扫描
   ${NAME} scan compare      双栈对照报告（IPv4 vs IPv6，同参数跑两轮）
   ${NAME} scan relay        反代入口候选的出站体检（从 Worker 内部发起）
-  ${NAME} scan serve [选项]   启动本地桥接服务（供面板一键唤醒）
+  ${NAME} scan serve [选项]   启动本地桥接服务（HTTP 接口，供脚本驱动扫描）
   ${NAME} scan ips [选项]     打印 Cloudflare 官方网段
   ${NAME} --help             显示帮助
   ${NAME} --version          显示版本

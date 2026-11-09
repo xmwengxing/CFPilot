@@ -11,11 +11,13 @@ describe('面板 gzip 往返', () => {
     expect(html).toContain('<!DOCTYPE html>')
     // 冒烟断言：标题文案（与页面内可见标题一致）
     expect(html).toContain('CFPilot 管理控制台')
-    expect(html).toContain('id="btnScan"')
+    expect(html).toContain('id="btnRefreshSub"')
     expect(html).toContain('id="cfgUuid"')
     // 关键 JS 逻辑仍在
     expect(html).toContain('api/v1/login')
-    expect(html).toContain('EventSource')
+    // 本地优选页只留说明（优选本体由 CLI / 桌面版承担）
+    expect(html).toContain('cfpilot scan --help')
+    expect(html).toContain('cfpilot@latest')
     // 解压后体积与源文件相当（说明压缩再解压是无损的）
     expect(Buffer.byteLength(html)).toBeLessThanOrEqual(Buffer.byteLength(original))
   })

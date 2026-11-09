@@ -22,6 +22,8 @@
  * 3. **不做业务判断**：只判断"这个值能不能用"，不判断"该不该这么配"。
  */
 
+import { cleanIpLine } from './sub-engine'
+
 /** 单字段校验结果 */
 export interface FieldError {
   field: string
@@ -36,6 +38,44 @@ function isIpv4(text: string): boolean {
   const m = IPV4.exec(text)
   if (!m) return false
   return m.slice(1).every((part) => Number(part) <= 255)
+}
+
+/**
+ * 手动填写的 IP 列表 —— 语法校验。
+ *
+ * ## 为什么要有
+ *
+ * 面板「节点来源 → 手动指定 IP」的输入框是自由文本，语法很简单：
+ * `#` 开头是注释，其余每行一条（`IP` / `IP:端口` / `IP:端口#备注` / `[IPv6]:端口`）。
+ *
+ * 但**解析层是宽容的**（`cleanIpLine` 遇到看不懂的行就跳过），
+ * 所以用户填错时**看不到任何提示** —— 只有「保存成功」，
+ * 但节点一条都没进订阅。这是最难排查的一类问题：
+ * 面板显示已保存，订阅里就是没有。
+ *
+ * ## 口径
+ *
+ * **判定权完全在解析层**（`cleanIpLine`）：解析器认得的这里必须放行，
+ * 解析器丢掉的这里必须报错。两边判据不一致会出现
+ * 「校验说没问题但节点没进去」—— 那比不校验更糟。
+ *
+ * @returns 空串 = 全部合法；否则是可直接展示给用户的一句话
+ */
+export function validateIpList(text: string): string {
+  const bad: number[] = []
+  const lines = text.split(/\r?\n/)
+  lines.forEach((raw, index) => {
+    const line = raw.trim()
+    if (!line) return
+    // 整行注释：解析器会跳过，这里也不该报错
+    const body = line.replace(/^["']|["']$/g, '').trim()
+    if (!body || body.startsWith('#')) return
+    if (cleanIpLine(line) === null) bad.push(index + 1)
+  })
+  if (bad.length === 0) return ''
+  const shown = bad.slice(0, 3).map((n) => `第 ${n} 行`).join('、')
+  const rest = bad.length > 3 ? ` 等 ${bad.length} 行` : ''
+  return `手动指定 IP 有 ${bad.length} 行无法识别（${shown}${rest}）`
 }
 
 /** 代理条目：允许 `scheme://[user:pass@]host[:port]`，也允许裸 `host[:port]` */
@@ -105,6 +145,17 @@ function checkRemoteSources(value: string, field: string, errors: FieldError[]):
       return
     }
   }
+}
+
+/**
+ * 手动指定 IP 列表：逐行校验。
+ *
+ * 之前完全没有校验 —— 解析层遇到看不懂的行就静默跳过，
+ * 用户看到「保存成功」但订阅里一个节点都没进去。
+ */
+function checkIpList(value: string, field: string, errors: FieldError[]): void {
+  const message = validateIpList(value)
+  if (message) errors.push({ field, message })
 }
 
 /**
@@ -181,6 +232,9 @@ export function validateConfigPatch(patch: Record<string, unknown>): FieldError[
 
   if (has('addApi')) checkRemoteSources(String(patch.addApi ?? ''), 'addApi', errors)
   if (has('addCsv')) checkRemoteSources(String(patch.addCsv ?? ''), 'addCsv', errors)
+
+  // 手动指定 IP：逐行校验（解析层会静默跳过看不懂的行，必须在这里拦住）
+  if (has('add')) checkIpList(String(patch.add ?? ''), 'add', errors)
 
   if (has('uuid')) {
     const uuid = String(patch.uuid ?? '').trim()

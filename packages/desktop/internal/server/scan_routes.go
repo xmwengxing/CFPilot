@@ -828,12 +828,12 @@ func (s *Server) handleScanScannerToken(w http.ResponseWriter, r *http.Request) 
 //
 // ## 令牌从哪来
 //
-// 面板的 `/api/v1/preferred-ips` 需要 Bearer 令牌：
-//   - 面板 UI 里生成的**一次性扫描令牌**（`SCANNER_TOKEN`）
-//   - 或内核环境变量 `SCANNER_TOKEN`
+// 面板的 `/api/v1/preferred-ips` 需要 Bearer 令牌，有两条路：
+//   - 内核环境变量 `SCANNER_TOKEN`（部署时注入的长期令牌）
+//   - 一次性扫描令牌：`POST /api/v1/scanner-token`（10 分钟有效、用后即焚）
 //
-// 桌面版没有面板密码，拿不到一次性令牌，
-// 所以这里优先用用户填的 scanToken；没有再提示去面板取。
+// 桌面版存着面板密码，所以能自动「登录 → 取令牌」（见 scan.FetchScannerToken）；
+// 用户手填的 scanToken 优先，没有再自动取，都没有才跳过回填。
 func (s *Server) doPanelCallback(ctx context.Context, host string, entries []scan.Entry, scanToken string) {
 	url := scan.DefaultCallbackURL(host)
 	if url == "" {
@@ -844,7 +844,7 @@ func (s *Server) doPanelCallback(ctx context.Context, host string, entries []sca
 	token := strings.TrimSpace(scanToken)
 	if token == "" {
 		s.logLevel("· 跳过回填：没有扫描令牌", "warn")
-		s.logLevel("  → 请到面板「优选库」页生成一次性令牌后填入，或设置环境变量 SCANNER_TOKEN", "warn")
+		s.logLevel("  → 请设置扫描令牌（环境变量 SCANNER_TOKEN），或调用面板的 POST /api/v1/scanner-token 自行签发", "warn")
 		return
 	}
 

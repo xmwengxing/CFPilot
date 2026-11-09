@@ -209,16 +209,6 @@
     background: var(--primary-glow); border-color: var(--primary); color: #fff; font-weight: 500;
   }
 
-  /* === Country Chips === */
-  .chips { display: flex; flex-wrap: wrap; gap: 7px; padding: 10px; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius-sm); max-height: 170px; overflow-y: auto; }
-  .chip {
-    padding: 4px 11px; border-radius: 999px; border: 1px solid var(--border);
-    background: rgba(255,255,255,0.03); font-size: 12px; cursor: pointer;
-    user-select: none; color: var(--text-secondary); transition: all .15s;
-  }
-  .chip:hover { border-color: rgba(255,255,255,0.25); color: var(--text-main); }
-  .chip.on { background: var(--primary-glow); border-color: var(--primary); color: #fff; font-weight: 500; }
-
   /* === Switch Rows === */
   .switch-box {
     display: flex; align-items: flex-start; justify-content: space-between; gap: 14px;
@@ -250,15 +240,6 @@
     color: #93c5fd; margin: 0; font-size: 12.5px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
-  .log {
-    max-height: 220px; overflow-y: auto; background: #060911; border: 1px solid var(--border);
-    border-radius: var(--radius-sm); padding: 12px; font-size: 12px; line-height: 1.7;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  }
-  .log div { color: #94a3b8; }
-  .log .ok { color: var(--ok); }
-  .log .err { color: var(--err); }
-
   /* === Tables === */
   .table-wrap { max-height: 400px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-input); }
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
@@ -275,9 +256,7 @@
   .summary-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
   .pill { padding: 4px 12px; border-radius: 999px; background: rgba(255,255,255,.04); border: 1px solid var(--border); font-size: 12.5px; }
 
-  /* === Progress & Alerts === */
-  .progress { height: 8px; background: var(--bg-input); border-radius: 999px; overflow: hidden; border: 1px solid var(--border); }
-  .progress > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--primary), var(--ok)); transition: width .25s ease; }
+  /* === Alerts === */
   .warn {
     border: 1px solid rgba(245,158,11,.35); background: var(--warn-bg);
     color: #fde68a; border-radius: var(--radius-sm); padding: 10px 14px; font-size: 12.5px; line-height: 1.65; margin-bottom: 12px;
@@ -456,6 +435,7 @@
           <div class="field">
             <label>手动静态节点（每行一条，支持格式：<code class="inline">IP</code> / <code class="inline">IP:端口</code> / <code class="inline">IP:端口#备注</code>）</label>
             <textarea id="cfgAdd" class="mono" placeholder="104.16.1.1:443#US-SJC&#10;[2606:4700::1]:443#US-LAX"></textarea>
+            <p class="tip" id="cfgAddHint" style="display:none"></p>
           </div>
           <div class="row" style="background:rgba(0,0,0,0.2);padding:10px 12px;border-radius:8px;border:1px solid var(--border)">
             <span class="muted" id="localState" style="color:var(--text-main);font-weight:500">本地真连接池：0 条</span>
@@ -470,7 +450,7 @@
               <textarea
                 id="localIpsText"
                 class="mono"
-                placeholder="暂无本地优选记录 —— 请前往「本地优选」标签页运行扫描，或直接在此手动录入"
+                placeholder="暂无本地优选记录 —— 请用 CLI 或桌面版完成优选后回填，或直接在此手动录入"
                 style="min-height: 140px"
               ></textarea>
               <p class="muted" style="margin: 6px 0 0">
@@ -507,92 +487,49 @@
   <!-- Tab 3: 本地优选 -->
   <section class="tab-page hidden" id="tab-optimize">
     <div class="card">
-      <h2><span class="dot"></span>本地真连接优选器（True-Connect Scanner）</h2>
+      <h2><span class="dot"></span>本地真连接优选（True-Connect Scanner）</h2>
       <p class="hint">
-        · 以<b>数据面专属域名</b>作为 TLS SNI 与 HTTP Host，在本机进行 TCP、TLS 及 WebSocket 101 握手实测，并将高速 IP 回填至「本地真连接池」。
-        · 不熟悉命令行的新手建议下载 CFPilot 部署工具执行优选 IP。
+        在本机以<b>数据面专属域名</b>作 TLS SNI 与 HTTP Host，实测 TCP / TLS / WebSocket 101 握手，
+        把高速 IP 回填到「本地真连接池」。
+        优选由 <b>CLI</b> 完成，本页只给出用法说明。
       </p>
-
-      <div class="row" style="margin:16px 0;padding:12px 14px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.25);border-radius:10px">
-        <button class="primary" id="btnScan">⚡ 唤醒本地优选 / 生成令牌</button>
-        <button class="ghost" id="btnCopyCmd">📋 复制终端命令</button>
-        <div class="spacer"></div>
-        <span class="muted" id="bridgeState">正在检测本地桥接服务…</span>
-      </div>
-
-      <details class="fold">
-        <summary>扫描参数定制（可选，默认值已针对大多数网络环境调优）</summary>
-        <div class="fold-body">
-          <div class="grid">
-            <div class="field">
-              <label>--top <span class="muted">最终保留最优节点数</span></label>
-              <input id="optTop" type="number" value="15" min="1" max="100" />
-              <p class="muted" style="margin:4px 0 0">建议设置 10–25 条，精选高带宽低延迟节点。</p>
-            </div>
-            <div class="field">
-              <label>--sample <span class="muted">初始网段抽样 IP 数</span></label>
-              <input id="optSample" type="number" value="300" min="10" max="20000" />
-              <p class="muted" style="margin:4px 0 0">建议范围 300–2000。增大采样可提升特定地区机房命中率。</p>
-            </div>
-            <div class="field">
-              <label>--token <span class="muted">自定义回填令牌（选填）</span></label>
-              <input id="optToken" placeholder="点击「开始优选」将自动签发 10 分钟临时令牌" />
-            </div>
-          </div>
-
-          <div class="field">
-            <label>--port <span class="muted">探测目标 TLS 端口（需与客户端实际连接端口一致）</span></label>
-            <div class="check-group" id="optPortGroup">
-              <label class="check-pill"><input type="radio" name="optPort" value="443" checked /> 443（标准推荐）</label>
-              <label class="check-pill"><input type="radio" name="optPort" value="2053" /> 2053</label>
-              <label class="check-pill"><input type="radio" name="optPort" value="2083" /> 2083</label>
-              <label class="check-pill"><input type="radio" name="optPort" value="2087" /> 2087</label>
-              <label class="check-pill"><input type="radio" name="optPort" value="2096" /> 2096</label>
-              <label class="check-pill"><input type="radio" name="optPort" value="8443" /> 8443</label>
-            </div>
-          </div>
-
-          <div class="field">
-            <div class="row" style="margin-bottom:6px">
-              <label style="margin:0">--countries <span class="muted">按目标机房所属国家 / 地区过滤（点击胶囊多选，不选则全量测试）</span></label>
-              <div class="spacer"></div>
-              <button type="button" class="ghost sm" id="btnAllCountries">全选地区</button>
-              <button type="button" class="ghost sm" id="btnClearCountries">清空已选地区</button>
-            </div>
-            <!-- 交互式胶囊容器 + 隐藏同步的原生 select 以保持 100% 兼容 -->
-            <div class="chips" id="optCountriesChips"></div>
-            <select id="optCountries" multiple class="hidden"></select>
-          </div>
-
-          <div class="switch-box" style="margin-bottom:12px">
-            <div class="sw-info">
-              <label class="sw-title" for="optNoCallback">仅本地输出，不自动回填（--no-callback）</label>
-              <div class="sw-desc">开启后扫描结果仅在终端打印，不写入服务端 KV 存储。</div>
-            </div>
-            <input type="checkbox" id="optNoCallback" />
-          </div>
-
-          <div class="row end"><button class="ghost sm" id="btnRebuildCmd">↻ 更新下方命令</button></div>
-        </div>
-      </details>
 
       <div class="grid" style="margin-top:14px">
         <div>
-          <label>方式一：自动回填命令 <span class="muted">（需先点上方「唤醒本地优选」签发临时令牌）</span></label>
-          <div class="cmd-box"><pre class="cmd" id="scanCmd">请点击上方「唤醒本地优选 / 生成令牌」按钮生成带参命令</pre></div>
+          <label>① 安装并运行（推荐）</label>
+          <div class="cmd-box">
+            <pre class="cmd">npm i -g cfpilot
+cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre>
+          </div>
+          <p class="muted" style="margin:6px 0 0">
+            免安装：把 <code class="inline">npm i -g cfpilot</code> 换成 <code class="inline">npx -y cfpilot@latest scan …</code> 即可。
+            需要 Node.js 18+；扫描期间请关闭本机代理的 TUN 模式与系统代理，确保测的是真实直连质量。
+          </p>
         </div>
         <div>
-          <label>方式二：免令牌纯扫描命令 <span class="muted">（直接在本地终端运行，结束后手动复制 IP）</span></label>
-          <div class="cmd-box"><pre class="cmd" id="scanCmdNoToken">正在生成命令…</pre></div>
+          <label>② 查看全部参数</label>
+          <div class="cmd-box">
+            <pre class="cmd">cfpilot scan --help</pre>
+          </div>
+          <p class="muted" style="margin:6px 0 0">
+            常用：<code class="inline">--top</code> 保留节点数、<code class="inline">--sample</code> 抽样规模、
+            <code class="inline">--countries</code> 地区过滤、<code class="inline">--no-callback</code> 只输出不回填。
+          </p>
         </div>
       </div>
 
-      <p class="tip">
-        <b>运行环境要求</b>：本机需安装 <b>Node.js 18+</b>（<a href="https://nodejs.org/zh-cn/download" target="_blank" rel="noopener">官方下载</a> / <a href="https://npmmirror.com/" target="_blank" rel="noopener">国内镜像</a>）。扫描期间请暂时关闭本机代理软件的 TUN 模式或系统代理，确保测试的是真实物理直连质量。
-      </p>
+      <div class="row" style="margin:16px 0 0;padding:12px 14px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.25);border-radius:10px">
+        <span class="muted" style="color:var(--text-main)">
+          不想用命令行？下载桌面版：内置优选与一键部署，图形界面操作。
+        </span>
+        <div class="spacer"></div>
+        <a class="ghost sm" href="https://github.com/xmwengxing/CFPilot/releases" target="_blank" rel="noopener">桌面版下载 ↗</a>
+      </div>
 
-      <div class="progress" style="margin:16px 0 10px"><i id="scanBar"></i></div>
-      <div class="log" id="scanLog"><div>[就绪] 等待启动本地扫描任务或复制命令至终端执行…</div></div>
+      <p class="tip">
+        <b>数据面 / 控制面别填反</b>：<code class="inline">--host</code> 是数据面（客户端实际连接的域名），
+        <code class="inline">--panel</code> 是控制面（面板所在域名）。填反会出现「令牌校验失败」或回填不生效。
+      </p>
     </div>
   </section>
 
@@ -620,35 +557,11 @@
     </div>
 
     <div class="card">
-      <h2><span class="dot"></span>订阅生成参数</h2>
-      <p class="hint">控制订阅里节点的准入与数量。只影响订阅生成，不影响数据面转发。</p>
-      <div class="grid-3">
-        <div class="field"><label>最低准入下行速度 DLS（MB/s，0 = 不限，仅 CSV 生效）</label><input id="cfgDls" type="number" min="0" step="1" /><p class="tip">仅过滤 CSV。</p></div>
-        <div class="field"><label>最高准入延迟 MAX_LATENCY（ms，0 = 不限，仅 CSV 生效）</label><input id="cfgMaxLatency" type="number" min="0" step="1" /><p class="tip">仅过滤 CSV。</p></div>
-        <div class="field"><label>订阅节点总数上限（0 = 不限）</label><input id="cfgMaxNodes" type="number" min="0" step="1" /><p class="tip">限制订阅节点总数。</p></div>
-      </div>
-      <div class="row end"><button class="primary" id="btnSaveSubGen">保存订阅生成参数</button></div>
-    </div>
-
-    <details class="fold" id="subNodesFold">
-      <summary>订阅下发节点清单（前 100 条）</summary>
-      <div class="fold-body">
-        <div class="table-wrap">
-          <table id="subTable">
-            <thead><tr><th>#</th><th>来源类型</th><th>节点地址</th><th>边缘机房</th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </div>
-    </details>
-
-    <div class="card">
       <h2><span class="dot"></span>远程第三方优选订阅源（可选扩展）</h2>
       <p class="hint">
         挂载外部维护的优选节点来源，订阅生成时会自动拉取并**独立成池**追加进去。<br>
         <b>TXT 列表</b>：每行一个 <code>IP:端口</code> 或 <code>IP:端口#备注</code>，按行解析。<br>
-        <b>CSV 测速表</b>：第三方测速工具 导出的 <code>result.csv</code>，
-        额外受下方的「最低准入下行速度 / 最高准入延迟」过滤（<b>仅对 CSV 生效</b>）。<br>
+        <b>CSV 测速表</b>：第三方测速工具 导出的 <code>result.csv</code>。<br>
         ⚠️ 远程池<b>不受</b>「节点来源」页那三个勾选项影响 —— 配了就生效。
         拉取失败会在「节点来源 → 实时下发节点预览」里报出来。
       </p>
@@ -663,7 +576,8 @@
       <h2><span class="dot"></span>Clash 分流规则（进阶）</h2>
       <p class="hint">
         这里编辑的是 Clash 订阅里 <code class="inline">rules</code> / <code class="inline">proxy-groups</code> 的来源（ini 格式，存 KV 的 <code class="inline">ROUTE_PROFILE</code>）。
-        留空 = 用内置 GEOSITE/GEOIP 规则；填内容后，订阅会按你的规则生成分流。
+        框里显示的是**当前生效的规则** —— 没自定义时就是内置那套 GEOSITE/GEOIP 规则；
+        改动后保存即生效，点「清空（回落内置）」可退回内置。
         完整 YAML 在下方只读预览，改完规则后点「刷新预览」再导入客户端更稳。
       </p>
       <div class="field">
@@ -679,7 +593,7 @@
       </div>
       <div class="field" style="margin-top:14px">
         <label>Clash 订阅 YAML 预览（只读）</label>
-        <textarea id="clashYamlPreview" class="mono" rows="10" readonly placeholder="点「刷新预览」查看当前 Clash 订阅的 YAML 全文（节点由上方订阅生成参数决定）"></textarea>
+        <textarea id="clashYamlPreview" class="mono" rows="10" readonly placeholder="点「刷新预览」查看当前 Clash 订阅的 YAML 全文"></textarea>
       </div>
       <div class="row">
         <button class="ghost" id="btnPreviewClashYaml">↻ 刷新预览</button>
@@ -1028,8 +942,6 @@
   body.light th { background: #f6f8fc; color: var(--text-secondary); }
   body.light tbody tr:hover { background: rgba(15, 23, 42, 0.035); }
   body.light pre.cmd { background: #f6f8fc; color: #1d4ed8; }
-  body.light .log { background: #f6f8fc; }
-  body.light .log div { color: #475569; }
   body.light code, body.light code.inline { color: #1d4ed8; background: var(--bg-input); }
   body.light .fold { background: rgba(255, 255, 255, 0.75); }
   body.light .fold > summary { color: #334155; }
@@ -1039,7 +951,6 @@
   body.light .source,
   body.light .switch-box { background: rgba(15, 23, 42, 0.02); }
   body.light .source.on { background: rgba(37, 99, 235, 0.06); border-color: rgba(37, 99, 235, 0.45); }
-  body.light .chip { background: rgba(15, 23, 42, 0.03); color: var(--text-secondary); }
   body.light .pill { background: rgba(15, 23, 42, 0.04); }
   body.light .tip { background: rgba(37, 99, 235, 0.06); }
   body.light .toast { background: #ffffff; border-color: rgba(15, 23, 42, 0.12); color: var(--text-main); }
@@ -1069,10 +980,6 @@
   var state = {
     config: null,
     status: null,
-    token: null,
-    cmd: '',
-    countries: [],
-    selected: [],
     nodes: []
   };
 
@@ -1188,7 +1095,6 @@
     return api('/api/v1/status').then(function (s) {
       state.status = s;
       renderStatus(s);
-      renderCmds();
       return s;
     }).catch(function (e) { toast(e.message, true); });
   }
@@ -1197,8 +1103,6 @@
     loadStatus();
 
     api('/api/v1/pool/meta').then(function (m) {
-      state.countries = m.countries || [];
-      renderCountries();
       $('builtinDomains').value = '内置 ' + m.builtin.domains + ' 个优选域名 / ' + m.builtin.cidrs + ' 个官方 CIDR 网段';
       $('domainLib').value = (m.customDomains || []).join('\n');
     }).catch(function () {});
@@ -1212,21 +1116,23 @@
 
     loadNodes();
     loadRouteProfile();
-    checkBridge();
   }
 
   function loadRouteProfile() {
     return api('/api/v1/route-profile').then(function (r) {
-      $('cfgRouteProfile').value = r.raw || '';
-      $('routeProfileState').textContent = r.isCustom ? '（自定义规则生效中）' : '（当前用内置规则，留空即回落内置）';
+      // 显示**生效中**的规则（自定义优先，否则内置），而不是 KV 的原始值。
+      // 之前只填 raw：没写自定义规则时 raw 是空串，用户看到「什么都没有」，
+      // 但订阅里其实有一整套内置 GEOSITE/GEOIP 规则 —— 读到的东西和生效的不是一回事。
+      $('cfgRouteProfile').value = r.text || '';
+      $('routeProfileState').textContent = r.isCustom ? '（自定义规则生效中）' : '（当前用内置规则，改动后保存即生效）';
     }).catch(function () {});
   }
 
   function saveRouteProfile(raw, okMsg) {
     return api('/api/v1/route-profile', { method: 'PUT', body: JSON.stringify({ raw: raw }) })
       .then(function (r) {
-        $('cfgRouteProfile').value = r.raw || '';
-        $('routeProfileState').textContent = r.isCustom ? '（自定义规则生效中）' : '（当前用内置规则，留空即回落内置）';
+        $('cfgRouteProfile').value = r.text || '';
+        $('routeProfileState').textContent = r.isCustom ? '（自定义规则生效中）' : '（当前用内置规则，改动后保存即生效）';
         toast(okMsg || '分流规则已保存');
       })
       .catch(function (e) { toast(e.message, true); });
@@ -1313,9 +1219,6 @@
     $('cfgAdd').value = c.add || '';
     $('cfgAddApi').value = c.addApi || '';
     $('cfgAddCsv').value = c.addCsv || '';
-    $('cfgDls').value = c.dls || 0;
-    $('cfgMaxLatency').value = c.maxLatency || 0;
-    $('cfgMaxNodes').value = c.maxNodes || 0;
     $('cfgProxyIp').value = c.proxyIp || '';
     $('cfgSocks5').value = c.socks5 || '';
     $('cfgHttpProxy').value = c.httpProxy || '';
@@ -1347,29 +1250,6 @@
     });
   }
 
-  function renderCountries() {
-    var sel = $('optCountries');
-    var chipsBox = $('optCountriesChips');
-    if (!sel || !chipsBox) return;
-    if (!state.countries.length) {
-      sel.innerHTML = '<option value="">（加载中…）</option>';
-      chipsBox.innerHTML = '<span class="muted">正在加载国家/地区列表…</span>';
-      return;
-    }
-    var selectedMap = {};
-    Array.prototype.forEach.call(sel.selectedOptions || [], function (o) {
-      if (o.value) selectedMap[o.value] = true;
-    });
-    sel.innerHTML = state.countries.map(function (c) {
-      var isSel = selectedMap[c.code] ? ' selected' : '';
-      return '<option value="' + esc(c.code) + '"' + isSel + '>' + esc(c.name) + ' ' + esc(c.code) + '</option>';
-    }).join('');
-    chipsBox.innerHTML = state.countries.map(function (c) {
-      var onCls = selectedMap[c.code] ? ' on' : '';
-      return '<span class="chip' + onCls + '" data-code="' + esc(c.code) + '">' + esc(c.name) + ' · ' + esc(c.code) + '</span>';
-    }).join('');
-  }
-
   function saveConfig(patch, okMsg) {
     return api('/api/v1/config', { method: 'PUT', body: JSON.stringify({ config: patch }) })
       .then(function (r) {
@@ -1381,6 +1261,22 @@
         return r;
       })
       .catch(function (e) { toast(e.message, true); throw e; });
+  }
+
+  /**
+   * 在输入框下方显示一条提示。
+   *
+   * 手动指定 IP 的语法判据**只在后端**（`config-validate.ts` 的 `validateIpList`，
+   * 以解析器 `cleanIpLine` 为准），面板不重复实现 ——
+   * 两边判据不一致会出现「前端说没问题、后端却丢掉了」。
+   * 面板只负责把后端返回的「哪一行、为什么」显示出来。
+   */
+  function showIpHint(text, isErr) {
+    var hint = $('cfgAddHint');
+    if (!hint) return;
+    hint.style.display = text ? '' : 'none';
+    hint.textContent = text || '';
+    hint.style.color = isErr ? 'var(--danger)' : 'var(--text-dim)';
   }
 
   function loadNodes() {
@@ -1399,12 +1295,6 @@
         '<td>' + (n.latency ? n.latency + ' ms' : '-') + '</td><td>' + (n.speed ? n.speed + ' MB/s' : '-') + '</td></tr>';
     }).join('');
     $('nodeTable').querySelector('tbody').innerHTML = rows || '<tr><td colspan="6" class="muted">当前暂无可用节点</td></tr>';
-
-    var subRows = list.map(function (n, i) {
-      return '<tr><td>' + (i + 1) + '</td><td><span class="tag ' + esc(n.source) + '">' + esc(n.source) + '</span></td>' +
-        '<td class="mono">' + hostTxt(n.ip) + ':' + n.port + '</td><td>' + esc(n.coloLabel || n.colo || '-') + '</td></tr>';
-    }).join('');
-    $('subTable').querySelector('tbody').innerHTML = subRows || '<tr><td colspan="4" class="muted">当前暂无可用节点</td></tr>';
 
     $('previewSummary').textContent = '（共生成 ' + (r.count || 0) + ' 个节点）';
 
@@ -1440,7 +1330,7 @@
     $('localState').textContent = '本地真连接池：' + local + ' 条';
   }
 
-  // === [Module 3c: 配置备份与迁移] ===
+  // === [Module 4a: 配置备份与迁移] ===
   //
   // 导出用白名单（后端负责），面板只负责展示与确认。
   // 「未包含」的字段必须明确告诉用户 —— 否则他迁移后才发现连不上。
@@ -1469,7 +1359,7 @@
     $('cfgTransferHint').innerHTML = '将改动 ' + diff.length + ' 项：' + html;
   }
 
-  // === [Module 3b: 订阅签名令牌] ===
+  // === [Module 4b: 订阅签名令牌] ===
   // 三种链接（base64 / clash / singbox）的「身份段」随模式变化：
   //   经典模式 → UUID；签名模式 → v1.<exp>.<nonce>.<sig>
   // 所以刷新链接前必须先知道当前令牌，否则签名模式下会拼出必然 403 的旧链接。
@@ -1533,169 +1423,7 @@
     $('subSingbox').value = base + '?target=singbox';
   }
 
-  // === [Module 5: Local True-Connect Scanner & Bridge SSE] ===
-  var BRIDGE = 'http://127.0.0.1:19527';
-  var es = null;
-
-  function log(text, cls) {
-    var box = $('scanLog');
-    var line = document.createElement('div');
-    if (cls) line.className = cls;
-    line.textContent = text;
-    box.appendChild(line);
-    box.scrollTop = box.scrollHeight;
-  }
-
-  function checkBridge() {
-    var ctrl = new AbortController();
-    var timer = setTimeout(function () { ctrl.abort(); }, 1800);
-    fetch(BRIDGE + '/status', { signal: ctrl.signal })
-      .then(function (r) { return r.json(); })
-      .then(function (j) {
-        clearTimeout(timer);
-        $('bridgeState').textContent = '● 本地桥接服务在线 v' + (j.version || '?');
-        $('bridgeState').style.color = 'var(--ok)';
-      })
-      .catch(function () {
-        clearTimeout(timer);
-        $('bridgeState').textContent = '○ 未检测到本地桥接服务（可复制下方命令在终端直接运行）';
-        $('bridgeState').style.color = 'var(--text-secondary)';
-      });
-  }
-
-  function readOpts() {
-    var portEl = document.querySelector('input[name="optPort"]:checked');
-    var countries = [];
-    var sel = $('optCountries');
-    if (sel) {
-      Array.prototype.forEach.call(sel.selectedOptions || [], function (opt) {
-        if (opt.value) countries.push(opt.value);
-      });
-    }
-    return {
-      token: ($('optToken').value || '').trim(),
-      top: Math.max(1, Math.min(100, Number($('optTop').value) || 15)),
-      sample: Math.max(10, Math.min(20000, Number($('optSample').value) || 300)),
-      port: portEl ? portEl.value : '443',
-      countries: countries,
-      noCallback: $('optNoCallback').checked
-    };
-  }
-
-  function scanHost() {
-    return (state.status && state.status.nodeDomain) || location.hostname;
-  }
-
-  function buildCmd(token, withToken) {
-    var host = scanHost();
-    var panelHost = location.hostname;
-    var o = readOpts();
-    // ⚠️ 包名必须是 `cfpilot`（不是旧的 `cfpilot-scanner`）。
-    //
-    // 旧包已在 2026-10 归档废弃（npm 上停在 0.6.5），
-    // 而「合并成单一 CLI」之后入口是 **`cfpilot scan`** 这个子命令。
-    // 继续用旧包名的话，用户复制这条命令会装到 0.6.5 ——
-    // 那个版本没有 `--panel` / `--no-callback` 等参数，命令直接报错。
-    var parts = ['npx -y cfpilot@latest', 'scan'];
-    parts.push('--host "' + host + '"');
-    if (panelHost && panelHost !== host) {
-      parts.push('--panel "' + panelHost + '"');
-    }
-    if (withToken && token) {
-      parts.push('--token "' + token + '"');
-    }
-    if (o.noCallback || !withToken) parts.push('--no-callback');
-    parts.push('--port ' + o.port);
-    if (o.countries.length) parts.push('--countries ' + o.countries.join(','));
-    parts.push('--top ' + o.top);
-    parts.push('--sample ' + o.sample);
-    return parts.join(' ');
-  }
-
-  function renderCmds() {
-    var o = readOpts();
-    var token = state.token || o.token;
-    if (token) {
-      $('scanCmd').textContent = buildCmd(token, true);
-    } else {
-      $('scanCmd').textContent = '请点击上方「唤醒本地优选 / 生成令牌」按钮生成带参命令';
-    }
-    $('scanCmdNoToken').textContent = buildCmd('', false);
-  }
-
-  function prepareScan() {
-    return api('/api/v1/scanner-token', { method: 'POST' }).then(function (r) {
-      state.token = r.token;
-      renderCmds();
-      return r.token;
-    });
-  }
-
-  function startScan() {
-    $('scanLog').innerHTML = '';
-    var o = readOpts();
-    prepareScan().then(function (token) {
-      var payload = {
-        host: scanHost(),
-        port: Number(o.port),
-        countries: o.countries,
-        token: token,
-        callback: location.origin + '/api/v1/preferred-ips',
-        top: o.top,
-        sample: o.sample
-      };
-      return fetch(BRIDGE + '/start-scan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      }).then(function (r) { return r.json(); });
-    }).then(function (r) {
-      if (!r || !r.ok) throw new Error((r && r.error) || '本地桥接服务未响应');
-      log('✓ 已成功唤醒本地优选服务，任务编号：' + (r.jobId || '-'), 'ok');
-      listenEvents(r.jobId);
-    }).catch(function (e) {
-      log('⚠ 未能连接本地桥接服务（' + e.message + '）', 'err');
-      log('→ 已为您生成一次性回填令牌，请直接点击「复制终端命令」在本机终端执行扫描。');
-      $('scanBar').style.width = '0%';
-    });
-  }
-
-  function listenEvents(jobId) {
-    if (es) { es.close(); es = null; }
-    es = new EventSource(BRIDGE + '/events?jobId=' + encodeURIComponent(jobId || ''));
-    es.addEventListener('stage', function (ev) {
-      var d = JSON.parse(ev.data);
-      log('▶ ' + (d.name || ('阶段 ' + d.stage)) + '（共 ' + (d.total || 0) + ' 个候选 IP）');
-    });
-    es.addEventListener('progress', function (ev) {
-      var d = JSON.parse(ev.data);
-      if (typeof d.percent === 'number') $('scanBar').style.width = d.percent + '%';
-      if (d.message) log(d.message);
-      else if (d.total) log('阶段 ' + d.stage + ' 进度：' + d.done + '/' + d.total);
-    });
-    es.addEventListener('result', function (ev) {
-      var d = JSON.parse(ev.data);
-      var e = d.entry || {};
-      log('✓ 入围节点：' + hostTxt(e.ip) + (e.port ? ':' + e.port : '') + (e.colo ? ' [' + e.colo + ']' : ''), 'ok');
-    });
-    es.addEventListener('done', function (ev) {
-      var d = JSON.parse(ev.data);
-      log('✓ 优选任务完成，共筛选出 ' + (d.count || 0) + ' 条优质 IP，已同步至「本地真连接池」', 'ok');
-      $('scanBar').style.width = '100%';
-      loadAll();
-    });
-    es.addEventListener('error', function (ev) {
-      try {
-        var d = JSON.parse(ev.data);
-        log('✗ 扫描异常：' + (d.message || '未知错误'), 'err');
-      } catch (e) {
-        log('✗ 扫描事件流连接中断', 'err');
-      }
-    });
-    es.onerror = function () {};
-  }
-
-  // === [Module 6: Event Listeners & User Actions] ===
+  // === [Module 5: Event Listeners & User Actions] ===
   function switchTab(tab) {
     Array.prototype.forEach.call($('tabs').children, function (b) {
       b.classList.toggle('active', b.getAttribute('data-tab') === tab);
@@ -1736,10 +1464,12 @@
       enableTrojan: $('cfgEnableTrojan').checked,
       enableXhttp: $('cfgEnableXhttp').checked,
       addApi: $('cfgAddApi').value,
-      addCsv: $('cfgAddCsv').value,
-      dls: Number($('cfgDls').value || 0),
-      maxLatency: Number($('cfgMaxLatency').value || 0),
-      maxNodes: Number($('cfgMaxNodes').value || 0)
+      addCsv: $('cfgAddCsv').value
+      // ⚠️ 订阅准入参数（dls / maxLatency / maxNodes）**不再从这里提交**：
+      // 它们的输入框随「订阅生成参数」卡片一起移除了，而本函数是
+      // 「出站与高级」页与「远程订阅源」页共用的保存入口。
+      // 不提交 ⇒ `mergeConfig` 不覆盖 ⇒ 用户原先设过的值原样保留
+      // （这三个字段仍可通过配置导入 / API 修改）。
     }, msg || '出站与远程池配置已保存');
   }
 
@@ -1783,34 +1513,6 @@
       toast('已生成新的随机 UUID，请点击「保存入站配置」生效');
     });
 
-    // 交互式国家胶囊选择逻辑（同步至隐藏的 #optCountries select）
-    $('optCountriesChips').addEventListener('click', function (e) {
-      var chip = e.target.closest('.chip[data-code]');
-      if (!chip) return;
-      var code = chip.getAttribute('data-code');
-      var sel = $('optCountries');
-      Array.prototype.forEach.call(sel.options, function (opt) {
-        if (opt.value === code) opt.selected = !opt.selected;
-      });
-      chip.classList.toggle('on');
-      renderCmds();
-    });
-
-    // 地区胶囊：全选 / 清空
-    $('btnAllCountries').addEventListener('click', function () {
-      var sel = $('optCountries');
-      Array.prototype.forEach.call(sel.options, function (opt) { if (opt.value) opt.selected = true; });
-      Array.prototype.forEach.call($('optCountriesChips').querySelectorAll('.chip'), function (c) { c.classList.add('on'); });
-      renderCmds();
-    });
-
-    $('btnClearCountries').addEventListener('click', function () {
-      var sel = $('optCountries');
-      Array.prototype.forEach.call(sel.options, function (opt) { opt.selected = false; });
-      Array.prototype.forEach.call($('optCountriesChips').querySelectorAll('.chip.on'), function (c) { c.classList.remove('on'); });
-      renderCmds();
-    });
-
     // 订阅端口：全选 / 清空
     function setSubPortsChecked(checked) {
       Array.prototype.forEach.call(document.querySelectorAll('input[name="subPort"]'), function (cb) {
@@ -1845,6 +1547,12 @@
             poolCountries: '',
             add: $('cfgAdd').value
           }, '节点来源配置已保存');
+          showIpHint('');
+        })
+        .catch(function (e) {
+          // 后端是唯一判据（前端不重复实现解析规则，避免两边判据不一致）。
+          // 错误信息里已经带了行号与原因 —— 显示在输入框下面，别只弹一下就没了。
+          showIpHint(e.message, true);
         });
     });
 
@@ -1877,7 +1585,6 @@
     // 高级页两个保存按钮均统一提交当前页全部字段，防止用户改了上半部分点下半部分按钮漏存
     $('btnSaveAdvanced').addEventListener('click', function () { saveAllAdvancedAndRemote('出站与高级配置已保存'); });
     $('btnSaveRemote').addEventListener('click', function () { saveAllAdvancedAndRemote('远程订阅源配置已保存'); });
-    $('btnSaveSubGen').addEventListener('click', function () { saveAllAdvancedAndRemote('订阅生成参数已保存'); });
     $('btnReloadRouteProfile').addEventListener('click', function () { loadRouteProfile(); toast('已重新读取分流规则'); });
     $('btnSaveRouteProfile').addEventListener('click', function () { saveRouteProfile($('cfgRouteProfile').value); });
     $('btnClearRouteProfile').addEventListener('click', function () { if (confirm('清空自定义规则、回落内置规则？')) saveRouteProfile('', '已清空，回落内置规则'); });
@@ -2013,23 +1720,6 @@
         loadLocalIps();
       }).catch(function (e) { toast(e.message, true); });
     });
-
-    $('btnScan').addEventListener('click', startScan);
-    $('btnCopyCmd').addEventListener('click', function () {
-      var cmd = $('scanCmd').textContent;
-      if (!cmd || /请点击/.test(cmd)) cmd = $('scanCmdNoToken').textContent;
-      copy(cmd);
-    });
-    $('btnRebuildCmd').addEventListener('click', function () { renderCmds(); toast('扫描命令已更新'); });
-
-    ['optToken', 'optTop', 'optSample', 'optNoCallback'].forEach(function (id) {
-      $(id).addEventListener('input', renderCmds);
-      $(id).addEventListener('change', renderCmds);
-    });
-    Array.prototype.forEach.call(document.querySelectorAll('input[name="optPort"]'), function (radio) {
-      radio.addEventListener('change', renderCmds);
-    });
-    renderCmds();
 
     $('btnRefreshSub').addEventListener('click', function () { refreshSubToken(); loadNodes(); toast('订阅链接与节点已刷新'); });
 

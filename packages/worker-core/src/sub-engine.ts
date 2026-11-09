@@ -18,7 +18,7 @@ import { isIpv4, isIpv6 } from './protocols/address'
 import { base64Encode } from './util'
 import { CpuBudget } from './budget'
 import { CF_IPV4_CIDRS, CURATED_OFFICIAL_IPS, PREFERRED_DOMAINS, coloLabel, countryOfColo, isKnownCountry } from './data/pools'
-import { buildBuiltinRules, renderRouteSections } from './route-profile'
+import { buildBuiltinRules, renderRouteSections, ROUTE_MAIN_GROUP } from './route-profile'
 
 export type { SubFormat }
 
@@ -97,6 +97,14 @@ export function cleanIpLine(line: string, defaultPort = DEFAULT_NODE_PORT): Clea
   return { ip: text, port: defaultPort, remark }
 }
 
+/**
+ * 主机名判定（不含协议/路径）。
+ *
+ * ⚠️ **标签允许纯数字** —— 所以 `999.1.1.1` 按域名规则是合法的。
+ * 用户写它几乎一定是写错的 IP，但**解析层保持宽容**：
+ * 校验的判据必须与解析一致（见 `config-validate.ts` 的 `validateIpList`），
+ * 否则会出现「校验说没问题但节点没进去」—— 那比不校验更糟。
+ */
 function isHostname(host: string): boolean {
   return /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/.test(host)
 }
@@ -1545,7 +1553,7 @@ export function renderClash(ctx: RenderContext): string {
   // ⚠️ 必须在写 proxy-groups **之前**算好：ini 里定义的组要并进
   // proxy-groups 段（Clash 要求所有组都在这个键下）。
   const route = renderRouteSections(ctx.routeProfile ?? '', {
-    mainGroup: 'CFPilot',
+    mainGroup: ROUTE_MAIN_GROUP,
     autoGroup: '自动选择',
   })
 
@@ -1611,10 +1619,10 @@ export function renderClash(ctx: RenderContext): string {
     lines.push(...route.rules)
     // 确保末尾一定有 MATCH 兜底（否则未匹配流量不知去向）
     if (!route.rules.some((r) => r.includes('MATCH,'))) {
-      lines.push('  - MATCH,CFPilot')
+      lines.push(`  - MATCH,${ROUTE_MAIN_GROUP}`)
     }
   } else {
-    lines.push(...buildBuiltinRules('CFPilot'))
+    lines.push(...buildBuiltinRules(ROUTE_MAIN_GROUP))
   }
   lines.push('')
   return lines.join('\n')

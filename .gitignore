@@ -27,6 +27,8 @@ packages/worker-core/src/route-profile.generated.ts
 /packages/worker-core/.merge-single/
 /packages/worker-core/.dev-remote/
 /packages/worker-core/dist-wr/
+# 本地预览面板用的 wrangler 配置（含固定的面板路径与密码，只对本机有效）
+/packages/worker-core/wrangler.local.jsonc
 
 # GUI 打包产物（图标源文件在 packages/gui/build，需保留）
 /packages/gui/release/

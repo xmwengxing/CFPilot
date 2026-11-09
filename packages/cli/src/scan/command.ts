@@ -426,7 +426,7 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
         `  ${NAME} 本地桥接服务已启动`,
         `  监听地址：http://${host}:${handle.port}`,
         `  版本：v${BRIDGE_VERSION}`,
-        '  现在可以在 CFPilot 面板点击「一键本地真连接优选」。',
+        '  可用 HTTP 接口：GET /status、POST /start-scan、GET /events、GET /results',
         '  按 Ctrl+C 退出。',
         '',
       ].join('\n')
@@ -484,7 +484,7 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
    *    现在用 --panel 指定控制面；不给则回落到 --host（兼容单项目部署）。
    *
    * 2. **自动获取临时令牌**：给 --panel + --panel-password 即可，
-   *    不必手动去面板点「生成令牌」。
+   *    用户不必自己去签发令牌。
    *
    *    令牌 10 分钟有效，而这里是**扫描结束后**才获取，
    *    所以不存在「扫描太久令牌过期」的问题 —— 与图形版同一思路。

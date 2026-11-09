@@ -360,14 +360,29 @@ export async function loadRouteProfile(store: Store): Promise<string> {
   return (await store.get(ROUTE_PROFILE_KEY)) ?? ''
 }
 
-/** 保存分流规则（空串表示清空自定义、回落内置；删前先读避免写配额浪费） */
+/**
+ * 保存分流规则。
+ *
+ * 空串 = 清空自定义、回落内置（删键）。
+ *
+ * ⚠️ **删键前不要先读**：KV 的读是最终一致的（边缘缓存约 60 秒），
+ * 陈旧读会把「其实有值」误判成「没有」→ 跳过删除 → 自定义规则留在 KV 里，
+ * 用户点了「清空（回落至内置）」却没清掉。
+ * 删除本身是幂等的，多写一次配额换来**行为正确** ——
+ * 而这是用户显式点击的动作（不是每请求都会走的路径），配额代价可以接受。
+ *
+ * ⚠️ 「与内置规则完全一致」也走删键（由调用方判断后传空串）：
+ * 面板的输入框显示的是**生效中的规则**（没自定义时就是内置那一份），
+ * 用户原样点「保存」不该在 KV 里留下一份与内置重复的自定义副本
+ * （那会让之后的内置规则更新永远不生效）。
+ */
 export async function saveRouteProfile(store: Store, raw: string): Promise<void> {
   const cleaned = raw.trim()
   if (!cleaned) {
-    if ((await store.get(ROUTE_PROFILE_KEY)) !== null) await store.delete(ROUTE_PROFILE_KEY)
+    await store.delete(ROUTE_PROFILE_KEY)
     return
   }
-  if ((await loadRouteProfile(store)) !== cleaned) await store.put(ROUTE_PROFILE_KEY, cleaned)
+  await store.put(ROUTE_PROFILE_KEY, cleaned)
 }
 
 /** 保存优选域名库（空数组表示清空自定义库、回落到内置库） */

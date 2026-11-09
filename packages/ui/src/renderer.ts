@@ -659,6 +659,12 @@
       const st = await window.cfpilot.serviceStatus()
       $text('rtLocal').textContent =
         '运行中 · 端口 ' + st.port + ' · 已运行 ' + fmtUptime(st.uptimeSeconds) + (st.version ? ' · v' + st.version : '')
+      // 左上角 logo 下方也标一下版本 —— 用户第一眼就能确认跑的是哪个版本。
+      const badge = document.getElementById('appVersion')
+      if (badge) {
+        badge.textContent = st.version ? 'v' + st.version : ''
+        badge.title = st.version ? '本程序版本 ' + st.version : ''
+      }
     } catch {
       $text('rtLocal').textContent = '读取失败'
     }
@@ -1788,7 +1794,8 @@
       const reportButton = document.createElement('button')
       reportButton.type = 'button'
       reportButton.className = 'btn btn-ghost'
-      reportButton.textContent = '质量报告'
+      reportButton.textContent = '质量检测'
+      reportButton.title = '把这条 IP 能跑的检测都跑一遍（分层复测 + IP 纯净度），结果写回优选历史'
       reportButton.setAttribute('aria-expanded', 'false')
       reportButton.disabled = !payload.sessionId
       reportCell.appendChild(reportButton)
@@ -1811,16 +1818,24 @@
         reportRow.hidden = !reportRow.hidden
         reportButton.setAttribute('aria-expanded', String(!reportRow.hidden))
         if (reportRow.hidden || reportLoaded || !payload.sessionId) return
-        reportDetail.textContent = '正在读取本地报告…'
+        reportDetail.textContent = '正在检测（分层复测 + IP 纯净度，约 15~40 秒）…'
         reportButton.disabled = true
         try {
-          const result = await window.cfpilot.getIPQualityReport({ sessionId: payload.sessionId, ip: e.ip, port: e.port })
-          if (result.ok && result.report) {
-            reportLoaded = true
-            renderIPQualityReport(reportDetail, result.report)
-          } else {
-            reportDetail.textContent = result.error || '报告不可用'
+          // 质量检测：后端把能跑的检查都跑一遍并写回优选历史，
+          // 返回的已是重建后的完整报告（不再是「大半未执行」）。
+          const result = await window.cfpilot.runQualityCheck({
+            sessionId: payload.sessionId,
+            ip: e.ip,
+            port: e.port,
+          })
+          if (!result.ok || !result.report) {
+            reportDetail.textContent = result.error || '检测不可用'
+            return
           }
+          reportLoaded = true
+          renderIPQualityReport(reportDetail, result.report)
+        } catch (error) {
+          reportDetail.textContent = error instanceof Error ? error.message : String(error)
         } finally {
           reportButton.disabled = false
         }
@@ -2651,17 +2666,15 @@
           // 端口固定 443：Pages 的 HTTPS 入口，2053 等端口在部分网络会被阻断
           wsPath: path,
           probePath,
+          probeTransport: (($('optProbeTransport') as unknown as HTMLSelectElement | null)?.value as 'ws' | 'xhttp' | 'both' | undefined) || 'ws',
+          xhttpPath: ($('optXhttpPath') as unknown as HTMLInputElement | null)?.value.trim() || '/xhttp',
           // 自定义候选：选「自定义列表」时跳过网段采样，直接用导入的 IP
           candidates: sourceMode === 'custom' ? candidateText() : '',
-          // 「测速」下拉：off = 跳过测速。
-          // 原先是「跳过测速」开关（勾选=跳过），改成开/关下拉后语义相反，
-          // 这里必须按 value 判断，不能沿用 checked。
-          skipSpeed: ($('optNoSpeed') as unknown as HTMLSelectElement).value === 'off',
+          // 测速档位：two=短测粗筛+精确测速，one=仅精确测速，off=关
+          skipSpeed: (($('optSpeedMode') as unknown as HTMLSelectElement | null)?.value ?? 'two') === 'off',
           sample: Number($('optSample').value) || 6556,
           top: Number($('optTop').value) || 15,
-          // 两轮测速：默认勾选。开启 = 全量短测粗排 + 前 30 精测；
-          // 关闭 = 旧的「按 TLS/延迟截前 30 个直接精测」。
-          twoStageSpeed: ($('optTwoStageSpeed') as HTMLInputElement).checked,
+          twoStageSpeed: (($('optSpeedMode') as unknown as HTMLSelectElement | null)?.value ?? 'two') === 'two',
           countries: readOptCountries(),
           speedMode: speedUrl ? 'url' : 'auto',
           speedUrl,
@@ -2824,6 +2837,11 @@
             log(`已填入 WS 路径：${path.path}`, 'ok')
           } else {
             log('识别 WS 路径失败：' + (path.error ?? '未知错误'), 'err')
+          }
+          if (path.ok && (path as { xhttpPath?: string }).xhttpPath) {
+            const xEl = $('optXhttpPath') as unknown as HTMLInputElement | null
+            if (xEl) xEl.value = (path as { xhttpPath: string }).xhttpPath
+            log(`已填入 XHTTP 路径：${(path as { xhttpPath: string }).xhttpPath}`, 'ok')
           }
         } catch (err) {
           log('识别 WS 路径异常：' + (err instanceof Error ? err.message : String(err)), 'err')
@@ -3142,6 +3160,7 @@
       reportButton.type = 'button'
       reportButton.textContent = '质量报告'
       reportButton.className = 'btn'
+      reportButton.title = '查看已保存的质量报告（只读）；要补测证据请用报告里的「重新检测此 IP」'
       tdReport.appendChild(reportButton)
       tr.appendChild(tdReport)
       tbody.appendChild(tr)
@@ -3154,14 +3173,21 @@
       tbody.appendChild(reportRow)
       let loaded = false
       reportButton.addEventListener('click', async () => {
+        // 展开/收起都走这里：报告已加载过就直接切显隐，不重复读。
         reportRow.hidden = !reportRow.hidden
         reportButton.setAttribute('aria-expanded', String(!reportRow.hidden))
-        if (reportRow.hidden || loaded) return
+        if (reportRow.hidden) return
+        if (loaded) return
         reportCell.textContent = '正在读取本地报告…'
         reportButton.disabled = true
         try {
+          // 只读：读已保存的证据，不触发任何检测。
+          // 要补证据用报告里的「重新检测此 IP」。
           const result = await window.cfpilot.getIPQualityReport({ sessionId: sess.id, ip: e.ip, port: e.port })
-          if (!result.ok || !result.report) { reportCell.textContent = result.error || '报告不可用'; return }
+          if (!result.ok || !result.report) {
+            reportCell.textContent = result.error || '报告不可用'
+            return
+          }
           renderIPQualityReport(reportCell, result.report, { sessionId: sess.id, host: sess.host, wsPath: sess.wsPath, probePath: sess.probePath })
           loaded = true
         } catch (error) { reportCell.textContent = error instanceof Error ? error.message : String(error) }
@@ -3239,6 +3265,42 @@
       kind: 'text',
       tip: '【是什么】通过用户自有的 HTTPS 识别服务，观察该传输路径真正对外的出口地址。\n【来源】实验性能力，需用户显式指定识别服务与传输路径。\n【影响】决定目标网站看到的 IP；数据中心出口常被风控。\n【参考】默认未执行；观测结果只代表当时那条路径。',
     },
+    'purity.score': {
+      label: '纯净度评分（0~100，越低越干净）',
+      unit: '',
+      kind: 'text',
+      tip: '【是什么】该 IP 在公开信誉库里的欺诈分（0~100，越高越可疑）。\n【来源】质量检测时查公开信誉画像。\n【影响】⚠️ 这是**入口 IP** 的分数；目标站看到的是**出口 IP**，两者不是一回事。\n【参考】0~10 干净，25 以上偏脏。',
+    },
+    'purity.risk': {
+      label: '风险等级',
+      unit: '',
+      kind: 'text',
+      tip: '【是什么】信誉库给出的风险档位（低/中/高）。\n【来源】质量检测时查公开信誉画像。\n【影响】入口 IP 自身的风险档位；不决定目标站是否放行出口。',
+    },
+    'purity.flags': {
+      label: '身份标记',
+      unit: '',
+      kind: 'text',
+      tip: '【是什么】该 IP 是否被标记为机房、代理、VPN、Tor、住宅等。\n【来源】质量检测时查公开信誉画像。\n【影响】机房与代理属性常被目标站提高风控门槛；住宅属性对解锁类服务更友好。',
+    },
+    'purity.blacklists': {
+      label: '黑名单',
+      unit: '',
+      kind: 'text',
+      tip: '【是什么】该 IP 命中的公开黑名单（Spamhaus / Firehol 等）。\n【来源】质量检测时查公开信誉画像。\n【影响】命中越多越容易被风控直接拒绝。',
+    },
+    'purity.scenarios': {
+      label: '场景适配',
+      unit: '',
+      kind: 'text',
+      tip: '【是什么】按信誉画像推导的各使用场景倾向（常规浏览 / 账号登录 / 流媒体与 AI / 风控严格站点）。\n【来源】由评分、身份标记与黑名单推导，不是实测解锁结论。\n【影响】给使用者一个取舍参考；真实能否通过仍取决于目标站策略与**出口 IP**。',
+    },
+    'purity.attribution': {
+      label: '归属信息',
+      unit: '',
+      kind: 'text',
+      tip: '【是什么】该 IP 的国家 / 城市 / ASN / ISP / 组织。\n【来源】质量检测时查公开归属信息。\n【影响】同一网段往往同归属，用于判断「这一批节点是不是来自同一片区域」。',
+    },
     compatibility: {
       label: '目标站兼容性',
       unit: '',
@@ -3274,7 +3336,7 @@
     return 'quality-bad'
   }
 
-  /** 报告仅呈现已记录证据；缺失指标保留状态，不伪造评分。
+  /** 报告呈现已记录证据；缺失指标保留状态，不伪造评分。
    * ctx 可选：给了才提供「重新检测 / 识别本机出口」两个显式动作。 */
   function renderIPQualityReport(container: HTMLElement, report: IPQualityReport, ctx?: { sessionId: string; host: string; wsPath: string; probePath: string }): void {
     container.replaceChildren()
@@ -3282,7 +3344,7 @@
     title.textContent = `${report.ip}:${report.port} · IP 质量报告`
     container.appendChild(title)
     const description = document.createElement('p')
-    description.textContent = `生成于 ${fmtHistoryTime(report.generatedAt)} · 仅聚合本地已保留样本，查看不触发检测。样本 ${report.history.testCount} 次。`
+    description.textContent = `生成于 ${fmtHistoryTime(report.generatedAt)} · 样本 ${report.history.testCount} 次。`
     container.appendChild(description)
     if (ctx) {
       const actions = document.createElement('div')
@@ -3293,17 +3355,16 @@
       reBtn.type = 'button'
       reBtn.className = 'btn btn-ghost'
       reBtn.textContent = '重新检测此 IP'
-      reBtn.title = '对该 IP 跑一遍 TCP/TLS/WS+PONG 复测，结论写回历史并刷新报告'
+      reBtn.title = '对该 IP 跑一遍分层复测（TCP/TLS/WS+PING/真实隧道）并刷新 IP 纯净度，结论写回历史'
       reBtn.addEventListener('click', async () => {
         reBtn.disabled = true
+        description.textContent = '正在检测（分层复测 + IP 纯净度，约 15~40 秒）…'
         try {
-          const res = await window.cfpilot.reTestIps({
-            sessionId: ctx.sessionId, host: ctx.host, wsPath: ctx.wsPath, probePath: ctx.probePath,
-            verifyPayload: true, targets: [{ ip: report.ip, port: report.port }],
+          const res = await window.cfpilot.runQualityCheck({
+            sessionId: ctx.sessionId, ip: report.ip, port: report.port,
           })
-          if (!res.ok) { description.textContent = '重新检测失败：' + (res.error || '未知错误'); return }
-          const fresh = await window.cfpilot.getIPQualityReport({ sessionId: ctx.sessionId, ip: report.ip, port: report.port })
-          if (fresh.ok && fresh.report) renderIPQualityReport(container, fresh.report, ctx)
+          if (!res.ok || !res.report) { description.textContent = '重新检测失败：' + (res.error || '未知错误'); return }
+          renderIPQualityReport(container, res.report, ctx)
         } catch (error) { description.textContent = '重新检测失败：' + (error instanceof Error ? error.message : String(error)) }
         finally { reBtn.disabled = false }
       })
@@ -3368,11 +3429,12 @@
       { key: 'basic', label: '基础连接' },
       { key: 'protocol', label: '协议验证' },
       { key: 'performance', label: '性能' },
+      { key: 'purity', label: 'IP 纯净度' },
       { key: 'egress', label: '出口' },
       { key: 'compatibility', label: '目标站兼容性' },
       { key: 'history', label: '历史' },
     ]
-    // 左栏放连接与性能，右栏放出口、兼容性与历史，中间竖线分隔。
+    // 左栏放连接与性能，右栏放纯净度、出口、兼容性与历史，中间竖线分隔。
     const leftKeys = ['basic', 'protocol', 'performance']
     const layout = document.createElement('div')
     layout.className = 'quality-layout'
@@ -3425,6 +3487,47 @@
         row.appendChild(note)
         host.appendChild(row)
       }
+    }
+
+    // 场景适配：单列展示每个场景的结论与理由（比挤成一行可读得多）。
+    const scenarios = report.purity?.scenarios ?? []
+    if (scenarios.length > 0) {
+      const box = document.createElement('div')
+      box.className = 'quality-scenarios'
+      const title = document.createElement('strong')
+      title.className = 'quality-group-title'
+      title.textContent = '场景适配（按信誉画像推导）'
+      box.appendChild(title)
+      const note = document.createElement('p')
+      note.className = 'tip'
+      note.textContent = '⚠️ 这是入口 IP 的信誉推导结论，不是实测解锁结果；目标站看到的是出口 IP。'
+      box.appendChild(note)
+      for (const sc of scenarios) {
+        const row = document.createElement('div')
+        row.className = 'quality-row'
+        const label = document.createElement('span')
+        label.className = 'q-label'
+        label.textContent = sc.label
+        const verdict = document.createElement('span')
+        verdict.className = 'q-value'
+        const verdictText =
+          sc.verdict === 'good' ? '适合' : sc.verdict === 'caution' ? '谨慎' : sc.verdict === 'bad' ? '不适合' : '未知'
+        verdict.textContent = verdictText
+        if (sc.verdict === 'good') verdict.style.color = 'var(--ok, #34d399)'
+        else if (sc.verdict === 'caution') verdict.style.color = 'var(--warn, #fbbf24)'
+        else if (sc.verdict === 'bad') verdict.style.color = 'var(--err, #f87171)'
+        else verdict.classList.add('quality-note')
+        row.appendChild(label)
+        row.appendChild(verdict)
+        if (sc.reason) {
+          const reason = document.createElement('span')
+          reason.className = 'q-note'
+          reason.textContent = sc.reason
+          row.appendChild(reason)
+        }
+        box.appendChild(row)
+      }
+      container.appendChild(box)
     }
 
     const trend = document.createElement('div')

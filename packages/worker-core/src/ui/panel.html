@@ -72,6 +72,12 @@
     box-shadow: 0 4px 14px rgba(59, 130, 246, 0.35);
     font-weight: 700; font-size: 16px; letter-spacing: .5px; color: #fff;
   }
+  /* logo 下方的版本号：一眼看清跑的是哪个版本 */
+  .logo-box { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .logo-ver {
+    font-size: 10.5px; line-height: 1; color: var(--text-secondary);
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
   header.top h1 { font-size: 18px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
   header.top p { margin: 2px 0 0; color: var(--text-secondary); font-size: 12.5px; }
   .spacer { flex: 1; }
@@ -315,7 +321,10 @@
 <!-- ==================== 主控台视图 ==================== -->
 <div id="app" class="wrap hidden">
   <header class="top">
-    <div class="logo">CP</div>
+    <div class="logo-box">
+      <div class="logo">CP</div>
+      <span class="logo-ver" id="logoVer" title="内核版本"></span>
+    </div>
     <div>
       <h1>CFPilot 管理控制台</h1>
       <p>Cloudflare 边缘网络数据面 · 节点池编排与真连接优选中心</p>
@@ -967,6 +976,7 @@
   <div class="card">
     <div class="login-head">
       <div class="logo">CP</div>
+      <span class="logo-ver" title="内核版本"></span>
       <h2 style="justify-content:center;font-size:18px">CFPilot 管理控制台</h2>
       <p class="muted" style="margin:4px 0 0">请输入管理员密码以解锁面板配置</p>
     </div>
@@ -1144,11 +1154,34 @@
   }
 
   function boot() {
+    loadKernelVersion();
     api('/api/v1/session').then(function (s) {
       if (!s.authenticated) { showLogin(); return; }
       showApp();
       loadAll();
     }).catch(function () { showLogin(); });
+  }
+
+  // === logo 旁的内核版本号 ===
+  //
+  // 用公开的版本端点（免鉴权）而不是 /api/v1/status ——
+  // 后者要登录，登录页上的 logo 就没版本号了。
+  // 取不到就留空：版本号只是锦上添花，不能因此报错或挡住登录。
+  function loadKernelVersion() {
+    var targets = document.querySelectorAll('.logo-ver');
+    if (!targets.length) return;
+    fetch('/__cfp_version', { credentials: 'same-origin' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (!d) return;
+        var label = d.version && d.version !== 'dev' ? 'v' + d.version : '';
+        var tip = d.build ? ('内核版本 ' + (d.version || '') + ' · 构建 ' + d.build) : '';
+        for (var i = 0; i < targets.length; i++) {
+          targets[i].textContent = label;
+          if (tip) targets[i].title = tip;
+        }
+      })
+      .catch(function () { /* 取不到就留空 */ });
   }
 
   function loadStatus() {

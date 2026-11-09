@@ -137,6 +137,13 @@
       font-weight: 700; font-size: 14px; color: #fff; letter-spacing: .5px;
       flex: 0 0 auto;
     }
+    /* logo 下方的版本号：一眼看清跑的是哪个版本 */
+    .logo-box { display: flex; flex-direction: column; align-items: center; gap: 3px; flex: 0 0 auto; }
+    .app-version {
+      font-size: 10px; line-height: 1; color: var(--text-muted);
+      font-variant-numeric: tabular-nums; letter-spacing: .02em;
+      white-space: nowrap;
+    }
     header.top .brand { min-width: 0; }
     header.top h1 { font-size: 15.5px; font-weight: 600; line-height: 1.25; letter-spacing: -0.01em; }
     header.top .sub { color: var(--text-secondary); font-size: 12px; line-height: 1.3; margin-top: 2px; }
@@ -476,6 +483,9 @@
       gap: 10px 14px;
       align-content: start;
     }
+    .pair.trio {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
     /* 在 .pair 里占满整行（如「机房国家」后面要跟一个自定义配置按钮） */
     .pair > .full { grid-column: 1 / -1; }
     .pair-grid .field { margin-bottom: 0; }
@@ -484,6 +494,7 @@
     }
     @media (max-width: 560px) {
       .pair { grid-template-columns: 1fr; }
+      .pair.trio { grid-template-columns: 1fr; }
     }
 
     /* --------------------------------------------------------------
@@ -1080,6 +1091,13 @@
       color: var(--text-secondary);
       margin: 10px 0 4px;
     }
+    /* 场景适配：独立一块，每个场景一行（结论 + 理由） */
+    .quality-scenarios {
+      margin-top: 14px;
+      padding-top: 4px;
+      border-top: 1px solid var(--border);
+    }
+    .quality-scenarios .quality-group-title { margin-top: 6px; }
     .quality-row {
       display: flex;
       align-items: baseline;
@@ -1193,7 +1211,10 @@
 <body>
   <div class="app">
     <header class="top">
-      <div class="logo">CP</div>
+      <div class="logo-box">
+        <div class="logo">CP</div>
+        <span class="app-version" id="appVersion" title="本程序版本"></span>
+      </div>
       <div class="brand">
         <h1>CFPilot 部署与维护工具</h1>
         <p class="sub">Pages 双项目部署 · 本地真连接优选</p>
@@ -1627,17 +1648,25 @@
             <p class="desc">
               下面三项两种优选<b>共用</b>：入口优选拿数据面地址做校验，反代优选拿它开隧道。
             </p>
-            <div class="grid">
-              <div class="field">
-                <label title="workers 部署请使用自定义域名！*.workers.dev 生产链路网络阻断。&#10;「自动识别」：优先填入数据面自定义域名，否则填入 workers.dev / pages.dev">Worker 域名</label>
-                <div class="field-inline">
-                  <input type="text" id="optHost" placeholder="如 cfp-dat.pages.dev 或自定义域名" />
-                  <button class="btn btn-ghost" id="btnAutoDetect">自动识别</button>
+            <div class="pair-grid">
+              <div class="pair">
+                <div class="field full">
+                  <label title="workers 部署请使用自定义域名！*.workers.dev 生产链路网络阻断。&#10;「自动识别」：优先填入数据面自定义域名，否则填入 workers.dev / pages.dev">Worker 域名</label>
+                  <div class="field-inline">
+                    <input type="text" id="optHost" placeholder="如 cfp-dat.pages.dev 或自定义域名" />
+                    <button class="btn btn-ghost" id="btnAutoDetect">自动识别</button>
+                  </div>
                 </div>
               </div>
-              <div class="field">
-                <label title="必须与实际 WebSocket 路径完全一致，否则无法优选 IP。&#10;CFPilot 项目：部署后日志内复制，或点「自动识别」从项目内读取后填入。">WS 路径</label>
-                <input type="text" id="optPath" placeholder="如 /vless 或 /（根路径）" />
+              <div class="pair">
+                <div class="field">
+                  <label title="必须与实际 WebSocket 路径完全一致，否则无法优选 IP。&#10;CFPilot 项目：部署后日志内复制，或点「自动识别」从项目内读取后填入。">WS 路径</label>
+                  <input type="text" id="optPath" placeholder="如 /vless 或 /（根路径）" />
+                </div>
+                <div class="field">
+                  <label title="XHTTP 路径，选 XHTTP 或双栈时生效。须与数据面 xhttpPath 一致，不跟面板订阅联动。本地独立填写，自动识别时一并回填。">XHTTP 路径</label>
+                  <input type="text" id="optXhttpPath" placeholder="/xhttp" value="/xhttp" />
+                </div>
               </div>
             </div>
             <!-- 候选来源单独一行：与上面两个输入框同宽，表格高度才对得齐 -->
@@ -1703,16 +1732,31 @@
                   </select>
                 </div>
                 <div class="field">
-                  <label title="开（默认）：逐个候选测下行速度，结果表出现「下行(MB/s)」列。&#10;关：跳过测速，只按延迟排序 —— 快很多、几乎不耗流量，但无法区分「延迟低但带宽差」的 IP；结果表的速度列显示为 —。&#10;流量参考：开时一轮约 1GB（6 秒 × 8 连接 × 候选数）。">测速</label>
-                  <select id="optNoSpeed">
-                    <option value="on" selected>开</option>
-                    <option value="off">关</option>
+                  <label title="ws = 只验 WebSocket（H1/101），xhttp = 只验 XHTTP（H2/packet-up），both = 两者都要过。&#10;本地优选独立进行，与面板订阅勾选无关。订阅含 VLESS+XHTTP 时选 xhttp 或 both；选 xhttp 会跳过 WS，避免误杀。">探测传输（本地独立）</label>
+                  <select id="optProbeTransport">
+                    <option value="ws" selected>WS（默认）</option>
+                    <option value="xhttp">XHTTP</option>
+                    <option value="both">双栈 WS+XHTTP</option>
                   </select>
                 </div>
               </div>
               <div class="pair">
+                <div class="field">
+                  <label title="短测粗筛 + 精确测速（默认）：先对全部通过候选做 1.2s×2 短测粗排，再对前 30 个做 6s×8 精测，避免快 IP 被截掉。&#10;仅精确测速：按 TLS/延迟取前 30 个直接精测。&#10;关：跳过测速，只按延迟排序。">测速</label>
+                  <select id="optSpeedMode">
+                    <option value="two" selected>短测粗筛 + 精确测速</option>
+                    <option value="one">仅精确测速</option>
+                    <option value="off">关</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label title="留空 = 自动：优先用目标项目自己的探针端点，没有则回落公开测速地址。&#10;填 /开头 = 强制用该探针路径；填网址 = 强制用该公开测速地址（大文件测试可自行填写）。">测速地址（可选）</label>
+                  <input type="text" id="optProbePath" placeholder="留空 = 自动" />
+                </div>
+              </div>
+              <div class="pair">
                 <div class="field full">
-                  <label title="需要同时选多个分组、或只选部分国家时，点「自定义配置」。&#10;若结果未出现候选国家，请增加「候选采样数」。&#10;机房来自 101 握手响应，因此筛选在阶段二之后生效；带筛选会自动扩大 101 校验的候选池（120 → 最多 500）。&#10;这是按机房筛选，不是采样：自定义列表模式下同样生效。">机房国家</label>
+                  <label title="需要同时选多个分组、或只选部分国家时，点「自定义配置」。&#10;若结果未出现候选国家，请增加「候选采样数」。&#10;机房来自校验响应，因此筛选在阶段二之后生效；带筛选会自动扩大校验的候选池（120 → 最多 500）。&#10;这是按机房筛选，不是采样：自定义列表模式下同样生效。">机房国家</label>
                   <div class="field-inline">
                     <select id="optCountryGroup" aria-label="机房国家快捷分组">
                       <option value="">全部国家（不筛选）</option>
@@ -1723,44 +1767,21 @@
                   </div>
                 </div>
               </div>
-              <div class="pair">
+              <div class="pair trio">
+                <div class="field">
+                  <label title="建议 6556（默认），不宜超过 23000。&#10;阶段一按 TLS 握手耗时筛选，而握手快慢与 TCP 延迟几乎无关（实测 TCP 9ms 的 IP 可能要 3.5 秒），采样小了根本碰不到握手快的 IP。&#10;两族都有时各拿一半预算。">候选采样数</label>
+                  <input type="number" id="optSample" value="6556" min="100" max="50000" />
+                </div>
                 <div class="field">
                   <label title="建议 10~20：节点过多只会稀释分流质量，没有实际意义。&#10;端口固定 443 —— 订阅启用多端口请在 Web 面板中勾选。">保留条数</label>
                   <input type="number" id="optTop" value="8" min="1" max="100" />
                 </div>
                 <div class="field">
-                  <label title="建议 6556（默认），不宜超过 23000。&#10;阶段一按 TLS 握手耗时筛选，而握手快慢与 TCP 延迟几乎无关（实测 TCP 9ms 的 IP 可能要 3.5 秒），采样小了根本碰不到握手快的 IP。&#10;两族都有时各拿一半预算。">候选采样数</label>
-                  <input type="number" id="optSample" value="6556" min="100" max="50000" />
-                </div>
-              </div>
-              <div class="pair">
-                <div class="field">
                   <label title="建议 6 秒：过短会被 TCP 慢启动拉低（前 1 秒的样本会被丢弃）。&#10;流量 ≈ 时长 × 速率 × 连接数：一轮约 1GB，流量敏感时调小它，或把「测速」设为关。&#10;测速连接数固定 8 条 —— 单条 TCP 受拥塞窗口限制会系统性低估带宽（实测 1 条 0.12、3 条 0.47、8 条 1.15 MB/s）。">测速时长（秒）</label>
                   <input type="number" id="optSpeedDur" value="6" min="2" max="10" />
                 </div>
-                <div class="field">
-                  <label title="留空 = 自动：优先用目标项目自己的探针端点，没有则回落公开测速地址。&#10;填 /开头 = 强制用该探针路径；填网址 = 强制用该公开测速地址（大文件测试可自行填写）。">测速地址（可选）</label>
-                  <input type="text" id="optProbePath" placeholder="留空 = 自动" />
-                </div>
               </div>
             </div>
-
-            <!--
-              两轮测速（默认开启）
-
-              旧流程在 101 通过后按延迟排序截前 30 个直接精测，会漏掉
-              「握手稍慢但下行明显更快」的 IP。开启后先对全部 101 通过候选
-              做 1.2s × 2 连接的短测粗排，再对粗排前 30 个做 6s × 8 连接精测。
-              粗测数值只用于排序，不写进结果；关闭则完全回到旧行为。
-            -->
-            <label class="switch-box" style="margin-top:12px">
-              <span class="sw-info">
-                <span class="sw-title">两轮测速 · 全量粗筛（推荐）</span>
-                <span class="sw-desc">先对所有 101 通过的 IP 短测粗排，再对速度最好的 30 个完整精测，避免快 IP 被延迟排序截掉。约多花 2~3 分钟 / 0.3GB；关闭则按延迟取前 30 个</span>
-              </span>
-              <input type="checkbox" id="optTwoStageSpeed" checked />
-              <span class="switch"></span>
-            </label>
 
             <!--
               实验性功能（默认全部关闭）
@@ -1976,7 +1997,7 @@
             <!-- 回填进度 / 结果反馈 -->
             <p class="tip" id="pushHint" style="margin-top: 8px"></p>
             <table id="scanTable" hidden>
-              <thead><tr><th>#</th><th>地址</th><th>机房</th><th>TLS握手(ms)</th><th>TCP(ms)</th><th>下行(MB/s)</th><th>质量报告</th></tr></thead>
+              <thead><tr><th>#</th><th>地址</th><th>机房</th><th>TLS握手(ms)</th><th>TCP(ms)</th><th>下行(MB/s)</th><th>质量检测</th></tr></thead>
               <tbody></tbody>
             </table>
           </div>

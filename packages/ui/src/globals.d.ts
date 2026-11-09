@@ -260,6 +260,10 @@ interface Window {
       host: string
       wsPath: string
       probePath: string
+      /** 探测传输分类（本地优选独立，与面板订阅无关） */
+      probeTransport?: 'ws' | 'xhttp' | 'both'
+      /** XHTTP 路径（本地填写，与面板配置无关） */
+      xhttpPath?: string
       skipSpeed: boolean
       sample: number
       top: number
@@ -314,10 +318,11 @@ interface Window {
       source?: 'custom' | 'pages'
       error?: string
     }>
-    /** 自动识别数据面 WS 路径（读 KV 的 CONFIG，回落环境变量 WS_PATH） */
+    /** 自动识别数据面 WS/XHTTP 路径（读 KV 的 CONFIG） */
     detectScanPath(): Promise<{
       ok: boolean
       path?: string
+      xhttpPath?: string
       source?: 'kv' | 'env'
       error?: string
     }>
@@ -421,6 +426,13 @@ interface Window {
     }>
     /** 从本地历史聚合质量报告，不触发额外检测。 */
     getIPQualityReport(params: { sessionId: string; ip: string; port: number }): Promise<{ ok: boolean; report?: IPQualityReport; error?: string }>
+    /**
+     * 质量检测：把一条 IP 的质量证据补齐（分层复测 + IP 纯净度），并写回优选历史。
+     *
+     * 与 `getIPQualityReport` 的区别：那个只读本地已有证据（刚优选完时大半是
+     * 「未执行」），这个会真的跑一遍能跑的检查并把结论写进历史。
+     */
+    runQualityCheck(params: { sessionId: string; ip: string; port: number; withSpeed?: boolean }): Promise<{ ok: boolean; report?: IPQualityReport; results?: ReTestIPResult[]; error?: string }>
     /**
      * 识别**本机网络**的出口（实验性、显式触发）。
      * 结果是本机直连/SOCKS5 路径的出口，不是候选 IP 的出口。
@@ -982,6 +994,27 @@ interface IPQualityReport {
   basic: { tcpMs: number | null; status: QualityFieldStatus }
   protocol: { tlsMs: number | null; wsOk: boolean | null; pongOk: boolean | null; realTunnelOk: boolean | null }
   performance: { speedMBps: number | null; peakMBps: number | null; stabilityP95: number | null; jitter: number | null }
+  /**
+   * IP 纯净度（候选 IP 自身的信誉画像）。
+   *
+   * ⚠️ 口径：这是**入口 IP** 的信誉；目标站看到的是**出口 IP**，两者不是一回事。
+   */
+  purity: {
+    status: string
+    score?: number | null
+    risk?: string
+    flags?: string[]
+    blacklists?: string[]
+    asn?: string
+    isp?: string
+    org?: string
+    country?: string
+    countryCode?: string
+    city?: string
+    observedAt?: string
+    scenarios?: Array<{ label: string; verdict: 'good' | 'caution' | 'bad' | 'unknown'; reason?: string }>
+    reason?: string
+  }
   egress: { transport?: string; remoteIp?: string; observedAt?: string; ageMs?: number; egressKind?: string; colo?: string; status: 'observed' | 'not-run' | 'failed' | 'stale' }
   compatibility: { status: string; targets: Array<{ urlLabel: string; status: 'ok' | 'challenge' | 'forbidden' | 'rate_limited' | 'tls_error' | 'timeout' | 'not_run'; httpStatus?: number; challengeHeader?: string; ms?: number; expectedContentOk?: boolean; error?: string }> }
   history: { firstSeen: string; lastSeen: string; testCount: number; successRate: number; trend: Array<{ at: string; sessionId: string; kind: 'scan' | 'retest'; ok: boolean; latencyMs: number | null; tlsMs: number | null; speedMBps: number | null; tcpMs?: number | null }> }

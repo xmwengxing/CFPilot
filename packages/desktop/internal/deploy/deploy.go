@@ -978,14 +978,18 @@ func (d *Deployer) configureProject(ctx context.Context, project, label string, 
 		}
 	}
 
-	if err := d.client.UpdatePagesEnv(ctx, d.opt.AccountID, project, envVars); err != nil {
-		d.warn(fmt.Sprintf("%s 配置失败：%v（会导致部署后变量不生效）", label, err))
-		return
-	}
-	// KV 绑定必须单独设（UpdatePagesEnv 只处理 env_vars）
-	if err := d.client.BindPagesKV(ctx, d.opt.AccountID, project,
+	// ⚠️ **一次 PATCH 同时设环境变量与 KV 绑定**。
+	//
+	// `PATCH /pages/projects/{name}` 会**自动触发一次部署**。
+	// 分两次 PATCH（＝两次隐式部署）会让发布次数直接翻倍，
+	// 而发布次数越多，账号级风控画像累积得越快（命中 8000119 时更甚）。
+	// 合并成一次 ⇒ 一次部署动作只有「1 次隐式 + 1 次显式」两次发布事件。
+	//
+	// ⚠️ 顺序仍然是「建项目 → 设变量/绑 KV → 部署」：
+	// Pages 的绑定与变量只对**之后的**部署生效。
+	if err := d.client.ConfigurePages(ctx, d.opt.AccountID, project, envVars,
 		map[string]string{"KV": d.opt.KVNamespaceID, "K": d.opt.KVNamespaceID}); err != nil {
-		d.warn(fmt.Sprintf("%s 绑定 KV 失败：%v（会导致读不到配置）", label, err))
+		d.warn(fmt.Sprintf("%s 配置失败：%v（会导致部署后变量不生效，或读不到配置）", label, err))
 		return
 	}
 	d.log("✅ " + label + "已配置 KV 与环境变量")

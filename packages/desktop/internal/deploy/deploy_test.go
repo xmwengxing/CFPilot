@@ -43,6 +43,15 @@ type fakeCF struct {
 	deleted []string
 	// 域名操作顺序（用于验证「旧解绑 → 新绑 → 删旧」）
 	domainOps []string
+	// patchCalls 记录 PATCH 配置请求：项目名 → 次数
+	//
+	// ⚠️ `PATCH /pages/projects/{name}` 会**自动触发一次部署**，
+	// 所以 PATCH 次数直接等于「隐式发布事件数」。
+	// 环境变量与 KV 绑定必须**合并成一次 PATCH**，
+	// 否则一次部署动作的发布次数会翻倍（风控画像累积更快）。
+	patchCalls map[string]int
+	// patchBodies 记录每次 PATCH 的请求体（用于校验一次 PATCH 同时带 env 与 KV）
+	patchBodies []map[string]any
 	// KV 写入记录：key → value
 	kvWrites map[string]string
 	// 已存在的 KV 值
@@ -72,6 +81,7 @@ type fakeCF struct {
 func newFakeCF() *fakeCF {
 	return &fakeCF{
 		deployCalls:       map[string]int{},
+		patchCalls:        map[string]int{},
 		kvWrites:          map[string]string{},
 		kvSeed:            map[string]string{},
 		deployFailPlan:    map[string]int{},
@@ -232,6 +242,8 @@ func (f *fakeCF) handler(t *testing.T) http.HandlerFunc {
 			if len(seg) == 2 && r.Method == http.MethodPatch {
 				var body map[string]any
 				_ = json.NewDecoder(r.Body).Decode(&body)
+				f.patchCalls[seg[1]]++
+				f.patchBodies = append(f.patchBodies, body)
 				if dc, has := body["deployment_configs"].(map[string]any); has {
 					if prod, has2 := dc["production"].(map[string]any); has2 {
 						if env, has3 := prod["env_vars"].(map[string]any); has3 {
@@ -386,6 +398,59 @@ func TestDeployOrderDataBeforeControl(t *testing.T) {
 	}
 	if f.deployOrder[1] != "mycontrol" {
 		t.Errorf("第二次部署应为控制面，实际 %q（顺序：%v）", f.deployOrder[1], f.deployOrder)
+	}
+}
+
+// ⚠️ **每个项目只能 PATCH 一次**。
+//
+// `PATCH /pages/projects/{name}` 会**自动触发一次部署**。
+// 环境变量与 KV 绑定如果分两次 PATCH，就是两次隐式发布；
+// 一次部署动作的发布次数会从「1 隐式 + 1 显式 = 2」涨到「2 隐式 + 1 显式 = 3」，
+// 命中 8000119 换名重试时更会成倍放大 —— 账号级风控画像累积得更快。
+//
+// 所以两个字段必须**合并进同一个 PATCH**。
+func TestConfigurePagesSinglePatch(t *testing.T) {
+	f := newFakeCF()
+	d, _ := newTestDeployer(t, f, func(o *Options) {
+		o.ControlProject = "mycontrol"
+		o.DataProject = "mydata"
+	})
+
+	if _, err := d.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"mycontrol", "mydata"} {
+		if n := f.patchCalls[name]; n != 1 {
+			t.Errorf("项目 %s 的 PATCH 应恰好 1 次，实际 %d 次（每次 PATCH 都会触发一次隐式部署）", name, n)
+		}
+	}
+
+	// 一次 PATCH 必须**同时**带 env_vars 与 kv_namespaces
+	if len(f.patchBodies) == 0 {
+		t.Fatal("应有 PATCH 请求")
+	}
+	for i, body := range f.patchBodies {
+		dc, ok := body["deployment_configs"].(map[string]any)
+		if !ok {
+			t.Fatalf("第 %d 次 PATCH 缺少 deployment_configs", i)
+		}
+		prod, ok := dc["production"].(map[string]any)
+		if !ok {
+			t.Fatalf("第 %d 次 PATCH 缺少 production", i)
+		}
+		if _, has := prod["env_vars"]; !has {
+			t.Errorf("第 %d 次 PATCH 缺少 env_vars", i)
+		}
+		kvs, ok := prod["kv_namespaces"].(map[string]any)
+		if !ok {
+			t.Fatalf("第 %d 次 PATCH 缺少 kv_namespaces", i)
+		}
+		for _, bind := range []string{"KV", "K"} {
+			if _, has := kvs[bind]; !has {
+				t.Errorf("第 %d 次 PATCH 的 kv_namespaces 缺少绑定 %q", i, bind)
+			}
+		}
 	}
 }
 

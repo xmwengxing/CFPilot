@@ -622,18 +622,12 @@ func (c *Client) DeletePagesProject(ctx context.Context, accountID, name string)
 // ⚠️ 调用它会**自动触发一次部署**。之后再 POST /deployments 就是二次部署，
 // 会触发 8000119。所以顺序必须是「建项目 → 设变量 → 部署」，
 // 且设变量后不要再单独触发部署。
+//
+// ⚠️ **这是单字段版本**：`PATCH` 只带 `env_vars`，不会带 `kv_namespaces`。
+// 部署流程请改用 `ConfigurePages`（一次 PATCH 同时带两者）——
+// 两次 PATCH 就是**两次隐式部署**，发布次数直接翻倍。
 func (c *Client) UpdatePagesEnv(ctx context.Context, accountID, name string, vars map[string]PageVar) error {
-	type payload struct {
-		DeploymentConfigs struct {
-			Production struct {
-				EnvVars map[string]PageVar `json:"env_vars"`
-			} `json:"production"`
-		} `json:"deployment_configs"`
-	}
-	var p payload
-	p.DeploymentConfigs.Production.EnvVars = vars
-	return c.doJSON(ctx, http.MethodPatch,
-		fmt.Sprintf("/accounts/%s/pages/projects/%s", accountID, url.PathEscape(name)), &p, nil)
+	return c.ConfigurePages(ctx, accountID, name, vars, nil)
 }
 
 // BindPagesKV 给 Pages 项目绑定 KV 命名空间。
@@ -641,21 +635,55 @@ func (c *Client) UpdatePagesEnv(ctx context.Context, accountID, name string, var
 // bindings 的键是**绑定名**，值是命名空间 ID。
 // CFPilot 需要绑两个名字：`KV`（自研内核读）与 `K`（兼容部分旧版实现）。
 // 少绑一个就会有一侧读不到配置。
+//
+// ⚠️ **这是单字段版本**：部署流程请改用 `ConfigurePages`（一次 PATCH 同时带两者）。
 func (c *Client) BindPagesKV(ctx context.Context, accountID, name string, bindings map[string]string) error {
+	return c.ConfigurePages(ctx, accountID, name, nil, bindings)
+}
+
+// ConfigurePages 一次性设置 Pages 项目的环境变量与 KV 绑定（**一次 PATCH**）。
+//
+// ## 为什么必须合并成一次
+//
+// `PATCH /accounts/{id}/pages/projects/{name}` 会**自动触发一次部署**。
+// 分两次 PATCH（先 env_vars、再 kv_namespaces）＝ **两次隐式部署**，
+// 之后再来一次显式 `POST /deployments` ⇒ 一次部署动作共 3 次发布事件。
+// 合并成一次 ⇒ 降到 2 次（1 次隐式 + 1 次显式）。
+//
+// ⚠️ 命中 8000119 时会自动换名重建并重试，单次动作最坏可达 ~25 次发布事件
+// —— 发布次数越少，账号级风控画像累积得越慢。
+//
+// ## 语义
+//
+// `envVars` 与 `bindings` 都可以为 nil（表示「这次不设置该项」）。
+// 两个都非 nil 时会在**同一个** deployment_configs.production 里一起下发，
+// 与 CLI 版（`updatePagesDeploymentConfig`）的语义完全一致。
+func (c *Client) ConfigurePages(
+	ctx context.Context,
+	accountID, name string,
+	envVars map[string]PageVar,
+	bindings map[string]string,
+) error {
 	type kvBinding struct {
 		NamespaceID string `json:"namespace_id"`
 	}
 	type payload struct {
 		DeploymentConfigs struct {
 			Production struct {
-				KVNamespaces map[string]kvBinding `json:"kv_namespaces"`
+				EnvVars      map[string]PageVar   `json:"env_vars,omitempty"`
+				KVNamespaces map[string]kvBinding `json:"kv_namespaces,omitempty"`
 			} `json:"production"`
 		} `json:"deployment_configs"`
 	}
 	var p payload
-	p.DeploymentConfigs.Production.KVNamespaces = make(map[string]kvBinding, len(bindings))
-	for k, v := range bindings {
-		p.DeploymentConfigs.Production.KVNamespaces[k] = kvBinding{NamespaceID: v}
+	if envVars != nil {
+		p.DeploymentConfigs.Production.EnvVars = envVars
+	}
+	if len(bindings) > 0 {
+		p.DeploymentConfigs.Production.KVNamespaces = make(map[string]kvBinding, len(bindings))
+		for k, v := range bindings {
+			p.DeploymentConfigs.Production.KVNamespaces[k] = kvBinding{NamespaceID: v}
+		}
 	}
 	return c.doJSON(ctx, http.MethodPatch,
 		fmt.Sprintf("/accounts/%s/pages/projects/%s", accountID, url.PathEscape(name)), &p, nil)

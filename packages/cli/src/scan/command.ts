@@ -457,6 +457,13 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
   const askCallback = flagBool(args, 'ask-callback')
   const wsPath = normalizeWsPath(flagString(args, 'path'), '/__edge_probe')
   const probePath = normalizeWsPath(flagString(args, 'probe-path'), '/__edge_probe')
+  const probeTransportRaw = (flagString(args, 'probe-transport') || 'ws').trim().toLowerCase()
+  const probeTransport: 'ws' | 'xhttp' | 'both' =
+    probeTransportRaw === 'xhttp' || probeTransportRaw === 'both' ? probeTransportRaw : 'ws'
+  const xhttpPath = normalizeWsPath(
+    flagString(args, 'xhttp-path') || '/xhttp',
+    '/xhttp'
+  ).replace(/\/+$/, '') || '/xhttp'
   const noSpeed = flagBool(args, 'no-speed')
   // 国家过滤：不选 = 全量。无效代码在 normalizeCountryFilter 里被丢弃
   const countries = normalizeCountryFilter(flagList(args, 'countries'))
@@ -517,6 +524,7 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
     process.stdout.write(`\n${NAME} v${VERSION}\n`)
     process.stdout.write(`目标域名：${host}:${port}（将作为 TLS SNI 与 HTTP Host）\n`)
     process.stdout.write(`WS 路径：${wsPath}\n`)
+    process.stdout.write(`探测传输：${probeTransport}${probeTransport !== 'ws' ? `（XHTTP 路径：${xhttpPath}）` : ''}\n`)
     if (countries.length > 0) {
       process.stdout.write(`国家筛选：${countries.join(' / ')}（不填则全量）\n`)
     }
@@ -683,6 +691,8 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
     port,
     candidates,
     countries,
+    probeTransport,
+    xhttpPath,
     wsPath,
     probePath,
     skipSpeed,
@@ -768,6 +778,8 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
             port,
             wsPath,
             probePath,
+            probeTransport,
+            xhttpPath,
             sample: flagNumber(args, 'sample', 6556),
             top,
             countries: summary.stats.countries,

@@ -44,10 +44,13 @@ import {
   probeWsPing,
   verifyTunnel,
   probeTlsHandshake,
+  probeXhttpEndpoint,
+  verifyXhttpTunnel,
   measureProbeThroughput,
   measureThroughput,
   type WsProbeResult,
   type TlsProbeResult,
+  type XhttpProbeResult,
 } from './true-probe'
 import { parseSpeedUrl, withBytes, schemeForPort, DEFAULT_SPEED_URL } from './speed-url'
 import { coloCity, countryOfColo, normalizeCountryFilter } from './countries'
@@ -168,6 +171,10 @@ export interface ScanOptions {
   speedTimeoutMs?: number
   /** 测速字节数 */
   speedBytes?: number
+  /** 探测传输分类：ws = 只走 WS，xhttp = 只走 XHTTP，both = 两者都要（默认 ws，保持旧行为） */
+  probeTransport?: 'ws' | 'xhttp' | 'both'
+  /** XHTTP 路径（默认 /xhttp，与数据面 xhttpPath 一致） */
+  xhttpPath?: string
   /** 阶段二校验的 WebSocket 路径（默认 /__edge_probe；对接其它项目时填它的 WS 路径） */
   wsPath?: string
   /**
@@ -287,8 +294,8 @@ export interface ScanObservation {
   ip: string
   /** 该阶段是否通过 */
   ok: boolean
-  /** 观测来自哪个阶段：tcp / tls / ws / speed */
-  stage?: 'tcp' | 'tls' | 'ws' | 'speed'
+  /** 观测来自哪个阶段：tcp / tls / ws / xhttp / speed */
+  stage?: 'tcp' | 'tls' | 'ws' | 'xhttp' | 'speed'
   /** 建连 / 握手耗时（毫秒） */
   latencyMs: number
   /** 稳态下行速度（MB/s）；未测速或测速失败时为空 */
@@ -309,6 +316,8 @@ export interface ScanSummary {
     /** 完成 TLS 握手的候选数 */
     tlsOk: number
     wsOk: number
+    /** XHTTP 端点可达的候选数（按 probeTransport 口径） */
+    xhttpOk: number
     /** 通过响应体内容校验（PING→PONG）的候选数；未开启校验时为 0 */
     verified: number
     speedOk: number
@@ -596,21 +605,36 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
     .sort((a, b) => a.latency - b.latency)
     .slice(0, tlsCandidateLimit)
 
+  const transport: 'ws' | 'xhttp' | 'both' = options.probeTransport ?? 'ws'
+  const xhttpPath = (options.xhttpPath?.trim() || '/xhttp').replace(/\/+$/, '') || '/xhttp'
   report({ type: 'stage', stage: 1, name: 'TLS 握手筛选', total: tlsInput.length })
   let tlsDone = 0
   const tlsResults = await poolAdaptive(tlsInput, tlsConcurrency, async (item) => {
     // TLS 探测的「成功」判定是 tlsMs > 0（它没有 ok 字段）
-    //
-    // ⚠️ 超时不重试：TLS 握手超时说明这个 IP 在当前网络下就是不可用，
+    // 超时不重试：TLS 握手超时说明这个 IP 在当前网络下就是不可用，
     // 再试一次也是同样的结果，却要让并发槽位多占 4 秒。
     // 只有「连接被重置」这类偶发错误才值得重试。
-    const probe = await withRetry<TlsProbeResult>(
-      retries,
-      () => probeTlsHandshake(item.ip, options.port, options.host, tlsTimeoutMs),
-      (r) => r.tlsMs > 0,
-      // 第 4 个参数：上次失败原因是超时就不要再试
-      (r) => !isTimeoutError(r.error)
-    )
+    // both 时两个 ALPN 都要过，tlsMs 取最大（排序口径一致）。
+    const doProbe = async (alpn: string): Promise<TlsProbeResult> =>
+      await withRetry<TlsProbeResult>(
+        retries,
+        () => probeTlsHandshake(item.ip, options.port, options.host, tlsTimeoutMs, alpn),
+        (r) => r.tlsMs > 0,
+        (r) => !isTimeoutError(r.error)
+      )
+    let probe: TlsProbeResult
+    if (transport === 'xhttp') {
+      probe = await doProbe('h2')
+    } else if (transport === 'both') {
+      const h1 = await doProbe('http/1.1')
+      if (h1.tlsMs <= 0) probe = h1
+      else {
+        const h2 = await doProbe('h2')
+        probe = h2.tlsMs <= 0 ? h2 : { ...h2, tlsMs: Math.max(h1.tlsMs, h2.tlsMs), alpn: 'both' }
+      }
+    } else {
+      probe = await doProbe('http/1.1')
+    }
     tlsDone++
     if (tlsDone % 200 === 0 || tlsDone === tlsInput.length) {
       report({
@@ -637,113 +661,133 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
     .sort((a, b) => a.tls.tlsMs - b.tls.tlsMs || a.latency - b.latency)
     .slice(0, effectiveProbeLimit)
 
-  // ---- 阶段二：WebSocket 101 + 响应体内容校验 ----
-  //
-  // 起默认走「严格模式」（`probeWsPing`）：
-  // 不只握手，还发送 PING 并校验数据面回的 `{"pong":true,...}`。
-  // 这样「101 通但数据面不响应」的 IP 会在这一层被拦掉，
-  // 不会带着虚假的希望进入测速、也不会出现在最终结果里。
-  //
-  // `--no-verify` 可退回纯 101 校验（对接第三方项目时用，
-  // 因为它们没有 CFPilot 的 PING 机制）。
-  //
-  // ⚠️ **内容校验优先走探针端点**（真机实测）：
-  // CFPilot 的 `/__edge_probe` 内置 PING/PONG，而 VLESS/Trojan 入站路径
-  // 期待的是协议头（`[0,0]`）而非 PING 文本 —— 对它发 PING 会永远等不到响应。
-  // 同一批 IP：探针路径 16/20 通过，WS 入站路径 0/20 全部超时。
-  //
-  // 但**不能把路径写死**：用户显式传 `--probe-path` / `--path` 时必须尊重，
-  // 否则「对接第三方项目」（它们的 WS 路径不是 /__edge_probe）永远测不出结果。
-  //
-  // 优先级：显式 probePath > 显式 wsPath（仅当它看起来像探针端点时）> 默认探针路径
+  // ---- 阶段二：按 probeTransport 做 WS / XHTTP 分类探测 ----
+  // ws：只验 WS；xhttp：只验 XHTTP（跳过 WS 避免误杀）；both：WS 先过滤再验 XHTTP。
+  const needWs = transport !== 'xhttp'
+  const needXhttp = transport !== 'ws'
   const strictProbe = options.verifyPayload !== false
   const explicitProbePath = options.probePath?.trim()
   const explicitWsPath = options.wsPath?.trim()
   const strictProbePath =
     explicitProbePath ||
-    // 用户的 wsPath 以 /__edge_probe 开头 → 视为探针端点
     (explicitWsPath?.startsWith('/__edge_probe') ? explicitWsPath : '') ||
     '/__edge_probe'
-  report({
-    type: 'stage',
-    stage: 2,
-    name: strictProbe ? 'WS 101 + 响应体校验（探针端点）' : 'WebSocket 101 校验',
-    total: stage1.length,
-  })
+  const stage2Name =
+    transport === 'xhttp'
+      ? 'XHTTP 端点校验（H2/packet-up）'
+      : transport === 'both'
+        ? 'WS + XHTTP 双栈校验'
+        : strictProbe
+          ? 'WS 101 + 响应体校验（探针端点）'
+          : 'WebSocket 101 校验'
+  report({ type: 'stage', stage: 2, name: stage2Name, total: stage1.length })
   let probeDone = 0
   let verifiedCount = 0
-  /**
-   * 早期退出：带国家筛选时，攒够够用的目标国家节点就收工。
-   *
-   * 为什么要提前退：扩大候选池（effectiveProbeLimit）后阶段二最多要探 500 个，
-   * 但用户只要 speedLimit 个节点 —— 探完 500 个里的第 20 个时就可以停，
-   * 省掉后面几百次 WS 探测（每次 3 秒超时）。
-   *
-   * 阈值取 speedLimit * 1.5，留出余量应对后续测速淘汰。
-   */
-  // 真实 wsPath 校验失败的计数（进入结果 stats）
   let pathFailures = 0
   const earlyExitTarget = hasCountryFilter ? Math.ceil(speedLimit * 1.5) : Infinity
   let matchedCount = 0
   let stoppedEarly = false
 
-  const probeResults = await pool(
-    stage1,
-    probeConcurrency,
-    async (item) => {
-      const probeFn = strictProbe ? probeWsPing : probeWs101
-      const probePath = strictProbe ? strictProbePath : explicitWsPath || '/__edge_probe'
-      const result: WsProbeResult = await withRetry(retries, () =>
-        probeFn(item.ip, options.port, options.host, probeTimeoutMs, probePath)
+  type Stage2Item = (typeof stage1)[number] & {
+    probe?: WsProbeResult
+    xhttp?: XhttpProbeResult
+    pathOk?: boolean
+    colo: string
+  }
+
+  // WS 子阶段（both/xhttp 时按 needWs 跳过或先行）
+  let wsPool: Stage2Item[] = stage1.map((item) => ({ ...item, colo: '' }))
+  let wsAll: Stage2Item[] = []
+  let xAll: Stage2Item[] = []
+  if (needWs) {
+    const probeResults = await pool(
+      wsPool,
+      probeConcurrency,
+      async (item) => {
+        const probeFn = strictProbe ? probeWsPing : probeWs101
+        const probePath = strictProbe ? strictProbePath : explicitWsPath || '/__edge_probe'
+        const result: WsProbeResult = await withRetry(retries, () =>
+          probeFn(item.ip, options.port, options.host, probeTimeoutMs, probePath)
+        )
+        let pathOk: boolean | undefined
+        if (result.ok && explicitWsPath && explicitWsPath !== probePath && options.verifyWsPath !== false) {
+          const pathProbe = await probeWs101(item.ip, options.port, options.host, probeTimeoutMs, explicitWsPath)
+          pathOk = pathProbe.ok
+          if (!pathOk) pathFailures++
+        }
+        probeDone++
+        if (result.pongVerified) verifiedCount++
+        if (hasCountryFilter && result.ok && countryFilter.includes(countryOfColo(result.colo || ''))) {
+          matchedCount++
+        }
+        report({
+          type: 'progress',
+          stage: 2,
+          done: probeDone,
+          total: stage1.length,
+          message: strictProbe
+            ? `101+PING 校验 ${probeDone}/${stage1.length}${result.ok ? ` ✓ ${result.colo}` : result.pongVerified === false ? ' ✗ 无响应' : ''}`
+            : `101 校验 ${probeDone}/${stage1.length}${result.ok ? ` ✓ ${result.colo}` : ''}`,
+        })
+        options.onObservation?.({ ip: item.ip, ok: result.ok, stage: 'ws', error: result.error })
+        return { ...item, probe: result, pathOk, colo: result.colo || '' }
+      },
+      () => {
+        if (matchedCount >= earlyExitTarget) {
+          stoppedEarly = true
+          return true
+        }
+        return false
+      }
+    )
+    wsAll = probeResults as unknown as Stage2Item[]
+    const wsFiltered = (strictProbe
+      ? wsAll.filter((r) => r.probe?.ok && r.probe.pongVerified === true)
+      : wsAll.filter((r) => r.probe?.ok)
+    ).filter((r) => r.pathOk !== false)
+    for (const item of wsAll) {
+      if (item.probe?.ok) continue
+      countFailure(failures, 'ws101', item.probe?.error)
+    }
+    wsPool = wsFiltered
+  }
+
+  // XHTTP 子阶段（无凭据端点探针：H2 POST 期望 400）
+  let xhttpOk: Stage2Item[] = wsPool
+  let xhttpOkCount = 0
+  if (needXhttp) {
+    report({ type: 'stage', stage: 2, name: 'XHTTP 端点校验（H2/packet-up）', total: wsPool.length })
+    let xDone = 0
+    const xResults = await pool(wsPool, probeConcurrency, async (item) => {
+      const result: XhttpProbeResult = await withRetry(retries, () =>
+        probeXhttpEndpoint(item.ip, options.port, options.host, xhttpPath, probeTimeoutMs)
       )
-      // 额外校验**真实 wsPath** 的 101：阶段二默认打的是探针路径，
-      // 路径配错时探针能过、客户端却全 -1。不额外花时间的场景（路径相同）自动跳过。
-      let pathOk: boolean | undefined
-      if (result.ok && explicitWsPath && explicitWsPath !== probePath && options.verifyWsPath !== false) {
-        const pathProbe = await probeWs101(item.ip, options.port, options.host, probeTimeoutMs, explicitWsPath)
-        pathOk = pathProbe.ok
-        if (!pathOk) pathFailures++
-      }
-      probeDone++
-      if (result.pongVerified) verifiedCount++
-      // 统计命中目标国家的数量（早期退出判据）
-      if (
-        hasCountryFilter &&
-        result.ok &&
-        countryFilter.includes(countryOfColo(result.colo || ''))
-      ) {
-        matchedCount++
-      }
+      xDone++
       report({
         type: 'progress',
         stage: 2,
-        done: probeDone,
-        total: stage1.length,
-        message: strictProbe
-          ? `101+PING 校验 ${probeDone}/${stage1.length}${result.ok ? ` ✓ ${result.colo}` : result.pongVerified === false ? ' ✗ 无响应' : ''}`
-          : `101 校验 ${probeDone}/${stage1.length}${result.ok ? ` ✓ ${result.colo}` : ''}`,
+        done: xDone,
+        total: wsPool.length,
+        message: `XHTTP 校验 ${xDone}/${wsPool.length}${result.ok ? ` ✓ ${result.colo}` : ` ✗ ${result.error ?? ''}`}`,
       })
-      options.onObservation?.({ ip: item.ip, ok: result.ok, stage: 'ws', error: result.error })
-      return { ...item, probe: result, pathOk }
-    },
-    () => {
-      if (matchedCount >= earlyExitTarget) {
-        stoppedEarly = true
-        return true
-      }
-      return false
+      options.onObservation?.({ ip: item.ip, ok: result.ok, stage: 'xhttp', error: result.error })
+      return { ...item, xhttp: result, colo: item.colo || result.colo || '' }
+    })
+    xAll = xResults as unknown as Stage2Item[]
+    for (const item of xAll) {
+      if (!item.xhttp?.ok) countFailure(failures, 'xhttp', item.xhttp?.error)
     }
-  )
-
-  // 严格模式下，只保留**通过内容校验**的候选。
-  // 非严格模式（第三方项目）退化为只看 101。
-  const wsOk = (strictProbe
-    ? probeResults.filter((r) => r.probe.ok && r.probe.pongVerified === true)
-    : probeResults.filter((r) => r.probe.ok)
-  ).filter((r) => (r as { pathOk?: boolean }).pathOk !== false)
-  for (const item of probeResults) {
-    if (item.probe.ok) continue
-    countFailure(failures, 'ws101', item.probe.error)
+    xhttpOk = xAll.filter((r) => r.xhttp?.ok)
+    xhttpOkCount = xhttpOk.length
+  } else {
+    xhttpOkCount = wsPool.length
+  }
+  const wsOk = xhttpOk
+  // 供下行统一使用：WS 探针对象保留（both/xhttp 的 colo 已在 item.colo 上）
+  for (const item of wsOk) {
+    if (!item.probe && item.xhttp) {
+      item.probe = { ok: true, colo: item.colo, status: item.xhttp.status, latencyMs: item.xhttp.latencyMs } as WsProbeResult
+    }
   }
 
   // ---- 阶段二点五：真实隧道校验（可选）----
@@ -755,8 +799,8 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   let tunnelOk = wsOk
   let tunnelFailed = 0
   const tunnelCredential = options.uuid || options.trojanPassword
-  if (tunnelCredential && options.wsPath) {
-    const candidates = wsOk.slice(0, speedLimit)
+  if (needWs && tunnelCredential && options.wsPath) {
+    const candidates = tunnelOk.slice(0, speedLimit)
     const verified = await pool(candidates, 4, async (item) => {
       const result = await verifyTunnel({
         ip: item.ip,
@@ -779,8 +823,36 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
       return { item, ok: result.ok }
     })
     const passed = new Set(verified.filter((v) => v.ok).map((v) => v.item.ip))
-    tunnelOk = wsOk.filter((item) => passed.has(item.ip))
+    tunnelOk = tunnelOk.filter((item) => passed.has(item.ip))
     if (tunnelOk.length === 0) tunnelOk = wsOk // 全失败时退回阶段二结果，避免直接空结果
+  }
+  // XHTTP 真隧道（VLESS/XHTTP 需要 uuid；Trojan 无 XHTTP 入站，跳过）
+  if (needXhttp && options.uuid) {
+    const candidates = tunnelOk.slice(0, speedLimit)
+    const verified = await pool(candidates, 4, async (item) => {
+      const result = await verifyXhttpTunnel({
+        ip: item.ip,
+        port: options.port,
+        host: options.host,
+        xhttpPath,
+        uuid: options.uuid,
+        targetHost: options.verifyTargetHost,
+        targetPort: options.verifyTargetPort,
+      })
+      if (!result.ok) tunnelFailed++
+      report({
+        type: 'progress',
+        stage: 2,
+        done: candidates.length,
+        total: candidates.length,
+        message: `XHTTP 隧道校验 ${result.ok ? '✓' : '✗ ' + (result.error ?? '')}`,
+      })
+      return { item, ok: result.ok }
+    })
+    const passed = new Set(verified.filter((v) => v.ok).map((v) => v.item.ip))
+    const before = tunnelOk.length
+    tunnelOk = tunnelOk.filter((item) => passed.has(item.ip))
+    if (tunnelOk.length === 0 && before > 0) tunnelOk = wsOk
   }
 
   // ---- 国家 / 地区过滤（可选，作用于已识别机房的候选）----
@@ -795,7 +867,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   let appliedCountries: string[] = []
   let countryFilterRelaxed = false
   if (hasCountryFilter && wsOk.length > 0) {
-    const matched = wsOk.filter((r) => countryFilter.includes(countryOfColo(r.probe.colo || '')))
+    const matched = wsOk.filter((r) => countryFilter.includes(countryOfColo(r.colo || r.probe?.colo || '')))
     if (matched.length > 0) {
       wsFiltered = matched
       appliedCountries = countryFilter
@@ -847,7 +919,8 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
     ok: boolean
     latency: number
     tls: TlsProbeResult
-    probe: WsProbeResult
+    probe?: WsProbeResult
+    colo?: string
     speed?: number
     peakMBps?: number
     jitter?: number
@@ -892,7 +965,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
         stage: 3,
         done: speedDone,
         total: stage2.length,
-        message: `测速 ${speedDone}/${stage2.length} [${item.probe.colo || 'UNK'}] ${result.steadyMBps.toFixed(1)} MB/s${jitter > 0 ? ` ±${jitter.toFixed(1)}` : ''}`,
+        message: `测速 ${speedDone}/${stage2.length} [${(item.colo || item.probe?.colo) || 'UNK'}] ${result.steadyMBps.toFixed(1)} MB/s${jitter > 0 ? ` ±${jitter.toFixed(1)}` : ''}`,
       })
       return { ...item, speed: result.ok ? result.steadyMBps : 0, peakMBps: result.peakMBps, jitter }
     })
@@ -929,7 +1002,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
         stage: 3,
         done: speedDone,
         total: stage2.length,
-        message: `测速 ${speedDone}/${stage2.length} [${item.probe.colo || 'UNK'}] ${result.steadyMBps.toFixed(1)} MB/s${jitter > 0 ? ` ±${jitter.toFixed(1)}` : ''}`,
+        message: `测速 ${speedDone}/${stage2.length} [${(item.colo || item.probe?.colo) || 'UNK'}] ${result.steadyMBps.toFixed(1)} MB/s${jitter > 0 ? ` ±${jitter.toFixed(1)}` : ''}`,
       })
       return { ...item, speed: result.ok ? result.steadyMBps : 0, peakMBps: result.peakMBps, jitter }
     })
@@ -941,7 +1014,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
       ip: r.ip,
       family: (r.ip.includes(':') ? 'v6' : 'v4') as 'v4' | 'v6',
       port: options.port,
-      colo: r.probe.colo || 'UNK',
+      colo: (r.colo || r.probe?.colo || 'UNK'),
       latency: r.latency,
       // tcpMs 是阶段一测得的 TCP 建连耗时（CLI 的 latency 字段本身就是它，
       // 这里显式补一份，便于与桌面版报告字段一一对应）。
@@ -1025,13 +1098,20 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
     observations.push({ ip: item.ip, ok: item.tls.tlsMs > 0, stage: 'tls', latencyMs: item.tls.tlsMs })
   }
   // 阶段二：WS 101 + 内容校验
-  for (const item of probeResults) {
+  for (const item of wsAll) {
+    const pr = item.probe
+    if (!pr) continue
     observations.push({
       ip: item.ip,
-      ok: item.probe.ok && item.probe.pongVerified !== false,
+      ok: pr.ok && pr.pongVerified !== false,
       stage: 'ws',
       latencyMs: item.latency,
     })
+  }
+  for (const item of xAll) {
+    const xr = item.xhttp
+    if (!xr) continue
+    observations.push({ ip: item.ip, ok: xr.ok, stage: 'xhttp', latencyMs: xr.latencyMs })
   }
   // 测速成功的候选补上速度（档案里的速度是「这个 IP 在本机有多快」）。
   const speedByIp = new Map<string, number>()
@@ -1051,6 +1131,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
       tcpOk: tcpOk.length,
       tlsOk: tlsOk.length,
       wsOk: wsOk.length,
+      xhttpOk: xhttpOkCount,
       verified: verifiedCount,
       speedOk: entries.length,
       elapsedMs: Date.now() - started,
@@ -1322,3 +1403,4 @@ function roundRobinBy<T extends { ip: string }>(
   }
   return out
 }
+

@@ -646,7 +646,8 @@ export function probeTlsHandshake(
   ip: string,
   port: number,
   host: string,
-  timeoutMs = 4000
+  timeoutMs = 4000,
+  alpn: string = 'http/1.1'
 ): Promise<TlsProbeResult> {
   return new Promise((resolve) => {
     const started = Date.now()
@@ -666,22 +667,23 @@ export function probeTlsHandshake(
       resolve({ ip, tlsMs: result.tlsMs ?? Date.now() - started, ...result })
     }
 
+    const expect = alpn === 'h2' ? 'h2' : 'http/1.1'
     const socket = tls.connect(
       {
         host: ip,
         port,
         servername: host,
         rejectUnauthorized: false,
-        ALPNProtocols: ['http/1.1'],
+        ALPNProtocols: [expect],
       },
       () => {
-        // 握手完成。ALPN 没协商到 http/1.1 就无法升级 WS，判失败。
-        const alpn = socket.alpnProtocol
-        if (alpn && alpn !== 'http/1.1') {
-          finish({ error: `ALPN=${alpn}` })
+        // 握手完成。ALPN 协商不到期望值则该传输不可用，判失败。
+        const got = socket.alpnProtocol
+        if (got && got !== expect) {
+          finish({ error: `ALPN=${got}` })
           return
         }
-        finish({ tlsMs: Date.now() - started, alpn: alpn || undefined })
+        finish({ tlsMs: Date.now() - started, alpn: got || undefined })
       }
     )
 
@@ -1089,3 +1091,297 @@ export function verifyTunnel(options: TunnelVerifyOptions): Promise<TunnelVerify
     })
   })
 }
+
+/* ------------------------------------------------------------------ *
+ * XHTTP（packet-up）探测
+ * ------------------------------------------------------------------ */
+
+export interface XhttpProbeResult {
+  ok: boolean
+  latencyMs: number
+  colo: string
+  status: number
+  error?: string
+}
+
+export interface XhttpTunnelOptions {
+  ip: string
+  port: number
+  host: string
+  xhttpPath?: string
+  uuid?: string
+  targetHost?: string
+  targetPort?: number
+  timeoutMs?: number
+}
+
+export interface XhttpTunnelResult {
+  ok: boolean
+  stage?: 'handshake' | 'protocol' | 'data'
+  latencyMs: number
+  colo?: string
+  firstBytes?: string
+  error?: string
+}
+
+/** 随机会话 id（XHTTP packet-up 的关联键） */
+export function randomXhttpSession(): string {
+  return 'sess-' + crypto.randomBytes(8).toString('hex')
+}
+
+/** H2 客户端的最小形态（仅探针用到的子集） */
+interface H2StreamLike {
+  on(event: string, cb: (...args: unknown[]) => void): void
+  end(data?: Buffer): void
+  destroy(): void
+  readonly destroyed: boolean
+  readonly closed: boolean
+}
+interface H2ClientLike {
+  request(headers: Record<string, string>): H2StreamLike
+  on(event: string, cb: (...args: unknown[]) => void): void
+  close(): void
+  destroy(): void
+}
+
+function h2Authority(ip: string, port: number): string {
+  return `https://${ip.includes(':') ? `[${ip}]` : ip}:${port}`
+}
+
+function extractColoFromHeaders(headers: Record<string, unknown>): string {
+  const ray = String(headers['cf-ray'] ?? '')
+  const m = /([A-Z]{3})$/.exec(ray.trim().toUpperCase())
+  return m ? m[1]! : ''
+}
+
+/**
+ * XHTTP 端点存活探针（无凭据）。
+ *
+ * TLS+H2 发 `POST <xhttpPath>/<会话>/0`（`text/plain`，与订阅的
+ * `noGRPCHeader` 一致，避免 CF 边缘 403），期望 `400`（处理器已达，
+ * 只是 VLESS 头非法）。
+ * `200` 中性页说明路径没命中（中性页对 POST 也回 200），判失败；
+ * `403` 说明边缘拦截，判失败。
+ */
+export function probeXhttpEndpoint(
+  ip: string,
+  port: number,
+  host: string,
+  xhttpPath: string,
+  timeoutMs = 3000
+): Promise<XhttpProbeResult> {
+  return new Promise((resolve) => {
+    void (async (): Promise<void> => {
+      const started = Date.now()
+      const session = randomXhttpSession()
+      const base = xhttpPath.replace(/\/+$/, '') || '/xhttp'
+      let settled = false
+      let client: H2ClientLike | null = null
+      const finish = (r: Omit<XhttpProbeResult, 'latencyMs'>): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        try {
+          client?.close()
+        } catch {
+          /* 已关闭 */
+        }
+        try {
+          client?.destroy()
+        } catch {
+          /* 已销毁 */
+        }
+        resolve({ ...r, latencyMs: Date.now() - started })
+      }
+      const timer = setTimeout(() => {
+        finish({ ok: false, colo: '', status: 0, error: 'XHTTP 握手超时' })
+      }, timeoutMs)
+      try {
+        const http2 = await import('node:http2')
+        client = http2.connect(h2Authority(ip, port), {
+          servername: host,
+          ALPNProtocols: ['h2'],
+          rejectUnauthorized: false,
+        } as never) as unknown as H2ClientLike
+        client.on('error', (...args: unknown[]) => {
+          const err = args[0] as Error
+          finish({ ok: false, colo: '', status: 0, error: err.message })
+        })
+        const req = client.request({
+          ':method': 'POST',
+          ':path': `${base}/${session}/0`,
+          ':authority': `${host}:${port}`,
+          'content-type': 'text/plain',
+          host,
+          referer: `https://${host}${base}/?x_padding=${'X'.repeat(200)}`,
+        })
+        req.on('response', (...args: unknown[]) => {
+          const headers = args[0] as Record<string, unknown>
+          const status = Number(headers[':status'] ?? 0)
+          const colo = extractColoFromHeaders(headers as Record<string, unknown>)
+          if (status === 400) {
+            finish({ ok: true, colo, status })
+            return
+          }
+          req.destroy()
+          finish({
+            ok: false,
+            colo,
+            status,
+            error: status === 403 ? 'HTTP 403（边缘拦截）' : `HTTP ${status}`,
+          })
+        })
+        req.on('error', (...args: unknown[]) => { const err = args[0] as Error;
+          finish({ ok: false, colo: '', status: 0, error: err.message })
+        })
+        req.end(Buffer.from('probe'))
+      } catch (err) {
+        finish({
+          ok: false,
+          colo: '',
+          status: 0,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    })()
+  })
+}
+
+/**
+ * XHTTP 真隧道校验（需 uuid）：packet-up 分包上行 + 下行 GET，
+ * 验证 VLESS `[0,0]` 与目标回包。
+ */
+export function verifyXhttpTunnel(options: XhttpTunnelOptions): Promise<XhttpTunnelResult> {
+  const { ip, port, host } = options
+  const base = (options.xhttpPath ?? '/xhttp').replace(/\/+$/, '') || '/xhttp'
+  const targetHost = options.targetHost ?? 'baidu.com'
+  const targetPort = options.targetPort ?? 80
+  const timeoutMs = options.timeoutMs ?? 8000
+  const payload = options.uuid
+    ? buildVlessTunnelPayload(options.uuid, targetHost, targetPort, tunnelTargetRequest(targetHost))
+    : null
+  if (!payload) {
+    return Promise.resolve({ ok: false, stage: 'protocol', latencyMs: 0, error: '缺少 uuid' })
+  }
+  return new Promise((resolve) => {
+    void (async (): Promise<void> => {
+      const started = Date.now()
+      const session = randomXhttpSession()
+      let settled = false
+      let stage: 'handshake' | 'protocol' | 'data' = 'handshake'
+      let client: H2ClientLike | null = null
+      const finish = (r: Omit<XhttpTunnelResult, 'latencyMs'>): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        try {
+          client?.close()
+        } catch {
+          /* 已关闭 */
+        }
+        try {
+          client?.destroy()
+        } catch {
+          /* 已销毁 */
+        }
+        resolve({ ...r, latencyMs: Date.now() - started })
+      }
+      const timer = setTimeout(() => {
+        finish({
+          ok: false,
+          stage,
+          error: stage === 'data' ? '下行无回包' : stage === 'protocol' ? 'VLESS 响应头超时' : 'XHTTP 握手超时',
+        })
+      }, timeoutMs)
+      try {
+        const http2 = await import('node:http2')
+        client = http2.connect(h2Authority(ip, port), {
+          servername: host,
+          ALPNProtocols: ['h2'],
+          rejectUnauthorized: false,
+        } as never) as unknown as H2ClientLike
+        client.on('error', (...args: unknown[]) => {
+          const err = args[0] as Error
+          finish({ ok: false, stage, error: err.message })
+        })
+        const upHeaders = {
+          ':method': 'POST',
+          ':path': `${base}/${session}/0`,
+          ':authority': `${host}:${port}`,
+          'content-type': 'text/plain',
+          host,
+          referer: `https://${host}${base}/?x_padding=${'X'.repeat(200)}`,
+        }
+        const up = client.request(upHeaders)
+        up.on('response', (...args: unknown[]) => { const headers = args[0] as Record<string, unknown>;
+          const status = Number(headers[':status'] ?? 0)
+          const colo = extractColoFromHeaders(headers as Record<string, unknown>)
+          if (status !== 200) {
+            finish({ ok: false, stage: 'handshake', colo, error: `HTTP ${status}` })
+          }
+        })
+        up.on('error', (...args: unknown[]) => { const err = args[0] as Error; finish({ ok: false, stage: 'handshake', error: err.message }) })
+        up.end(payload!)
+        // 上行确认后开下行
+        const t = setInterval(() => {
+          if (up.destroyed || up.closed) clearInterval(t)
+        }, 200)
+        // 小延迟确保上行先到（Xray 客户端顺序一致），下行等上行头
+        setTimeout(() => {
+          if (settled) return
+          stage = 'protocol'
+          const down = client!.request({
+            ':method': 'GET',
+            ':path': `${base}/${session}`,
+            ':authority': `${host}:${port}`,
+            host,
+            referer: `https://${host}${base}/?x_padding=${'X'.repeat(200)}`,
+          })
+          let buf: Buffer = Buffer.alloc(0)
+          let headDone = false
+          down.on('response', (...args: unknown[]) => { const headers = args[0] as Record<string, unknown>;
+            const status = Number(headers[':status'] ?? 0)
+            const colo = extractColoFromHeaders(headers as Record<string, unknown>)
+            if (status !== 200) {
+              finish({ ok: false, stage: 'protocol', colo, error: `HTTP ${status}` })
+              return
+            }
+            stage = 'data'
+            void colo
+          })
+          down.on('error', (...args: unknown[]) => { const err = args[0] as Error; finish({ ok: false, stage, error: err.message }) })
+          down.on('data', (...args: unknown[]) => { const chunk = args[0] as Buffer;
+            buf = Buffer.concat([buf, chunk])
+            if (!headDone) {
+              if (buf.length < 2) return
+              if (buf[0] !== 0x00 || buf[1] !== 0x00) {
+                finish({ ok: false, stage: 'protocol', error: 'VLESS 响应头非法' })
+                return
+              }
+              headDone = true
+              buf = buf.subarray(2)
+            }
+            if (headDone && buf.length > 0) {
+              finish({
+                ok: true,
+                stage: 'data',
+                firstBytes: buf.subarray(0, 16).toString('latin1'),
+              })
+            }
+          })
+          down.end()
+          void t
+        }, 300)
+      } catch (err) {
+        finish({
+          ok: false,
+          stage,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    })()
+  })
+}
+
+
+

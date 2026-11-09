@@ -54,6 +54,10 @@ export interface StartScanRequest {
   family?: FamilyChoice
   /** 国家 / 地区过滤（可多选，如 ["HK","JP"]；空 / 不传 = 全量） */
   countries?: string[]
+  /** 探测传输分类：ws|xhttp|both，默认 ws */
+  probeTransport?: 'ws' | 'xhttp' | 'both'
+  /** XHTTP 路径，默认 /xhttp */
+  xhttpPath?: string
   /** 阶段二校验的 WebSocket 路径（对接第三方项目时填它自己的路径） */
   wsPath?: string
   /** 探针端点路径（默认 /__edge_probe） */
@@ -435,6 +439,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           //   verifyPayload —— 目标没有探针端点时，内容校验必然失败，
           //     应自动退回纯 101 校验
           //   speedMode / speedUrl —— 面板可以指定用探针端点还是公开测速地址
+          probeTransport: body.probeTransport,
+          xhttpPath: body.xhttpPath,
           wsPath: body.wsPath,
           probePath: body.probePath,
           verifyPayload: body.verifyPayload,

@@ -106,6 +106,10 @@ type Options struct {
 	// Electron 版一直是对的：`options.probePath ?? '/__edge_probe'`，
 	// 与 WS 路径完全无关。
 	ProbePath string
+	// ProbeTransport 是探测传输分类：ws|xhttp|both，空 = ws（对照 CLI --probe-transport）
+	ProbeTransport string
+	// XHTTPPath 是 XHTTP 路径，默认 /xhttp
+	XHTTPPath string
 	// Countries 是地区过滤（按机房代码，空表示不过滤）
 	Countries []string
 
@@ -277,6 +281,18 @@ func (o Options) withDefaults() Options {
 	if o.ProbePath == "" {
 		o.ProbePath = ProbeDefaultPath
 	}
+	t := strings.ToLower(strings.TrimSpace(o.ProbeTransport))
+	if t != "xhttp" && t != "both" {
+		t = "ws"
+	}
+	o.ProbeTransport = t
+	if strings.TrimSpace(o.XHTTPPath) == "" {
+		o.XHTTPPath = "/xhttp"
+	}
+	o.XHTTPPath = strings.TrimRight(o.XHTTPPath, "/")
+	if o.XHTTPPath == "" {
+		o.XHTTPPath = "/xhttp"
+	}
 	return o
 }
 
@@ -389,12 +405,32 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 	}
 
 	tlsOK := forEachIPAdaptive(ctx, tlsInput, opt.TLSConcurrency, func(t TCPResult) (TLSResult, bool) {
-		// ⚠️ 超时不重试：TLS 握手超时说明这个 IP 在当前网络下就是不可用，
+		// 超时不重试：TLS 握手超时说明这个 IP 在当前网络下就是不可用，
 		// 再试一次也是同样的结果，却要让并发槽位多占一个超时周期。
 		// 只有「连接被重置」这类偶发错误才值得重试。
 		r := TLSResult{}
 		for attempt := 0; attempt < opt.Retries; attempt++ {
-			r = ProbeTLS(ctx, t.IP, opt.Port, opt.Host, msDuration(opt.TLSTimeoutMs))
+			if opt.ProbeTransport == "xhttp" {
+				r = ProbeTLSWithALPN(ctx, t.IP, opt.Port, opt.Host, msDuration(opt.TLSTimeoutMs), "h2")
+			} else if opt.ProbeTransport == "both" {
+				h1 := ProbeTLSWithALPN(ctx, t.IP, opt.Port, opt.Host, msDuration(opt.TLSTimeoutMs), "http/1.1")
+				if !h1.OK {
+					r = h1
+				} else {
+					h2 := ProbeTLSWithALPN(ctx, t.IP, opt.Port, opt.Host, msDuration(opt.TLSTimeoutMs), "h2")
+					if !h2.OK {
+						r = h2
+					} else {
+						r = h2
+						if h1.TLSMs > r.TLSMs {
+							r.TLSMs = h1.TLSMs
+						}
+						r.ALPN = "both"
+					}
+				}
+			} else {
+				r = ProbeTLS(ctx, t.IP, opt.Port, opt.Host, msDuration(opt.TLSTimeoutMs))
+			}
 			if r.OK {
 				if opt.ProbeObserver != nil {
 					opt.ProbeObserver(r.IP, "tls", true, r.TLSMs)
@@ -457,8 +493,15 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 	if strictProbe {
 		stats["verifyPayload"] = 1
 	}
+	transport := opt.ProbeTransport
+	needWs := transport != "xhttp"
+	needXhttp := transport != "ws"
 	stage2Message := "阶段二：WebSocket 101 校验"
-	if strictProbe {
+	if transport == "xhttp" {
+		stage2Message = "阶段二：XHTTP 端点校验（H2/packet-up）"
+	} else if transport == "both" {
+		stage2Message = "阶段二：WS + XHTTP 双栈校验"
+	} else if strictProbe {
 		stage2Message = "阶段二：WS 101 + PING/PONG 内容校验"
 	}
 	report(Progress{Stage: "probe", Total: len(stage2), Message: stage2Message})
@@ -480,59 +523,117 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 	if strictProbe {
 		probePath = opt.ProbePath
 	}
-	wsOK := forEachIP(ctx, stage2, opt.ProbeConcurrency, func(ip string) (WSResult, bool) {
-		var last WSResult
-		for attempt := 0; attempt < opt.Retries; attempt++ {
-			if strictProbe {
-				last = ProbeWSPing(ctx, ip, opt.Port, opt.Host, msDuration(opt.ProbeTimeoutMs), probePath)
-			} else {
-				last = ProbeWS101(ctx, ip, opt.Port, opt.Host, msDuration(opt.ProbeTimeoutMs), probePath)
-			}
-			// 严格模式用的是探针端点，还要确认真实代理路径也能 101，
-			// 否则会出现「探针能过、客户端全 -1」（对齐 CLI scan.ts:699-706）。
-			// 路径相同时无需重复探测。
-			if last.OK && strictProbe && opt.WSPath != probePath {
-				pathProbe := ProbeWS101(ctx, ip, opt.Port, opt.Host, msDuration(opt.ProbeTimeoutMs), opt.WSPath)
-				if !pathProbe.OK {
-					last.OK = false
-					last.Error = "真实 WS 路径 101 校验失败：" + pathProbe.Error
+	var wsOK []WSResult
+	if needWs {
+		wsOK = forEachIP(ctx, stage2, opt.ProbeConcurrency, func(ip string) (WSResult, bool) {
+			var last WSResult
+			for attempt := 0; attempt < opt.Retries; attempt++ {
+				if strictProbe {
+					last = ProbeWSPing(ctx, ip, opt.Port, opt.Host, msDuration(opt.ProbeTimeoutMs), probePath)
+				} else {
+					last = ProbeWS101(ctx, ip, opt.Port, opt.Host, msDuration(opt.ProbeTimeoutMs), probePath)
+				}
+				if last.OK && strictProbe && opt.WSPath != probePath {
+					pathProbe := ProbeWS101(ctx, ip, opt.Port, opt.Host, msDuration(opt.ProbeTimeoutMs), opt.WSPath)
+					if !pathProbe.OK {
+						last.OK = false
+						last.Error = "真实 WS 路径 101 校验失败：" + pathProbe.Error
+					}
+				}
+				if last.OK {
+					if len(wantCountries) > 0 && wantCountries[strings.ToUpper(last.Colo)] {
+						matchedCount++
+					}
+					if opt.ProbeObserver != nil {
+						opt.ProbeObserver(last.IP, "ws", true, last.Latency)
+					}
+					return last, true
+				}
+				if ctx.Err() != nil {
+					return last, false
 				}
 			}
-			if last.OK {
-				// 统计命中目标地区的数量（早期退出判据）
-				if len(wantCountries) > 0 && wantCountries[strings.ToUpper(last.Colo)] {
-					matchedCount++
-				}
-				if opt.ProbeObserver != nil {
-					opt.ProbeObserver(last.IP, "ws", true, last.Latency)
-				}
-				return last, true
+			if opt.ProbeObserver != nil {
+				opt.ProbeObserver(last.IP, "ws", false, 0)
 			}
-			if ctx.Err() != nil {
-				return last, false
-			}
+			return last, false
+		}, func(done int) {
+			report(Progress{Stage: "probe", Done: done, Total: len(stage2), Message: "阶段二：WebSocket 101 校验"})
+		}, func() bool {
+			return len(opt.Countries) > 0 && matchedCount >= earlyExitTarget
+		})
+		stats["wsOk"] = len(wsOK)
+		if len(wsOK) == 0 && !needXhttp {
+			report(Progress{Stage: "probe", Done: len(stage2), Total: len(stage2),
+				Message: "阶段二全部失败：没有 IP 能完成 WebSocket 101 升级（检查 WS 路径）"})
+			return &Summary{Entries: []Entry{}, Stats: stats}, nil
 		}
-		if opt.ProbeObserver != nil {
-			opt.ProbeObserver(last.IP, "ws", false, 0)
+	}
+	// XHTTP 子阶段：both 在 WS 通过子集上再验，xhttp 直接在 stage2 上验。
+	xhttpInput := stage2
+	if needWs && needXhttp {
+		xhttpInput = make([]string, 0, len(wsOK))
+		for _, r := range wsOK {
+			xhttpInput = append(xhttpInput, r.IP)
 		}
-		return last, false
-	}, func(done int) {
-		report(Progress{Stage: "probe", Done: done, Total: len(stage2), Message: "阶段二：WebSocket 101 校验"})
-	}, func() bool {
-		// 早期退出：带地区筛选时，攒够够用的目标地区节点就收工。
-		//
-		// 为什么要提前退：扩大候选池后阶段二最多要探 500 个，
-		// 但用户只要 SpeedLimit 个节点 —— 探到第 20 个时就可以停，
-		// 省掉后面几百次 WS 探测（每次 3 秒超时）。
-		//
-		// 阈值取 SpeedLimit * 1.5，留出余量应对后续测速淘汰。
-		return len(opt.Countries) > 0 && matchedCount >= earlyExitTarget
-	})
-
+	}
+	if needXhttp {
+		report(Progress{Stage: "probe", Total: len(xhttpInput), Message: "阶段二：XHTTP 端点校验（H2/packet-up）"})
+		xhttpOK := forEachIP(ctx, xhttpInput, opt.ProbeConcurrency, func(ip string) (WSResult, bool) {
+			var last XHTTPResult
+			for attempt := 0; attempt < opt.Retries; attempt++ {
+				last = ProbeXHTTP(ctx, ip, opt.Port, opt.Host, opt.XHTTPPath, msDuration(opt.ProbeTimeoutMs))
+				if last.OK {
+					if opt.ProbeObserver != nil {
+						opt.ProbeObserver(last.IP, "xhttp", true, last.Latency)
+					}
+					colo := last.Colo
+					// both 时优先保留 WS 的 colo（更可靠）
+					if needWs {
+						for _, w := range wsOK {
+							if w.IP == ip {
+								colo = w.Colo
+								break
+							}
+						}
+					}
+					return WSResult{IP: ip, OK: true, Colo: colo, Status: last.Status, Latency: last.Latency}, true
+				}
+				if ctx.Err() != nil {
+					return WSResult{}, false
+				}
+			}
+			if opt.ProbeObserver != nil {
+				opt.ProbeObserver(last.IP, "xhttp", false, 0)
+			}
+			return WSResult{}, false
+		}, func(done int) {
+			report(Progress{Stage: "probe", Done: done, Total: len(xhttpInput), Message: "阶段二：XHTTP 端点校验"})
+		})
+		stats["xhttpOk"] = len(xhttpOK)
+		if needWs {
+			// both：交集（XHTTP 通过的 IP 还要保留 WS 结果对象）
+			keep := make(map[string]WSResult, len(xhttpOK))
+			for _, r := range xhttpOK {
+				keep[r.IP] = r
+			}
+			filtered := wsOK[:0]
+			for _, r := range wsOK {
+				if _, ok := keep[r.IP]; ok {
+					filtered = append(filtered, r)
+				}
+			}
+			wsOK = filtered
+		} else {
+			wsOK = xhttpOK
+		}
+	} else {
+		stats["xhttpOk"] = len(wsOK)
+	}
 	stats["wsOk"] = len(wsOK)
 	if len(wsOK) == 0 {
 		report(Progress{Stage: "probe", Done: len(stage2), Total: len(stage2),
-			Message: "阶段二全部失败：没有 IP 能完成 WebSocket 101 升级（检查 WS 路径）"})
+			Message: "阶段二全部失败：没有 IP 通过当前传输的校验"})
 		return &Summary{Entries: []Entry{}, Stats: stats}, nil
 	}
 
@@ -542,7 +643,7 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 	// 认证配置、数据面出站是否可用 —— 这三类都会表现为「优选结果正常、
 	// 导入客户端全是 -1」。只有给了真实凭据才跑（对齐 CLI scan.ts:749-784）。
 	tunnelRes := make(map[string]TunnelVerifyResult)
-	if opt.UUID != "" || opt.TrojanPassword != "" {
+	if needWs && (opt.UUID != "" || opt.TrojanPassword != "") {
 		limit := opt.SpeedLimit
 		if limit > len(wsOK) {
 			limit = len(wsOK)
@@ -579,8 +680,40 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 		report(Progress{Stage: "probe",
 			Message: fmt.Sprintf("真实隧道校验完成（通过 %d / %d）", len(passed), limit)})
 	}
+	if needXhttp && opt.UUID != "" {
+		limit := opt.SpeedLimit
+		if limit > len(wsOK) {
+			limit = len(wsOK)
+		}
+		passed := make(map[string]bool, limit)
+		failed := 0
+		for _, r := range wsOK[:limit] {
+			res := VerifyXHTTPTunnel(ctx, r.IP, opt.Port, opt.Host, opt.XHTTPPath, opt.UUID, opt.VerifyTargetHost, opt.VerifyTargetPort, msDuration(opt.ProbeTimeoutMs))
+			if res.OK {
+				passed[r.IP] = true
+			} else {
+				failed++
+			}
+		}
+		stats["xhttpTunnelTested"] = limit
+		stats["xhttpTunnelFailed"] = failed
+		if len(passed) > 0 {
+			kept := make([]WSResult, 0, len(passed))
+			for _, r := range wsOK {
+				if passed[r.IP] {
+					kept = append(kept, r)
+				}
+			}
+			wsOK = kept
+			stats["xhttpTunnelOk"] = len(wsOK)
+		} else if limit > 0 {
+			// 全失败时保留阶段二结果，避免空结果
+		}
+		report(Progress{Stage: "probe",
+			Message: fmt.Sprintf("XHTTP 隧道校验完成（通过 %d / %d）", len(passed), limit)})
+	}
 
-	// 地区过滤（机房信息来自阶段二的 101 响应）
+	// 地区过滤（机房信息来自阶段二的 101 / XHTTP 响应）
 	wsFiltered := wsOK
 	if len(opt.Countries) > 0 {
 		want := ExpandCountryFilter(opt.Countries)

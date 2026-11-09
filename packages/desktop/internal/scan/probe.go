@@ -110,49 +110,42 @@ type TLSResult struct {
 	Error string
 }
 
-// ProbeTLS 做一次 TLS 握手（带用户域名作 SNI）。
-//
-// 三条与 JS 版对齐的关键点：
-//
-//  1. **InsecureSkipVerify = true**：优选 IP 上挂的是用户域名的证书，
-//     用 IP 连接时证书名必然不匹配。这里不校验证书 ——
-//     目的是「测通不通」，不是「验身份」。
-//  2. **ALPN 固定 http/1.1**：与 probeWs101 一致。
-//     协商不到 http/1.1 的 IP 走不了 WS，直接判失败。
-//  3. **握手完成立刻关闭**，不产生额外请求。
+// ProbeTLS 做一次 TLS 握手（带用户域名作 SNI），默认 http/1.1。
 func ProbeTLS(ctx context.Context, ip string, port int, host string, timeout time.Duration) TLSResult {
-	start := time.Now()
+	return ProbeTLSWithALPN(ctx, ip, port, host, timeout, "http/1.1")
+}
 
+// ProbeTLSWithALPN 按 ALPN 探测 TLS。
+// InsecureSkipVerify：优选 IP 上挂的是用户域名的证书，用 IP 连接时证书名必然不匹配。
+func ProbeTLSWithALPN(ctx context.Context, ip string, port int, host string, timeout time.Duration, alpn string) TLSResult {
+	if alpn == "" {
+		alpn = "http/1.1"
+	}
+	start := time.Now()
 	d := net.Dialer{Timeout: timeout}
 	rawConn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(ip, fmt.Sprint(port)))
 	if err != nil {
 		return TLSResult{IP: ip, TLSMs: time.Since(start).Milliseconds(), Error: shortErr(err)}
 	}
-
 	cfg := &tls.Config{
 		ServerName:         host,
-		InsecureSkipVerify: true, // 见上方注释 1
-		NextProtos:         []string{"http/1.1"},
+		InsecureSkipVerify: true,
+		NextProtos:         []string{alpn},
 		MinVersion:         tls.VersionTLS12,
 	}
 	conn := tls.Client(rawConn, cfg)
 	_ = conn.SetDeadline(time.Now().Add(timeout))
-
 	if err := conn.HandshakeContext(ctx); err != nil {
 		_ = rawConn.Close()
 		return TLSResult{IP: ip, TLSMs: time.Since(start).Milliseconds(), Error: shortErr(err)}
 	}
-
 	state := conn.ConnectionState()
-	alpn := state.NegotiatedProtocol
+	got := state.NegotiatedProtocol
 	_ = conn.Close()
-
-	// ALPN 没协商到 http/1.1 就无法升级 WS，判失败（与 JS 版一致）
-	if alpn != "" && alpn != "http/1.1" {
-		return TLSResult{IP: ip, TLSMs: time.Since(start).Milliseconds(), ALPN: alpn,
-			Error: "ALPN=" + alpn}
+	if got != "" && got != alpn {
+		return TLSResult{IP: ip, TLSMs: time.Since(start).Milliseconds(), ALPN: got, Error: "ALPN=" + got}
 	}
-	return TLSResult{IP: ip, OK: true, TLSMs: time.Since(start).Milliseconds(), ALPN: alpn}
+	return TLSResult{IP: ip, OK: true, TLSMs: time.Since(start).Milliseconds(), ALPN: got}
 }
 
 // ------------------------------------------------------------------

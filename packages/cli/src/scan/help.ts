@@ -31,6 +31,10 @@ scan 选项:
   --no-callback          只打印结果，不回填
   --path <path>          阶段二校验的 WebSocket 路径，默认 /__edge_probe
                          （对接其它项目时填它自己的 WS 路径，例如 /vless 或 /<uuid>）
+  --probe-transport <m>  探测传输分类：ws|xhttp|both，默认 ws
+                         ws = 只验 WS（H1/101），xhttp = 只验 XHTTP（H2/packet-up），both = 两者都要
+                         订阅含 VLESS+XHTTP 时用 xhttp 或 both；选 xhttp 会跳过 WS 避免误杀
+  --xhttp-path <path>    XHTTP 路径，默认 /xhttp（与数据面一致，--probe-transport=xhttp/both 时生效）
   --probe-path <path>    probe 模式的测速路径，默认 /__edge_probe
                          显式指定后，阶段二的内容校验也会走这个路径
                          （对接第三方项目时用；探针端点不是 /__edge_probe 时必填）

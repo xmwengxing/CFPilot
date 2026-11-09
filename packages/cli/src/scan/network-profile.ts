@@ -7,7 +7,7 @@ import { parseCidr } from './ip-ranges'
 
 export type FailureClass = 'timeout' | 'refused' | 'unreachable' | 'reset' | 'tls' | 'alpn' | 'dns' | 'http' | 'content' | 'cancelled' | 'unknown'
 export interface FailureClassification { kind: FailureClass; status?: number; retryable: boolean; message: string }
-export type ProbeStage = 'tcp' | 'tls' | 'ws' | 'speed'
+export type ProbeStage = 'tcp' | 'tls' | 'ws' | 'xhttp' | 'speed'
 export interface NetworkProfile {
   id: string
   isp: string
@@ -71,7 +71,7 @@ export const OBSERVATION_CAPACITY = 4096
 const MAX_COUNTER = 1_000_000_000
 const MAX_FILE_BYTES = 4 * 1024 * 1024
 const DEFAULT_HALF_LIFE = 7 * 24 * 60 * 60 * 1000
-const STAGES: readonly ProbeStage[] = ['tcp', 'tls', 'ws', 'speed']
+const STAGES: readonly ProbeStage[] = ['tcp', 'tls', 'ws', 'xhttp', 'speed']
 const FAILURE_CLASSES: readonly FailureClass[] = ['timeout', 'refused', 'unreachable', 'reset', 'tls', 'alpn', 'dns', 'http', 'content', 'cancelled', 'unknown']
 const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value)

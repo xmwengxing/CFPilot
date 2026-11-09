@@ -56,6 +56,8 @@ func (s *Server) registerScanRoutes(mux *http.ServeMux) {
 	// 优选历史（读取 / 删除）与单 IP 复测
 	mux.HandleFunc("/api/scan/history", s.guard(s.handleScanHistory))
 	mux.HandleFunc("/api/scan/quality-report", s.guard(s.handleIPQualityReport))
+	// 质量检测：把「未执行」的证据补齐并写回历史（纯净度 + 分层复测）
+	mux.HandleFunc("/api/scan/quality-check", s.guard(s.handleQualityCheck))
 	// 本机出口识别（实验性、显式触发；测的是本机网络出口，非候选 IP 出口）
 	mux.HandleFunc("/api/scan/quality-egress", s.guard(s.handleQualityEgress))
 	// 穿候选隧道的兼容性与候选出口识别（实验性、显式触发）
@@ -68,10 +70,12 @@ func (s *Server) registerScanRoutes(mux *http.ServeMux) {
 
 // scanRequest 是扫描请求体（字段与 Electron 版 ScanParams 对齐）。
 type scanRequest struct {
-	Host      string `json:"host"`
-	WSPath    string `json:"wsPath"`
-	ProbePath string `json:"probePath"`
-	Sample    int    `json:"sample"`
+	Host           string `json:"host"`
+	WSPath         string `json:"wsPath"`
+	ProbePath      string `json:"probePath"`
+	ProbeTransport string `json:"probeTransport"`
+	XHTTPPath      string `json:"xhttpPath"`
+	Sample         int    `json:"sample"`
 	// Family 是地址族：auto / v4 / v6 / both（空 = auto）。
 	//
 	// auto = 先做 IPv6 环境预检（本机公网地址 + 默认路由 + 活跃段金丝雀连通），
@@ -213,6 +217,8 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 		// 算出来 0.000004 MB/s。
 		WSPath:           firstNonEmpty(req.WSPath, scan.ProbeDefaultPath),
 		ProbePath:        firstNonEmpty(req.ProbePath, scan.ProbeDefaultPath),
+		ProbeTransport:   strings.TrimSpace(req.ProbeTransport),
+		XHTTPPath:        strings.TrimSpace(req.XHTTPPath),
 		Countries:        req.Countries,
 		Concurrency:      req.Concurrency,
 		TCPTimeoutMs:     req.TCPTimeoutMs,
@@ -543,25 +549,36 @@ func (s *Server) handleScanDetectPath(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	path := scan.ProbeDefaultPath
+	xhttpPath := "/xhttp"
 	source := "默认值"
 
 	if raw, ok := client.GetKVValue(ctx, profile.AccountID, profile.KVNamespaceID, deploy.ConfigKey); ok && raw != "" {
 		var cfg struct {
-			WsPath string `json:"wsPath"`
+			WsPath    string `json:"wsPath"`
+			XhttpPath string `json:"xhttpPath"`
 		}
-		if err := json.Unmarshal([]byte(raw), &cfg); err == nil && strings.TrimSpace(cfg.WsPath) != "" {
-			path = strings.TrimSpace(cfg.WsPath)
-			source = "KV 配置"
+		if err := json.Unmarshal([]byte(raw), &cfg); err == nil {
+			if strings.TrimSpace(cfg.WsPath) != "" {
+				path = strings.TrimSpace(cfg.WsPath)
+				source = "KV 配置"
+			}
+			if strings.TrimSpace(cfg.XhttpPath) != "" {
+				xhttpPath = strings.TrimSpace(cfg.XhttpPath)
+			}
 		}
 	}
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
+	if !strings.HasPrefix(xhttpPath, "/") {
+		xhttpPath = "/" + xhttpPath
+	}
 
-	s.logf(fmt.Sprintf("识别到 WS 路径：%s（来源：%s）", path, source))
+	s.logf(fmt.Sprintf("识别到 WS 路径：%s，XHTTP 路径：%s（来源：%s）", path, xhttpPath, source))
 	writeJSON(w, http.StatusOK, map[string]any{
-		"path":   path,
-		"source": source,
+		"path":      path,
+		"xhttpPath": xhttpPath,
+		"source":    source,
 	})
 }
 

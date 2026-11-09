@@ -583,6 +583,7 @@
             return {
               ok: true,
               path: r.path,
+              xhttpPath: r.xhttpPath || '/xhttp',
               source: String(r.source || '').indexOf('KV') >= 0 ? 'kv' : 'env',
             }
           }
@@ -834,6 +835,54 @@
       return get('/api/scan/quality-report?sessionId=' + encodeURIComponent(params.sessionId || '') + '&ip=' + encodeURIComponent(params.ip || '') + '&port=' + encodeURIComponent(params.port || 443))
     },
 
+    /**
+     * 识别**本机网络**的出口（实验性、显式触发）。
+     *
+     * ⚠️ 结果是本机直连/SOCKS5 路径的出口，不是候选 IP 的出口；
+     * 仅供判断目标站看到的出口类型，不得当作逐候选差异。
+     */
+    identifyEgress: function (params) {
+      return post('/api/scan/quality-egress', {
+        sessionId: (params && params.sessionId) || '',
+        ip: (params && params.ip) || '',
+        port: (params && params.port) || 443,
+        serviceUrl: (params && params.serviceUrl) || '',
+        bearerToken: (params && params.bearerToken) || '',
+        socks5Proxy: (params && params.socks5Proxy) || '',
+      })
+    },
+
+    /**
+     * 穿候选隧道检测目标站兼容性（实验性、显式触发，串行 ≤10 个目标）。
+     * targets: [{label, spec: 'host[:port]/path', expectedText?}]
+     */
+    probeTunnelCompatibility: function (params) {
+      return post('/api/scan/quality-compat', {
+        sessionId: (params && params.sessionId) || '',
+        ip: (params && params.ip) || '',
+        port: (params && params.port) || 443,
+        host: (params && params.host) || '',
+        wsPath: (params && params.wsPath) || '',
+        uuid: (params && params.uuid) || '',
+        trojanPassword: (params && params.trojanPassword) || '',
+        targets: (params && params.targets) || [],
+      })
+    },
+
+    /** 穿候选隧道识别**候选出口**（实验性、显式触发）。 */
+    identifyTunnelEgress: function (params) {
+      return post('/api/scan/quality-tunnel-egress', {
+        sessionId: (params && params.sessionId) || '',
+        ip: (params && params.ip) || '',
+        port: (params && params.port) || 443,
+        host: (params && params.host) || '',
+        wsPath: (params && params.wsPath) || '',
+        uuid: (params && params.uuid) || '',
+        trojanPassword: (params && params.trojanPassword) || '',
+        serviceUrl: (params && params.serviceUrl) || '',
+      })
+    },
+
     /** 读取实验性功能开关（默认全部关闭）。 */
     getExperimental: function () {
       return get('/api/experimental')
@@ -892,10 +941,40 @@
         wsPath: (params && params.wsPath) || '',
         probePath: (params && params.probePath) || '',
         withSpeed: !!(params && params.withSpeed),
+        verifyPayload: !!(params && params.verifyPayload),
+        uuid: (params && params.uuid) || '',
+        trojanPassword: (params && params.trojanPassword) || '',
+        verifyTargetHost: (params && params.verifyTargetHost) || '',
+        verifyTargetPort: (params && params.verifyTargetPort) || 0,
         targets: (params && params.targets) || [],
       }).then(function (r) {
         return {
           ok: !!(r && r.ok),
+          results: (r && r.results) || [],
+          error: (r && r.error) || '',
+        }
+      })
+    },
+
+    /**
+     * 质量检测：把一条 IP 的质量证据补齐（分层复测 + IP 纯净度），并写回优选历史。
+     *
+     * 与 getIPQualityReport 的区别：那个**只读**本地已保存的证据，
+     * 所以刚优选完的条目大半是「未执行」；这个会真的去跑一遍能跑的检查。
+     *
+     * host / wsPath / probePath 一律用**历史会话里保存的参数**（后端也会再校验），
+     * 界面不传，避免打到别的域名上。
+     */
+    runQualityCheck: function (params) {
+      return post('/api/scan/quality-check', {
+        sessionId: (params && params.sessionId) || '',
+        ip: (params && params.ip) || '',
+        port: (params && params.port) || 443,
+        withSpeed: !!(params && params.withSpeed),
+      }).then(function (r) {
+        return {
+          ok: !!(r && r.ok),
+          report: (r && r.report) || null,
           results: (r && r.results) || [],
           error: (r && r.error) || '',
         }
@@ -1010,6 +1089,48 @@
    * 所以现在：先挂对象，再干那些可能失败的初始化，且每步各自兜住异常。
    */
   window.cfpilot = api
+
+  /* ------------------------------------------------------------------ */
+  /* 桌面扁平横幅：导航并入标题行（仅 Go 版，面板 UI 不变）               */
+  /* ------------------------------------------------------------------ */
+  /**
+   * 把 #nav 移进标题横幅（logo 那一行），释放约 50px 纵向空间。
+   * 页签扁平化：背景与页面一致、之间用分隔线、激活时只高亮文字+下划线。
+   * 只改桌面适配层，packages/ui 保持不动（面板 UI 不受影响）。
+   */
+  function applyFlatHeader() {
+    try {
+      var header = document.querySelector('header.top')
+      var nav = document.getElementById('nav')
+      if (!header || !nav || nav.parentElement === header) return
+      if (!document.getElementById('cfpilot-desktop-flat')) {
+        var style = document.createElement('style')
+        style.id = 'cfpilot-desktop-flat'
+        style.textContent =
+          'header.top{display:flex;align-items:center;gap:14px;padding:8px 20px}' +
+          'header.top .brand .sub{margin-top:1px}' +
+          'header.top nav.tabs{background:transparent;border:none;border-radius:0;padding:0;margin:0;width:auto;max-width:none;flex:1 1 auto;justify-content:flex-start;gap:0;flex-wrap:nowrap}' +
+          'header.top nav.tabs button{flex:0 0 auto;min-width:0;padding:8px 13px;border-radius:0;position:relative;background:transparent}' +
+          'header.top nav.tabs button+button{border-left:1px solid var(--border)}' +
+          'header.top nav.tabs button:hover{background:var(--bg-hover);color:var(--text-main)}' +
+          'header.top nav.tabs button.active{background:transparent;color:var(--accent);font-weight:600;box-shadow:none}' +
+          'header.top nav.tabs button.active::after{content:"";position:absolute;left:10px;right:10px;bottom:0;height:2px;background:var(--accent);border-radius:2px 2px 0 0}' +
+          '@media(max-width:980px){header.top{flex-wrap:wrap;gap:8px 14px}header.top nav.tabs{order:10;flex:1 1 100%;overflow-x:auto;justify-content:flex-start}}' +
+          '@media(max-width:640px){header.top .brand .sub{display:none}}'
+        document.head.appendChild(style)
+      }
+      var spacer = header.querySelector('.spacer')
+      var actions = header.querySelector('.top-actions')
+      header.insertBefore(nav, spacer || actions || null)
+    } catch (err) {
+      /* 排版失败不影响功能 */
+    }
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', applyFlatHeader)
+  } else {
+    applyFlatHeader()
+  }
 
   // 建立 SSE 连接（失败不影响 API 可用性）
   try {

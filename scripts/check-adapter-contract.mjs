@@ -56,6 +56,9 @@ const contracts = [
   ['reTestIps', 'sessionId', '复测结论要写回历史会话'],
   ['reTestIps', 'targets', '复测目标列表'],
   ['reTestIps', 'results', '界面读 result.results 展示分层状态'],
+  ['runQualityCheck', 'sessionId', '质量检测要写回历史会话'],
+  ['runQualityCheck', 'report', '界面读 result.report 渲染完整报告'],
+  ['runQualityCheck', 'results', '界面读 result.results 展示分层状态'],
 
   // ---- 会话（2026-10-26 的另一个严重故障）----
   ['__session', null, 'adapter 必须调用 /__session 建立会话'],

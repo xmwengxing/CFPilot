@@ -6,6 +6,7 @@ import (
 	"net"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -54,6 +55,43 @@ type QualityCompatibility struct {
 	Targets []CompatibilityTarget `json:"targets"`
 	Status  string                `json:"status"`
 }
+
+// PurityScenario 是某个使用场景的适配结论。
+type PurityScenario struct {
+	Label   string `json:"label"`
+	Verdict string `json:"verdict"` // good / caution / bad / unknown
+	Reason  string `json:"reason,omitempty"`
+}
+
+// QualityPurity 是候选 IP 自身的信誉画像（纯净度）。
+//
+// ## 口径
+//
+// 查的是**入口 IP** 的信誉；目标站看到的是**出口 IP**，两者不是一回事。
+// 报告里必须如实标注，避免用户把「入口干净」误当成「节点能过风控」。
+type QualityPurity struct {
+	Status string `json:"status"` // available / failed / not_run
+	// Score 是欺诈分（0~100，越高越可疑）；nil = 未取到
+	Score *int `json:"score,omitempty"`
+	// Risk 是风险等级：low / medium / high / unknown
+	Risk string `json:"risk,omitempty"`
+	// Flags 是身份标记（机房、代理、VPN、Tor 等）
+	Flags []string `json:"flags,omitempty"`
+	// Blacklists 是命中的公开黑名单
+	Blacklists  []string `json:"blacklists,omitempty"`
+	ASN         string   `json:"asn,omitempty"`
+	ISP         string   `json:"isp,omitempty"`
+	Org         string   `json:"org,omitempty"`
+	Country     string   `json:"country,omitempty"`
+	CountryCode string   `json:"countryCode,omitempty"`
+	City        string   `json:"city,omitempty"`
+	// ObservedAt 是观测时刻
+	ObservedAt string `json:"observedAt,omitempty"`
+	// Scenarios 是场景适配倾向
+	Scenarios []PurityScenario `json:"scenarios,omitempty"`
+	// Reason 是失败/缺失原因
+	Reason string `json:"reason,omitempty"`
+}
 type QualityTrendPoint struct {
 	At        string   `json:"at"`
 	SessionID string   `json:"sessionId"`
@@ -88,6 +126,7 @@ type QualityReport struct {
 	Basic            QualityBasic         `json:"basic"`
 	Protocol         QualityProtocol      `json:"protocol"`
 	Performance      QualityPerformance   `json:"performance"`
+	Purity           QualityPurity        `json:"purity"`
 	Egress           QualityEgress        `json:"egress"`
 	Compatibility    QualityCompatibility `json:"compatibility"`
 	History          QualityHistory       `json:"history"`
@@ -345,6 +384,7 @@ func BuildQualityReport(list []Session, sessionID, ip string, port int, now time
 	if entry.QualityReport != nil {
 		r.Egress = entry.QualityReport.Egress
 		r.Compatibility = entry.QualityReport.Compatibility
+		r.Purity = entry.QualityReport.Purity
 		if r.Compatibility.Targets == nil {
 			r.Compatibility.Targets = []CompatibilityTarget{}
 		}
@@ -369,6 +409,24 @@ func BuildQualityReport(list []Session, sessionID, ip string, port int, now time
 		egressStatus, egressReason = r.Egress.Status, "出口观测失败或已过期"
 	}
 	add("egress", egressStatus, nil, egressReason)
+	// 纯净度：候选 IP 自身的信誉画像。
+	// 口径提示必须写进 reason —— 目标站看到的是出口 IP，不是这个入口 IP。
+	purityStatus, purityReason := "not_run", "点「质量检测」会查询该 IP 的公开信誉画像"
+	if r.Purity.Status == "available" {
+		purityStatus, purityReason = "available", ""
+		if r.Purity.Score == nil {
+			purityStatus = "failed"
+			purityReason = "信誉查询未返回评分"
+		}
+	} else if r.Purity.Status == "failed" {
+		purityStatus, purityReason = "failed", firstNonEmptyStr(r.Purity.Reason, "信誉查询失败")
+	}
+	add("purity.score", purityStatus, purityScoreValue(r.Purity), purityReason)
+	add("purity.risk", purityStatus, r.Purity.Risk, purityReason)
+	add("purity.flags", purityStatus, strings.Join(r.Purity.Flags, "、"), purityReason)
+	add("purity.blacklists", purityStatus, strings.Join(r.Purity.Blacklists, "、"), purityReason)
+	add("purity.scenarios", purityStatus, formatPurityScenarios(r.Purity.Scenarios), purityReason)
+	add("purity.attribution", purityStatus, formatPurityAttribution(r.Purity), purityReason)
 	compatibilityStatus := "not_run"
 	if r.Compatibility.Status == "available" || r.Compatibility.Status == "failed" || r.Compatibility.Status == "stale" {
 		compatibilityStatus = r.Compatibility.Status
@@ -379,6 +437,72 @@ func BuildQualityReport(list []Session, sessionID, ip string, port int, now time
 }
 func sameTarget(a string, ap int, b string, bp int) bool {
 	return net.ParseIP(a) != nil && net.ParseIP(a).Equal(net.ParseIP(b)) && ap == bp
+}
+
+// purityScoreValue 返回纯净度评分的可展示值（未取到时为 nil）。
+func purityScoreValue(p QualityPurity) any {
+	if p.Score == nil {
+		return nil
+	}
+	return *p.Score
+}
+
+// formatPurityScenarios 把场景适配结论压成一行可读文本。
+func formatPurityScenarios(list []PurityScenario) string {
+	if len(list) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(list))
+	for _, s := range list {
+		label := s.Verdict
+		switch s.Verdict {
+		case "good":
+			label = "适合"
+		case "caution":
+			label = "谨慎"
+		case "bad":
+			label = "不适合"
+		default:
+			label = "未知"
+		}
+		parts = append(parts, s.Label+"："+label)
+	}
+	return strings.Join(parts, "；")
+}
+
+// formatPurityAttribution 把归属信息压成一行可读文本。
+func formatPurityAttribution(p QualityPurity) string {
+	parts := make([]string, 0, 5)
+	if p.Country != "" {
+		country := p.Country
+		if p.CountryCode != "" {
+			country = p.Country + "(" + p.CountryCode + ")"
+		}
+		parts = append(parts, country)
+	}
+	if p.City != "" {
+		parts = append(parts, p.City)
+	}
+	if p.ASN != "" {
+		parts = append(parts, p.ASN)
+	}
+	if p.ISP != "" {
+		parts = append(parts, p.ISP)
+	}
+	if p.Org != "" && p.Org != p.ISP {
+		parts = append(parts, p.Org)
+	}
+	return strings.Join(parts, " · ")
+}
+
+// firstNonEmptyStr 返回第一个非空字符串。
+func firstNonEmptyStr(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // SaveQualityReport 将独立实验报告存入指定会话；调用方不得把无绑定的出口结果关联候选。
@@ -399,13 +523,16 @@ func (s *Store) SaveQualityReport(sessionID string, report QualityReport) error 
 		for j := range list[i].Entries {
 			e := &list[i].Entries[j]
 			if sameTarget(e.IP, e.Port, report.IP, report.Port) {
-				// 字段合并：出口与兼容性各自独立保存，互不覆盖。
+				// 字段合并：出口、纯净度与兼容性各自独立保存，互不覆盖。
 				if e.QualityReport != nil {
 					if report.Egress.Status == "" {
 						report.Egress = e.QualityReport.Egress
 					}
 					if len(report.Compatibility.Targets) == 0 && report.Compatibility.Status == "" {
 						report.Compatibility = e.QualityReport.Compatibility
+					}
+					if report.Purity.Status == "" {
+						report.Purity = e.QualityReport.Purity
 					}
 				}
 				e.QualityReport = &report

@@ -144,7 +144,30 @@ export function isXhttpPath(pathname: string, baseValue: string | undefined): bo
 interface XhttpSession {
   id: string
   createdAt: number
-  lastSeen: number
+  /**
+   * 三个活动时间戳。
+   *
+   * ## 为什么不能只有一个 lastSeen
+   *
+   * 早前只有 `lastSeen`，且只在 `getOrCreateSession()` 里写一次。
+   * packet-up 的下行是一个**长流**（GET 一直挂着），期间不再有新的 POST ——
+   * 于是 `lastSeen` 冻结在下行开始的那一刻。
+   *
+   * 后果：**纯下载会话（下行一直在流）10 分钟后被判「空闲」回收** ——
+   * 而清理是在每次 `getOrCreateSession()` 时跑的，也就是
+   * 「任何人发来一条新连接，就能把别人正在下载的会话掐掉」。
+   *
+   * 拆成三项之后：
+   *   - 上行有包到达 → lastUploadAt
+   *   - 下行有数据流出 → lastDownlinkAt
+   *   - 空闲判定用 lastActivityAt = max(两者)
+   */
+  /** 最后一次上行分包到达的时刻 */
+  lastUploadAt: number
+  /** 最后一次下行数据产出的时刻 */
+  lastDownlinkAt: number
+  /** 最后一次「有流量」的时刻（空闲判定用） */
+  lastActivityAt: number
   /** seq 0 解析出的 VLESS 头；未到达时 undefined */
   header: VlessHeader | undefined
   headerWaiters: Array<(header: VlessHeader | null) => void>
@@ -153,6 +176,13 @@ interface XhttpSession {
   dialResult: DialResult | null
   /** seq -> 上行字节（seq 0 的为头之后剩余字节） */
   pending: Map<number, Uint8Array>
+  /**
+   * 本会话已向 isolate 级预算预留的字节数。
+   *
+   * 归还一律按这个数记账（见 releaseSessionRetained）——
+   * 不按 `pending` 重算，避免「预留」与「入 pending」之间的时间差造成额度泄漏。
+   */
+  reservedBytes: number
   nextPumpSeq: number
   pumpStarted: boolean
   /** 上行新块通知 */
@@ -166,6 +196,20 @@ interface XhttpSession {
 const XHTTP_SESSIONS = new Map<string, XhttpSession>()
 const SESSION_ASSOCIATE_MS = 30_000
 const SESSION_MAX = 100
+/**
+ * **尚未收到协议头**的会话数上限。
+ *
+ * ## 为什么要有这个独立上限
+ *
+ * 下行 GET 会先创建一条会话再等协议头（正常顺序允许「下行先到」），
+ * 而下行 GET **不需要鉴权** —— 任何人都能 `GET /xhttp/<任意随机 id>`。
+ * 没有这道闸门的话，100 个随机 GET 就能占满全部槽位，
+ * 把真实用户的连接挤掉。
+ *
+ * 取 20：够正常客户端并发（「下行先到」的窗口只有 30 秒），
+ * 又把未鉴权请求能占的槽位压到 1/5，剩下 80 个留给已建立的会话。
+ */
+const SESSION_MAX_PENDING_ASSOC = 20
 const SESSION_IDLE_MS = 10 * 60_000
 /** packet-up 单 POST 上限（官方默认 1MB，这里放宽到 10MB 防误杀） */
 const PACKET_MAX_BYTES = 10 * 1024 * 1024
@@ -204,30 +248,36 @@ let retainedTotalBytes = 0
 /**
  * 归还会话暂存的字节数。
  *
- * 会话关闭时必须调用 —— 否则额度只增不减，跑到一定量之后**所有**新会话都会被拒。
+ * ⚠️ 按**会话自己记的预留数**归还，不按 `pending` 重算 ——
+ * 「预留」与「入 pending」之间存在时间差（判满、写入异常都可能插在中间），
+ * 按 pending 重算会把这段差值漏掉 ⇒ 额度净泄漏。
+ * 额度只增不减 ⇒ 跑到一定量之后**所有**新会话都会被 503 拒掉（假死）。
  */
-function releaseRetained(bytes: number): void {
-  retainedTotalBytes -= bytes
-  if (retainedTotalBytes < 0) retainedTotalBytes = 0
-}
-
-/** 会话当前暂存的字节数 */
-function sessionRetained(session: XhttpSession): number {
-  let total = 0
-  for (const chunk of session.pending.values()) total += chunk.byteLength
-  return total
+function releaseSessionRetained(session: XhttpSession): void {
+  if (session.reservedBytes <= 0) {
+    session.reservedBytes = 0
+    return
+  }
+  retainedTotalBytes = Math.max(0, retainedTotalBytes - session.reservedBytes)
+  session.reservedBytes = 0
 }
 
 /**
  * 预留 isolate 级暂存额度；超限返回 false（调用方应拒绝并关闭会话）。
  *
  * 注意：预留发生在**写入 pending 之前**，所以额度与实际暂存始终一致；
- * 泵出时由 `releaseRetained` 归还。
+ * 泵出时由 `releaseSessionRetained` 归还。
+ *
+ * ⚠️ 归还一律按 `session.reservedBytes` 记账（见 releaseSessionRetained 的注释）——
+ * 早前是「预留多少就还多少、逐块减」，而「预留」与「入 pending」之间
+ * 存在时间差（判满检查、写入异常都可能插在中间），
+ * 那段差值没被归还 ⇒ 额度净泄漏 ⇒ 最终所有会话被 503 拒掉。
  */
 function reserveRetained(session: XhttpSession, bytes: number): boolean {
   if (bytes <= 0) return true
   if (retainedTotalBytes + bytes > MAX_RETAINED_TOTAL_BYTES) return false
   retainedTotalBytes += bytes
+  session.reservedBytes += bytes
   return true
 }
 
@@ -240,7 +290,58 @@ export function clearXhttpSessions(): void {
   retainedTotalBytes = 0
 }
 
-function getOrCreateSession(id: string, trafficLimitBytes: number): XhttpSession {
+/**
+ * 会话「不活跃了没有」。
+ *
+ * ## 判定口径
+ *
+ * 三项活动时间**都**超过空闲阈值才算闲置：
+ * 上行久无新包、下行久无新数据、整体也久无动静。
+ *
+ * 只看其中一项会把「正在下载但没有新上行」的会话误杀 ——
+ * 那正是早前 `lastSeen` 单字段的缺陷。
+ */
+function isSessionIdle(session: XhttpSession, now: number): boolean {
+  return (
+    now - session.lastUploadAt > SESSION_IDLE_MS &&
+    now - session.lastDownlinkAt > SESSION_IDLE_MS &&
+    now - session.lastActivityAt > SESSION_IDLE_MS
+  )
+}
+
+/**
+ * 会话是否**可以安全回收**（占用容量但已经没有价值）。
+ *
+ * 只有「孤儿会话」符合：没有协议头、没有建立出站、也没有人在等下行，
+ * 且已经超过关联等待窗口 —— 也就是客户端 POST 了分包却再也没出现。
+ *
+ * ⚠️ **有协议头 / 有出站连接 / 下行流在等的会话一律不可回收**：
+ * 那都是**正在正常工作的隧道**，踢掉它等于让别人的连接凭空断掉。
+ */
+function isSessionReclaimable(session: XhttpSession, now: number): boolean {
+  if (session.closed) return true
+  if (session.header || session.dialResult || session.downlinkStarted) return false
+  return now - session.createdAt > SESSION_ASSOCIATE_MS
+}
+
+/**
+ * 取（或建）一个会话。
+ *
+ * @param kind 调用方类型：上行分包 / 下行长流。
+ *   用来决定刷新哪个活动时间戳 —— 下行长流只在**开始时**进来一次，
+ *   后续数据靠 `touchDownlink()` 单独刷新。
+ * @param authenticated 本次请求**自带协议头**（seq = 0 的上行分包）。
+ *   为 true 时不占「未关联会话」的闸门 —— 因为协议头马上就会被校验，
+ *   校验不过会立刻 closeSession 把槽位还回来。
+ * @returns null 表示**拒绝新建**（容量已满且无可回收的会话）。
+ *   调用方应返回 503，而不是踢掉一条正在工作的隧道。
+ */
+function getOrCreateSession(
+  id: string,
+  trafficLimitBytes: number,
+  kind: 'upload' | 'downlink',
+  authenticated: boolean
+): XhttpSession | null {
   const now = Date.now()
   // 惰性清理过期与闲置会话，避免无界增长
   //
@@ -248,33 +349,61 @@ function getOrCreateSession(id: string, trafficLimitBytes: number): XhttpSession
   // 直接 delete 会**漏掉暂存字节的归还**，额度只增不减 ——
   // 跑到一定量之后所有新会话都会被 503 拒掉（假死）。
   for (const [key, value] of XHTTP_SESSIONS) {
-    if (value.closed || now - value.lastSeen > SESSION_IDLE_MS || now - value.createdAt > 30 * 60_000) {
+    if (value.closed || isSessionIdle(value, now) || now - value.createdAt > 30 * 60_000) {
       closeSession(key, value)
     }
   }
   const existing = XHTTP_SESSIONS.get(id)
   if (existing) {
-    existing.lastSeen = now
+    touchSession(existing, kind, now)
     return existing
   }
+
   if (XHTTP_SESSIONS.size >= SESSION_MAX) {
-    // 满了就淘汰最旧的，让新会话可用
-    const oldest = XHTTP_SESSIONS.keys().next().value
-    if (oldest !== undefined) {
-      const old = XHTTP_SESSIONS.get(oldest)
-      if (old) closeSession(oldest, old)
-      else XHTTP_SESSIONS.delete(oldest)
+    // 容量满了。
+    //
+    // ⚠️ 早前的实现直接踢掉「最早创建」的那条 —— 那可能是一条
+    // **正在正常传输**的隧道，于是第 101 条连接能凭空掐掉别人的连接。
+    //
+    // 现在分两步：
+    //   1) 先回收「孤儿会话」（没头、没出站、没人等、且已过关联窗口）；
+    //   2) 仍然满 ⇒ **拒绝新会话**（返回 null ⇒ 503）。
+    //      宁可让新连接失败，也不破坏已在工作的连接。
+    for (const [key, value] of XHTTP_SESSIONS) {
+      if (isSessionReclaimable(value, now)) {
+        closeSession(key, value)
+      }
+    }
+    if (XHTTP_SESSIONS.size >= SESSION_MAX) {
+      return null
+    }
+  }
+  // 未鉴权请求（无协议头的下行 GET、无头的分包 POST）也占槽位 ——
+  // 单独给它们一道闸门，别让随机 id 的请求把真实会话挤掉。
+  //
+  // ⚠️ 只拦**未鉴权**的建会话：带协议头的上行分包不受影响 ——
+  // 否则攻击者用 20 个随机 GET 就能把真实用户也一起挡在门外。
+  if (!authenticated) {
+    let pendingAssoc = 0
+    for (const value of XHTTP_SESSIONS.values()) {
+      if (!value.header) pendingAssoc += 1
+    }
+    if (pendingAssoc >= SESSION_MAX_PENDING_ASSOC) {
+      return null
     }
   }
   const session: XhttpSession = {
     id,
     createdAt: now,
-    lastSeen: now,
+    lastUploadAt: now,
+    lastDownlinkAt: now,
+    lastActivityAt: now,
     header: undefined,
     headerWaiters: [],
     dialPromise: null,
     dialResult: null,
     pending: new Map(),
+    reservedBytes: 0,
     nextPumpSeq: 0,
     pumpStarted: false,
     signalResolve: null,
@@ -285,6 +414,16 @@ function getOrCreateSession(id: string, trafficLimitBytes: number): XhttpSession
   }
   XHTTP_SESSIONS.set(id, session)
   return session
+}
+
+/** 刷新会话的活动时间戳。 */
+function touchSession(session: XhttpSession, kind: 'upload' | 'downlink', now: number): void {
+  if (kind === 'upload') {
+    session.lastUploadAt = now
+  } else {
+    session.lastDownlinkAt = now
+  }
+  session.lastActivityAt = now
 }
 
 function closeSession(id: string, session: XhttpSession): void {
@@ -309,7 +448,7 @@ function closeSession(id: string, session: XhttpSession): void {
     }
   }
   // 归还暂存额度（否则 isolate 级预算只增不减，最终把所有会话都拒掉）
-  releaseRetained(sessionRetained(session))
+  releaseSessionRetained(session)
   session.pending.clear()
   XHTTP_SESSIONS.delete(id)
 }
@@ -428,7 +567,7 @@ async function pumpUplink(session: XhttpSession, dialResult: DialResult): Promis
         session.pending.delete(session.nextPumpSeq)
         session.nextPumpSeq += 1
         // 泵出即归还暂存额度（否则额度只增不减，最终把所有会话都拒掉）
-        releaseRetained(chunk.byteLength)
+        releaseSessionRetained(session)
         if (chunk.byteLength === 0) continue
         if (session.traffic.add(chunk.byteLength)) {
           recordXhttpDiagnostics(session.targetLabel, { kind: 'budget', message: '流量超限', candidate: 'traffic' }, 'XHTTP 上行流量超限')
@@ -478,7 +617,13 @@ async function handlePacketUpChunk(
 ): Promise<Response | null> {
   void proxies
   const trafficLimit = (config.dataBudgetMB || 0) * 1024 * 1024
-  const session = getOrCreateSession(sessionId, trafficLimit)
+  // seq === 0 自带 VLESS 协议头 —— 这一次请求就是「已鉴权」的。
+  const session = getOrCreateSession(sessionId, trafficLimit, 'upload', seq === 0)
+  if (!session) {
+    // 容量已满且无可回收的会话 ⇒ 拒绝新建。
+    // ⚠️ 不能改成「踢掉一条正在工作的隧道」—— 那会让别人的连接凭空断掉。
+    return new Response('会话数已达上限，请稍后重试', { status: 503, headers: xhttpHeaders() })
+  }
   if (session.closed) return null
 
   // ⚠️ 先按 Content-Length 拒掉超限的包，**再**读 body。
@@ -517,13 +662,20 @@ async function handlePacketUpChunk(
     const rest = body.subarray(parsed.consumed)
     // 已泵过的 seq 直接忽略（重传）
     if (seq >= session.nextPumpSeq && !session.pending.has(seq)) {
-      if (!reserveRetained(session, rest.byteLength)) {
-        closeSession(sessionId, session)
-        return new Response('暂存超限', { status: 503, headers: xhttpHeaders() })
-      }
+      // ⚠️ **判满必须在预留之前**。
+      //
+      // 早前的顺序是「先 reserveRetained、再判 pending 是否已满」，
+      // 而 closeSession 只归还 `session.pending` 里的字节 ——
+      // 刚预留、还没进 pending 的那一段**不会被归还** ⇒ 额度净泄漏一块。
+      // 反复「填满 30 包 + 再发 1 个超限包」就能把 isolate 的 32MiB
+      // 预算**永久**打满，之后所有会话（含合法会话）一律 503（假死）。
       if (session.pending.size >= PACKET_MAX_BUFFERED) {
         closeSession(sessionId, session)
         return new Response('分包缓存已满', { status: 503, headers: xhttpHeaders() })
+      }
+      if (!reserveRetained(session, rest.byteLength)) {
+        closeSession(sessionId, session)
+        return new Response('暂存超限', { status: 503, headers: xhttpHeaders() })
       }
       session.pending.set(seq, rest.slice())
     }
@@ -535,13 +687,17 @@ async function handlePacketUpChunk(
     // ⚠️ seq >= 1 的分包**没有 VLESS 头**（头只在 seq = 0 校验），
     // 所以这里必须先过 isolate 级暂存预算 —— 否则任何人都能
     // `POST /xhttp/<任意随机 id>/<seq>` 免费占用 isolate 内存。
-    if (!reserveRetained(session, body.byteLength)) {
-      closeSession(sessionId, session)
-      return new Response('暂存超限', { status: 503, headers: xhttpHeaders() })
-    }
+    //
+    // ⚠️ **判满必须在预留之前**（理由同 seq===0 分支）：
+    // 先预留再判满的话，closeSession 只归还 pending 里的字节，
+    // 刚预留的那一段不会被归还 ⇒ 额度净泄漏（详见 reserveRetained 注释）。
     if (session.pending.size >= PACKET_MAX_BUFFERED) {
       closeSession(sessionId, session)
       return new Response('分包缓存已满', { status: 503, headers: xhttpHeaders() })
+    }
+    if (!reserveRetained(session, body.byteLength)) {
+      closeSession(sessionId, session)
+      return new Response('暂存超限', { status: 503, headers: xhttpHeaders() })
     }
     session.pending.set(seq, body.slice())
   }
@@ -558,7 +714,10 @@ async function handleSessionDownlink(
 ): Promise<Response | null> {
   void request
   const trafficLimit = (config.dataBudgetMB || 0) * 1024 * 1024
-  const session = getOrCreateSession(sessionId, trafficLimit)
+  const session = getOrCreateSession(sessionId, trafficLimit, 'downlink', false)
+  if (!session) {
+    return new Response('会话数已达上限，请稍后重试', { status: 503, headers: xhttpHeaders() })
+  }
   if (session.closed || session.downlinkStarted) return null
   session.downlinkStarted = true
 
@@ -625,6 +784,14 @@ async function handleSessionDownlink(
           return
         }
         if (value && value.byteLength > 0) {
+          // ⚠️ 必须在这里刷新下行活动时间。
+          //
+          // 下行是长流：GET 只在**开始时**进一次 getOrCreateSession，
+          // 之后数据源源不断流出来但再没有新的请求到达。
+          // 不刷新的话，纯下载会话会被「空闲 10 分钟」判定回收 ——
+          // 而回收是在**别人发来新请求**时触发的，等于任意一条新连接
+          // 就能把别人正在下载的会话掐掉。
+          touchSession(session, 'downlink', Date.now())
           if (session.traffic.add(value.byteLength)) {
             recordXhttpDiagnostics(session.targetLabel, { kind: 'budget', message: '流量超限', candidate: 'traffic' }, 'XHTTP 下行流量超限')
             cleanup()

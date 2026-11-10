@@ -465,6 +465,17 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
     '/xhttp'
   ).replace(/\/+$/, '') || '/xhttp'
   const noSpeed = flagBool(args, 'no-speed')
+  /**
+   * 下行速度下限（MB/s）：稳态吞吐低于该值的候选淘汰。0 = 不过滤。
+   *
+   * 与「跳过测速」互斥 —— 跳过测速时速度恒为 0，
+   * 非零下限会把结果全部淘汰（在 runScan 里报错，这里提前拦一道给更好的提示）。
+   */
+  const minSpeedMBps = Math.max(0, flagNumber(args, 'min-speed', 0))
+  if (minSpeedMBps > 0 && noSpeed) {
+    process.stderr.write('--min-speed 与 --no-speed（跳过测速）互斥：没有速度值可用于筛选\n')
+    process.exit(1)
+  }
   // 国家过滤：不选 = 全量。无效代码在 normalizeCountryFilter 里被丢弃
   const countries = normalizeCountryFilter(flagList(args, 'countries'))
   /**
@@ -527,6 +538,9 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
     process.stdout.write(`探测传输：${probeTransport}${probeTransport !== 'ws' ? `（XHTTP 路径：${xhttpPath}）` : ''}\n`)
     if (countries.length > 0) {
       process.stdout.write(`国家筛选：${countries.join(' / ')}（不填则全量）\n`)
+    }
+    if (minSpeedMBps > 0) {
+      process.stdout.write(`速度过滤：低于 ${minSpeedMBps} MB/s 的候选淘汰\n`)
     }
   }
 
@@ -696,6 +710,7 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
     wsPath,
     probePath,
     skipSpeed,
+    minSpeedMBps,
     verifyPayload,
     concurrency: flagNumber(args, 'concurrency', 300),
     retries: flagNumber(args, 'retries', 2),

@@ -197,9 +197,9 @@
   /**
    * 各事件的订阅者列表。
    *
-   * ⚠️ 这里必须与后端 `s.events.publish(...)` 的**全部 7 个事件**一一对应：
+   * ⚠️ 这里必须与后端 `s.events.publish(...)` 的**全部 8 个事件**一一对应：
    * deploy-status / log / relay-progress / relay-result / scan-result /
-   * update-done / update-progress。
+   * task-status / update-done / update-progress。
    *
    * 漏一个键的后果（2026-11-05 真机）：relay-result / relay-progress 没声明，
    * 界面启动调 onRelayResult / onRelayProgress 时 subscribe() 里的
@@ -218,6 +218,7 @@
     'relay-progress': [],
     'update-progress': [],
     'update-done': [],
+    'task-status': [],
   }
 
   let es = null
@@ -927,6 +928,127 @@
       return call('DELETE', '/api/scan/history?id=' + encodeURIComponent(id || ''))
     },
 
+    /* ---------------- 定时优选任务 ---------------- */
+
+    /**
+     * 读取当前账号的定时优选任务清单。
+     *
+     * 后端首次访问时会自动为该账号物化 5 条内置任务。
+     */
+    listScheduledTasks: function () {
+      return get('/api/schedule/tasks').then(function (r) {
+        return {
+          ok: !!(r && r.ok),
+          account: (r && r.account) || null,
+          tasks: (r && r.tasks) || [],
+          scheduler: (r && r.scheduler) || null,
+          enabledCount: (r && r.enabledCount) || 0,
+          enabledLimit: (r && r.enabledLimit) || 3,
+          hint: (r && r.hint) || '',
+          error: (r && r.error) || '',
+        }
+      })
+    },
+
+    /** 新建一个定时优选任务 */
+    createScheduledTask: function (params) {
+      var p = params || {}
+      return post('/api/schedule/tasks', {
+        name: p.name || '',
+        description: p.description || '',
+        intervalDays: Number(p.intervalDays) || 2,
+        runAt: p.runAt || '',
+        minSpeedMBps: Number(p.minSpeedMBps) || 0,
+        scan: p.scan || {},
+      }).then(function (r) {
+        return {
+          ok: !!(r && r.ok),
+          task: (r && r.task) || null,
+          error: (r && r.error) || '',
+          conflict: (r && r.conflict) || null,
+        }
+      })
+    },
+
+    /**
+     * 批量修改定时优选任务（多选后「保存应用」）。
+     *
+     * 只有实际改动过的字段才会提交 —— 空白字段保持原值，
+     * 避免一次编辑把别的任务的名称也抹平。
+     */
+    updateScheduledTasks: function (params) {
+      var p = params || {}
+      var body = { ids: p.ids || [] }
+      if (p.name !== undefined && p.name !== null) body.name = p.name
+      if (p.description !== undefined && p.description !== null) body.description = p.description
+      if (p.intervalDays !== undefined && p.intervalDays !== null) body.intervalDays = Number(p.intervalDays)
+      if (p.runAt !== undefined && p.runAt !== null) body.runAt = p.runAt
+      if (p.minSpeedMBps !== undefined && p.minSpeedMBps !== null) body.minSpeedMBps = Number(p.minSpeedMBps)
+      if (p.enabled !== undefined && p.enabled !== null) body.enabled = !!p.enabled
+      return call('PUT', '/api/schedule/tasks', body).then(function (r) {
+        return {
+          ok: !!(r && r.ok),
+          tasks: (r && r.tasks) || [],
+          error: (r && r.error) || '',
+          conflict: (r && r.conflict) || null,
+        }
+      })
+    },
+
+    /** 删除定时优选任务（内置任务不会被删，会在 skipped 里说明） */
+    deleteScheduledTasks: function (ids) {
+      return call('DELETE', '/api/schedule/tasks', { ids: ids || [] }).then(function (r) {
+        return {
+          ok: !!(r && r.ok),
+          deleted: (r && r.deleted) || 0,
+          skipped: (r && r.skipped) || [],
+          error: (r && r.error) || '',
+        }
+      })
+    },
+
+    /** 读取本地优选 IP 池（定时任务跑出来的结果） */
+    listScheduledPool: function () {
+      return get('/api/schedule/pool').then(function (r) {
+        return {
+          ok: !!(r && r.ok),
+          entries: (r && r.entries) || [],
+          error: (r && r.error) || '',
+        }
+      })
+    },
+
+    /**
+     * 把选中的池内条目回填到面板。
+     *
+     * mode：replace = 覆盖（会清空面板已有的优选 IP，含用户手填的）；
+     *       append  = 增量（只补真正新的）。
+     */
+    pushScheduledPool: function (entries, mode) {
+      return post('/api/schedule/pool/push', {
+        entries: entries || [],
+        mode: mode === 'append' ? 'append' : 'replace',
+      }).then(function (r) {
+        return {
+          ok: !!(r && r.ok),
+          count: (r && r.count) || 0,
+          mode: (r && r.mode) || '',
+          error: (r && r.error) || '',
+        }
+      })
+    },
+
+    /** 从本地优选 IP 池移除条目 */
+    deleteScheduledPool: function (ips) {
+      return call('DELETE', '/api/schedule/pool', { ips: ips || [] }).then(function (r) {
+        return {
+          ok: !!(r && r.ok),
+          deleted: (r && r.deleted) || 0,
+          error: (r && r.error) || '',
+        }
+      })
+    },
+
     /**
      * 对选中的 IP 跑分层可用性复测（TCP → TLS → WS101，可选测速）。
      *
@@ -1062,6 +1184,11 @@
 
     onUpdateProgress: function (cb) {
       return subscribe('update-progress', cb)
+    },
+
+    /** 定时优选任务的状态变化（运行中 / 完成 / 失败） */
+    onTaskStatus: function (cb) {
+      return subscribe('task-status', cb)
     },
 
     /* ---------------- 版本信息 ---------------- */

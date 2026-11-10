@@ -208,6 +208,23 @@ export interface ScanOptions {
   /** 跳过测速，只按延迟排序 */
   skipSpeed?: boolean
   /**
+   * 下行速度下限（MB/s）：稳态吞吐低于该值的候选直接淘汰。
+   *
+   * 0 = 不过滤（默认）。
+   *
+   * ## 判定口径
+   *
+   * 用**稳态值**（`steadyMBps`，即 `entry.speed`），不是峰值
+   * （`peakMBps`）—— 单窗口突发能把峰值翻倍（实测 2.46 vs 1.14），
+   * 拿峰值当筛选门槛会把「偶然冲高」的 IP 当成好节点。
+   *
+   * ## 与「跳过测速」互斥
+   *
+   * 跳过测速时速度恒为 0，任何非零下限都会把结果全部淘汰 ——
+   * 所以这里直接报错，而不是静默返回空结果。
+   */
+  minSpeedMBps?: number
+  /**
    * 是否做「出口体检」（调数据面 `/__unlock_probe`）。
    *
    * 按**机房去重**：同一机房的优选 IP 出口相同，只测一条代表。
@@ -537,6 +554,16 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   const speedTimeoutMs = options.speedTimeoutMs ?? 12000
   const speedBytes = options.speedBytes ?? 5 * 1024 * 1024
   const top = options.top ?? 8
+  /**
+   * 下行速度下限（MB/s）：稳态吞吐低于该值的候选淘汰。
+   *
+   * 0 = 不过滤。与「跳过测速」互斥 —— 跳过测速时速度恒为 0，
+   * 任何非零下限都会把结果全灭，所以这里直接报错。
+   */
+  const minSpeedMBps = options.minSpeedMBps ?? 0
+  if (minSpeedMBps > 0 && options.skipSpeed) {
+    throw new Error('--min-speed 与「跳过测速」互斥：跳过测速时没有速度值可用于筛选')
+  }
   /**
    * 国家 / 地区筛选（作用于已识别机房的候选）。
    *
@@ -1030,6 +1057,21 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
         : b.speed - a.speed || a.tlsMs - b.tlsMs || a.latency - b.latency
     )
 
+  // 下行速度下限过滤（0 = 不过滤）。
+  //
+  // 放在 `pickWithDiversity` **之前**：被淘汰的候选本可以补位，
+  // 放在之后会得到不足 top 条的结果。
+  const speedFiltered = filterByMinSpeed(ranked, minSpeedMBps)
+  if (minSpeedMBps > 0 && speedFiltered.length < ranked.length) {
+    report({
+      type: 'progress',
+      stage: 3,
+      done: speedFiltered.length,
+      total: ranked.length,
+      message: `速度过滤：淘汰 ${ranked.length - speedFiltered.length} 个低于 ${minSpeedMBps} MB/s 的候选`,
+    })
+  }
+
   // 取前 N 时**按 /16 轮流取**，而不是直接切前 N 名。
   //
   // 为什么：Cloudflare 的好 IP 会集中在少数 /16（实测 104.16–104.19 就占了大半），
@@ -1038,7 +1080,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   //
   // 轮流取（每轮从每个 /16 取当前最好的一条）既保住了速度排序，又保证
   // 最终列表覆盖多个网段；同段内部仍然按速度排。
-  const entries = pickWithDiversity(ranked, top)
+  const entries = pickWithDiversity(speedFiltered, top)
 
   // ---- 阶段四：出口体检（可选）----
   //
@@ -1348,6 +1390,29 @@ async function coarsePreRank<T extends { ip: string }>(
   })
 
   return rankByCoarseSpeed(candidates, coarse, speedLimit)
+}
+
+/**
+ * 下行速度下限过滤。
+ *
+ * 保留稳态吞吐（`entry.speed`）**不低于** `minSpeedMBps` 的候选。
+ * `minSpeedMBps <= 0` 时原样返回（不过滤）。
+ *
+ * ## 为什么用稳态值而不是峰值
+ *
+ * `peakMBps` 是单个测量窗口的瞬时峰值，真机实测能把稳态值翻倍
+ * （2.46 vs 1.14 MB/s）。拿它当筛选门槛，会把「偶然冲高」的 IP
+ * 误当成好节点留下 —— 而用户真正在意的是能持续跑多快。
+ *
+ * Go 版对应 `packages/desktop/internal/scan` 的 `filterByMinSpeed`，
+ * 两端必须对同一组输入给出相同结果。
+ */
+export function filterByMinSpeed<T extends { speed: number }>(
+  entries: readonly T[],
+  minSpeedMBps: number
+): T[] {
+  if (!(minSpeedMBps > 0)) return entries as T[]
+  return entries.filter((e) => e.speed >= minSpeedMBps)
 }
 
 export function pickWithDiversity<T extends { ip: string }>(ranked: readonly T[], top: number): T[] {

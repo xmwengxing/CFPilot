@@ -1635,6 +1635,7 @@
           <div class="subtabs" id="scanTabs">
             <button type="button" class="active" data-scan-tab="entry">入口优选</button>
             <button type="button" data-scan-tab="relay">反代优选</button>
+            <button type="button" data-scan-tab="task">定时优选任务</button>
           </div>
 
           <!--
@@ -1651,7 +1652,7 @@
             <div class="pair-grid">
               <div class="pair">
                 <div class="field full">
-                  <label title="workers 部署请使用自定义域名！*.workers.dev 生产链路网络阻断。&#10;「自动识别」：优先填入数据面自定义域名，否则填入 workers.dev / pages.dev">Worker 域名</label>
+                  <label title="workers 部署请使用自定义域名！*.workers.dev 生产链路网络阻断。&#10;「自动识别」：优先填入数据面自定义域名，否则填入 workers.dev / pages.dev">Workers / Pages 域名</label>
                   <div class="field-inline">
                     <input type="text" id="optHost" placeholder="如 cfp-dat.pages.dev 或自定义域名" />
                     <button class="btn btn-ghost" id="btnAutoDetect">自动识别</button>
@@ -1898,6 +1899,7 @@
 
             <div class="btn-row" style="margin-top:16px">
               <button class="btn btn-primary" id="btnScan">开始优选</button>
+              <button class="btn btn-ghost" id="btnSaveTask" title="把当前优选参数存成定时任务，到点自动跑，结果进「定时优选任务」页的本地优选 IP 池。">保存为定时任务</button>
               <button class="btn btn-ghost" id="btnEnvCheck">检测网络环境</button>
             </div>
             <div class="warnbox" style="margin-top:12px">
@@ -1971,6 +1973,103 @@
             </div>
           </div>
 
+          <!--
+            ============ 定时优选任务 ============
+
+            与前两个页签的关系：
+              入口优选 / 反代优选 = 「现在跑一次」
+              定时优选任务      = 「按周期自动跑」
+
+            两块内容：
+              ① 任务清单   —— 归属账号、多选、编辑 5 个参数、删除
+              ② 本地优选 IP 池 —— 定时任务跑出来的结果，可多选后复制 / 回填
+          -->
+          <div id="scanPanelTask" hidden>
+            <div class="card">
+              <h2><span class="dot"></span>⏰ 定时优选任务</h2>
+              <p class="desc">
+                任务归属账号：<b id="taskAccountName">（读取中…）</b>
+                <span class="muted" id="taskAccountHint"></span>
+              </p>
+              <p class="hint">
+                任务按「周期 + 时刻」自动跑优选，结果进下方的<b>本地优选 IP 池</b>，
+                由你勾选后决定是否回填到面板。<br>
+                <b>数据面域名与 WS 路径由该账号的部署清单自动获取</b>，不用在这里设置。<br>
+                <b>运行时刻之间要相隔 30 分钟以上</b> —— 同一台机器同一时刻只跑一个扫描，
+                挨太近的任务会互相顶掉。<br>
+                <b>同一账号最多启用 <span id="taskEnabledLimit">3</span> 个任务</b>
+                （当前已启用 <span id="taskEnabledCount">0</span> 个）——
+                定时优选是无人值守跑的，任务太多会让本机 IP 的行为看起来像批量扫描器。<br>
+                内置任务默认<b>不启用</b>，请先设好时间再打开。
+              </p>
+              <div class="warnbox" id="taskWarn" hidden style="margin-top:10px"></div>
+              <div class="btn-row" style="margin-top:12px">
+                <button class="btn btn-ghost" id="btnTaskRefresh" title="重新读取任务清单与 IP 池。">↻ 刷新</button>
+                <button class="btn btn-ghost" id="btnTaskEdit" disabled
+                  title="编辑勾选任务的名称、说明、周期、运行时间与速度过滤。&#10;优选参数不可编辑 —— 要调整请删除任务后在「入口优选」页重新配置。">编辑所选</button>
+                <button class="btn btn-ghost" id="btnTaskDelete" disabled
+                  title="删除勾选的任务。内置任务不可删除。">删除所选</button>
+                <button class="btn btn-primary" id="btnTaskSave" disabled
+                  title="把弹窗里改动过的字段套用到所有勾选的任务。&#10;保存时会检查运行时刻是否与其它任务冲突。">保存应用</button>
+              </div>
+              <div class="src-table-scroll" style="margin-top:12px">
+                <table id="taskTable">
+                  <thead><tr>
+                    <th style="width:34px"><input type="checkbox" id="taskCheckAll" title="全选 / 全不选" /></th>
+                    <th style="width:80px">启用</th>
+                    <th>名称</th>
+                    <th>说明</th>
+                    <th>周期</th>
+                    <th>运行时间</th>
+                    <th>速度过滤</th>
+                    <th>优选参数</th>
+                    <th>下次运行</th>
+                    <th>上次运行</th>
+                    <th>状态</th>
+                    <th>数据面</th>
+                  </tr></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <p class="hint" id="taskHint">（正在加载任务清单…）</p>
+            </div>
+
+            <div class="card">
+              <h2><span class="dot"></span>🗂️ 本地优选 IP 池</h2>
+              <p class="hint">
+                定时任务跑出来的结果。同一 IP 再次入池会被<b>最新一轮的结果覆盖</b>。<br>
+                <b>覆盖回填</b>会清空面板优选池里已有的 IP（含你在面板手填的「手动指定 IP」）；
+                <b>增量回填</b>只补真正新的。
+              </p>
+              <div class="btn-row" style="margin-top:10px">
+                <button class="btn btn-ghost" id="btnPoolCopy" disabled
+                  title="把勾选的 IP 复制到剪贴板（格式 IP:端口#备注，可直接粘贴）。">复制选中 IP</button>
+                <button class="btn btn-ghost" id="btnPoolPushReplace" disabled
+                  title="清空面板优选池后写入勾选的 IP。&#10;会连带清掉面板里手填的「手动指定 IP」。">覆盖回填</button>
+                <button class="btn btn-primary" id="btnPoolPushAppend" disabled
+                  title="保留面板优选池里已有的 IP，只补勾选里真正新的。">增量回填</button>
+                <button class="btn btn-ghost" id="btnPoolRemove" disabled
+                  title="从本地池移除勾选的条目（不影响面板）。">移除选中</button>
+              </div>
+              <div class="src-table-scroll" style="margin-top:12px">
+                <table id="poolTable">
+                  <thead><tr>
+                    <th style="width:34px"><input type="checkbox" id="poolCheckAll" title="全选 / 全不选" /></th>
+                    <th>IP</th>
+                    <th>端口</th>
+                    <th>来源任务</th>
+                    <th>下行(MB/s)</th>
+                    <th>延迟(ms)</th>
+                    <th>机房</th>
+                    <th>入池时间</th>
+                  </tr></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <p class="hint" id="poolHint">（本地池为空 —— 定时任务跑完后结果会自动进这里）</p>
+            </div>
+          </div>
+
           <div class="card" id="entryResultCard">
             <h2><span class="dot"></span>📋 入口 IP 优选结果</h2>
             <div class="result-box" id="scanOut">暂无结果，填写上方参数后点击「开始优选」</div>
@@ -2000,28 +2099,6 @@
               <thead><tr><th>#</th><th>地址</th><th>机房</th><th>TLS握手(ms)</th><th>TCP(ms)</th><th>下行(MB/s)</th><th>质量检测</th></tr></thead>
               <tbody></tbody>
             </table>
-          </div>
-
-          <!--
-            自适应效果对照（A/B）
-
-            跨省、跨运营商的样本拿不到，但**同一网络环境下的开/关对照**随时能做：
-            同样的档案、同样的域名，一轮开一轮关，比较阶段通过率与可用节点数。
-            这是把实验能力转成正式功能前唯一可靠的验收依据。
-          -->
-          <div class="card" id="adaptiveCard">
-            <h2><span class="dot"></span>🧪 自适应效果对照</h2>
-            <p class="desc">
-              同一档案、同一域名下「开启 / 关闭」自适应采样的分阶段通过率对照。
-              <b>至少各跑一轮</b>才有参考价值。
-            </p>
-            <div id="adaptiveEffect">
-              <p class="history-empty">加载中…</p>
-            </div>
-            <div class="btn-row" style="margin-top: 10px; align-items: center">
-              <button class="btn btn-ghost" id="btnEffectRefresh">刷新对照</button>
-              <span class="tip" id="effectHint"></span>
-            </div>
           </div>
 
           <!--
@@ -2055,6 +2132,33 @@
               勾选「带测速」会同时重新测下行速度（每 IP 约多花 4 秒）。
             </p>
           </div>
+
+          <!--
+            自适应效果对照（A/B）
+
+            跨省、跨运营商的样本拿不到，但**同一网络环境下的开/关对照**随时能做：
+            同样的档案、同样的域名，一轮开一轮关，比较阶段通过率与可用节点数。
+            这是把实验能力转成正式功能前唯一可靠的验收依据。
+
+            放在**最下方**且**默认折叠**：它是实验性能力的验收工具，
+            日常用不到 —— 摆在中间会让人以为它是优选流程的一环。
+          -->
+          <details class="fold" id="adaptiveCard" style="margin-top:12px">
+            <summary>🧪 自适应效果对照（实验性，默认折叠）</summary>
+            <div class="fold-body">
+              <p class="desc" style="margin-top:0">
+                同一档案、同一域名下「开启 / 关闭」自适应采样的分阶段通过率对照。
+                <b>至少各跑一轮</b>才有参考价值。
+              </p>
+              <div id="adaptiveEffect">
+                <p class="history-empty">加载中…</p>
+              </div>
+              <div class="btn-row" style="margin-top: 10px; align-items: center">
+                <button class="btn btn-ghost" id="btnEffectRefresh">刷新对照</button>
+                <span class="tip" id="effectHint"></span>
+              </div>
+            </div>
+          </details>
         </section>
 
         <!-- ============ 说明 ============ -->
@@ -2507,6 +2611,61 @@
                   <h3>注意事项</h3>
                   <ul class="usage-tips" id="usageTips"></ul>
                 </div>
+              </div>
+            </div>
+          </div>
+
+          <!--
+            定时优选任务编辑弹窗
+
+            两用：
+              新建 —— 从「入口优选」页点「保存为定时任务」进来，优选参数已预填
+              编辑 —— 从任务清单勾选后点「编辑所选」进来
+
+            优选参数**只读**：要改得删了任务、在优选页重新配置。
+            这里只开放 5 个参数：名称 / 说明 / 周期 / 运行时间 / 速度过滤。
+          -->
+          <div class="modal-mask" id="taskModal" hidden>
+            <div class="modal-box" style="width: min(620px, 100%)">
+              <div class="modal-head">
+                <strong id="taskModalTitle">定时优选任务</strong>
+                <div class="btn-row" style="margin:0">
+                  <button class="btn btn-ghost btn-sm" id="btnTaskCancel" type="button">取消</button>
+                  <button class="btn btn-primary btn-sm" id="btnTaskConfirm" type="button">确定</button>
+                </div>
+              </div>
+              <div class="note" style="margin-top:0">
+                <div class="grid" style="margin-top:0">
+                  <div class="field">
+                    <label>任务名称</label>
+                    <input type="text" id="taskName" maxlength="40" placeholder="如 每日凌晨优选" />
+                  </div>
+                  <div class="field">
+                    <label>运行周期（天）</label>
+                    <input type="number" id="taskInterval" min="2" max="365" step="1" value="2" />
+                    <p class="tip">最小 2 天。</p>
+                  </div>
+                  <div class="field">
+                    <label>运行时间</label>
+                    <input type="text" id="taskRunAt" maxlength="5" placeholder="01:00" />
+                    <p class="tip">本机时间 00:00 - 23:59。</p>
+                  </div>
+                  <div class="field">
+                    <label>速度过滤（下行 MB/s）</label>
+                    <input type="number" id="taskMinSpeed" min="0" max="1000" step="0.1" value="0" />
+                    <p class="tip">0 = 不过滤；低于该值的候选淘汰。</p>
+                  </div>
+                </div>
+                <div class="field" style="margin-top:12px">
+                  <label>任务说明（可选）</label>
+                  <textarea id="taskDesc" rows="2" maxlength="200" placeholder="这条任务是做什么的"></textarea>
+                </div>
+                <div class="field" style="margin-top:12px">
+                  <label>优选参数（只读）</label>
+                  <p class="tip" id="taskScanSummary" style="margin:0">—</p>
+                  <p class="tip" style="margin:4px 0 0">优选参数不可编辑。要调整请删除任务后，在「入口优选」页重新配置并保存。</p>
+                </div>
+                <p class="tip" id="taskModalHint" style="margin:10px 0 0"></p>
               </div>
             </div>
           </div>

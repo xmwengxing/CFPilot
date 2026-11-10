@@ -1071,6 +1071,7 @@
       'btnKvRefresh',
       'btnKvManual',
       'btnAutoDetect',
+      'btnSaveTask',
     ]) {
       const el = document.getElementById(id) as HTMLButtonElement | null
       if (el) el.disabled = busy
@@ -2640,6 +2641,618 @@
     return n + ' B'
   }
 
+  /* ------------------------------------------------------------------ */
+  /* 定时优选任务                                                        */
+  /* ------------------------------------------------------------------ */
+
+  /** 定时任务清单（后端返回的原始结构） */
+  let scheduledTasks: ScheduledTask[] = []
+  /** 勾选的任务 ID */
+  let scheduledChecked = new Set<string>()
+  /** 本地优选 IP 池 */
+  let scheduledPool: ScheduledPoolEntry[] = []
+  /** 勾选的池内 IP（按 IP 去重键） */
+  let poolChecked = new Set<string>()
+  /** 编辑弹窗的上下文：'create' = 新建，'edit' = 编辑勾选的任务 */
+  let taskModalMode: 'create' | 'edit' = 'create'
+  /** 新建任务时从优选表单抓下来的优选参数快照 */
+  let taskDraftScan: ScheduledScanParams | null = null
+  /** 编辑弹窗打开时的原始值（用来判断哪些字段被改过） */
+  let taskModalOrigin: Record<string, string> = {}
+
+  /** 读当前优选表单的优选参数（与 runScan 的 payload 同源，避免两处读法漂移）。 */
+  function currentScanParams(): ScheduledScanParams {
+    const probeInput = $('optProbePath').value.trim()
+    return {
+      family: readOptFamily(),
+      countries: readOptCountries(),
+      sample: Number($('optSample').value) || 6556,
+      top: Number($('optTop').value) || 8,
+      speedMode: (($('optSpeedMode') as unknown as HTMLSelectElement | null)?.value ?? 'two'),
+      speedDurationMs: (Number($('optSpeedDur').value) || 6) * 1000,
+      speedConnections: 8,
+      probeTransport:
+        (($('optProbeTransport') as unknown as HTMLSelectElement | null)?.value as
+          | 'ws'
+          | 'xhttp'
+          | 'both'
+          | undefined) || 'ws',
+    }
+  }
+
+  /** 优选参数的可读摘要（任务清单里只读展示）。 */
+  function scanParamsSummary(p: ScheduledScanParams): string {
+    if (!p) return '—'
+    const family =
+      p.family === 'v4'
+        ? 'IPv4'
+        : p.family === 'v6'
+          ? 'IPv6'
+          : p.family === 'both'
+            ? 'IPv4+IPv6'
+            : '自动'
+    const countries = (p.countries || []).length
+      ? p.countries.join(' / ')
+      : '全部'
+    const speed = p.speedMode === 'off' ? '不测速' : p.speedMode === 'one' ? '仅精测' : '两轮测速'
+    return `${family} · ${countries} · 采样 ${p.sample} · 保留 ${p.top} · ${speed}`
+  }
+
+  /** 任务状态的可读文案。 */
+  function taskStatusText(t: ScheduledTask): string {
+    if (!t.enabled) return '已禁用'
+    switch (t.lastStatus) {
+      case 'ok':
+        return `完成（${t.lastCount ?? 0} 条）`
+      case 'relaxed':
+        return `完成（筛选放宽 · ${t.lastCount ?? 0} 条）`
+      case 'failed':
+        return '失败：' + (t.lastMessage || '未知原因')
+      case 'skipped':
+        return '已跳过：' + (t.lastMessage || '')
+      default:
+        return '等待首次运行'
+    }
+  }
+
+  /** 毫秒时间戳 → 可读时间。 */
+  function formatTaskTime(ms?: number): string {
+    if (!ms) return '—'
+    const d = new Date(ms)
+    const p = (n: number) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+  }
+
+  /** 渲染任务清单。 */
+  function renderScheduledTasks(): void {
+    const tbody = $('taskTable').querySelector('tbody')
+    if (!tbody) return
+    if (!scheduledTasks.length) {
+      tbody.innerHTML = '<tr><td colspan="12" class="muted">（暂无任务）</td></tr>'
+      $('taskHint').textContent = '（暂无任务 —— 可在「入口优选」页点「保存为定时任务」新建）'
+      updateTaskButtons()
+      return
+    }
+    tbody.innerHTML = scheduledTasks
+      .map((t) => {
+        const checked = scheduledChecked.has(t.id) ? ' checked' : ''
+        const badge = t.builtin ? ' <span class="badge info">内置</span>' : ''
+        const speed = t.minSpeedMBps > 0 ? `≥ ${t.minSpeedMBps} MB/s` : '不过滤'
+        const next = t.enabled ? '运行中…' : '—'
+        // 数据面域名是**运行期**从该账号的部署清单取的 —— 第一次跑完才有值。
+        const host = t.lastHost || '（跑完一次后显示）'
+        const toggle = t.enabled
+          ? '<button class="btn btn-ghost btn-sm" data-task-toggle="' +
+            escapeHtml(t.id) +
+            '" title="停用后不再自动运行。">停用</button>'
+          : '<button class="btn btn-ghost btn-sm" data-task-toggle="' +
+            escapeHtml(t.id) +
+            '" title="启用后到点自动运行优选。">启用</button>'
+        return (
+          '<tr>' +
+          `<td><input type="checkbox" data-task-id="${escapeHtml(t.id)}"${checked} /></td>` +
+          `<td>${toggle}</td>` +
+          `<td>${escapeHtml(t.name)}${badge}</td>` +
+          `<td class="muted">${escapeHtml(t.description || '')}</td>` +
+          `<td>${t.intervalDays} 天</td>` +
+          `<td class="mono">${escapeHtml(t.runAt)}</td>` +
+          `<td>${escapeHtml(speed)}</td>` +
+          `<td class="muted" style="font-size:12px">${escapeHtml(scanParamsSummary(t.scan))}</td>` +
+          `<td class="muted">${escapeHtml(next)}</td>` +
+          `<td class="muted">${escapeHtml(formatTaskTime(t.lastRunAt))}</td>` +
+          `<td class="muted">${escapeHtml(taskStatusText(t))}</td>` +
+          `<td class="muted mono" style="font-size:12px">${escapeHtml(host)}</td>` +
+          '</tr>'
+        )
+      })
+      .join('')
+    $('taskHint').textContent = `共 ${scheduledTasks.length} 条任务（已勾选 ${scheduledChecked.size} 条）`
+    updateTaskButtons()
+  }
+
+  /** 更新任务清单的批量操作按钮的可用状态。 */
+  function updateTaskButtons(): void {
+    const n = scheduledChecked.size
+    const edit = $('btnTaskEdit') as HTMLButtonElement | null
+    const del = $('btnTaskDelete') as HTMLButtonElement | null
+    const save = $('btnTaskSave') as HTMLButtonElement | null
+    if (edit) edit.disabled = n === 0
+    if (del) del.disabled = n === 0
+    if (save) save.disabled = n === 0
+    const all = $('taskCheckAll') as HTMLInputElement | null
+    if (all) {
+      const total = scheduledTasks.length
+      all.checked = total > 0 && n === total
+      all.indeterminate = n > 0 && n < total
+    }
+  }
+
+  /** 渲染本地优选 IP 池。 */
+  function renderScheduledPool(): void {
+    const tbody = $('poolTable').querySelector('tbody')
+    if (!tbody) return
+    if (!scheduledPool.length) {
+      tbody.innerHTML = '<tr><td colspan="8" class="muted">（本地池为空）</td></tr>'
+      $('poolHint').textContent = '（本地池为空 —— 定时任务跑完后结果会自动进这里）'
+      updatePoolButtons()
+      return
+    }
+    tbody.innerHTML = scheduledPool
+      .map((e) => {
+        const checked = poolChecked.has(e.ip.toLowerCase()) ? ' checked' : ''
+        return (
+          '<tr>' +
+          `<td><input type="checkbox" data-pool-ip="${escapeHtml(e.ip)}"${checked} /></td>` +
+          `<td class="mono">${escapeHtml(e.ip)}</td>` +
+          `<td>${e.port || 443}</td>` +
+          `<td class="muted">${escapeHtml(e.taskName || '')}</td>` +
+          `<td>${e.speed ? e.speed.toFixed(2) : '—'}</td>` +
+          `<td>${e.latency || '—'}</td>` +
+          `<td>${escapeHtml(e.colo || '—')}</td>` +
+          `<td class="muted">${escapeHtml(formatTaskTime(e.at))}</td>` +
+          '</tr>'
+        )
+      })
+      .join('')
+    $('poolHint').textContent = `共 ${scheduledPool.length} 条（已勾选 ${poolChecked.size} 条）`
+    updatePoolButtons()
+  }
+
+  /** 更新 IP 池操作按钮的可用状态。 */
+  function updatePoolButtons(): void {
+    const n = poolChecked.size
+    for (const id of ['btnPoolCopy', 'btnPoolPushReplace', 'btnPoolPushAppend', 'btnPoolRemove']) {
+      const btn = $(id) as HTMLButtonElement | null
+      if (btn) btn.disabled = n === 0
+    }
+    const all = $('poolCheckAll') as HTMLInputElement | null
+    if (all) {
+      const total = scheduledPool.length
+      all.checked = total > 0 && n === total
+      all.indeterminate = n > 0 && n < total
+    }
+  }
+
+  /** 显示任务清单上方的提示条。 */
+  function showTaskWarn(text: string, isErr: boolean): void {
+    const el = $('taskWarn')
+    if (!el) return
+    el.hidden = !text
+    el.textContent = text
+    el.className = isErr ? 'warnbox err' : 'warnbox'
+  }
+
+  /** 读取任务清单与 IP 池。 */
+  async function loadScheduledTasks(): Promise<void> {
+    try {
+      const res = await window.cfpilot.listScheduledTasks()
+      scheduledTasks = res.tasks || []
+      // 清掉已不存在的勾选项
+      const ids = new Set(scheduledTasks.map((t) => t.id))
+      for (const id of Array.from(scheduledChecked)) {
+        if (!ids.has(id)) scheduledChecked.delete(id)
+      }
+      const acct = res.account
+      $('taskAccountName').textContent = acct
+        ? `${acct.name || acct.accountName || '当前账号'}${acct.accountName && acct.name !== acct.accountName ? '（' + acct.accountName + '）' : ''}`
+        : '（没有账号）'
+      $('taskAccountHint').textContent = res.hint || ''
+      // 启用数上限（后端定的，界面只显示）
+      const limitEl = $('taskEnabledLimit')
+      const countEl = $('taskEnabledCount')
+      if (limitEl) limitEl.textContent = String(res.enabledLimit ?? 3)
+      if (countEl) countEl.textContent = String(res.enabledCount ?? 0)
+      showTaskWarn('', false)
+      renderScheduledTasks()
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      showTaskWarn('读取任务清单失败：' + msg, true)
+    }
+    try {
+      const res = await window.cfpilot.listScheduledPool()
+      scheduledPool = res.entries || []
+      const ips = new Set(scheduledPool.map((e) => e.ip.toLowerCase()))
+      for (const ip of Array.from(poolChecked)) {
+        if (!ips.has(ip)) poolChecked.delete(ip)
+      }
+      renderScheduledPool()
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      $('poolHint').textContent = '读取本地优选 IP 池失败：' + msg
+    }
+  }
+
+  /** 打开任务编辑弹窗。 */
+  function openTaskModal(mode: 'create' | 'edit'): void {
+    taskModalMode = mode
+    const modal = $('taskModal')
+    const title = $('taskModalTitle')
+    const hint = $('taskModalHint')
+    if (!modal) return
+    if (mode === 'create') {
+      if (title) title.textContent = '新建定时优选任务'
+      ;($('taskName') as HTMLInputElement).value = ''
+      ;(document.getElementById('taskDesc') as HTMLTextAreaElement).value = ''
+      ;($('taskInterval') as HTMLInputElement).value = '2'
+      ;($('taskRunAt') as HTMLInputElement).value = '01:00'
+      ;($('taskMinSpeed') as HTMLInputElement).value = '0'
+      const nameEl0 = $('taskName') as HTMLInputElement | null
+      if (nameEl0) {
+        nameEl0.disabled = false
+        nameEl0.title = ''
+      }
+      taskDraftScan = currentScanParams()
+      $('taskScanSummary').textContent = scanParamsSummary(taskDraftScan)
+      if (hint) {
+        hint.textContent =
+          '优选参数取自当前「入口优选」页的设置，保存后不可修改。'
+      }
+    } else {
+      const picked = scheduledTasks.filter((t) => scheduledChecked.has(t.id))
+      if (!picked.length) return
+      if (title) {
+        title.textContent =
+          picked.length === 1 ? '编辑定时优选任务' : `编辑所选 ${picked.length} 个任务`
+      }
+      const first = picked[0]
+      ;($('taskName') as HTMLInputElement).value = first.name
+      ;(document.getElementById('taskDesc') as HTMLTextAreaElement).value =
+        first.description || ''
+      ;($('taskInterval') as HTMLInputElement).value = String(first.intervalDays)
+      ;($('taskRunAt') as HTMLInputElement).value = first.runAt
+      ;($('taskMinSpeed') as HTMLInputElement).value = String(first.minSpeedMBps)
+      $('taskScanSummary').textContent = scanParamsSummary(first.scan)
+      // 内置任务的名字**不可改** ——
+      // 「亚洲组_IPv4」这个名字本身就是它在扫什么的唯一线索。
+      const nameEl = $('taskName') as HTMLInputElement | null
+      const allBuiltin = picked.every((t) => t.builtin)
+      if (nameEl) {
+        nameEl.disabled = allBuiltin
+        nameEl.title = allBuiltin
+          ? '内置任务不能改名 —— 名称里的地址族与地区就是它的用途说明'
+          : ''
+      }
+      if (hint) {
+        hint.textContent = allBuiltin
+          ? '内置任务不能改名，其余参数可以改。'
+          : picked.length > 1
+            ? '所选任务的设置可能不同 —— 留空的字段保持各自原值，只提交你改动过的字段。'
+            : '优选参数不可编辑。'
+      }
+    }
+    taskModalOrigin = {
+      name: ($('taskName') as HTMLInputElement).value,
+      description: (document.getElementById('taskDesc') as HTMLTextAreaElement).value,
+      intervalDays: ($('taskInterval') as HTMLInputElement).value,
+      runAt: ($('taskRunAt') as HTMLInputElement).value,
+      minSpeedMBps: ($('taskMinSpeed') as HTMLInputElement).value,
+    }
+    modal.hidden = false
+  }
+
+  /** 关闭任务编辑弹窗。 */
+  function closeTaskModal(): void {
+    const modal = $('taskModal')
+    if (modal) modal.hidden = true
+  }
+
+  /** 提交任务编辑弹窗。 */
+  async function submitTaskModal(): Promise<void> {
+    const name = ($('taskName') as HTMLInputElement).value.trim()
+    const description = (
+      document.getElementById('taskDesc') as HTMLTextAreaElement
+    ).value.trim()
+    const intervalDays = Number(($('taskInterval') as HTMLInputElement).value) || 0
+    const runAt = ($('taskRunAt') as HTMLInputElement).value.trim()
+    const minSpeedMBps = Number(($('taskMinSpeed') as HTMLInputElement).value) || 0
+
+    if (!name) {
+      showTaskWarn('任务名称不能为空', true)
+      return
+    }
+    if (intervalDays < 2) {
+      showTaskWarn('运行周期不能小于 2 天', true)
+      return
+    }
+    if (!/^\d{2}:\d{2}$/.test(runAt)) {
+      showTaskWarn('运行时间格式应为 00:00 - 23:59', true)
+      return
+    }
+    if (minSpeedMBps < 0) {
+      showTaskWarn('速度过滤不能为负数', true)
+      return
+    }
+    // 速度下限与「跳过测速」互斥 —— 没有速度值可用于筛选。
+    const speedMode = taskDraftScan?.speedMode ?? scheduledTasks.find((t) => scheduledChecked.has(t.id))?.scan.speedMode
+    if (minSpeedMBps > 0 && speedMode === 'off') {
+      showTaskWarn('设了速度过滤就不能用「跳过测速」—— 没有速度值可用于筛选', true)
+      return
+    }
+
+    const btn = $('btnTaskConfirm') as HTMLButtonElement | null
+    if (btn) btn.disabled = true
+    try {
+      if (taskModalMode === 'create') {
+        const res = await window.cfpilot.createScheduledTask({
+          name,
+          description,
+          intervalDays,
+          runAt,
+          minSpeedMBps,
+          scan: taskDraftScan!,
+        })
+        if (!res.ok) {
+          showTaskWarn(res.error || '创建失败', true)
+          return
+        }
+        closeTaskModal()
+        showTaskWarn('', false)
+        log('已创建定时优选任务：' + name, 'ok')
+      } else {
+        // 只提交改动过的字段 —— 空白字段保持各自原值。
+        //
+        // 批量编辑时各任务的设置可能不同：一个用户只改了「运行时间」，
+        // 不能把别的任务的名称也一并改掉。
+        const now: Record<string, string> = {
+          name,
+          description,
+          intervalDays: String(intervalDays),
+          runAt,
+          minSpeedMBps: String(minSpeedMBps),
+        }
+        const patch: Parameters<typeof window.cfpilot.updateScheduledTasks>[0] = {
+          ids: Array.from(scheduledChecked),
+        }
+        // 内置任务的名称框是禁用的 —— 不提交 name（后端也会拒）。
+        const nameDisabled = ($('taskName') as HTMLInputElement | null)?.disabled === true
+        if (!nameDisabled && now.name !== taskModalOrigin.name) patch.name = now.name
+        if (now.description !== taskModalOrigin.description) patch.description = now.description
+        if (now.intervalDays !== taskModalOrigin.intervalDays) {
+          patch.intervalDays = Number(now.intervalDays)
+        }
+        if (now.runAt !== taskModalOrigin.runAt) patch.runAt = now.runAt
+        if (now.minSpeedMBps !== taskModalOrigin.minSpeedMBps) {
+          patch.minSpeedMBps = Number(now.minSpeedMBps)
+        }
+        if (Object.keys(patch).length === 1) {
+          showTaskWarn('没有改动任何字段', true)
+          return
+        }
+        const res = await window.cfpilot.updateScheduledTasks(patch)
+        if (!res.ok) {
+          showTaskWarn(res.error || '保存失败', true)
+          return
+        }
+        closeTaskModal()
+        showTaskWarn('', false)
+        log('已保存定时优选任务设置', 'ok')
+      }
+      await loadScheduledTasks()
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      showTaskWarn('保存失败：' + msg, true)
+    } finally {
+      if (btn) btn.disabled = false
+    }
+  }
+
+  /** 绑定定时任务相关的交互。 */
+  function bindScheduledTasks(): void {
+    // 「保存为定时任务」（入口优选页）
+    //
+    // ⚠️ **不校验**表单里的域名 / WS 路径 ——
+    // 定时任务在运行期从该账号的部署清单现取这两个值，
+    // 用户在这里填什么都不影响任务（填错反而误导）。
+    $('btnSaveTask')!.addEventListener('click', () => {
+      openTaskModal('create')
+    })
+
+    $('btnTaskRefresh')!.addEventListener('click', () => {
+      void loadScheduledTasks()
+    })
+    $('btnTaskEdit')!.addEventListener('click', () => openTaskModal('edit'))
+    $('btnTaskCancel')!.addEventListener('click', () => closeTaskModal())
+    $('btnTaskConfirm')!.addEventListener('click', () => {
+      void submitTaskModal()
+    })
+    // 点遮罩关闭
+    const modal = $('taskModal')
+    if (modal) {
+      modal.addEventListener('click', (ev) => {
+        if (ev.target === modal) closeTaskModal()
+      })
+    }
+
+    $('btnTaskDelete')!.addEventListener('click', async () => {
+      const ids = Array.from(scheduledChecked)
+      if (!ids.length) return
+      if (!confirm('删除选中的 ' + ids.length + ' 个任务？')) return
+      try {
+        const res = await window.cfpilot.deleteScheduledTasks(ids)
+        if (!res.ok) {
+          showTaskWarn(res.error || '删除失败', true)
+          return
+        }
+        if (res.skipped && res.skipped.length) {
+          showTaskWarn('已删除 ' + (res.deleted ?? 0) + ' 个；' + res.skipped.length + ' 个内置任务不可删除', true)
+        } else {
+          showTaskWarn('', false)
+        }
+        scheduledChecked.clear()
+        await loadScheduledTasks()
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        showTaskWarn('删除失败：' + msg, true)
+      }
+    })
+
+    // 任务表勾选
+    $('taskTable').addEventListener('change', (ev) => {
+      const box = (ev.target as HTMLElement | null)?.closest('input[data-task-id]') as HTMLInputElement | null
+      if (box) {
+        const id = box.getAttribute('data-task-id') || ''
+        if (box.checked) scheduledChecked.add(id)
+        else scheduledChecked.delete(id)
+        updateTaskButtons()
+        return
+      }
+      const all = (ev.target as HTMLElement | null)?.closest('#taskCheckAll') as HTMLInputElement | null
+      if (all) {
+        scheduledChecked.clear()
+        if (all.checked) {
+          for (const t of scheduledTasks) scheduledChecked.add(t.id)
+        }
+        renderScheduledTasks()
+      }
+    })
+
+    // 单条任务的启用 / 停用
+    $('taskTable').addEventListener('click', async (ev) => {
+      const btn = (ev.target as HTMLElement | null)?.closest(
+        'button[data-task-toggle]'
+      ) as HTMLButtonElement | null
+      if (!btn) return
+      const id = btn.getAttribute('data-task-toggle') || ''
+      const task = scheduledTasks.find((t) => t.id === id)
+      if (!task) return
+      btn.disabled = true
+      try {
+        const res = await window.cfpilot.updateScheduledTasks({
+          ids: [id],
+          enabled: !task.enabled,
+        })
+        if (!res.ok) {
+          showTaskWarn(res.error || '操作失败', true)
+          return
+        }
+        showTaskWarn('', false)
+        log(`已${task.enabled ? '停用' : '启用'}定时任务「${task.name}」`, 'ok')
+        await loadScheduledTasks()
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        showTaskWarn('操作失败：' + msg, true)
+        await loadScheduledTasks()
+      }
+    })
+
+    // IP 池勾选
+    $('poolTable').addEventListener('change', (ev) => {
+      const box = (ev.target as HTMLElement | null)?.closest('input[data-pool-ip]') as HTMLInputElement | null
+      if (box) {
+        const ip = (box.getAttribute('data-pool-ip') || '').toLowerCase()
+        if (box.checked) poolChecked.add(ip)
+        else poolChecked.delete(ip)
+        updatePoolButtons()
+        return
+      }
+      const all = (ev.target as HTMLElement | null)?.closest('#poolCheckAll') as HTMLInputElement | null
+      if (all) {
+        poolChecked.clear()
+        if (all.checked) {
+          for (const e of scheduledPool) poolChecked.add(e.ip.toLowerCase())
+        }
+        renderScheduledPool()
+      }
+    })
+
+    // 复制选中 IP
+    $('btnPoolCopy')!.addEventListener('click', () => {
+      const picked = scheduledPool.filter((e) => poolChecked.has(e.ip.toLowerCase()))
+      if (!picked.length) {
+        log('没有勾选 IP', 'warn')
+        return
+      }
+      const text = picked
+        .map((e) => {
+          const host = e.ip.includes(':') ? '[' + e.ip + ']' : e.ip
+          return `${host}:${e.port || 443}#${e.remark || ''}`
+        })
+        .join('\n')
+      copy(text)
+      log('已复制 ' + picked.length + ' 条 IP', 'ok')
+    })
+
+    // 覆盖回填 / 增量回填
+    const pushPool = async (mode: 'replace' | 'append'): Promise<void> => {
+      const picked = scheduledPool.filter((e) => poolChecked.has(e.ip.toLowerCase()))
+      if (!picked.length) {
+        log('没有勾选 IP', 'warn')
+        return
+      }
+      const verb = mode === 'append' ? '增量回填' : '覆盖回填'
+      if (mode === 'replace' && !confirm('覆盖回填会清空面板优选池里已有的 IP（含你在面板手填的「手动指定 IP」）。继续？')) {
+        return
+      }
+      try {
+        const res = await window.cfpilot.pushScheduledPool(picked, mode)
+        if (!res.ok) {
+          log(verb + '失败：' + (res.error || '未知错误'), 'err')
+          return
+        }
+        log(verb + '完成：' + (res.count ?? picked.length) + ' 条', 'ok')
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        log(verb + '失败：' + msg, 'err')
+      }
+    }
+    $('btnPoolPushReplace')!.addEventListener('click', () => {
+      void pushPool('replace')
+    })
+    $('btnPoolPushAppend')!.addEventListener('click', () => {
+      void pushPool('append')
+    })
+
+    // 移除选中
+    $('btnPoolRemove')!.addEventListener('click', async () => {
+      const ips = Array.from(poolChecked)
+      if (!ips.length) return
+      try {
+        const res = await window.cfpilot.deleteScheduledPool(ips)
+        if (!res.ok) {
+          log('移除失败：' + (res.error || '未知错误'), 'err')
+          return
+        }
+        log('已移除 ' + (res.deleted ?? 0) + ' 条', 'ok')
+        poolChecked.clear()
+        await loadScheduledTasks()
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        log('移除失败：' + msg, 'err')
+      }
+    })
+
+    // 定时任务状态推送（SSE）
+    window.cfpilot.onTaskStatus((payload) => {
+      if (!payload) return
+      if (payload.status === 'ok' || payload.status === 'relaxed') {
+        log(`定时任务「${payload.name}」完成：${payload.count ?? 0} 条入池`, 'ok')
+      } else if (payload.status === 'failed') {
+        log(`定时任务「${payload.name}」失败：${payload.message || ''}`, 'err')
+      }
+      void loadScheduledTasks()
+    })
+  }
+
   function bindScan(): void {
     document.getElementById('btnScan')!.addEventListener('click', async () => {
       const host = $('optHost').value.trim()
@@ -3755,7 +4368,7 @@
   /* ------------------------------------------------------------------ */
 
   /** 当前选中的优选方向 */
-  let scanTab: 'entry' | 'relay' = 'entry'
+  let scanTab: 'entry' | 'relay' | 'task' = 'entry'
   /** 候选来源：默认（网段采样 / 内置清单）或自定义列表 */
   let sourceMode: 'default' | 'custom' = 'default'
   /** 反代体检「全通可取」的 IP（回填按钮用） */
@@ -3769,7 +4382,9 @@
         'button[data-scan-tab]'
       ) as HTMLButtonElement | null
       if (!btn) return
-      const next: 'entry' | 'relay' = btn.dataset.scanTab === 'relay' ? 'relay' : 'entry'
+      const raw = btn.dataset.scanTab
+      const next: 'entry' | 'relay' | 'task' =
+        raw === 'relay' ? 'relay' : raw === 'task' ? 'task' : 'entry'
       if (next === scanTab) return
       scanTab = next
       for (const b of nav.querySelectorAll('button[data-scan-tab]')) {
@@ -3777,8 +4392,16 @@
       }
       const entryPanel = document.getElementById('scanPanelEntry')
       const relayPanel = document.getElementById('scanPanelRelay')
+      const taskPanel = document.getElementById('scanPanelTask')
       if (entryPanel) entryPanel.hidden = next !== 'entry'
       if (relayPanel) relayPanel.hidden = next !== 'relay'
+      if (taskPanel) taskPanel.hidden = next !== 'task'
+
+      // 「① 数据面与候选来源」在**定时任务页签**下隐藏：
+      // 定时任务自己会从账号的部署清单取数据面域名与 WS 路径，
+      // 让用户在这里填一遍只会误导（填了也不生效）。
+      const sourceCard = document.getElementById('sourceCard')
+      if (sourceCard) sourceCard.hidden = next === 'task'
 
       // 入口方向的两张产物卡（结果 / 自适应对照）在反代页签下**收起**：
       // 它们只跟入口优选有关，留在反代页里既占地方又容易看错。
@@ -3787,6 +4410,9 @@
       const adaptiveCard = document.getElementById('adaptiveCard')
       if (entryResult) entryResult.hidden = next !== 'entry'
       if (adaptiveCard) adaptiveCard.hidden = next !== 'entry'
+
+      // 定时任务页首次进入时拉一次清单与 IP 池。
+      if (next === 'task') void loadScheduledTasks()
     })
   }
 
@@ -3917,9 +4543,9 @@
       }
       sourceListBody.innerHTML = list
         .map((s) =>
-          '<label data-src-row="' + esc(s.name) + '" style="display:flex;align-items:center;gap:8px;padding:5px 2px;cursor:pointer">' +
-          '<input type="checkbox" data-src-id="' + esc(s.id) + '" />' +
-          '<span>' + esc(s.name) + '</span></label>'
+          '<label data-src-row="' + escapeHtml(s.name) + '" style="display:flex;align-items:center;gap:8px;padding:5px 2px;cursor:pointer">' +
+          '<input type="checkbox" data-src-id="' + escapeHtml(s.id) + '" />' +
+          '<span>' + escapeHtml(s.name) + '</span></label>'
         )
         .join('')
       sourceListBody.querySelectorAll<HTMLInputElement>('input[data-src-id]').forEach((box) => {
@@ -3945,7 +4571,7 @@
         } catch (err) {
           if (sourceListBody) {
             sourceListBody.innerHTML =
-              '<p class="country-empty">加载失败：' + esc(err instanceof Error ? err.message : String(err)) + '</p>'
+              '<p class="country-empty">加载失败：' + escapeHtml(err instanceof Error ? err.message : String(err)) + '</p>'
           }
         }
       })()
@@ -5633,6 +6259,7 @@
     safeBind('链式代理', bindChain)
     safeBind('优选', bindScan)
     safeBind('优选页签', bindScanSubtabs)
+    safeBind('定时优选任务', bindScheduledTasks)
     safeBind('候选来源', bindCandidateSource)
     safeBind('反代优选', bindRelay)
     safeBind('优选历史', bindHistory)

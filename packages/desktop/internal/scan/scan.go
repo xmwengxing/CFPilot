@@ -160,6 +160,23 @@ type Options struct {
 	// ⚠️ 与 CLI 的 --no-speed 语义一致（packages/cli/src/scan/scan.ts）。
 	SkipSpeed bool
 
+	// MinSpeedMBps 是下行速度下限（MB/s）：稳态吞吐低于该值的候选淘汰。
+	// 0 = 不过滤。
+	//
+	// ## 判定口径
+	//
+	// 用**稳态值**（Entry.Speed），不是峰值 —— 单窗口突发能把峰值翻倍
+	// （真机实测 2.46 vs 1.14），拿峰值当门槛会把「偶然冲高」的 IP
+	// 当成好节点留下。
+	//
+	// ## 与 SkipSpeed 互斥
+	//
+	// 跳过测速时速度恒为 0，任何非零下限都会把结果全部淘汰。
+	// 所以这里直接报错，而不是静默返回空结果。
+	//
+	// 对应 CLI 的 --min-speed（packages/cli/src/scan/scan.ts）。
+	MinSpeedMBps float64
+
 	// VerifyPayload 开启阶段二的 PING/PONG 响应体校验（CLI 默认的严格模式）。
 	//
 	// 开启后阶段二打 **ProbePath**（探针端点）而不是 WSPath —— 对 VLESS/Trojan
@@ -239,6 +256,32 @@ type Summary struct {
 	Stats   map[string]int `json:"stats"`
 }
 
+// filterByMinSpeed 按下行速度下限过滤候选。
+//
+// 保留稳态吞吐（Entry.Speed）**不低于** minSpeedMBps 的候选；
+// minSpeedMBps <= 0 时原样返回（不过滤）。
+//
+// ## 为什么用稳态值而不是峰值
+//
+// PeakSpeed 是单个测量窗口的瞬时峰值，真机实测能把稳态值翻倍
+// （2.46 vs 1.14 MB/s）。拿它当筛选门槛，会把「偶然冲高」的 IP
+// 误当成好节点留下 —— 而用户真正在意的是能持续跑多快。
+//
+// 对应 CLI 的 filterByMinSpeed（packages/cli/src/scan/scan.ts），
+// 两端必须对同一组输入给出相同结果。
+func filterByMinSpeed(entries []Entry, minSpeedMBps float64) []Entry {
+	if minSpeedMBps <= 0 {
+		return entries
+	}
+	out := make([]Entry, 0, len(entries))
+	for _, e := range entries {
+		if e.Speed >= minSpeedMBps {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // withDefaults 补齐默认值。
 func (o Options) withDefaults() Options {
 	set := func(p *int, v int) {
@@ -305,6 +348,11 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 	}
 	if len(opt.Candidates) == 0 {
 		return nil, fmt.Errorf("候选 IP 为空")
+	}
+	// 速度下限与「跳过测速」互斥：跳过测速时速度恒为 0，
+	// 任何非零下限都会把结果全部淘汰 —— 直接报错，别静默返回空。
+	if opt.MinSpeedMBps > 0 && opt.SkipSpeed {
+		return nil, fmt.Errorf("下行速度下限与「跳过测速」互斥：没有速度值可用于筛选")
 	}
 
 	report := func(p Progress) {
@@ -863,6 +911,14 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 		}
 		return entries[i].Latency < entries[j].Latency
 	})
+	// 下行速度下限过滤（0 = 不过滤）。
+	//
+	// 放在 PickWithDiversity **之前**：被淘汰的候选本可以补位，
+	// 放在之后会得到不足 Top 条的结果。
+	//
+	// 判据是 Speed（稳态吞吐），不是峰值 —— 单窗口突发能把峰值翻倍，
+	// 用它当门槛会把偶然冲高的 IP 当成好节点留下。
+	entries = filterByMinSpeed(entries, opt.MinSpeedMBps)
 	// 取前 N 时按 /16 轮流取（对照 CLI 的 pickWithDiversity）
 	entries = PickWithDiversity(entries, opt.Top)
 

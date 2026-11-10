@@ -82,10 +82,14 @@ type scanRequest struct {
 	// 通了才让 IPv6 参与采样；不通则退回纯 IPv4 并给出
 	// 「当前网络环境不具备 IPv6 测速条件」与排查建议 —— 不会把一半预算
 	// 烧在必然超时的候选上（对照 CLI 的 --family）。
-	Family    string   `json:"family"`
-	Top       int      `json:"top"`
-	SkipSpeed bool     `json:"skipSpeed"`
-	Countries []string `json:"countries"`
+	Family    string `json:"family"`
+	Top       int    `json:"top"`
+	SkipSpeed bool   `json:"skipSpeed"`
+	// MinSpeedMBps 是下行速度下限（MB/s）：稳态吞吐低于它的候选淘汰。0 = 不过滤。
+	// 与 skipSpeed 互斥（跳过测速时没有速度值可用）。
+	// 对应 CLI 的 --min-speed。
+	MinSpeedMBps float64  `json:"minSpeedMBps"`
+	Countries    []string `json:"countries"`
 
 	// NoCallback 为 true 表示「只输出列表，不回填面板」
 	NoCallback bool `json:"noCallback"`
@@ -235,6 +239,8 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 		SpeedDurationMs:  req.SpeedDurationMs,
 		SpeedBytes:       req.SpeedBytes,
 		Top:              req.Top,
+		// 下行速度下限（0 = 不过滤），与 CLI 的 --min-speed 同口径。
+		MinSpeedMBps: req.MinSpeedMBps,
 		// 阶段二严格校验与阶段二点五真实隧道校验（可选，默认保持旧行为）。
 		VerifyPayload:    req.VerifyPayload,
 		UUID:             strings.TrimSpace(req.UUID),

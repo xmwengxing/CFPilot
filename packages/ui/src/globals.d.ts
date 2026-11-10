@@ -497,6 +497,78 @@ interface Window {
     }>
     /** 删除一条优选历史会话 */
     deleteScanHistory(id: string): Promise<{ ok: boolean; error?: string }>
+
+    /* ---------------- 定时优选任务 ---------------- */
+
+    /**
+     * 读取当前账号的定时优选任务清单。
+     *
+     * 首次访问时后端会为该账号自动生成 5 条内置任务。
+     */
+    listScheduledTasks(): Promise<{
+      ok: boolean
+      account: { id: string; name: string; accountName: string; active: boolean } | null
+      tasks: ScheduledTask[]
+      scheduler?: { running: boolean; lastRun: number; lastError: string }
+      /** 该账号当前启用中的任务数 */
+      enabledCount?: number
+      /** 该账号最多可启用的任务数 */
+      enabledLimit?: number
+      /** 没有账号等**非致命**情况的提示 */
+      hint?: string
+      error?: string
+    }>
+
+    /** 新建一个定时优选任务 */
+    createScheduledTask(params: {
+      name: string
+      description?: string
+      intervalDays: number
+      runAt: string
+      minSpeedMBps?: number
+      scan: ScheduledScanParams
+    }): Promise<{ ok: boolean; task?: ScheduledTask; error?: string; conflict?: { id: string; name: string; runAt: string } }>
+
+    /**
+     * 批量修改定时优选任务（多选后「保存应用」）。
+     *
+     * 只有实际改动过的字段才会提交 —— 空白字段保持原值。
+     */
+    updateScheduledTasks(params: {
+      ids: string[]
+      name?: string
+      description?: string
+      intervalDays?: number
+      runAt?: string
+      minSpeedMBps?: number
+      enabled?: boolean
+    }): Promise<{ ok: boolean; tasks?: ScheduledTask[]; error?: string; conflict?: { id: string; name: string; runAt: string } }>
+
+    /** 删除定时优选任务（内置任务不会被删，会在 skipped 里说明） */
+    deleteScheduledTasks(ids: string[]): Promise<{
+      ok: boolean
+      deleted?: number
+      skipped?: Array<{ id: string; reason: string }>
+      error?: string
+    }>
+
+    /** 读取本地优选 IP 池 */
+    listScheduledPool(): Promise<{ ok: boolean; entries: ScheduledPoolEntry[]; error?: string }>
+
+    /**
+     * 把选中的池内条目回填到面板。
+     *
+     * replace = 覆盖（会清空面板已有的优选 IP，含用户手填的）；
+     * append  = 增量（只补真正新的）。
+     */
+    pushScheduledPool(
+      entries: ScheduledPoolEntry[],
+      mode: 'replace' | 'append'
+    ): Promise<{ ok: boolean; count?: number; mode?: string; error?: string }>
+
+    /** 从本地优选 IP 池移除条目 */
+    deleteScheduledPool(ips: string[]): Promise<{ ok: boolean; deleted?: number; error?: string }>
+
     /**
      * 对选中的 IP 跑分层可用性复测（TCP → TLS → WS101，可选测速）。
      *
@@ -643,6 +715,8 @@ interface Window {
     onLog(cb: (entry: CFPilotLogEntry) => void): () => void
     onDeployStatus(cb: (status: CFPilotDeployStatus) => void): () => void
     onScanResult(cb: (payload: CFPilotScanResult) => void): () => void
+    /** 定时优选任务的状态变化（运行中 / 完成 / 失败 / 被跳过） */
+    onTaskStatus(cb: (payload: ScheduledTaskStatus) => void): () => void
     /* ---------------- 反代优选（出站链路体检） ---------------- */
     /**
      * 启动反代体检（异步：结果走 `onRelayResult`）。
@@ -763,6 +837,91 @@ interface CFPilotRelayResult {
   picked?: string[]
   entries?: CFPilotRelayEntry[]
   at?: string
+}
+
+/**
+ * 定时优选任务的优选参数快照（**只读**）。
+ *
+ * 要改这些参数得删掉任务、在优选页重新配置 ——
+ * 所以界面上只展示，不提供编辑入口。
+ */
+interface ScheduledScanParams {
+  /** 地址族：auto / v4 / v6 / both */
+  family: string
+  /** 国家 / 地区过滤；空 = 不过滤。元素可以是 ASIA / US 分组关键字 */
+  countries: string[]
+  /** 候选采样数 */
+  sample: number
+  /** 最终保留条数 */
+  top: number
+  /** 测速档位：two（两轮）/ one（仅精测）/ off（跳过测速） */
+  speedMode: string
+  /** 单候选测速时长（毫秒） */
+  speedDurationMs: number
+  /** 每个候选的并发连接数 */
+  speedConnections: number
+  /** 探测传输：ws / xhttp / both */
+  probeTransport: string
+}
+
+/** 一条定时优选任务 */
+interface ScheduledTask {
+  id: string
+  name: string
+  description?: string
+  /** 内置任务不可删除 */
+  builtin: boolean
+  /** 内置任务的身份键（ASIA_V4 等） */
+  builtinKey?: string
+  /** 归属账号 ID */
+  profileId: string
+  enabled: boolean
+  /** 运行周期（天），最小 2 */
+  intervalDays: number
+  /** 运行时刻（本地时间 "HH:MM"） */
+  runAt: string
+  /** 下行速度下限（MB/s）；0 = 不过滤 */
+  minSpeedMBps: number
+  /** 优选参数快照（只读） */
+  scan: ScheduledScanParams
+  anchorAt: number
+  lastRunAt?: number
+  /** 上一轮实际用的数据面域名（运行期从该账号的部署清单取） */
+  lastHost?: string
+  /** 上一轮状态：ok / failed / skipped / relaxed */
+  lastStatus?: string
+  lastMessage?: string
+  lastCount?: number
+  createdAt: number
+  updatedAt: number
+}
+
+/** 本地优选 IP 池里的一条记录 */
+interface ScheduledPoolEntry {
+  ip: string
+  port: number
+  /** 产出这条记录的账号（回填要打到该账号的控制面） */
+  profileId: string
+  taskId: string
+  taskName: string
+  /** 稳态下行速度（MB/s） */
+  speed: number
+  latency: number
+  colo: string
+  family: string
+  /** 回填 / 复制用的备注 */
+  remark: string
+  at: number
+}
+
+/** 定时优选任务的状态变化 */
+interface ScheduledTaskStatus {
+  taskId: string
+  name: string
+  status: string
+  message?: string
+  count?: number
+  at: number
 }
 
 interface CFPilotScanResult {  entries: Array<{

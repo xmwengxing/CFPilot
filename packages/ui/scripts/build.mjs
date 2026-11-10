@@ -74,6 +74,26 @@ const checks = [
   ['index.html 有增量/覆盖回填两个按钮', html.includes('btnPushAppend') && html.includes('btnPushReplace')],
   ['index.html 有网络环境弹窗', html.includes('envModal')],
   ['index.html 无 adapter 注入（应保持纯净）', !html.includes('adapter.js')],
+
+  // 定时任务清单：编辑只针对**单条**任务。
+  //
+  // 多选后统一编辑本身是错的 —— 各任务设置可能不同，一个字段填什么值
+  // 要套到哪些任务上说不清。所以工具栏只留「刷新 / 删除所选」，
+  // 编辑入口是每行末尾的「编辑」按钮。
+  ['index.html 任务表无「编辑所选」', !html.includes('btnTaskEdit')],
+  ['index.html 任务表无「保存应用」', !html.includes('btnTaskSave')],
+  ['renderer.js 无「编辑所选」引用', !js.includes('btnTaskEdit')],
+  ['renderer.js 有行内「编辑」按钮', js.includes('data-task-edit')],
+
+  // 数据源页：完整优选会写 KV 且耗时 1–3 分钟，入口已撤掉。
+  ['index.html 无「一键完整优选」按钮', !html.includes('btnSrcQuick')],
+  ['renderer.js 无「一键完整优选」引用', !js.includes('btnSrcQuick')],
+
+  // 可拖曳调高的表格容器（任务表 + 数据源表）
+  ['index.html 任务表有拖曳手柄', html.includes('data-resize="taskTableScroll"')],
+  ['index.html 数据源表有拖曳手柄', html.includes('data-resize="srcSourcesScroll"')],
+  ['index.html 有拖曳手柄样式', html.includes('.table-resizer')],
+  ['renderer.js 绑定了拖曳手柄', js.includes('pointerdown')],
 ]
 
 let bad = 0

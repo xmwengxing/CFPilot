@@ -430,7 +430,7 @@
       <!-- 来源 3：手动与本地优选 -->
       <div class="source" id="src-manual">
         <label class="chk"><input type="checkbox" id="poolManual" /> 3. 手动指定 IP</label>
-        <div class="desc">包含「本地真连接优选器」自动回填的实测 IP（最高优先级）以及下方手动录入的静态节点。</div>
+        <div class="desc">「本地真连接池」持久化保存自动回填的实测 IP；手动静态节点为动态增补 IP。</div>
         <div class="src-body">
           <div class="field">
             <label>手动静态节点（每行一条，支持格式：<code class="inline">IP</code> / <code class="inline">IP:端口</code> / <code class="inline">IP:端口#备注</code>）</label>
@@ -540,7 +540,7 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
         <h2><span class="dot"></span>客户端订阅地址</h2>
         <button class="primary sm" id="btnRefreshSub">↻ 刷新订阅与节点</button>
       </div>
-      <p class="hint">复制下方对应客户端格式的订阅链接导入即可。当您在「节点来源」或「入站配置」修改参数后，客户端更新订阅即可同步最新节点。</p>
+      <p class="hint">复制下方对应客户端格式的订阅链接导入。「节点来源」或「入站配置」修改参数后，客户端更新订阅即可同步最新节点。</p>
 
       <div class="field">
         <label>通用 Base64 订阅（适用于 v2rayN / v2rayNG / Shadowrocket / Nekoray）</label>
@@ -559,11 +559,11 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
     <div class="card">
       <h2><span class="dot"></span>远程第三方优选订阅源（可选扩展）</h2>
       <p class="hint">
-        挂载外部维护的优选节点来源，订阅生成时会自动拉取并**独立成池**追加进去。<br>
+        挂载外部维护的优选节点来源，订阅生成时会自动拉取并**独立成池**追加。<br>
         <b>TXT 列表</b>：每行一个 <code>IP:端口</code> 或 <code>IP:端口#备注</code>，按行解析。<br>
-        <b>CSV 测速表</b>：第三方测速工具 导出的 <code>result.csv</code>。<br>
-        ⚠️ 远程池<b>不受</b>「节点来源」页那三个勾选项影响 —— 配了就生效。
-        拉取失败会在「节点来源 → 实时下发节点预览」里报出来。
+        <b>CSV 测速表</b>：第三方优选器导出的 <code>result.csv</code>。<br>
+        ⚠️ 远程池<b>不受</b>「节点来源」页那三个勾选项影响。
+        拉取失败会在「节点来源 → 实时下发节点预览」中显示。
       </p>
       <div class="grid">
         <div class="field"><label>远程 TXT 列表地址（ADDAPI，每行一个 https URL）</label><textarea id="cfgAddApi" class="mono" placeholder="https://example.com/ips.txt"></textarea></div>
@@ -575,10 +575,8 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
     <div class="card">
       <h2><span class="dot"></span>Clash 分流规则（进阶）</h2>
       <p class="hint">
-        这里编辑的是 Clash 订阅里 <code class="inline">rules</code> / <code class="inline">proxy-groups</code> 的来源（ini 格式，存 KV 的 <code class="inline">ROUTE_PROFILE</code>）。
-        框里显示的是**当前生效的规则** —— 没自定义时就是内置那套 GEOSITE/GEOIP 规则；
-        改动后保存即生效，点「清空（回落内置）」可退回内置。
-        完整 YAML 在下方只读预览，改完规则后点「刷新预览」再导入客户端更稳。
+        编辑 Clash 订阅 <code class="inline">rules</code> / <code class="inline">proxy-groups</code> 来源（ini 格式）。
+        「清空（回落内置）」可退回内置 GEOSITE/GEOIP 规则。建议「刷新预览」（需等待加载显示）确认后导入客户端。
       </p>
       <div class="field">
         <label>分流规则原文 <span class="muted" id="routeProfileState"></span></label>
@@ -704,10 +702,7 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
         <p class="tip">
           订阅仅会为上方勾选的协议形态生成节点。若勾选 Trojan 或 XHTTP，请确保下方对应的服务端入站开关处于启用状态。
           <br>全部未勾选，后端会回落到 VLESS + WebSocket（保证订阅不为空）。
-          <br>⚠️ <b>XHTTP 实测在 Cloudflare 边缘会被直接拦截</b>：标准 Xray 客户端发的请求头是
-          <code class="inline">Content-Type: application/grpc</code>，Cloudflare 对这个类型直接回 <b>403</b>
-          （请求根本到不了数据面），因此勾选 XHTTP 生成的节点目前全部为 <b>-1</b>。
-          只有能把 Content-Type 改成 <code class="inline">application/octet-stream</code> 等类型的客户端才可能通。
+          <br>⚠️ <b>XHTTP 已可用</b>：上行改用 packet-up 分包、关闭 gRPC 头伪装（边缘不再返回 403），支持上下行分离与 H3 降级。
         </p>
       </div>
 
@@ -737,7 +732,7 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
     <div class="card">
       <h2><span class="dot"></span>出站路由、链式代理与抗封锁策略</h2>
       <p class="hint">
-        配置数据面访问目标网站时的出站落地方式。配置 SOCKS5 / HTTP(S) 代理或反代池可解除 Cloudflare 禁止连回自家网段的限制，并改善出站 IP 纯净度。
+        配置 SOCKS5 / HTTP(S) 代理或反代池可解除 Cloudflare 禁止连回自家网段的限制，并改善出站 IP 纯净度。
       </p>
 
       <div class="grid grid-2col">
@@ -757,7 +752,7 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
           <div class="field">
             <label>链式代理</label>
             <textarea id="cfgProxyIp" class="mono" placeholder="1.2.3.4:443"></textarea>
-            <p class="tip">链式代理落地：连接此地址、由它转发到目标站（按下方调度模式参与选路）。与「自定义反代入口池」不等同 —— 那个只在直连失败后兜底。</p>
+            <p class="tip">连接此地址、转发到目标站（按下方调度模式参与选路）。</p>
           </div>
         </div>
         <div>
@@ -776,7 +771,7 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
           <div class="field">
             <label>自定义反代入口池</label>
             <textarea id="cfgRelayPool" class="mono" placeholder="1.2.3.4:443&#10;relay.example.com:443"></textarea>
-            <p class="tip">反代兜底入口（relayPool）：用户自配的第三方反代入口，排在内置反代之前；仅在直连/优选失败、目标在 Cloudflare 网段时启用。</p>
+            <p class="tip">relayPool：自配第三方反代入口，优先于内置反代；直连/优选失败、Cloudflare 网段目标时启用。</p>
           </div>
         </div>
       </div>
@@ -797,14 +792,14 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
           <option value="smart">智能分流 —— CF 网段目标走代理，其它先直连</option>
         </select>
         <p class="tip">
-          「仅代理」保证出口 IP 与你配置的一致（直连会暴露 Cloudflare 原生出口）。
-          代理全部失败时会尝试<b>反代入口池</b>（同样是第三方出口），仍失败才报错。
+          「仅代理」保证出口 IP 与配置一致（直连会暴露 Cloudflare 原生出口）。
+          代理全部失败时会尝试<b>反代入口池</b>（同样是第三方出口），仍失败则报错。
           四种模式改变的是<b>候选优先级与回退顺序</b>，不是简单开关：代理与直连不会混进同一竞速池，
           因此不会出现「直连先成功、出口 IP 与预期不符」。
         </p>
         <p class="tip">
           IPv6 支持边界：入站可解析 IPv6 目标，SOCKS5 与 HTTP CONNECT 上游也可写 IPv6 地址；
-          但 Worker 本身<b>不支持直接连接 IPv6 目标出站</b>，这类目标需经代理落地或 NAT64 转换。
+          但 Worker 本身<b>不支持直接连接 IPv6 目标出站</b>，此类目标需经代理落地或 NAT64 转换。
         </p>
       </div>
 
@@ -883,7 +878,7 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
 
     <div class="card">
       <h2><span class="dot"></span>配置备份与迁移</h2>
-      <p class="hint">导出的是<b>脱敏配置</b>：不含 UUID、Trojan 口令、入站路径、自定义域名，以及带口令的落地代理。导入前会先显示差异，确认后才写入。</p>
+      <p class="hint">导出<b>脱敏配置</b>：不含 UUID、Trojan 口令、入站路径、自定义域名，以及带口令的落地代理。导入前显示差异，确认后写入。</p>
       <div class="field">
         <label>配置 JSON</label>
         <textarea class="mono" id="cfgTransfer" rows="5" placeholder="点「导出当前配置」生成，或把备份粘贴到这里"></textarea>

@@ -4,6 +4,14 @@
  * 注意：这里拿不到 Node 能力，也拿不到令牌明文。
  * 所有敏感操作通过 window.cfpilot 转主进程。
  */
+import {
+  escapeHtml,
+  formatTaskTime,
+  scanParamsSummary,
+  taskRowHtml,
+  taskStatusText,
+} from './task-rows'
+
 (function () {
   'use strict'
 
@@ -2653,8 +2661,10 @@
   let scheduledPool: ScheduledPoolEntry[] = []
   /** 勾选的池内 IP（按 IP 去重键） */
   let poolChecked = new Set<string>()
-  /** 编辑弹窗的上下文：'create' = 新建，'edit' = 编辑勾选的任务 */
+  /** 编辑弹窗的上下文：'create' = 新建，'edit' = 编辑某一条任务 */
   let taskModalMode: 'create' | 'edit' = 'create'
+  /** 'edit' 模式下正在编辑的任务 id（编辑只针对单条） */
+  let taskEditId: string | null = null
   /** 新建任务时从优选表单抓下来的优选参数快照 */
   let taskDraftScan: ScheduledScanParams | null = null
   /** 编辑弹窗打开时的原始值（用来判断哪些字段被改过） */
@@ -2680,91 +2690,24 @@
     }
   }
 
-  /** 优选参数的可读摘要（任务清单里只读展示）。 */
-  function scanParamsSummary(p: ScheduledScanParams): string {
-    if (!p) return '—'
-    const family =
-      p.family === 'v4'
-        ? 'IPv4'
-        : p.family === 'v6'
-          ? 'IPv6'
-          : p.family === 'both'
-            ? 'IPv4+IPv6'
-            : '自动'
-    const countries = (p.countries || []).length
-      ? p.countries.join(' / ')
-      : '全部'
-    const speed = p.speedMode === 'off' ? '不测速' : p.speedMode === 'one' ? '仅精测' : '两轮测速'
-    return `${family} · ${countries} · 采样 ${p.sample} · 保留 ${p.top} · ${speed}`
-  }
-
-  /** 任务状态的可读文案。 */
-  function taskStatusText(t: ScheduledTask): string {
-    if (!t.enabled) return '已禁用'
-    switch (t.lastStatus) {
-      case 'ok':
-        return `完成（${t.lastCount ?? 0} 条）`
-      case 'relaxed':
-        return `完成（筛选放宽 · ${t.lastCount ?? 0} 条）`
-      case 'failed':
-        return '失败：' + (t.lastMessage || '未知原因')
-      case 'skipped':
-        return '已跳过：' + (t.lastMessage || '')
-      default:
-        return '等待首次运行'
-    }
-  }
-
-  /** 毫秒时间戳 → 可读时间。 */
-  function formatTaskTime(ms?: number): string {
-    if (!ms) return '—'
-    const d = new Date(ms)
-    const p = (n: number) => String(n).padStart(2, '0')
-    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
-  }
-
   /** 渲染任务清单。 */
   function renderScheduledTasks(): void {
     const tbody = $('taskTable').querySelector('tbody')
     if (!tbody) return
     if (!scheduledTasks.length) {
-      tbody.innerHTML = '<tr><td colspan="12" class="muted">（暂无任务）</td></tr>'
+      tbody.innerHTML = '<tr><td colspan="11" class="muted">（暂无任务）</td></tr>'
       $('taskHint').textContent = '（暂无任务 —— 可在「入口优选」页点「保存为定时任务」新建）'
       updateTaskButtons()
       return
     }
+    // 内置任务没有勾选框 ⇒ 永远不该出现在删除集合里。
+    // 这里兜底清一次：万一旧状态里残留了，删的时候也不会出现
+    // 「点了删除却没删成」的割裂。
+    for (const t of scheduledTasks) {
+      if (t.builtin) scheduledChecked.delete(t.id)
+    }
     tbody.innerHTML = scheduledTasks
-      .map((t) => {
-        const checked = scheduledChecked.has(t.id) ? ' checked' : ''
-        const badge = t.builtin ? ' <span class="badge info">内置</span>' : ''
-        const speed = t.minSpeedMBps > 0 ? `≥ ${t.minSpeedMBps} MB/s` : '不过滤'
-        const next = t.enabled ? '运行中…' : '—'
-        // 数据面域名是**运行期**从该账号的部署清单取的 —— 第一次跑完才有值。
-        const host = t.lastHost || '（跑完一次后显示）'
-        const toggle = t.enabled
-          ? '<button class="btn btn-ghost btn-sm" data-task-toggle="' +
-            escapeHtml(t.id) +
-            '" title="停用后不再自动运行。">停用</button>'
-          : '<button class="btn btn-ghost btn-sm" data-task-toggle="' +
-            escapeHtml(t.id) +
-            '" title="启用后到点自动运行优选。">启用</button>'
-        return (
-          '<tr>' +
-          `<td><input type="checkbox" data-task-id="${escapeHtml(t.id)}"${checked} /></td>` +
-          `<td>${toggle}</td>` +
-          `<td>${escapeHtml(t.name)}${badge}</td>` +
-          `<td class="muted">${escapeHtml(t.description || '')}</td>` +
-          `<td>${t.intervalDays} 天</td>` +
-          `<td class="mono">${escapeHtml(t.runAt)}</td>` +
-          `<td>${escapeHtml(speed)}</td>` +
-          `<td class="muted" style="font-size:12px">${escapeHtml(scanParamsSummary(t.scan))}</td>` +
-          `<td class="muted">${escapeHtml(next)}</td>` +
-          `<td class="muted">${escapeHtml(formatTaskTime(t.lastRunAt))}</td>` +
-          `<td class="muted">${escapeHtml(taskStatusText(t))}</td>` +
-          `<td class="muted mono" style="font-size:12px">${escapeHtml(host)}</td>` +
-          '</tr>'
-        )
-      })
+      .map((t) => taskRowHtml(t, scheduledChecked.has(t.id)))
       .join('')
     $('taskHint').textContent = `共 ${scheduledTasks.length} 条任务（已勾选 ${scheduledChecked.size} 条）`
     updateTaskButtons()
@@ -2773,17 +2716,18 @@
   /** 更新任务清单的批量操作按钮的可用状态。 */
   function updateTaskButtons(): void {
     const n = scheduledChecked.size
-    const edit = $('btnTaskEdit') as HTMLButtonElement | null
     const del = $('btnTaskDelete') as HTMLButtonElement | null
-    const save = $('btnTaskSave') as HTMLButtonElement | null
-    if (edit) edit.disabled = n === 0
     if (del) del.disabled = n === 0
-    if (save) save.disabled = n === 0
     const all = $('taskCheckAll') as HTMLInputElement | null
     if (all) {
-      const total = scheduledTasks.length
-      all.checked = total > 0 && n === total
-      all.indeterminate = n > 0 && n < total
+      // 「全选」只覆盖**非内置**任务 —— 内置任务没有勾选框。
+      const selectable = scheduledTasks.filter((t) => !t.builtin)
+      const total = selectable.length
+      const picked = selectable.filter((t) => scheduledChecked.has(t.id)).length
+      all.checked = total > 0 && picked === total
+      all.indeterminate = picked > 0 && picked < total
+      // 一个可删的任务都没有时，「全选」也没有意义 —— 置灰。
+      all.disabled = total === 0
     }
   }
 
@@ -2882,8 +2826,17 @@
     }
   }
 
-  /** 打开任务编辑弹窗。 */
-  function openTaskModal(mode: 'create' | 'edit'): void {
+  /**
+   * 打开任务编辑弹窗。
+   *
+   * @param mode 'create' 新建；'edit' 编辑**某一条**任务。
+   * @param taskId 'edit' 时要编辑的任务 id。
+   *
+   * ⚠️ 编辑**只针对单条**任务：多选后统一编辑本身就是错的 ——
+   * 各任务的设置可能不同，一个字段填什么值要套到哪些任务上说不清，
+   * 很容易把不该改的一并改掉。所以编辑入口是每行末尾的「编辑」按钮。
+   */
+  function openTaskModal(mode: 'create' | 'edit', taskId?: string): void {
     taskModalMode = mode
     const modal = $('taskModal')
     const title = $('taskModalTitle')
@@ -2908,12 +2861,10 @@
           '优选参数取自当前「入口优选」页的设置，保存后不可修改。'
       }
     } else {
-      const picked = scheduledTasks.filter((t) => scheduledChecked.has(t.id))
+      const picked = scheduledTasks.filter((t) => t.id === taskId)
       if (!picked.length) return
-      if (title) {
-        title.textContent =
-          picked.length === 1 ? '编辑定时优选任务' : `编辑所选 ${picked.length} 个任务`
-      }
+      taskEditId = taskId ?? null
+      if (title) title.textContent = '编辑定时优选任务'
       const first = picked[0]
       ;($('taskName') as HTMLInputElement).value = first.name
       ;(document.getElementById('taskDesc') as HTMLTextAreaElement).value =
@@ -2925,19 +2876,17 @@
       // 内置任务的名字**不可改** ——
       // 「亚洲组_IPv4」这个名字本身就是它在扫什么的唯一线索。
       const nameEl = $('taskName') as HTMLInputElement | null
-      const allBuiltin = picked.every((t) => t.builtin)
+      const builtin = first.builtin
       if (nameEl) {
-        nameEl.disabled = allBuiltin
-        nameEl.title = allBuiltin
+        nameEl.disabled = builtin
+        nameEl.title = builtin
           ? '内置任务不能改名 —— 名称里的地址族与地区就是它的用途说明'
           : ''
       }
       if (hint) {
-        hint.textContent = allBuiltin
+        hint.textContent = builtin
           ? '内置任务不能改名，其余参数可以改。'
-          : picked.length > 1
-            ? '所选任务的设置可能不同 —— 留空的字段保持各自原值，只提交你改动过的字段。'
-            : '优选参数不可编辑。'
+          : '优选参数不可编辑。'
       }
     }
     taskModalOrigin = {
@@ -2983,7 +2932,8 @@
       return
     }
     // 速度下限与「跳过测速」互斥 —— 没有速度值可用于筛选。
-    const speedMode = taskDraftScan?.speedMode ?? scheduledTasks.find((t) => scheduledChecked.has(t.id))?.scan.speedMode
+    const editing = scheduledTasks.find((t) => t.id === taskEditId)
+    const speedMode = taskDraftScan?.speedMode ?? editing?.scan.speedMode
     if (minSpeedMBps > 0 && speedMode === 'off') {
       showTaskWarn('设了速度过滤就不能用「跳过测速」—— 没有速度值可用于筛选', true)
       return
@@ -3009,10 +2959,10 @@
         showTaskWarn('', false)
         log('已创建定时优选任务：' + name, 'ok')
       } else {
-        // 只提交改动过的字段 —— 空白字段保持各自原值。
+        // 只提交改动过的字段 —— 空白字段保持原值。
         //
-        // 批量编辑时各任务的设置可能不同：一个用户只改了「运行时间」，
-        // 不能把别的任务的名称也一并改掉。
+        // 编辑**只针对单条**任务（入口是每行末尾的「编辑」按钮），
+        // 所以提交范围就是那一条，不涉及批量套用。
         const now: Record<string, string> = {
           name,
           description,
@@ -3020,8 +2970,13 @@
           runAt,
           minSpeedMBps: String(minSpeedMBps),
         }
+        const targetId = taskEditId ?? Array.from(scheduledChecked)[0] ?? ''
+        if (!targetId) {
+          showTaskWarn('没有可保存的任务', true)
+          return
+        }
         const patch: Parameters<typeof window.cfpilot.updateScheduledTasks>[0] = {
-          ids: Array.from(scheduledChecked),
+          ids: [targetId],
         }
         // 内置任务的名称框是禁用的 —— 不提交 name（后端也会拒）。
         const nameDisabled = ($('taskName') as HTMLInputElement | null)?.disabled === true
@@ -3056,6 +3011,67 @@
     }
   }
 
+  /**
+   * 表格容器高度拖曳。
+   *
+   * ## 为什么要有
+   *
+   * 表格行数不定：任务多了、来源多了，固定高度要么看不全、
+   * 要么给几行也留一大片空白。让用户自己拖最省事。
+   *
+   * ## 边界
+   *
+   * - 拖的是**高度**（纵向），手柄在**左下角**（右下角被滚动条占着）；
+   * - 高度钳制在 [最小, 最大] 之间 —— 太小看不见表头，太大会把整页撑爆；
+   * - 用**指针事件**而不是 mouse 事件：触屏也能拖；
+   * - 拖动时给 body 加 `resizing` 类，禁止选中文本、强制十字光标。
+   */
+  function bindTableResizers(): void {
+    const MIN_H = 180
+    const MAX_H = 900
+    document.querySelectorAll<HTMLElement>('.table-resizer').forEach((handle) => {
+      const targetId = handle.getAttribute('data-resize') || ''
+      const box = document.getElementById(targetId) as HTMLElement | null
+      if (!box) return
+
+      let startY = 0
+      let startH = 0
+
+      const onMove = (ev: PointerEvent): void => {
+        // 往上拖 = 变高
+        const next = startH + (startY - ev.clientY)
+        const h = Math.min(MAX_H, Math.max(MIN_H, next))
+        // 拖过之后高度由 JS 说了算 ⇒ 解除 CSS 的 max-height 限制，
+        // 否则内容比上限高时会多出一截空白。
+        box.style.maxHeight = 'none'
+        box.style.height = h + 'px'
+      }
+      const onUp = (): void => {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+        document.body.classList.remove('resizing')
+      }
+      handle.addEventListener('pointerdown', (ev) => {
+        ev.preventDefault()
+        startY = ev.clientY
+        // 容器可能是「内容高度 < 上限」，此时取实际渲染高度作为起点
+        startH = box.getBoundingClientRect().height
+        // 记下初始上限，双击恢复时用
+        if (!box.dataset.baseMax) {
+          box.dataset.baseMax = box.style.maxHeight || getComputedStyle(box).maxHeight
+        }
+        document.body.classList.add('resizing')
+        window.addEventListener('pointermove', onMove)
+        window.addEventListener('pointerup', onUp)
+      })
+      handle.addEventListener('dblclick', () => {
+        // 双击手柄 = 恢复默认高度
+        box.style.height = ''
+        box.style.maxHeight = box.dataset.baseMax || ''
+      })
+    })
+  }
+
   /** 绑定定时任务相关的交互。 */
   function bindScheduledTasks(): void {
     // 「保存为定时任务」（入口优选页）
@@ -3070,7 +3086,6 @@
     $('btnTaskRefresh')!.addEventListener('click', () => {
       void loadScheduledTasks()
     })
-    $('btnTaskEdit')!.addEventListener('click', () => openTaskModal('edit'))
     $('btnTaskCancel')!.addEventListener('click', () => closeTaskModal())
     $('btnTaskConfirm')!.addEventListener('click', () => {
       void submitTaskModal()
@@ -3120,10 +3135,24 @@
       if (all) {
         scheduledChecked.clear()
         if (all.checked) {
-          for (const t of scheduledTasks) scheduledChecked.add(t.id)
+          // 只选**非内置**任务 —— 内置任务没有勾选框（删不掉），全选也不该带上它。
+          for (const t of scheduledTasks) {
+            if (!t.builtin) scheduledChecked.add(t.id)
+          }
         }
         renderScheduledTasks()
       }
+    })
+
+    // 单条任务的「编辑」按钮（末列）
+    $('taskTable').addEventListener('click', (ev) => {
+      const btn = (ev.target as HTMLElement | null)?.closest(
+        'button[data-task-edit]'
+      ) as HTMLButtonElement | null
+      if (!btn) return
+      const id = btn.getAttribute('data-task-edit') || ''
+      if (!id) return
+      openTaskModal('edit', id)
     })
 
     // 单条任务的启用 / 停用
@@ -5534,7 +5563,7 @@
 
   function srcBusySet(on: boolean): void {
     srcBusy = on
-    const ids = ['btnSrcSync', 'btnSrcQuick', 'btnSrcConfigSave', 'btnSrcRefresh']
+    const ids = ['btnSrcSync', 'btnSrcConfigSave', 'btnSrcRefresh']
     ids.forEach((id) => {
       const el = document.getElementById(id) as HTMLButtonElement | null
       if (el) el.disabled = on
@@ -5999,21 +6028,6 @@
         } finally { srcBusySet(false) }
       })()
     })
-    on('btnSrcQuick', () => {
-      if (srcBusy) return
-      if (!confirm('将从本地池分层取样跑完整优选（WS101 + 隧道 + 测速），并用 top 8【覆盖】当前订阅的优选 IP。\n\n这会用掉一次测速时间且会写 KV，确定继续？')) return
-      void (async () => {
-        srcBusySet(true)
-        srcNote('完整优选进行中（约 1–3 分钟），请不要关闭程序…')
-        try {
-          const r = await window.cfpilot.sourcesQuick(200)
-          srcNote(r.ok ? (r.message || '完整优选完成') : ('完整优选失败：' + (r.error || '未知错误')), !r.ok)
-          await loadSourcesData(true)
-        } catch (err) {
-          srcNote('完整优选失败：' + srcErr(err), true)
-        } finally { srcBusySet(false) }
-      })()
-    })
     on('btnSrcFormSave', upsertDraft)
     on('btnSrcFormClear', clearSourceForm)
     on('btnSrcConfigSave', () => { void saveSourceConfig() })
@@ -6260,6 +6274,7 @@
     safeBind('优选', bindScan)
     safeBind('优选页签', bindScanSubtabs)
     safeBind('定时优选任务', bindScheduledTasks)
+    safeBind('表格拖曳', bindTableResizers)
     safeBind('候选来源', bindCandidateSource)
     safeBind('反代优选', bindRelay)
     safeBind('优选历史', bindHistory)

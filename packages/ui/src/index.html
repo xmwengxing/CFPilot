@@ -903,6 +903,31 @@
     }
     .src-table-scroll table { margin-top: 0; }
     .src-table-scroll th { position: sticky; top: 0; background: var(--bg-card); z-index: 1; }
+
+    /* 可拖曳调高的表格容器 */
+    //
+    // 表格行多时固定高度看不清全部内容，又不能把整页撑长 ——
+    // 所以容器限高内部滚动，并留一个**左下角**手柄让用户自己拖。
+    // 放左下角是因为右下角被滚动条占着。
+    .table-box { position: relative; }
+    .table-box .src-table-scroll { padding-bottom: 2px; }
+    .table-resizer {
+      position: absolute; left: 0; bottom: 0;
+      width: 24px; height: 14px;
+      cursor: ns-resize;
+      opacity: 0.55;
+      /* 左下角的三条斜纹（镜像自右下角的经典拖拽角标） */
+      background:
+        linear-gradient(135deg, transparent 0 42%, var(--border) 42% 52%, transparent 52% 62%,
+        var(--border) 62% 72%, transparent 72% 82%, var(--border) 82% 92%, transparent 92%);
+      background-position: right bottom;
+      background-repeat: no-repeat;
+      background-size: 22px 12px;
+      border-radius: 0 0 0 var(--radius-sm);
+    }
+    .table-resizer:hover { opacity: 1; }
+    body.resizing { user-select: none; cursor: ns-resize; }
+    body.resizing * { cursor: ns-resize !important; }
     /* 自定义列表时不参与本次优选的参数：连 label 一起变淡，避免看着像坏了 */
     .field.is-disabled { opacity: 0.5; }
     tbody tr:hover { background: rgba(255, 255, 255, 0.025); }
@@ -1363,9 +1388,8 @@
 			  · Developer Platform / Workers / Admin —— 建/删 Workers 项目、上传内核、绑 KV、配环境变量<br>
 			  <br>
 
-              </span>
+              </div>
             </div>
-          </div>
         </section>
 
         <!-- ============ 部署 ============ -->
@@ -1405,8 +1429,7 @@
               <button class="btn btn-ghost" id="btnRtAnalytics">打开 Cloudflare 控制台</button>
             </div>
             <p class="tip" id="rtTip" style="margin-top:8px">
-              常态只读取**本机**信息（内置内核 + 最近一次部署留档），不会调用 Token；
-              点「检查部署状态」才会连 Cloudflare 比对线上版本。
+              请先点击「检查部署状态」比对线上版本后做部署决策。
             </p>
           </div>
 
@@ -1491,15 +1514,15 @@
                   域名会写进控制面的 <code>DATA_HOST</code>变量（订阅里的节点地址），
                   <b>该部署不自动绑定域名</b>。部署成功后请到
                   Cloudflare 控制台 → Workers 和 Pages → 该 Worker →「域」标签页 → 添加自定义域名（与上方填写值一致）。<br>
-                  点「检查部署状态」会按平台上的**真实绑定**自动刷新这个值。
+                  点「检查部署状态」会按平台上的**真实绑定**自动刷新。
                 </p>
                 <p class="tip">
                   留空则节点用 <code>*.workers.dev</code> —— 多数网络直连不可访问，节点无法连接。
                 </p>
               </div>
               <p class="tip">
-                ⚠ <b>更新部署时如果切换模式，新数据面上线后会自动删除旧的数据面
-                （Pages 或 Worker），旧的自定义域名会随之失效，需要重新绑一次。</b>
+                ⚠ <b>更新部署时如果切换模式，新模式数据面部署后会自动删除旧模式数据面
+                （Pages 或 Worker），原自定义域名随之失效，需重新绑定。</b>
               </p>
             </div>
 
@@ -1592,9 +1615,9 @@
           <div class="card">
             <h2><span class="dot"></span>🔗 链式代理（自建落地节点）</h2>
             <p class="desc">
-              在<b>你自己的 VPS</b> 上装一个带口令的 SOCKS5 落地节点，
-              让流量走 <b>客户端 → Worker → VPS → 目标站</b>。
-              目标站看到的是你的 VPS 出口（干净），而不是 Cloudflare 的机房 IP。
+              在<b>私有 VPS</b> 装一个带口令的 SOCKS5 落地节点，
+              流量走 <b>客户端 → Worker → VPS → 目标站</b>。
+              目标站看到 VPS 出口，非 Cloudflare 机房 IP。
             </p>
 
             <div class="row">
@@ -1616,10 +1639,10 @@
             <pre id="chainOut" class="chain-out" hidden></pre>
 
             <p class="tip" style="margin-top:10px">
-              · 需要本机有 <code>ssh</code> 客户端（Windows 10+ 自带）且已配好密钥。<br>
-              · <b>没有密钥也能用</b>：点「复制命令」在终端里执行 —— 终端里 ssh 才会提示输入密码。<br>
+              · 需要本机有 <code>ssh</code> 客户端且已配好密钥。<br>
+              · <b>无密钥</b>：点「复制命令」在终端里执行 —— 终端 ssh 提示输入密码。<br>
               · 脚本会装 sing-box、生成随机口令、起 systemd 服务，仅支持 Debian/Ubuntu/CentOS 系。<br>
-              · 跑完会打印一行 <code>socks5://用户:口令@IP:端口</code>，粘到面板「出站与高级」→ SOCKS5。
+              · 运行后输出 <code>socks5://用户:口令@IP:端口</code>，粘到面板「出站与高级」→ SOCKS5。
             </p>
           </div>
         </section>
@@ -1647,7 +1670,7 @@
           <div class="card" id="sourceCard">
             <h2><span class="dot"></span>① 数据面与候选来源</h2>
             <p class="desc">
-              下面三项两种优选<b>共用</b>：入口优选拿数据面地址做校验，反代优选拿它开隧道。
+              两种优选<b>共用</b>以下三项参数：入口优选做校验，反代优选开隧道。
             </p>
             <div class="pair-grid">
               <div class="pair">
@@ -1904,9 +1927,8 @@
             </div>
             <div class="warnbox" style="margin-top:12px">
               <b>⚠️ 运行前请关闭所有代理工具</b>（Clash / Mihomo / v2rayN / sing-box / Surge 等），
-              包括 <b>TUN 模式</b>与<b>系统代理</b><br><br>
-              如必须开启代理，请将本程序加入直连/绕过名单；
-              点击<b>「检测网络环境」</b>可确认当前系统是否处于干扰/代理状态
+              含 <b>TUN 模式</b>与<b>系统代理</b><br>
+              点击<b>「检测网络环境」</b>检测干扰/代理状态/本机 IPv6 支持
             </div>
           </div>
           </div><!-- /scanPanelEntry -->
@@ -1916,15 +1938,15 @@
             <div class="card">
               <h2><span class="dot"></span>↩️ 反代优选（出站链路体检）</h2>
               <p class="desc">
-                验证候选代理能否把 <b>SNI 转发到你的数据面</b>。链路是
-                「本机 →（隧道）→ Worker → 候选代理 → Cloudflare → 你的数据面」，
-                由<b>本机</b>在这条隧道上完成 TLS 握手与请求。
-                只有证书按你的域名校验通过、<b>且</b>返回的 build 等于数据面自己的 build 才算通过。
+                验证候选代理<b>SNI可达数据面</b>。优选链路
+                「本机 →（隧道）→ Worker → 候选代理 → Cloudflare → 数据面」，
+                由<b>本机</b>在隧道上完成 TLS 握手与请求。
+                证书按所属域名校验通过、<b>且</b>返回的 build 等于数据面 build 为通过。
               </p>
               <!-- 与入口优选同一套等宽网格：宽屏一行放下，窄屏自动落成单列 -->
               <div class="grid">
                 <div class="field span-2">
-                  <label title="VLESS UUID，隧道鉴权用。点右侧按钮可直接从面板配置读取，不用手抄。">UUID</label>
+                  <label title="VLESS UUID，隧道鉴权用。点右侧按钮可直接从面板配置读取。">UUID</label>
                   <div class="field-inline">
                     <input type="text" id="optRelayUuid" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
                     <button class="btn btn-ghost" id="btnRelayFetchUuid">从面板读取</button>
@@ -1952,9 +1974,8 @@
                 <p class="tip" id="relayProgressText" style="margin:5px 0 0"></p>
               </div>
               <p class="tip" id="relayHint">
-                候选来自上方「候选来源」：<b>默认</b>用内置 Proxy IP 源（随版本发布，用户不可修改），
-                也可以切到自定义列表粘贴 / 导入自己的 IP。结果写入面板
-                <b>ProxyIP 池</b>（只影响 Worker 出站选路，<b>不进订阅</b>）。
+                「候选来源」：<b>默认</b>内置 Proxy IP 源，可自定义。结果写入面板
+                <b>反代入口池</b>（只影响 Worker 出站选路，<b>不进订阅</b>）。
               </p>
             </div>
 
@@ -1992,44 +2013,39 @@
                 <span class="muted" id="taskAccountHint"></span>
               </p>
               <p class="hint">
-                任务按「周期 + 时刻」自动跑优选，结果进下方的<b>本地优选 IP 池</b>，
-                由你勾选后决定是否回填到面板。<br>
-                <b>数据面域名与 WS 路径由该账号的部署清单自动获取</b>，不用在这里设置。<br>
-                <b>运行时刻之间要相隔 30 分钟以上</b> —— 同一台机器同一时刻只跑一个扫描，
-                挨太近的任务会互相顶掉。<br>
-                <b>同一账号最多启用 <span id="taskEnabledLimit">3</span> 个任务</b>
-                （当前已启用 <span id="taskEnabledCount">0</span> 个）——
-                定时优选是无人值守跑的，任务太多会让本机 IP 的行为看起来像批量扫描器。<br>
-                内置任务默认<b>不启用</b>，请先设好时间再打开。
+                任务按「周期 + 时刻」自动跑优选，结果进下方<b>本地优选 IP 池</b>，
+                可自选 IP 回填面板。<br>
+                <b>内置任务不可删</b> —— 仅能编辑任务参数。<br>
+                运行时刻间隔应 ＞30 分钟 —— 同一台机器同一时刻只跑一个扫描。<br>
+                <b>同一账号最多启用 <span id="taskEnabledLimit">3</span> 个定时任务</b>
+                （当前已启用 <span id="taskEnabledCount">0</span> 个）。
               </p>
               <div class="warnbox" id="taskWarn" hidden style="margin-top:10px"></div>
               <div class="btn-row" style="margin-top:12px">
                 <button class="btn btn-ghost" id="btnTaskRefresh" title="重新读取任务清单与 IP 池。">↻ 刷新</button>
-                <button class="btn btn-ghost" id="btnTaskEdit" disabled
-                  title="编辑勾选任务的名称、说明、周期、运行时间与速度过滤。&#10;优选参数不可编辑 —— 要调整请删除任务后在「入口优选」页重新配置。">编辑所选</button>
                 <button class="btn btn-ghost" id="btnTaskDelete" disabled
-                  title="删除勾选的任务。内置任务不可删除。">删除所选</button>
-                <button class="btn btn-primary" id="btnTaskSave" disabled
-                  title="把弹窗里改动过的字段套用到所有勾选的任务。&#10;保存时会检查运行时刻是否与其它任务冲突。">保存应用</button>
+                  title="删除勾选的任务。内置任务不可删除 —— 那一列没有勾选框，选不中。">删除所选</button>
               </div>
-              <div class="src-table-scroll" style="margin-top:12px">
-                <table id="taskTable">
-                  <thead><tr>
-                    <th style="width:34px"><input type="checkbox" id="taskCheckAll" title="全选 / 全不选" /></th>
-                    <th style="width:80px">启用</th>
-                    <th>名称</th>
-                    <th>说明</th>
-                    <th>周期</th>
-                    <th>运行时间</th>
-                    <th>速度过滤</th>
-                    <th>优选参数</th>
-                    <th>下次运行</th>
-                    <th>上次运行</th>
-                    <th>状态</th>
-                    <th>数据面</th>
-                  </tr></thead>
-                  <tbody></tbody>
-                </table>
+              <div class="table-box" id="taskTableBox" style="margin-top:12px">
+                <div class="src-table-scroll" id="taskTableScroll" style="max-height:520px">
+                  <table id="taskTable">
+                    <thead><tr>
+                      <th style="width:34px"><input type="checkbox" id="taskCheckAll" title="全选 / 全不选" /></th>
+                      <th style="width:80px">启用</th>
+                      <th>名称</th>
+                      <th style="width:64px">周期</th>
+                      <th style="width:88px">运行时间</th>
+                      <th style="width:96px">速度过滤</th>
+                      <th style="width:104px">下次运行</th>
+                      <th style="width:132px">上次运行</th>
+                      <th style="width:140px">状态</th>
+                      <th>数据面</th>
+                      <th style="width:72px">操作</th>
+                    </tr></thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+                <div class="table-resizer" data-resize="taskTableScroll" title="拖动调整表格高度"></div>
               </div>
               <p class="hint" id="taskHint">（正在加载任务清单…）</p>
             </div>
@@ -2037,17 +2053,17 @@
             <div class="card">
               <h2><span class="dot"></span>🗂️ 本地优选 IP 池</h2>
               <p class="hint">
-                定时任务跑出来的结果。同一 IP 再次入池会被<b>最新一轮的结果覆盖</b>。<br>
-                <b>覆盖回填</b>会清空面板优选池里已有的 IP（含你在面板手填的「手动指定 IP」）；
-                <b>增量回填</b>只补真正新的。
+                定时任务结果累计存档。重复 IP 再次入池会被<b>最新结果覆盖</b>。<br>
+                <b>覆盖回填</b>清空面板优选池已有 IP（含面板手填的「手动指定 IP」）；
+                <b>增量回填</b>面板优选池添加新 IP。
               </p>
               <div class="btn-row" style="margin-top:10px">
                 <button class="btn btn-ghost" id="btnPoolCopy" disabled
                   title="把勾选的 IP 复制到剪贴板（格式 IP:端口#备注，可直接粘贴）。">复制选中 IP</button>
                 <button class="btn btn-ghost" id="btnPoolPushReplace" disabled
-                  title="清空面板优选池后写入勾选的 IP。&#10;会连带清掉面板里手填的「手动指定 IP」。">覆盖回填</button>
+                  title="清空面板优选池后写入勾选 IP。&#10;会连带清掉面板里手填的「手动指定 IP」。">覆盖回填</button>
                 <button class="btn btn-primary" id="btnPoolPushAppend" disabled
-                  title="保留面板优选池里已有的 IP，只补勾选里真正新的。">增量回填</button>
+                  title="保留面板优选池里已有 IP，只补充勾选 IP。">增量回填</button>
                 <button class="btn btn-ghost" id="btnPoolRemove" disabled
                   title="从本地池移除勾选的条目（不影响面板）。">移除选中</button>
               </div>
@@ -2288,9 +2304,8 @@
           <div class="card">
             <h2><span class="dot"></span>🌐 外部 IP 本地候选池 <span class="badge info" id="srcPoolBadge">—</span></h2>
             <p class="desc">
-              外部清单定期同步到本机 <code>~/.cfpilot/external-candidates.json</code>，与 CLI 版共用同一份池。
-              入池只做 <b>TCP + TLS 轻量校验</b>；只有点「一键完整优选」才会跑 WS101 + 隧道 + 测速，
-              并把 top 8 回填订阅（<code>replace</code>）。面板与 Worker 内核零改动。
+              外部清单定期同步到本机 <code>~/.cfpilot/external-candidates.json</code>，
+              入池只做 <b>TCP + TLS 轻量校验</b>，储备可用候选 IP。
             </p>
             <p class="kv-row" style="margin:0 0 6px">
               <span class="k">池内候选</span><span class="v" id="srcPoolSummary">—</span>
@@ -2303,24 +2318,22 @@
             </p>
             <div class="btn-row" style="margin-top:12px;align-items:center">
               <button class="btn btn-primary" id="btnSrcSync" type="button">立即同步</button>
-              <button class="btn btn-ghost" id="btnSrcQuick" type="button">一键完整优选（写订阅）</button>
               <button class="btn btn-ghost" id="btnSrcRefresh" type="button">刷新</button>
               <span class="tip" id="srcSyncScope" style="margin:0">当前 — 个来源参与同步</span>
             </div>
             <p class="tip" id="srcTopHint" style="margin-top:8px">
-              「立即同步」只写本地磁盘、不写 KV；「一键完整优选」是唯一会更新订阅的动作，耗时约 1–3 分钟。
+              「立即同步」只写本地磁盘、不写 KV。
             </p>
           </div>
 
           <div class="card">
             <h2><span class="dot"></span>📡 数据源 <span class="badge info" id="srcSourcesBadge">0 个</span></h2>
             <p class="desc">
-              清单型（GitHub Raw / 自定义 HTTPS）与 API 型（RIPEstat）共存。默认只接受 HTTPS，
-              私网 / 本机 / 云元数据地址一律拒绝。删除数据源只会清理来源关联，仍被其它来源引用的候选会保留。
+              清单型（GitHub Raw / 自定义 HTTPS）与 API 型（RIPEstat）共存。默认只接受 HTTPS。
             </p>
             <p class="tip" style="margin-top:6px">
-              <b>「参与同步」</b>指该来源是否会被定时自动同步或「立即同步」拉取（TCP + TLS 轻量校验后写入本地池）。
-              暂停同步只影响后续采集，已入池候选仍保留；「加载数据源清单」弹窗与行内「测试」不受影响。
+              <b>「参与同步」</b>定时自动同步或「立即同步」拉取（TCP + TLS 轻量校验后写入本地候选池）。
+              暂停同步影响后续采集，已入池候选仍保留。
             </p>
             <p class="kv-row" style="margin:0 0 8px">
               <span class="k">清单概览</span><span class="v" id="srcSourcesSummary">—</span>
@@ -2355,11 +2368,14 @@
                 <button class="btn btn-ghost btn-sm" id="btnSrcBulkDisable" type="button">暂停同步</button>
                 <button class="btn btn-ghost btn-sm" id="btnSrcBulkDelete" type="button">删除选中</button>
               </div>
-              <div class="src-table-scroll">
-                <table id="srcSourcesTable" hidden>
-                  <thead><tr><th style="width:32px"></th><th>ID / 名称</th><th>类型</th><th>链接 / 查询</th><th>参与同步</th><th>间隔(h)</th><th>上次同步</th><th>状态</th><th>操作</th></tr></thead>
-                  <tbody id="srcSourcesBody"></tbody>
-                </table>
+              <div class="table-box" id="srcSourcesBox">
+                <div class="src-table-scroll" id="srcSourcesScroll" style="max-height:380px">
+                  <table id="srcSourcesTable" hidden>
+                    <thead><tr><th style="width:32px"></th><th>ID / 名称</th><th>类型</th><th>链接 / 查询</th><th>参与同步</th><th>间隔(h)</th><th>上次同步</th><th>状态</th><th>操作</th></tr></thead>
+                    <tbody id="srcSourcesBody"></tbody>
+                  </table>
+                </div>
+                <div class="table-resizer" data-resize="srcSourcesScroll" title="拖动调整表格高度"></div>
               </div>
               <p class="tip" id="srcSourcesEmpty">还没有数据源，点「新增 / 编辑来源」添加。</p>
               <p class="tip" id="srcSourcesFilterHint" hidden></p>
@@ -2620,7 +2636,11 @@
 
             两用：
               新建 —— 从「入口优选」页点「保存为定时任务」进来，优选参数已预填
-              编辑 —— 从任务清单勾选后点「编辑所选」进来
+              编辑 —— 从任务清单**该行末尾**的「编辑」按钮进来
+
+            ⚠️ 编辑只针对**单条**任务：多选后统一编辑本身是错的 ——
+            各任务的设置可能不同，一个字段填什么值要套到哪些任务上说不清，
+            很容易把不该改的一并改掉。
 
             优选参数**只读**：要改得删了任务、在优选页重新配置。
             这里只开放 5 个参数：名称 / 说明 / 周期 / 运行时间 / 速度过滤。

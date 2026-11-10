@@ -22,3 +22,21 @@ describe('面板 gzip 往返', () => {
     expect(Buffer.byteLength(html)).toBeLessThanOrEqual(Buffer.byteLength(original))
   })
 })
+
+/**
+ * 面板表单字段必须**三处齐全**：有输入框、读得到初值、提交得出去。
+ *
+ * 只加输入框不提交是最容易犯的错 —— 用户在面板里改了值，
+ * 点保存却什么都没变（因为提交体里没这个字段）。
+ */
+describe('面板配置字段接线', () => {
+  const html = readFileSync(resolve(__dirname, '../src/ui/panel.html'), 'utf8')
+
+  it('单连接流量上限：有输入框、读初值、提交', () => {
+    expect(html).toContain('id="cfgDataBudget"')
+    // 读初值
+    expect(html).toContain("$('cfgDataBudget').value")
+    // 提交
+    expect(html).toContain('dataBudgetMB:')
+  })
+})

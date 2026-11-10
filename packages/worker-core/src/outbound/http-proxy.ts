@@ -8,6 +8,7 @@
  */
 import { assertSafeConnectAuthority } from '../protocols/address'
 import { ByteStream } from '../protocols/stream'
+import { TargetRejectedError } from './proxy-health'
 
 const CRLF_CRLF = [0x0d, 0x0a, 0x0d, 0x0a]
 
@@ -121,7 +122,11 @@ export async function httpConnect(
     const statusLine = text.split('\r\n')[0] ?? ''
     const match = /^HTTP\/1\.[01]\s+(\d{3})/.exec(statusLine)
     if (!match) throw new Error('HTTP 代理响应非法')
-    if (match[1] !== '200') throw new Error(`HTTP 代理 CONNECT 失败：${match[1]}`)
+    // ⚠️ 代理已经回了应答 ⇒ **代理本身是活的**，只是目标站不收这个出口。
+    // 标记成 TargetRejectedError，别让健康记忆把它当成坏节点。
+    if (match[1] !== '200') {
+      throw new TargetRejectedError(`HTTP 代理 CONNECT 失败：${match[1]}`)
+    }
 
     return stream.release()
   } finally {

@@ -849,7 +849,20 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
       </div>
 
       <div class="grid" style="margin-top:12px">
-        <div class="field"><label>ECH 公共引导域名（留空默认 cloudflare-ech.com）</label><input id="cfgEchHost" class="mono" placeholder="cloudflare-ech.com" /><p class="tip">留空使用默认域名。</p></div>
+        <div class="field">
+          <label>单连接流量上限（MB，0 = 不限制）</label>
+          <input id="cfgDataBudget" type="number" min="0" max="102400" step="1" placeholder="0" />
+          <p class="tip">
+            单条连接累计传输超过这个值就断开。<b>默认 0 = 不限制</b> ——
+            不限制时，客户端网络很慢的情况下数据会一直堆积在平台缓冲里，
+            极端情况下会触发平台的内存限制（1101）并中断该实例上的其它连接。
+            日常使用建议填 1024（1 GB）；大文件下载场景按需调大。
+          </p>
+        </div>
+        <div class="field">
+          <label>ECH 公共引导域名（留空默认 cloudflare-ech.com）</label>
+          <input id="cfgEchHost" class="mono" placeholder="cloudflare-ech.com" /><p class="tip">留空使用默认域名。</p>
+        </div>
         <div class="field"><label>ECH DoH 查询地址（留空使用客户端默认）</label><input id="cfgEchDns" class="mono" placeholder="https://223.5.5.5/dns-query" /><p class="tip">留空使用客户端默认。</p></div>
       </div>
 
@@ -1234,6 +1247,7 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
     $('cfgConcurrent').checked = !!c.concurrentDial;
     $('cfgResolvePreferred').checked = c.resolvePreferred !== false;
     $('cfgAggressiveRedial').checked = !!c.aggressiveRedial;
+    $('cfgDataBudget').value = c.dataBudgetMB || 0;
 
     $('poolOfficial').checked = !!c.poolOfficial;
     $('poolDomain').checked = !!c.poolDomain;
@@ -1461,6 +1475,7 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
       echHost: $('cfgEchHost').value.trim() || 'cloudflare-ech.com',
       echDns: $('cfgEchDns').value.trim(),
       concurrentDial: $('cfgConcurrent').checked,
+      dataBudgetMB: Math.max(0, Number($('cfgDataBudget').value) || 0),
       enableTrojan: $('cfgEnableTrojan').checked,
       enableXhttp: $('cfgEnableXhttp').checked,
       addApi: $('cfgAddApi').value,

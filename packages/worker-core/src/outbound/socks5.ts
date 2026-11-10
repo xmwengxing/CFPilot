@@ -3,6 +3,7 @@
  */
 import { ByteStream } from '../protocols/stream'
 import { isIpv4, isIpv6, parseIpv6 } from '../protocols/address'
+import { TargetRejectedError } from './proxy-health'
 
 export interface Socks5Options {
   username?: string
@@ -105,7 +106,12 @@ export async function socks5Connect(
 
     const reply = await readWithTimeout(stream, 4, timeoutMs, 'SOCKS5 CONNECT')
     if (!reply || reply[0] !== 0x05) throw new Error('SOCKS5 CONNECT 响应非法')
-    if (reply[1] !== 0x00) throw new Error(`SOCKS5 CONNECT 失败：0x${reply[1]!.toString(16)}`)
+    // ⚠️ 代理已经回了应答 ⇒ **代理本身是活的**，只是目标站不收这个出口。
+    // 标记成 TargetRejectedError，别让健康记忆把它当成坏节点
+    // （否则「某个站点不收某个出口」会变成「整个代理被拉黑」）。
+    if (reply[1] !== 0x00) {
+      throw new TargetRejectedError(`SOCKS5 CONNECT 失败：0x${reply[1]!.toString(16)}`)
+    }
 
     // 读取绑定地址（长度取决于地址类型）
     const atyp = reply[3]!

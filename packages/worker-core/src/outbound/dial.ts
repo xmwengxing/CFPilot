@@ -28,6 +28,12 @@
 import { socks5Connect } from './socks5'
 import { httpConnect } from './http-proxy'
 import { blockedTarget, TargetBlockedError, IPV6_DIRECT_UNSUPPORTED } from './guard'
+import {
+  filterHealthy,
+  recordProxyFailure,
+  recordProxySuccess,
+  TargetRejectedError,
+} from './proxy-health'
 import { isIpv4 } from '../protocols/address'
 import { resolveEndpointIps } from './doh'
 import { collectRelayEndpoints, RELAY_BATCH_SIZE, type RelayPoolOptions } from './relay'
@@ -528,6 +534,21 @@ function summarizeErrors(errors: readonly unknown[]): string {
  *   - 有人成功 → 立刻 resolve，不等同批其它候选；
  *   - **迟到的成功结果要整条 Socket 关掉**，否则会泄漏一条已建立的 TCP 连接；
  *   - 整批失败才 reject，并带上每一批的失败原因。
+ *
+ * ## 为什么不去「取消还在连接中的候选」
+ *
+ * 直觉上，赢家出现后应该把其余**仍在建连**的候选立刻掐掉，
+ * 免得它们白占「单请求 6 条并发出站」的槽位。
+ *
+ * ⚠️ **平台做不到**：`close()` 对**尚未建立连接**的 socket 是一次「干净关闭」，
+ * 它会等对端的 TCP 握手走完 —— 实测要 **约 20 秒**，而且**这段时间里 socket
+ * 仍然计入出站连接数**。`writable.abort()` + `readable.cancel()` 同样无效
+ * （实测仍是 20 秒；`socket.abort()` 这个 API 至今没有）。
+ *
+ * 也就是说：在途候选**无论如何都要占满自己的超时窗口**，
+ * 主动关它并不会更快释放槽位，只会让本进程多等一次 close。
+ *
+ * ⇒ 现状（迟到成功的立刻关掉、在途的等它自己超时）已经是这个平台上的最优解。
  */
 function raceBatch(attempts: ReadonlyArray<() => Promise<DialResult>>): Promise<DialResult> {
   if (attempts.length === 0) return Promise.reject(new Error('没有可用的出站拨号方式'))
@@ -845,14 +866,25 @@ export async function dial(options: DialOptions): Promise<DialResult> {
       }
       if (candidate.source === 'proxy' && candidate.via) {
         // 代理候选：连代理，由代理转发到**原始目标**
-        return await dialViaProxy(attemptOptions, {
-          host: candidate.via.host,
-          port: candidate.via.port,
-          kind: candidate.via.kind,
-          username: candidate.via.username,
-          password: candidate.via.password,
-          serverName: candidate.via.serverName,
-        })
+        try {
+          const result = await dialViaProxy(attemptOptions, {
+            host: candidate.via.host,
+            port: candidate.via.port,
+            kind: candidate.via.kind,
+            username: candidate.via.username,
+            password: candidate.via.password,
+            serverName: candidate.via.serverName,
+          })
+          recordProxySuccess(candidate.via)
+          return result
+        } catch (err) {
+          // ⚠️ 「目标站拒绝」不计入失败统计 —— 那说明代理是活的
+          // （`TargetRejectedError`），把它记成坏节点会误伤。
+          if (!(err instanceof TargetRejectedError)) {
+            recordProxyFailure(candidate.via, Date.now())
+          }
+          throw err
+        }
       }
       // 直连 / 优选 IP：换入口地址，但目标（TLS SNI 等）仍是原目标
       return await dialDirect({ ...attemptOptions, hostname: candidate.host, port: candidate.port })
@@ -894,11 +926,18 @@ export async function dial(options: DialOptions): Promise<DialResult> {
    * 顺序故障转移只占用**一个**代理连接，失败才换下一个。
    *
    * 代价：第一个代理慢时会多等 —— 但代理握手本来就有超时兜底。
+   *
+   * ## 健康记忆
+   *
+   * 顺序转移的代价在「第一个代理已经宕机」时会变成**每个请求都白等一次
+   * 完整的代理超时**。健康记忆让连续失败的节点进入冷却，冷却期内直接跳过
+   * （见 `proxy-health.ts`）；成败的记录在 `attemptOf` 里统一做。
    */
   const dialLanding = async (): Promise<DialResult> => {
     if (landing.length === 0) throw new Error('未配置落地代理')
     let lastErr: unknown
-    for (const candidate of landing) {
+    const candidates = filterHealthy(landing, (c) => c.via, Date.now())
+    for (const candidate of candidates) {
       try {
         return await attemptOf(candidate)()
       } catch (err) {
@@ -914,11 +953,16 @@ export async function dial(options: DialOptions): Promise<DialResult> {
    *
    * ProxyIP 只要 TCP 连上就算成功（1 RTT），并发无害且更快。
    * （落地代理是 2~3 RTT，两类混池会让 ProxyIP 永远赢 —— 见 CandidateGroups 注释。）
+   *
+   * 同样套一层健康记忆：坏掉的 ProxyIP 不必每次都参与竞速
+   * （它不会拖慢赢家，但会白占「单请求 6 条并发出站」里的一个槽位）。
    */
   const dialProxyIp = async (): Promise<DialResult> => {
     if (proxyIp.length === 0) throw new Error('未配置 ProxyIP')
+    const now = Date.now()
+    const candidates = filterHealthy(proxyIp, (c) => c.via, now)
     return await raceDial(
-      proxyIp.map(attemptOf),
+      candidates.map(attemptOf),
       true
     )
   }

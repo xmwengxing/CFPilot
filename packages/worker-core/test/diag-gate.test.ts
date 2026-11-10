@@ -5,7 +5,8 @@
  *
  * 1. **`/__diag` 必须带 token**。诊断内容包含用户最近访问的目标域名与失败原因
  *    （隐私数据）以及 `impl` / `build`（内部实现特征），早前任何人知道域名就能读。
- *    现在只认**完整 UUID**（`?token=` 或 `x-cfpilot-token` 头），未配置 UUID 时一律拒绝。
+ *    现在只认**完整 UUID**（`x-cfpilot-token` 头），未配置 UUID 时一律拒绝。
+ *    `?token=` 查询参数形式已移除 —— 令牌走 URL 会进浏览器历史、Referer 与边缘日志。
  *
  *    ⚠️ UUID 前 8 位曾经也能通过 —— 那只有 32 bit 搜空间，
  *    在线枚举即可拿到别人的诊断数据。这条必须保持为「拒绝」。
@@ -90,25 +91,41 @@ describe('数据面 /__diag 必须带 token', () => {
 
   it('token 错误 → 中性页', async () => {
     const res = await dataPlane(
-      new Request('https://data.example.com/__diag?token=deadbeef')
+      new Request('https://data.example.com/__diag', {
+        headers: { 'x-cfpilot-token': 'deadbeef' },
+      })
     )
     await expectNeutralPage(res)
   })
 
   it('token = uuid 前 8 位 → 中性页（32 bit 搜空间不可接受）', async () => {
     const res = await dataPlane(
-      new Request(`https://data.example.com/__diag?token=${UUID_SHORT}`)
+      new Request('https://data.example.com/__diag', {
+        headers: { 'x-cfpilot-token': UUID_SHORT },
+      })
     )
     await expectNeutralPage(res)
   })
 
   it('token = 完整 uuid → 返回诊断 JSON，且不可缓存', async () => {
-    const res = await dataPlane(new Request(`https://data.example.com/__diag?token=${UUID}`))
+    const res = await dataPlane(
+      new Request('https://data.example.com/__diag', {
+        headers: { 'x-cfpilot-token': UUID },
+      })
+    )
     expect(res.status).toBe(200)
     // 诊断里有用户访问过的目标域名，绝不能进任何缓存
     expect(res.headers.get('cache-control')).toContain('no-store')
     const data = (await res.json()) as { impl?: string }
     expect(data.impl).toBe('self')
+  })
+
+  it('?token= 查询参数形式已移除（令牌不该走 URL）', async () => {
+    // 令牌走 URL 会进浏览器历史、Referer 与边缘日志 —— 只接受请求头。
+    const res = await dataPlane(
+      new Request(`https://data.example.com/__diag?token=${UUID}`)
+    )
+    await expectNeutralPage(res)
   })
 
   it('x-cfpilot-token 请求头同样有效', async () => {
@@ -125,7 +142,9 @@ describe('数据面 /__diag 必须带 token', () => {
   it('未配置 uuid 时一律拒绝（fail-closed）', async () => {
     // 空 UUID 的部署绝不能因为「uuid 为空」而把诊断公开
     const res = await dataPlane(
-      new Request('https://data.example.com/__diag?token='),
+      new Request('https://data.example.com/__diag', {
+        headers: { 'x-cfpilot-token': '' },
+      }),
       { WS_PATH }
     )
     await expectNeutralPage(res)

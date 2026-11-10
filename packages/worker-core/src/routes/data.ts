@@ -67,24 +67,19 @@ function diagThrottled(now: number): boolean {
 /**
  * 校验 `/__diag` 的访问令牌。
  *
- * 接受 `x-cfpilot-token` 请求头（推荐，不会留在 URL / 日志里），
- * 也兼容 `?token=` 查询参数（旧命令与浏览器直接打开）。
+ * 接受 `x-cfpilot-token` 请求头（不会留在 URL / 日志里）。
  *
  * ⚠️ 未配置 UUID 时一律拒绝（fail-closed）：一个还没配好的部署
  * 绝不能因为「uuid 为空」而把诊断内容公开给所有人。
  */
-function diagAuthorized(request: Request, url: URL, uuid: string): boolean {
+function diagAuthorized(request: Request, uuid: string): boolean {
   if (!uuid) return false
-  // ⚠️ `?token=` 查询参数**已废弃**，保留只是为了兼容旧的排障命令。
+  // ⚠️ 只接受 `x-cfpilot-token` 请求头。
   //
-  // 令牌走 URL 会进浏览器历史、Referer 与边缘日志 —— 比放在请求头里风险大得多。
-  // 新用法一律走请求头（README 里的示例已经是 `x-cfpilot-token`）。
-  // 下个大版本会删掉这条分支。
-  const token = (
-    request.headers.get('x-cfpilot-token') ??
-    url.searchParams.get('token') ??
-    ''
-  ).trim()
+  // 早前还兼容 `?token=` 查询参数，已删除 ——
+  // 令牌走 URL 会进浏览器历史、Referer 与边缘日志，比放在请求头里风险大得多。
+  // 排障命令改用 `-H "x-cfpilot-token: <UUID>"` 即可（README 示例本就是这个形式）。
+  const token = (request.headers.get('x-cfpilot-token') ?? '').trim()
   if (!token) return false
   const now = Date.now()
   if (timingSafeEqual(token, uuid)) {
@@ -186,7 +181,7 @@ export async function routeDataPlane(
         },
       })
     }
-    if (!diagAuthorized(request, url, config.uuid)) return null
+    if (!diagAuthorized(request, config.uuid)) return null
     const { recentDiagnostics, diagnosticCounters, recentRoutes } = await import('../protocols/websocket-self')
     const { recentXhttpDiagnostics } = await import('../protocols/xhttp')
     return new Response(
@@ -243,7 +238,7 @@ export async function routeDataPlane(
         headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
       })
     }
-    if (!diagAuthorized(request, url, config.uuid)) return null
+    if (!diagAuthorized(request, config.uuid)) return null
     const { coloToCountry } = await import('../outbound/relay')
     const { runUnlockProbe } = await import('../unlock')
     const colo = (request as unknown as { cf?: { colo?: string } }).cf?.colo ?? ''

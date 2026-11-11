@@ -12,10 +12,14 @@ android {
 
         // 版本号：唯一真相是**仓库根的 package.json**（AGENTS §6 单一版本源）。
         //
-        // ⚠️ 路径是三级：app → android → packages → 仓库根。
-        //    （rootDir 在子项目里是 app/ 目录，两级会指到 packages/ —— 那里没有 package.json。）
+        // ⚠️ 路径要用 **rootDir**（根项目目录 = packages/android/），
+        //    不是 projectDir（= packages/android/app/）—— 两者差一级。
+        //    rootDir 再上两级才是仓库根：packages/android → packages → 仓库根。
+        //
+        //    （用 file('../../package.json') 是错的：file() 相对**项目目录**，
+        //      两级只到 packages/，那里没有 package.json。）
         versionName new groovy.json.JsonSlurper()
-                .parseText(new File(rootDir, '../../../package.json').text)
+                .parseText(new File(rootDir, '../../package.json').text)
                 .version
         versionCode Integer.parseInt(versionName.replaceAll('[^0-9]', '').padLeft(6, '0'))
     }

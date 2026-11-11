@@ -1,4 +1,4 @@
-//go:build cgo
+//go:build cgo && jnilib
 
 // CFPilot 安卓版：JNI 导出层。
 //

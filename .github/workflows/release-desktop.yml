@@ -472,7 +472,7 @@ jobs:
           GOOS=android GOARCH=arm64 CGO_ENABLED=1 \
             CC="$NDK_BIN/aarch64-linux-android24-clang" \
             CXX="$NDK_BIN/aarch64-linux-android24-clang++" \
-            go build -buildmode=c-shared -o "$OUT/libcfpilot.so" \
+            go build -tags jnilib -buildmode=c-shared -o "$OUT/libcfpilot.so" \
             -ldflags="-s -w -X main.Version=${{ steps.ver.outputs.version }}" \
             ./cmd/cfpilot-android
           ls -la "$OUT"
@@ -508,8 +508,16 @@ jobs:
           set -euo pipefail
           cd packages/desktop
           OUT="$(mktemp -d)"
+
+          # jni.h 在 JDK 里，得把 include 目录喂给 cgo。
+          # （JNI 那套代码挂在 jnilib 标签下，普通构建不需要它。）
+          JAVA_INC="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")/include"
+          echo "jni.h 目录：$JAVA_INC"
+          test -f "$JAVA_INC/jni.h"
+
           GOOS=linux GOARCH=amd64 CGO_ENABLED=1 \
-            go build -buildmode=c-shared -o "$OUT/libcfpilot.so" \
+            CGO_CFLAGS="-I$JAVA_INC -I$JAVA_INC/linux" \
+            go build -tags jnilib -buildmode=c-shared -o "$OUT/libcfpilot.so" \
             -ldflags="-X main.Version=ci-check" ./cmd/cfpilot-android
 
           echo "--- .so 里的 JNI 符号"

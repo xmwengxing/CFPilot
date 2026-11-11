@@ -1,5 +1,18 @@
+//go:build jnilib
+
 /*
  * CFPilot 安卓版 —— JNI 的字符串胶水。
+ *
+ * ## 为什么带 build tag
+ *
+ * jni.h 只有 JDK / NDK 里才有。普通构建（`go build ./...`、`go test ./...`）
+ * 的机器上不一定有 —— 硬 include 会直接编译失败。
+ *
+ * 所以这一整套 JNI 代码都挂在 `jnilib` 标签下：
+ *   - 编安卓 .so 时带上 `-tags jnilib`；
+ *   - 普通构建不带这个标签 → 这一整套文件被排除 → 什么都不用装。
+ *
+ * （.c 文件同样受 build tag 约束：Go 的构建系统对 C 文件也应用约束。）
  *
  * ## 为什么需要这一层
  *

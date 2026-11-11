@@ -494,6 +494,34 @@ jobs:
             echo "  ✓ 符号 $sym"
           done
 
+      - name: 验证 JNI 契约（真 JVM 调用）
+        # ⚠️ 这一步验的是「安卓端到底能不能用」。
+        #
+        #    JNI 的符号是 JVM **按名字**找的，编译期与链接期都检查不出来。
+        #    比如返回类型写成 char* 而不是 jstring：编译通过、链接通过、CI 全绿，
+        #    只在真机上炸成满屏乱码（2026-11-11 实测踩过）。
+        #
+        #    这里用**真的 JVM** 调一遍：同名类、同名方法、同样的符号查找方式，
+        #    与手机上的路径完全一致。Go 内核也换成 linux 版 —— 里面那套逻辑与安卓版相同，
+        #    差别只在目标平台。
+        run: |
+          set -euo pipefail
+          cd packages/desktop
+          OUT="$(mktemp -d)"
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=1 \
+            go build -buildmode=c-shared -o "$OUT/libcfpilot.so" \
+            -ldflags="-X main.Version=ci-check" ./cmd/cfpilot-android
+
+          echo "--- .so 里的 JNI 符号"
+          nm -D "$OUT/libcfpilot.so" | grep Java_ || true
+
+          SRC=../android/tools/jnicheck/com/xmwengxing/cfpilot
+          rm -rf /tmp/jnicheck && mkdir -p /tmp/jnicheck/classes /tmp/jnicheck/data
+          cp "$SRC"/*.java /tmp/jnicheck/
+          javac -d /tmp/jnicheck/classes /tmp/jnicheck/*.java
+          java -cp /tmp/jnicheck/classes -Djava.library.path="$OUT" \
+            com.xmwengxing.cfpilot.JniCheck /tmp/jnicheck/data
+
       - name: 编译 APK
         working-directory: packages/android
         run: |

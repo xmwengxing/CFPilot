@@ -17,6 +17,29 @@ import (
 	"time"
 )
 
+// 取消类测试用的两个时间常量。
+//
+// ## 为什么 cancelTimeout 不能太小
+//
+// 这组测试验证的是「**请求挂住时，context 到期要把它取消掉**」。
+// 超时太紧的话，请求还没走到「挂住」那一步就被掐了 ——
+// TLS 握手被打断，报出来的错误是握手错误而不是 context.DeadlineExceeded，
+// 断言就挂了。
+//
+// 症状是**随机失败**：本机 20 次里挂 1 次，CI 的慢机器上更频繁
+// （2026-11-11 在 CI 上抓到过一次，错误是
+// `http: TLS handshake error ... remote error: tls: bad certificate`）。
+//
+// ## 真正判「没有卡死」的是 returnLimit
+//
+// 「及时返回」由 returnLimit 判定，不是由 cancelTimeout 判定 ——
+// 超时本身只是**触发**取消的手段，多给它时间完成握手，
+// 断言仍然成立，而且不再随机失败。
+const (
+	cancelTimeout = time.Second
+	returnLimit   = 3 * time.Second
+)
+
 func identityServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *x509.CertPool) {
 	t.Helper()
 	srv := httptest.NewTLSServer(handler)
@@ -156,11 +179,11 @@ func TestIdentifyEgressValidatesConfiguration(t *testing.T) {
 
 func TestIdentifyEgressCancellationAndTLS(t *testing.T) {
 	srv, roots := identityServer(t, func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), cancelTimeout)
 	defer cancel()
 	start := time.Now()
 	_, err := identifyEgress(ctx, EgressIdentityOptions{ServiceURL: srv.URL + "?secret=query-secret"}, roots)
-	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > time.Second || strings.Contains(err.Error(), "query-secret") {
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > returnLimit || strings.Contains(err.Error(), "query-secret") {
 		t.Fatalf("取消未生效或泄露 query：%v", err)
 	}
 	good, _ := identityServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -289,11 +312,11 @@ func TestIdentifyEgressStalledBodyCancellation(t *testing.T) {
 		w.(http.Flusher).Flush()
 		<-r.Context().Done()
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), cancelTimeout)
 	defer cancel()
 	start := time.Now()
 	_, err := identifyEgress(ctx, EgressIdentityOptions{ServiceURL: srv.URL}, roots)
-	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > time.Second {
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > returnLimit {
 		t.Fatalf("慢响应体未及时取消：%v", err)
 	}
 }
@@ -315,11 +338,11 @@ func TestIdentifyEgressSOCKS5HandshakeCancellation(t *testing.T) {
 		_, _ = io.Copy(io.Discard, conn)
 		close(closed)
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), cancelTimeout)
 	defer cancel()
 	start := time.Now()
 	_, err = IdentifyEgress(ctx, EgressIdentityOptions{ServiceURL: "https://example.com", SOCKS5ProxyURL: "socks5://" + ln.Addr().String()})
-	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > time.Second {
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > returnLimit {
 		t.Fatalf("SOCKS5 握手未及时取消：%v", err)
 	}
 	select {

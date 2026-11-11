@@ -2,43 +2,71 @@
 
 // CFPilot 安卓版：JNI 导出层。
 //
-// # 为什么单独一个文件
+// # 为什么不用 gomobile，也不用手写 JNI 胶水
 //
-// 带 `import "C"` 的文件在 CGO_ENABLED=0 时会被整个排除。
-// 把导出层与业务逻辑分开，好处有两个：
-//  1. 业务逻辑那部分**不需要 NDK 就能编译验证**
-//     （CGO_ENABLED=0 GOOS=android go build ./cmd/cfpilot-android）；
-//  2. 导出层只做「C 字符串 ↔ Go 值」的搬运，不掺杂逻辑。
+// 常见做法有两种，都不如这个直接：
 //
-// # 内存约定
+//   - **gomobile bind**：它会生成 Java 类 + JNI 胶水 + .aar。
+//     但它要求 Go 包是**库包**（不能是 main），Java 类名由包路径推导
+//     （`cmd/cfpilot-android` 这种带连字符的目录名会被拼成奇怪的东西），
+//     还得额外装 gomobile 工具。
 //
-// 返回的字符串由 C.CString 分配（底层是 C 的 malloc），
-// Java 侧在 JNI 胶水层转成 jstring 后立刻 free()。
+//   - **手写 JNI 胶水（C 文件）**：胶水得**链进 Go 编出来的 .so**，
+//     否则 JVM 在 `System.loadLibrary("cfpilot")` 加载的那个库里
+//     根本找不到 `Java_..._nativeStart` 符号 —— 而这个 .so 是
+//     `-buildmode=c-shared` 编出来的，链接期就把没被引用的 C 符号丢了。
+//     （把 C 文件放进 Go 包目录能解决，但那样 cgo 的 preamble 与
+//     `//export` 的「preamble 只能有声明」限制会打架。）
+//
+// **本文件用的办法**：Go 的 `//export` 可以把函数导出成**任意 C 名字** ——
+// 直接用 JNI 的命名约定（`Java_<包>_<类>_<方法>`）导出即可。
+// JVM 按名字找符号，符号在不在 .so 里由 Go 的导出表说了算 ✓
+//
+// 于是：
+//   - 不需要 gomobile（少一个工具、少一处版本漂移）
+//   - 不需要单独的 .c 文件（少一层链接期的坑）
+//   - Java 侧就是普通的 `external fun` 声明
+//
+// # 参数类型
+//
+// JNI 的 `JNIEnv*` 与 `jclass` 在 ABI 上都是**指针**，
+// 所以用 `unsafe.Pointer` 传即可 —— 不必 include jni.h，
+// 也就不受「//export 的 preamble 不能有定义」的限制。
 package main
 
 /*
 #include <stdlib.h>
-
-// Go 侧导出的函数（实现见下方 //export 注释）。
-char* StartServer(char* dataDir);
-void StopServer();
 */
 import "C"
 
-// StartServer 启动本地服务，返回 JSON 描述（地址、端口、令牌、数据目录）。
+import "unsafe"
+
+// Java_com_xmwengxing_cfpilot_NativeBridge_nativeStart 启动本地服务。
 //
-// ⚠️ 返回的字符串由 C.CString 分配，**调用方必须 free()**。
-// 失败时返回的 JSON 里带 error 字段（不返回 NULL —— Java 侧统一按 JSON 解析，
-// 免得为「空指针」单独写一套分支）。
+// dataDir 是配置目录（设置、凭据、内核缓存都放这里）。
+// 返回 JSON（地址、端口、令牌、数据目录）；失败时带 error 字段。
 //
-//export StartServer
-func StartServer(dataDir *C.char) *C.char {
+// ⚠️ 返回的字符串由 C.CString 分配，**调用方必须 free()**（JNI 胶水层负责）。
+//
+//export Java_com_xmwengxing_cfpilot_NativeBridge_nativeStart
+func Java_com_xmwengxing_cfpilot_NativeBridge_nativeStart(
+	env unsafe.Pointer,
+	clazz unsafe.Pointer,
+	dataDir *C.char,
+) *C.char {
+	_ = env
+	_ = clazz
 	return C.CString(toJSON(startServer(C.GoString(dataDir))))
 }
 
-// StopServer 停止本地服务（应用退出时调用）。
+// Java_com_xmwengxing_cfpilot_NativeBridge_nativeStop 停止本地服务。
 //
-//export StopServer
-func StopServer() {
+//export Java_com_xmwengxing_cfpilot_NativeBridge_nativeStop
+func Java_com_xmwengxing_cfpilot_NativeBridge_nativeStop(
+	env unsafe.Pointer,
+	clazz unsafe.Pointer,
+) {
+	_ = env
+	_ = clazz
 	stopServer()
 }

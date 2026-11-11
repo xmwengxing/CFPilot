@@ -447,11 +447,26 @@ jobs:
         run: |
           set -euo pipefail
           cd packages/desktop
-          NDK_BIN="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          if [ ! -d "$NDK_BIN" ]; then
-            NDK_BIN="$(ls -d "${ANDROID_HOME}"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/bin | head -1)"
+          # ⚠️ 不要引用 ${ANDROID_NDK_VERSION} —— runner 上没有这个环境变量，
+          #    而 set -u 会让未定义变量直接终止脚本。
+          # 优先用 27.x：Go 1.24 的 cgo 与它配合最稳（NDK 28+ 换了 clang 默认值）。
+          NDK_BIN=""
+          for d in "${ANDROID_HOME}"/ndk/27.*; do
+            if [ -d "$d/toolchains/llvm/prebuilt/linux-x86_64/bin" ]; then
+              NDK_BIN="$d/toolchains/llvm/prebuilt/linux-x86_64/bin"
+              break
+            fi
+          done
+          if [ -z "$NDK_BIN" ]; then
+            NDK_BIN="$(ls -d "${ANDROID_HOME}"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/bin 2>/dev/null | sort -V | tail -1)"
+          fi
+          if [ -z "$NDK_BIN" ]; then
+            echo "::error::找不到 NDK 的 clang 工具链（${ANDROID_HOME}/ndk 下有什么？）"
+            ls -la "${ANDROID_HOME}/ndk" || true
+            exit 1
           fi
           echo "NDK 工具链：$NDK_BIN"
+          "$NDK_BIN/aarch64-linux-android24-clang" --version | head -2
           OUT=../android/app/src/main/jniLibs/arm64-v8a
           mkdir -p "$OUT"
           GOOS=android GOARCH=arm64 CGO_ENABLED=1 \
@@ -461,6 +476,23 @@ jobs:
             -ldflags="-s -w -X main.Version=${{ steps.ver.outputs.version }}" \
             ./cmd/cfpilot-android
           ls -la "$OUT"
+
+          # ⚠️ 必须确认 JNI 符号真的在 .so 里。
+          #
+          # JVM 是**按名字**找符号的（Java_<包>_<类>_<方法>）：
+          # 符号不在库里，运行时就是 UnsatisfiedLinkError —— 而这个错误
+          # 只在真机上才暴露，编译期完全看不出来。
+          #
+          # 所以这里硬校验：符号表里必须有这两个。
+          for sym in Java_com_xmwengxing_cfpilot_NativeBridge_nativeStart \
+                     Java_com_xmwengxing_cfpilot_NativeBridge_nativeStop; do
+            if ! nm -D "$OUT/libcfpilot.so" | grep -q " T $sym$"; then
+              echo "::error::$OUT/libcfpilot.so 里缺少 JNI 符号 $sym"
+              nm -D "$OUT/libcfpilot.so" | grep Java_ || true
+              exit 1
+            fi
+            echo "  ✓ 符号 $sym"
+          done
 
       - name: 编译 APK
         working-directory: packages/android

@@ -201,7 +201,17 @@ for (const target of TARGETS) {
 
   // 静态脱敏：放在断言之后、体积统计之前
   // （脱敏不产生静态外部导入；体积统计必须算脱敏后的大小）。
-  if (target.out === 'dataplane.js' || target.out === 'control.js') {
+  //
+  // ⚠️ 合并版（worker.js）**也要脱敏**。
+  //
+  // 它虽然只用于本地测试、也「不再是部署所需」，但仍会随 npm 包发布
+  // （`packages/cli/assets/worker.js`，兼容旧调用方）。
+  // 不脱敏的话，产物里的外部项目名就是明文 —— 仓库公开，等于自曝关联。
+  //
+  // 用 **literals 模式**：只改字符串字面量，不动属性名。
+  // 合并版里控制面与数据面都有，改属性名没有额外收益，却有跑坏的风险；
+  // 而字面量这一层已经足够把明文特征（哨兵值、中文报错、协议关键字）藏掉。
+  {
     const raw = readFileSync(outFile, 'utf8')
     const safe =
       target.out === 'dataplane.js'
@@ -218,9 +228,7 @@ for (const target of TARGETS) {
   const safeNote =
     target.out === 'dataplane.js'
       ? '，已静态脱敏（full）'
-      : target.out === 'control.js'
-        ? '，已静态脱敏（literals）'
-        : ''
+      : '，已静态脱敏（literals）'
   console.log(`[worker-core] ${target.label} → dist/${target.out} (${kb} KB${note}${safeNote})`)
   // 体积预算（**自定约束**，不是 Cloudflare 的官方限制）。
   //

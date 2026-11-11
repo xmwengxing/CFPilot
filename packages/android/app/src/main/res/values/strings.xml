@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">CFPilot</string>
+    <string name="notification_title">CFPilot 本地服务运行中</string>
+    <string name="notification_channel">服务状态</string>
+    <string name="notification_channel_desc">显示本地服务是否在运行</string>
+</resources>

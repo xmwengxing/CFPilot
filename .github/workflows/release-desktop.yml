@@ -22,6 +22,10 @@ on:
 
 permissions:
   contents: write
+  # 推送到 ghcr.io 需要这个（GITHUB_TOKEN 只能推本仓库的包）。
+  # 不新增独立工作流 —— 镜像与桌面二进制是同一次发布的两份产物，
+  # 放在同一个 job 里：镜像推失败就不发 Release（避免「Release 已发布但镜像没有」）。
+  packages: write
 
 jobs:
   build:
@@ -219,6 +223,66 @@ jobs:
           path: packages/desktop/dist/*
           retention-days: 30
 
+      # ─────────────────────────────────────────────────────────────
+      # 容器镜像
+      # ─────────────────────────────────────────────────────────────
+      #
+      # 为什么不做成独立工作流：
+      #   镜像里装的就是上面编出来的那个二进制，两者必须同版本、同一次发布。
+      #   拆成两个工作流就会出现「二进制发了镜像没发」这种半成品状态，
+      #   而且 GitHub 的 Actions 页面会多一个入口（本来就三个了）。
+      #
+      # 为什么镜像不在自己内部编译：
+      #   Dockerfile 只 COPY 一个预编译的静态二进制，构建秒级完成。
+      #   多架构由各自的二进制装配（buildx 会按 TARGETARCH 取对应那份），
+      #   不用 QEMU 跑 Go 编译（慢十倍）。
+      #
+      # ⚠️ 但基础镜像里的 `RUN apk add` 是要**执行**的 ——
+      #    arm64 那份要靠 QEMU 模拟，所以下面要装 qemu-action。
+
+      - name: 确定镜像名
+        id: image
+        run: |
+          # ghcr 要求镜像名全小写。
+          OWNER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          echo "name=ghcr.io/${OWNER}/cfpilot" >> "$GITHUB_OUTPUT"
+          echo "镜像：ghcr.io/${OWNER}/cfpilot"
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送镜像（amd64 + arm64）
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker
+          file: ./docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ steps.ver.outputs.version }}
+            ${{ steps.image.outputs.name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 校验镜像可拉取
+        run: |
+          set -euo pipefail
+          IMAGE="${{ steps.image.outputs.name }}"
+          VERSION="${{ steps.ver.outputs.version }}"
+          # 从 registry 拉一份刚推的，确认多架构清单与标签都对。
+          docker pull "$IMAGE:$VERSION"
+          docker manifest inspect "$IMAGE:$VERSION" | head -30
+          echo "镜像可用：$IMAGE:$VERSION"
+
       - name: 生成发布说明
         id: notes
         # 说明来源优先级：
@@ -267,6 +331,8 @@ jobs:
             printf -- '---\n\n'
             printf '**下载后直接运行**：Windows 双击 `.exe`；Linux 先 `chmod +x`。\n\n'
             printf 'CLI 工具：`npm i -g cfpilot`，然后运行 `cfpilot` 进入中文菜单。\n'
+            printf '\n**容器镜像**：`docker pull ghcr.io/xmwengxing/cfpilot:%s`\n' "$VERSION"
+            printf '（linux/amd64 与 linux/arm64；默认只允许本机访问，详见仓库 README 的 Docker 章节）\n'
           } > release_body.md
 
           {
@@ -304,3 +370,113 @@ jobs:
           #
           # 没有 tag 注释时回退到自动生成的变更列表。
           body: ${{ steps.notes.outputs.body }}
+
+  # ─────────────────────────────────────────────────────────────
+  # 安卓版 APK
+  # ─────────────────────────────────────────────────────────────
+  #
+  # 单独一个 job（不单独开工作流 —— 同一个 tag、同一份 Release）。
+  #
+  # 为什么单独一个 job 而不是塞进 build 那个：
+  #   安卓要 NDK + Android SDK + Gradle，工具链与桌面版完全不同，
+  #   混在一个 job 里会让「桌面版构建」被安卓的工具链拖累，
+  #   而且安卓那边失败不该把已经能发的桌面二进制也拖下水。
+  #
+  # 产物会**追加**到同一个 Release（tag_name 仍是 v<版本>）。
+  android:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: packages/desktop/go.sum
+
+      # GitHub 的 ubuntu runner 自带 Android SDK 与 NDK，
+      # 这里只需要确认路径与版本。
+      - name: 准备 Android 工具链
+        run: |
+          set -euo pipefail
+          echo "ANDROID_HOME=${ANDROID_HOME}" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}" >> "$GITHUB_ENV"
+          echo "--- SDK:"; ls "${ANDROID_HOME}" | head -10
+          echo "--- NDK:"; ls "${ANDROID_HOME}/ndk" || echo "（没有预装 NDK）"
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 确定版本号
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ inputs.version }}"
+          else
+            V="${GITHUB_REF_NAME#desktop-v}"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: 构建内核与界面
+        run: |
+          npm run build -w @cfpilot/worker-core
+          npm run build -w @cfpilot/ui
+          node scripts/gen-desktop-icons.mjs
+
+      - name: 把界面与内核资产塞进 Go 包
+        # 与桌面版同一套：界面与内核资产都是 go:embed 进二进制的，
+        # 所以 APK 里的 .so 与桌面版 exe 装的是**同一份**资源。
+        run: node scripts/build-desktop.mjs --assets-only
+
+      - name: 编译安卓内核（c-shared → .so）
+        # 每个 ABI 一份 .so，放进 jniLibs 由 Gradle 打进 APK。
+        #
+        # ⚠️ 必须 CGO_ENABLED=1：-buildmode=c-shared 走 cgo，
+        #    交叉编译器由 NDK 提供（CC / CXX 指向 NDK 里的 clang）。
+        run: |
+          set -euo pipefail
+          cd packages/desktop
+          NDK_BIN="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          if [ ! -d "$NDK_BIN" ]; then
+            NDK_BIN="$(ls -d "${ANDROID_HOME}"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/bin | head -1)"
+          fi
+          echo "NDK 工具链：$NDK_BIN"
+          OUT=../android/app/src/main/jniLibs/arm64-v8a
+          mkdir -p "$OUT"
+          GOOS=android GOARCH=arm64 CGO_ENABLED=1 \
+            CC="$NDK_BIN/aarch64-linux-android24-clang" \
+            CXX="$NDK_BIN/aarch64-linux-android24-clang++" \
+            go build -buildmode=c-shared -o "$OUT/libcfpilot.so" \
+            -ldflags="-s -w -X main.Version=${{ steps.ver.outputs.version }}" \
+            ./cmd/cfpilot-android
+          ls -la "$OUT"
+
+      - name: 编译 APK
+        working-directory: packages/android
+        run: |
+          set -euo pipefail
+          gradle --no-daemon :app:assembleRelease
+          ls -la app/build/outputs/apk/release/
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: CFPilot-android-${{ steps.ver.outputs.version }}
+          path: packages/android/app/build/outputs/apk/release/*.apk
+          retention-days: 30
+
+      - name: 把 APK 追加到 Release
+        # 不给 body —— Release 已经由 build job 创建并写好正文，
+        # 这里只追加资产。正文为空时 softprops 不会覆盖已有正文 ✓
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          files: packages/android/app/build/outputs/apk/release/*.apk

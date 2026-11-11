@@ -1,0 +1,28 @@
+// CFPilot 安卓版 —— 顶层构建脚本。
+//
+// 只做版本号同步与插件声明，具体配置在 app/build.gradle。
+//
+// 版本号的唯一真相仍是**根 package.json**（AGENTS §6 单一版本源政策）。
+// 这里不写死版本 —— 由 app/build.gradle 从根 package.json 读，
+// 再与 tags 对齐（带 v 前缀），这样不会出现「Gradle 里的版本和 npm 上的不一样」。
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.5.2'
+        classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.24'
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+tasks.register('clean', Delete) {
+    delete rootProject.layout.buildDirectory
+}

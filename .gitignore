@@ -80,3 +80,9 @@ release_body.md
 # go-winres 生成的 Windows 资源（构建时重新生成，不入库）
 /packages/desktop/cmd/cfpilot/*.syso
 .workbuddy-ai/
+
+# 安卓构建产物（APK / .so / gradle 缓存）
+packages/android/app/build/
+packages/android/.gradle/
+packages/android/build/
+packages/android/app/src/main/jniLibs/

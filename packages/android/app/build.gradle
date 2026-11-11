@@ -1,0 +1,75 @@
+apply plugin: 'com.android.application'
+apply plugin: 'org.jetbrains.kotlin.android'
+
+// ---------------------------------------------------------------------------
+// 版本号：唯一真相是**仓库根的 package.json**（AGENTS §6 单一版本源）
+// ---------------------------------------------------------------------------
+def rootPkg = new groovy.json.JsonSlurper().parseText(
+        file('../../package.json').text
+)
+def appVersion = rootPkg.version
+
+android {
+    namespace 'com.xmwengxing.cfpilot'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.xmwengxing.cfpilot'
+        minSdk 24
+        targetSdk 34
+        versionCode Integer.parseInt(appVersion.replaceAll(/\D/g, '').padLeft(6, '0'))
+        versionName appVersion
+
+        // 只保留需要的 ABI —— APK 体积直接翻倍不值。
+        // arm64 是主力（现代手机全是它），armv7 覆盖老设备，x86_64 只给模拟器用。
+        ndk {
+            abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64'
+        }
+    }
+
+    // .so 由 Go 侧 `go build -buildmode=c-shared` 编好后放进 jniLibs。
+    // 这里只负责把它打进 APK，不参与编译。
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ['src/main/jniLibs']
+        }
+    }
+
+    buildTypes {
+        release {
+            // 用 debug 签名：这是**侧载**用的包（不走应用商店）。
+            // 上架时才需要换成正式密钥。
+            signingConfig signingConfigs.debug
+            minifyEnabled false
+        }
+        debug {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    // Go 的 .so 里带了构建机的路径，strip 掉能小几 MB。
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging false
+        }
+    }
+
+    lint {
+        abortOnError false
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'com.google.android.material:material:1.12.0'
+}

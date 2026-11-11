@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      用 Material3 的基础主题，但**不跟随系统深色** ——
+      面板是自绘的深色界面，跟着系统变浅色会看不清。
+    -->
+    <style name="Theme.CFPilot" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
+</resources>

@@ -181,6 +181,12 @@ const targets = [
 //   node scripts/build-desktop.mjs --only windows
 //   node scripts/build-desktop.mjs --only windows,linux/amd64
 //   CFPILOT_DESKTOP_TARGETS=windows node scripts/build-desktop.mjs   ← 环境变量（旧用法，保留兼容）
+//
+// 另有 --assets-only：**只做资源准备，不编译任何二进制**。
+// 安卓版用得上 —— 它要的是「界面与内核资产已塞进 internal/server/assets/」，
+// 编译的是自己的 .so（另一套工具链，见 CI 的 android job）。
+// 少编一遍 linux 二进制，省掉几十秒的交叉编译。
+const assetsOnly = process.argv.includes('--assets-only')
 const onlyFlagIdx = process.argv.indexOf('--only')
 let only = (process.env.CFPILOT_DESKTOP_TARGETS || '').trim()
 if (onlyFlagIdx !== -1) {
@@ -365,6 +371,11 @@ function findWinres() {
     if (existsSync(c)) return c
   }
   return null
+}
+
+if (assetsOnly) {
+  console.log('[desktop] --assets-only：资源已就位，跳过二进制编译')
+  process.exit(0)
 }
 
 for (const t of picked) {

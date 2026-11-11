@@ -162,6 +162,28 @@ console.log(`[icons] tray-16.png  ${tray16.length} 字节`)
 console.log(`[icons] tray-32.png  ${tray32.length} 字节`)
 console.log(`[icons] app.ico      ${ico.length} 字节（7 个尺寸）`)
 
+// ---- 安卓启动图标 ----
+//
+// 与托盘图标同源（同一套品牌色画法），只是尺寸按 mipmap 密度给。
+// 生成到 packages/android/app/src/main/res/mipmap-<density>/ic_launcher.png。
+//
+// ⚠️ 为什么要脚本生成而不是放一张图进仓库：
+//   仓库里放二进制图标，改品牌色时容易漏掉；脚本画的话改一处颜色全平台同步。
+const androidResDir = join(repoRoot, 'packages', 'android', 'app', 'src', 'main', 'res')
+for (const [density, size] of [
+  ['mdpi', 48],
+  ['hdpi', 72],
+  ['xhdpi', 96],
+  ['xxhdpi', 144],
+  ['xxxhdpi', 192],
+]) {
+  const dir = join(androidResDir, `mipmap-${density}`)
+  mkdirSync(dir, { recursive: true })
+  const png = makePng(size)
+  writeFileSync(join(dir, 'ic_launcher.png'), png)
+  console.log(`[icons] 安卓 mipmap-${density}/ic_launcher.png  ${size}×${size}  ${png.length} 字节`)
+}
+
 // ---- 内嵌进 Go 代码 ----
 
 function toGoBytes(name, buf, comment) {

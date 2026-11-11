@@ -27,7 +27,7 @@
  *
  * - `ruleset=<策略组>,<规则URL或内联规则>`；
  * - `custom_proxy_group=<组名>\`<类型>\`[<正则>]\`<URL>\`<interval>[`成员...]`，
- *   反引号分隔，与我们熟悉的 订阅转换工具 格式相同。
+ *   反引号分隔，与常见的订阅转换格式相同。
  */
 
 /** 一条分流规则 */
@@ -176,7 +176,7 @@ export function parseRouteProfile(text: string): RouteProfile {
  * 🇭🇰 香港节点`load-balance`(港|HK|hk)`https://captive.apple.com/...`300
  * ```
  *
- * ⚠️ 成员名可能带 `[]` 前缀（订阅转换工具 的「引用已有组」语法），
+ * ⚠️ 成员名可能带 `[]` 前缀（「引用已有组」语法），
  * 解析时剥掉 —— 否则 Clash 会去找名为 `[]DIRECT` 的组而失败。
  */
 function parseProxyGroup(body: string): ProxyGroup | null {
@@ -225,7 +225,7 @@ function parseProxyGroup(body: string): ProxyGroup | null {
       const v = cleanMember(m)
       if (v) group.members.push(v)
     }
-    // 没写成员时给通配（与 订阅转换工具 行为一致）
+    // 没写成员时给通配
     if (group.members.length === 0) group.members.push('.*')
     return group
   }
@@ -304,7 +304,7 @@ export function renderRouteProfile(
     }
     if (g.regex && g.regex !== '.*') {
       // Clash 的 filter 是「包含」匹配，不是完整正则；
-      // 订阅转换工具 的正则里取「或」分支，这里退化为不过滤（交给客户端）。
+      // 正则里取「或」分支，这里退化为不过滤（交给客户端）。
       // ⚠️ 不做正则→filter 的翻译：误判比不过滤更糟。
     }
 
@@ -322,7 +322,7 @@ export function renderRouteProfile(
       // url-test / fallback / load-balance：统一挂主组。
       //
       // 为什么不按 ini 的正则挂：Clash 的 filter 是「名称包含」匹配，
-      // 而 订阅转换工具 的 `(港|HK|hk)` 是完整正则 —— 直接翻译会把
+      // 而 `(港|HK|hk)` 这种写法是完整正则 —— 直接翻译会把
       // 不该进的节点也拉进来。误判比不过滤更糟，因此交给组内竞速自己挑。
       groupLines.push('    proxies:')
       groupLines.push(`      - ${yamlStr(mainGroup)}`)

@@ -388,6 +388,18 @@ for (const t of picked) {
   )
   const mb = (statSync(outPath).size / 1024 / 1024).toFixed(2)
   console.log(`[desktop] ✅ ${t.out} (${mb} MB)`)
+
+  // 容器镜像用的暂存区。
+  //
+  // 镜像**不在里面编译** —— Go 二进制在这里编好，Dockerfile 只做一次 COPY。
+  // 目录按架构分（docker/dist/amd64、docker/dist/arm64），
+  // 对应 Dockerfile 里的 `COPY dist/${TARGETARCH}/cfpilot`。
+  if (t.goos === 'linux') {
+    const stageDir = join(repoRoot, 'docker', 'dist', t.goarch)
+    mkdirSync(stageDir, { recursive: true })
+    copyFileSync(outPath, join(stageDir, 'cfpilot'))
+    console.log(`[desktop] 📦 容器暂存 → docker/dist/${t.goarch}/cfpilot`)
+  }
 }
 
 console.log('[desktop] 全部完成')

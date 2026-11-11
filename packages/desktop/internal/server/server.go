@@ -87,9 +87,15 @@ type Server struct {
 
 // New 创建一个服务实例（不启动监听）。
 func New(settings config.DesktopSettings) (*Server, error) {
-	boot, err := randomHex(16)
-	if err != nil {
-		return nil, err
+	// 启动令牌：优先用环境变量给定的固定值（容器编排 / 反代需要它），
+	// 否则每次启动随机生成 —— 随机的是安全默认值。
+	boot := config.EnvBootTokenValue()
+	if boot == "" {
+		var err error
+		boot, err = randomHex(16)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &Server{
 		settings:    settings,

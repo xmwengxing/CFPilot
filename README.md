@@ -225,6 +225,84 @@ GNOME 默认不支持（Ubuntu 自带的 AppIndicator 扩展默认启用，所�
 | 应用内更新 | 只**下载**到 `~/.cfpilot-gui/updates/`；替换需手动：退出程序 → `chmod +x` 新文件 → 覆盖旧文件 |
 | 卸载    | 删除二进制 + `~/.cfpilot-gui/` 目录即可，不写注册表 / 系统目录                            |
 
+### Docker 版
+
+容器版跑的是**同一份 Go 源码和同一份界面**，与桌面二进制没有区别 —— 区别只在外壳：
+没有托盘、没有桌面通知、不自动开浏览器（容器里也没有这些东西）。
+
+适合的场景：NAS、软路由、小主机、长期挂着跑定时优选任务。
+桌面用户用上面的二进制更合适。
+
+```bash
+# 1. 先编出 Linux 产物（镜像不在里面编译，Dockerfile 只做一次 COPY）
+node scripts/build-desktop.mjs --only linux
+
+# 2. 构建镜像（构建上下文是 docker/ 目录，很小）
+docker build -f docker/Dockerfile -t cfpilot:local docker
+
+# 3. 运行
+docker run -d --name cfpilot \
+  -p 127.0.0.1:19726:19726 \
+  -v cfpilot-data:/data \
+  -e TZ=Asia/Shanghai \
+  cfpilot:local
+
+# 4. 打开面板：地址在启动日志里（令牌每次启动随机，重启后要从日志里重新拿）
+docker logs cfpilot | grep 管理界面
+```
+
+也可以直接用 compose：
+
+```bash
+docker compose -f docker/docker-compose.yml up -d
+```
+
+**启动后先看日志拿地址**：
+
+```bash
+docker logs -f cfpilot
+# [cfpilot] 管理界面：http://127.0.0.1:19726/?t=<一次性令牌>
+```
+
+`?t=` 里的令牌用于**一次性换取会话 Cookie**（换完就不再需要）。
+固定它可以加 `-e CFPILOT_BOOT_TOKEN=<你自己的随机串>` —— 但它**不是密码**，
+拿到它的人换到 Cookie 后长期有效，别把它当访问控制用。
+
+#### ⚠️ 暴露风险
+
+面板持有 **Cloudflare Token 的读写权限**，能部署与删除 Cloudflare 项目、读写 KV、
+查看全部优选池与订阅密钥。**谁能访问它，谁就能用你的 Cloudflare 账号。**
+
+| 端口映射 | 谁能访问 |
+| --- | --- |
+| `-p 127.0.0.1:19726:19726` | 只有这台机器 ✅ **推荐** |
+| `-p 19726:19726` | 整个局域网 ⚠️ |
+
+局域网访问还要**额外**设 `CFPILOT_ALLOW_LAN=1`（否则浏览器会因为 Host 头是局域网 IP
+被判「非法 Host」而拒绝）。启动日志里会打出风险警告。
+
+⚠️ Host 校验**不是访问控制** —— 非浏览器客户端可以伪造 Host 头绕过它。
+**真正的边界是宿主机上的端口映射。** 只在可信网络里开放，永远不要直接暴露到公网。
+
+#### 容器里的环境变量
+
+| 变量 | 默认 | 作用 |
+| --- | --- | --- |
+| `CFPILOT_DATA_DIR` | `/data` | 配置、凭据、内核缓存的存放目录（挂卷到这里） |
+| `CFPILOT_PORT` | `19726` | 监听端口 |
+| `CFPILOT_LISTEN_ADDR` | `0.0.0.0` | 监听地址。容器里**必须**是 `0.0.0.0`：Docker 的端口转发连的是容器网卡地址，只监听回环会「连得上但没响应」 |
+| `CFPILOT_ALLOW_LAN` | `0` | 设为 `1` 允许局域网访问（放宽 Host 校验 + 打风险警告） |
+| `CFPILOT_BOOT_TOKEN` | 随机 | 固定启动令牌 |
+| `TZ` | — | 时区，定时任务的「运行时刻」按它解析 |
+
+#### 容器里的差异
+
+- **日志**：`docker logs` 看得到（等价于 `--console`）；同时也在 `/data/cfpilot.log`。
+- **更新**：镜像不会自动更新，重新拉镜像 + 重建容器即可。
+  程序内「检查更新」只下载内核资产，不替换容器里的程序。
+- **数据**：一定要挂卷（`-v cfpilot-data:/data`），否则容器一删，Cloudflare Token 就要重填。
+- **定时优选任务**：容器常驻，比在手机上跑更合适 —— 这是容器形态的主要价值。
+
 ### 托盘菜单
 
 | 菜单项        | 作用                         |

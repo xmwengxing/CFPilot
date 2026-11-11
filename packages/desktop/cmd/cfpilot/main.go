@@ -126,6 +126,23 @@ func main() {
 			fatal(fmt.Errorf("端口 %d 超出范围（1-65535）", *portFlag))
 		}
 		settings.Port = *portFlag
+	} else if p := config.EnvPortValue(); p > 0 {
+		// 环境变量端口（容器里用）。命令行 --port 优先级更高。
+		settings.Port = p
+	}
+
+	// 环境变量覆盖「允许局域网访问」。
+	//
+	// ⚠️ 这个开关会让面板**监听所有网卡**（0.0.0.0）——
+	// 任何能访问该端口的人都能打开面板，而面板持有 Cloudflare Token 的
+	// 读写权限、能部署与删除 Cloudflare 项目。
+	//
+	// 所以它**只能由用户在启动时显式给出**（环境变量 / 界面里的二次确认），
+	// 不存在「默认开启」这种状态。这里也不能静默生效 ——
+	// 生效时会在启动日志里打出醒目警告。
+	if config.EnvAllowLANValue() && !settings.AllowLAN {
+		settings.AllowLAN = true
+		log.Printf("[cfpilot] 已通过环境变量 %s 开启局域网访问", config.EnvAllowLAN)
 	}
 
 	if *checkOnly {
@@ -154,6 +171,30 @@ func main() {
 
 	url := srv.WelcomeURL()
 	log.Printf("[cfpilot] 管理界面：%s", url)
+
+	// ⚠️ 允许局域网访问时的风险警告。
+	//
+	// 这个面板持有 Cloudflare Token 的读写权限、能部署与删除 Cloudflare 项目。
+	// 放开后**任何能访问该端口的人**都能打开它 ——
+	// 一次误配（端口映射到 0.0.0.0、反代没做鉴权、公网 IP 直连）
+	// 就足以把 Cloudflare 账号交出去。
+	//
+	// 所以这里必须把话说清楚，而不是让人自己在文档里翻。
+	if settings.AllowLAN {
+		log.Printf("")
+		log.Printf("[cfpilot] ══════════════════════════════════════════════════════")
+		log.Printf("[cfpilot] ⚠️  已启用局域网访问")
+		log.Printf("[cfpilot] ⚠️  面板持有 Cloudflare Token 的读写权限，")
+		log.Printf("[cfpilot] ⚠️  能部署与删除 Cloudflare 项目。")
+		log.Printf("[cfpilot] ⚠️  请确认该端口只对可信网络开放，")
+		log.Printf("[cfpilot] ⚠️  切勿直接暴露到公网。")
+		if settings.Host != config.LoopbackHost {
+			log.Printf("[cfpilot] ⚠️  当前监听地址：%s（监听地址与访问范围是两回事，", settings.Host)
+			log.Printf("[cfpilot] ⚠️  真正的边界是「谁能访问这个端口」）")
+		}
+		log.Printf("[cfpilot] ══════════════════════════════════════════════════════")
+		log.Printf("")
+	}
 
 	// 启动后自动打开 WebUI。
 	//
@@ -410,6 +451,7 @@ func isPortFree(port int) bool {
 //   - 只复制，不改写内容（panic 的格式保持原样，便于对照）
 //   - 每行加 `[stderr]` 前缀，方便和普通日志区分
 //   - 复制协程自身的 panic 也会被吞掉（写日志时 panic）→ 用 recover 兜住
+//   - **只允许一个读者**（见下面注释）
 func redirectStderrToLog(w io.Writer) {
 	pr, pw, err := os.Pipe()
 	if err != nil {
@@ -418,20 +460,42 @@ func redirectStderrToLog(w io.Writer) {
 	orig := os.Stderr
 	os.Stderr = pw
 
+	// ⚠️⚠️ 这里**只能有一个读者**，而且**不能用 io.Copy**。
+	//
+	// ## 为什么不能用 io.Copy(orig, pr)
+	//
+	// `*os.File` 实现了 `io.WriterTo`（Go 1.22 起），
+	// 所以 `io.Copy(orig, pr)` 会走 `pr.WriteTo(orig)` → Linux 上是 **splice**。
+	//
+	// splice 的实现是：**先拿住目标 fd 的写锁，再循环从源读、往目标写**。
+	// 源里没有数据时，它就**一直持着目标的写锁**等下去。
+	//
+	// `orig` 就是进程的 stderr —— 于是：
+	//   1. 复制协程卡在 splice 上，永远占着 stderr 的写锁；
+	//   2. 后续任何 `log.Printf`（写 stderr）都要抢这把锁 → **整个程序卡死**。
+	//
+	// 症状：服务起来了（HTTP 在别的协程里跑），但主流程停在启动那一步，
+	// 托盘不出现、浏览器不开、**容器里 docker logs 一片空白**。
+	//
+	// ## 什么时候会命中
+	//
+	// 只有 stderr 是**管道**时才会（Windows 的 TTY 与 Linux 终端都不走 splice）：
+	// Docker、CI、systemd —— 也就是「把程序跑在别处」的所有场景。
+	//
+	// ## 现在的做法
+	//
+	// 用 `io.TeeReader` 让**同一个读取循环**把数据同时送到原 stderr 与日志文件：
+	//   - 只有一个读者 ✓（TeeReader 内部只从 pr 读一次）
+	//   - 不经过 io.Copy / WriteTo / splice ✓
+	//   - 写锁只在真正 write 的那一刻持有，不跨越读 ✓
 	go func() {
 		defer func() { _ = recover() }()
-		sc := bufio.NewScanner(pr)
+		defer pr.Close()
+		sc := bufio.NewScanner(io.TeeReader(pr, orig))
 		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for sc.Scan() {
 			_, _ = fmt.Fprintf(w, "[stderr] %s\n", sc.Text())
 		}
-		_ = pr.Close()
-	}()
-
-	// 原 stderr 保留一份（--console 时终端仍能看到）
-	go func() {
-		defer func() { _ = recover() }()
-		_, _ = io.Copy(orig, pr)
 	}()
 }
 

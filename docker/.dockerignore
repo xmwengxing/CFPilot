@@ -1,0 +1,17 @@
+# 构建上下文排除清单
+#
+# 构建上下文就是 **docker/ 目录**，天然很小（Dockerfile + compose + 暂存的二进制）。
+# 这里只挡掉不该进镜像的东西。
+
+# 日志与临时文件
+*.log
+*.tmp
+
+# 凭据（**绝不能进镜像**）
+.env
+.env.*
+secrets.json
+
+# 系统文件
+.DS_Store
+Thumbs.db

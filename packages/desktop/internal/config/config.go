@@ -76,7 +76,7 @@ const AnyHost = "0.0.0.0"
 
 // DefaultSettings 返回一份合理的出厂设置。
 func DefaultSettings() DesktopSettings {
-	return DesktopSettings{
+	s := DesktopSettings{
 		Port:              DefaultPort,
 		Host:              LoopbackHost,
 		AllowLAN:          false,
@@ -84,13 +84,26 @@ func DefaultSettings() DesktopSettings {
 		// 实验性功能默认全关，探索比例给一个中性初值。
 		Experimental: ExperimentalSettings{ExploreRatio: 0.2, Access: "fixed"},
 	}
+	// Host 由 EffectiveHost 统一推导 —— 出厂值也必须过一遍，
+	// 否则「设置文件还不存在」这条路径会绕过环境变量覆盖
+	// （容器里 CFPILOT_LISTEN_ADDR 就这么失效过）。
+	s.Host = s.EffectiveHost()
+	return s
 }
 
 // EffectiveHost 根据 AllowLAN 推导实际监听地址。
 //
 // 单一真相：Host 永远由 AllowLAN 决定，不单独存可写值，
 // 避免出现「开关关了但还在监听 0.0.0.0」的危险状态。
+//
+// 唯一的例外是环境变量 `CFPILOT_LISTEN_ADDR` —— 容器里必须监听 0.0.0.0
+// （Docker 的端口转发连的是容器网卡地址，只监听回环会连不上），
+// 而「谁能访问」在容器里由宿主机上的端口映射决定。
+// 详见 env.go 的 EnvListenAddr 说明。
 func (s DesktopSettings) EffectiveHost() string {
+	if addr := EnvListenAddrValue(); addr != "" {
+		return addr
+	}
 	if s.AllowLAN {
 		return AnyHost
 	}
@@ -98,7 +111,13 @@ func (s DesktopSettings) EffectiveHost() string {
 }
 
 // Dir 返回配置目录（与 Electron 版一致）。
+//
+// 可用环境变量 `CFPILOT_DATA_DIR` 覆盖 —— 容器部署时用它把数据指到挂载卷
+// （容器里没有用户主目录，见 env.go）。
 func Dir() (string, error) {
+	if dir := EnvDataDirValue(); dir != "" {
+		return dir, nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("无法定位用户主目录：%w", err)

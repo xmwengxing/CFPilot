@@ -48,12 +48,18 @@
  * cf_new_jstring：C 字符串 → jstring。
  *
  * 返回的 jstring 由 JVM 管理，调用方**不要**释放。
+ *
+ * ⚠️ 返回类型故意写成 void* 而不是 jstring：
+ *    JNI 头里 jstring 的实际定义各平台不一样（NDK 的 jni.h 与 JDK 的 jni.h
+ *    写法不同），cgo 映射出来的 Go 类型也跟着不一样 ——
+ *    在 Go 侧直接写 C.jstring 会因为「这边是指针、那边是值」而编译不过。
+ *    统一用 void* 过桥，两边都不用管 jstring 到底是什么。
  */
-jstring cf_new_jstring(JNIEnv *env, const char *s) {
+void *cf_new_jstring(JNIEnv *env, const char *s) {
     if (s == NULL) {
-        return (*env)->NewStringUTF(env, "");
+        return (void *)(*env)->NewStringUTF(env, "");
     }
-    return (*env)->NewStringUTF(env, s);
+    return (void *)(*env)->NewStringUTF(env, s);
 }
 
 /*
@@ -61,7 +67,8 @@ jstring cf_new_jstring(JNIEnv *env, const char *s) {
  *
  * 调用方负责 free()（Go 侧用 C.free）。
  */
-char *cf_read_jstring(JNIEnv *env, jstring s) {
+char *cf_read_jstring(JNIEnv *env, void *obj) {
+    jstring s = (jstring)obj;
     if (s == NULL) {
         return strdup("");
     }

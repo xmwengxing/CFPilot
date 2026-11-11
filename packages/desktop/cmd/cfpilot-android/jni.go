@@ -25,8 +25,12 @@ package main
 #include <stdlib.h>
 
 // jni_bridge.c 提供的两个纯 C 转换函数。
-jstring cf_new_jstring(JNIEnv *env, const char *s);
-char *cf_read_jstring(JNIEnv *env, jstring s);
+//
+// ⚠️ 两边都用 void* 过桥：JNI 头里 jstring 的写法各平台不一样
+//    （NDK 的 jni.h 与 JDK 的 jni.h 不同），cgo 映射出来的 Go 类型也不一样 ——
+//    在 Go 侧直接写 C.jstring 会因为「这边是指针、那边是值」而编译不过。
+void *cf_new_jstring(JNIEnv *env, const char *s);
+char *cf_read_jstring(JNIEnv *env, void *obj);
 */
 import "C"
 
@@ -43,7 +47,7 @@ func newJavaString(envPtr unsafe.Pointer, s *C.char) unsafe.Pointer {
 // ⚠️ 返回的是 **malloc 出来的副本**，调用方必须 C.free 掉。
 func readJavaString(envPtr unsafe.Pointer, objPtr unsafe.Pointer) *C.char {
 	env := (*C.JNIEnv)(envPtr)
-	return C.cf_read_jstring(env, (*C.jstring)(objPtr))
+	return C.cf_read_jstring(env, unsafe.Pointer(objPtr))
 }
 
 // freeCString 释放 readJavaString 取回来的副本。

@@ -64,8 +64,18 @@ const DECODER =
   'v=__t.decode(u);__c.set(b,v)}return v}})();'
 
 // 敏感词（对「解码后的值」做匹配，含中文报错）
-const SENSITIVE =
-  /vless|trojan|xhttp|socks\d?h?|socks5|websocket|sec-websocket|cfpilot|proxyip|同类项目|clash|vmess|shadowsocks|proxy-|packet-up|noGRPCHeader|CONNECT |优选|反代|代理|节点|订阅|测速|探针|诊断|网段|面板|分流|握手|头解析|解析失败|暂不支持|需要 WebSocket|需要 POST/i
+//
+// ⚠️ 词表里有几个词是**拆开拼**的 —— 它们是外部项目的名称，
+// 仓库公开，明文写在这里等于自曝关联。拆开后静态检索只能看到碎片，
+// 而匹配效果完全一致（拼出来的字符串与原文逐字节相同）。
+const EXTERNAL_NAMES = ['@edge' + 'tunnel', 'cmliu' + 'ssss']
+
+const SENSITIVE = new RegExp(
+  'vless|trojan|xhttp|socks\\d?h?|socks5|websocket|sec-websocket|cfpilot|proxyip|' +
+    EXTERNAL_NAMES[0] +
+    '|clash|vmess|shadowsocks|proxy-|packet-up|noGRPCHeader|CONNECT |优选|反代|代理|节点|订阅|测速|探针|诊断|网段|面板|分流|握手|头解析|解析失败|暂不支持|需要 WebSocket|需要 POST',
+  'i'
+)
 
 // 中文文案：只要含 ≥2 个连续汉字就整段编码。
 //
@@ -107,16 +117,19 @@ const isSensitive = (value) =>
 const HIDE_LITERALS = new Set(['"/__edge_probe"', '"/__diag"', '"/__cfp_version"', '"/__version"'])
 
 // 自检词表（数据面）：输出里不允许再出现的明文
+//
+// ⚠️ 外部项目名同样拆开拼（见 EXTERNAL_NAMES 的说明）。
 const DATA_LEAK_WORDS = [
   'vless', 'trojan', 'xhttp', 'socks5', 'websocket', 'cfpilot',
-  '第三方域名', '同类项目', 'TROJAN_PASSWORD', 'WS_PATH',
+  EXTERNAL_NAMES[1], EXTERNAL_NAMES[0], 'TROJAN_PASSWORD', 'WS_PATH',
 ]
 
 // 自检词表（控制面）：这里**不能**放 `vless` / `trojan` 这类单词 ——
 // literals 模式不改属性名，产物里仍会有 `trojanPassword` / `trojanPath` 这样的标识符。
 // 只检查「一定来自字符串字面量」的长特征。
 const CONTROL_LEAK_WORDS = [
-  '第三方域名', '同类项目', '090227.xyz', 'bestcf.top', 'yuchen.icu', 'mofashi',
+  EXTERNAL_NAMES[1], EXTERNAL_NAMES[0],
+  '090227.xyz', 'bestcf.top', 'yuchen.icu', 'mofashi',
   'type: vless', 'type: trojan', 'fake-ip-range', 'github.com/xmwengxing', 'CFPilot/',
 ]
 

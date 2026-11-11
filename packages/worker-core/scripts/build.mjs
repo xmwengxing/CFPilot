@@ -24,6 +24,7 @@ import { execSync } from 'node:child_process'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { desensitizeControlPlane, desensitizeDataPlane } from './obfuscate.mjs'
+import { TXT_LIST_SENTINEL as SENTINEL } from './sentinel.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const pkgRoot = resolve(here, '..')
@@ -98,8 +99,10 @@ function assertNoStaticExternals(outFile, targetName) {
  * 注入后仍会被静态脱敏编码一次，产物里也是编码形态。
  *
  * 与 src/outbound/doh.ts 的 TXT_LIST_SENTINEL 对应。
+ *
+ * ⚠️ 拆开写的那份在 `sentinel.mjs`（脚本之间共用同一份，避免各处写法漂移）。
  */
-const TXT_LIST_SENTINEL = '@edge' + 'tunnel'
+const TXT_LIST_SENTINEL = SENTINEL
 
 /**
  * 包的语义版本号（0.9.4 这类），注入产物供面板「系统内核版本」显示。

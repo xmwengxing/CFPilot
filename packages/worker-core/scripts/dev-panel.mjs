@@ -17,10 +17,15 @@ import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { TXT_LIST_SENTINEL } from './sentinel.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const pkgRoot = resolve(here, '..')
 const port = process.argv[2] || '8788'
+// 配置文件：默认用本地预览那份；`dev` 脚本传 wrangler.jsonc 走完整形态。
+const config = process.argv[3] || 'wrangler.local.jsonc'
+// 构建标识：面板「系统内核版本」显示用。`dev` 与 `dev:panel` 原本给的值不同。
+const buildLabel = process.argv[4] || 'local-preview'
 // 版本号从 package.json 读 —— 写死会随升版失同步。
 const pkgVersion = JSON.parse(
   readFileSync(resolve(pkgRoot, 'package.json'), 'utf8')
@@ -34,12 +39,12 @@ const args = [
   '--port',
   port,
   '--config',
-  'wrangler.local.jsonc',
+  config,
   '--define',
   // 哨兵值与 build.mjs 同源；这里同样拆开写，避免明文进仓库。
-  `__CFP_SENTINEL__:'${'@edge' + 'tunnel'}'`,
+  `__CFP_SENTINEL__:'${TXT_LIST_SENTINEL}'`,
   '--define',
-  "__CFP_BUILD__:'local-preview'",
+  `__CFP_BUILD__:'${buildLabel}'`,
   '--define',
   `__CFP_PKG_VERSION__:'${pkgVersion}'`,
 ]

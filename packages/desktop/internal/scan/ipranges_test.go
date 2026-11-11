@@ -244,7 +244,7 @@ func TestParseCandidateListAllForms(t *testing.T) {
 	}
 }
 
-// 第三方测速工具 的 result.csv 原文要能直接粘进来。
+// 第三方测速器的 result.csv 原文要能直接粘进来。
 func TestParseCandidateListCSV(t *testing.T) {
 	csv := `IP 地址,已发送,已接收,丢包率,平均延迟,下载速度 (MB/s)
 104.16.1.1,4,4,0.00,45.2,12.34

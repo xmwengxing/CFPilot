@@ -89,7 +89,7 @@ beforeEach(() => {
       })
     }
     if (url.includes('/result.csv')) {
-      // 第三方测速工具 风格的 CSV
+      // 第三方测速器风格的 CSV
       return new Response(
         'IP 地址,已发送,已接收,丢包率,平均延迟,下载速度 (MB/s)\n' +
           '104.16.3.3,100,100,0,50,9.5\n' +

@@ -242,7 +242,7 @@ const CITY_HEADER_KEYS = ['城市', 'city']
 /**
  * TLS 列表头键（社区通用形式）。
  *
- * 第三方测速工具 的 CSV 有一列 `TLS`（true/false），
+ * 第三方测速器的 CSV 有一列 `TLS`（true/false），
  * 表示该 IP 是否支持 TLS 握手。`false` 的行对 VLESS-WS 无用
  * （客户端到边缘必须是 TLS），直接丢弃。
  */
@@ -278,7 +278,7 @@ function parseNumber(text: string): number {
 }
 
 /**
- * 解析 第三方测速工具 风格的 result.csv。
+ * 解析第三方测速器风格的 result.csv。
  * 支持带表头（中文/英文）与无表头的启发式解析。
  */
 export function parseCsvText(text: string, options: CsvParseOptions = {}): CsvParseResult {
@@ -365,7 +365,7 @@ export function parseCsvText(text: string, options: CsvParseOptions = {}): CsvPa
       // 无表头启发式：
       //   2 个数值列 → [下载速度, 延迟]
       //   3 个数值列 → [端口, 下载速度, 延迟]
-      //   ≥4 个数值列 → 第三方测速工具 风格，末尾两个为 [延迟, 下载速度]
+      //   ≥4 个数值列 → 第三方测速器风格，末尾两个为 [延迟, 下载速度]
       const ipCell = cells.findIndex((c) => {
         const v = c.trim()
         return isIpv4(v) || isIpv6(v) || (v.includes('.') && isHostname(v))

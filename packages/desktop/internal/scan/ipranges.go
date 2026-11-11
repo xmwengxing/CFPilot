@@ -795,7 +795,7 @@ func sampleFromCIDRv6(ipnet *net.IPNet, n int, seed int64, hostBits int) []strin
 //	1.2.3.4:443#备注
 //	[2606:4700::1]:443#备注
 //	host.example.com          （优选域名）
-//	result.csv 原文           （第三方测速工具 输出）
+//	result.csv 原文           （第三方测速器输出）
 //
 // 清洗逻辑集中在这里，禁止在别处重复实现。
 func ParseCandidateList(raw string) []string {

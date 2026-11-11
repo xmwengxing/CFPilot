@@ -34,6 +34,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +50,20 @@ var embeddedFS embed.FS
 
 // SessionCookie 是换取会话用的 Cookie 名。
 const SessionCookie = "cfpilot_session"
+
+// allowScheduledTasks 本平台是否提供「定时优选任务」。
+//
+// ## 为什么安卓上不做
+//
+// 安卓系统随时可能冻结/回收后台进程（Doze / App Standby），
+// 「到点自动跑一轮」在手机上**不可靠** —— 任务可能延后很久甚至不跑。
+//
+// 定时优选交给**常驻的容器形态**做（NAS / 小主机），两边分工明确：
+//   - 手机 / 桌面：现在跑一次
+//   - 容器：按周期自动跑
+//
+// 桌面上照常提供 ✓
+const allowScheduledTasks = runtime.GOOS != "android"
 
 // Server 是本地服务实例。
 type Server struct {
@@ -196,8 +211,10 @@ func (s *Server) Start() error {
 	log.Printf("[cfpilot] 已启动：http://%s", addr)
 	// 外部数据源定时同步跟随服务生命周期；start 内部防重复启动（换端口会再调 Start）
 	s.startSourceScheduler()
-	// 定时优选任务同样跟随服务生命周期
-	s.startScheduleScheduler()
+	// 定时优选任务同样跟随服务生命周期（安卓上不做，见 allowScheduledTasks）
+	if allowScheduledTasks {
+		s.startScheduleScheduler()
+	}
 	return nil
 }
 
@@ -307,6 +324,19 @@ func (s *Server) routes() http.Handler {
 		panic(err)
 	}
 	fileServer := http.FileServer(http.FS(sub))
+
+	// 首页要注入「本平台有哪些能力」——
+	//
+	// ⚠️ 为什么不用接口告诉界面：那样要先等一次请求回来，
+	//    这期间「定时优选任务」页签会先闪一下再消失。
+	//    注入到 HTML 里则**首屏就有**，同步可用。
+	//
+	// 注入的是一行脚本：安卓上带 scheduledTasks:false，
+	// 界面据此把整个定时任务模块藏起来。
+	capsScript := "<script>window.__cfpilotCaps=" +
+		fmt.Sprintf("{%q:%v}", "scheduledTasks", allowScheduledTasks) +
+		";</script>"
+	indexHTML := injectCapabilities(mustReadIndexHTML(), capsScript)
 	// ⚠️ 必须禁缓存。
 	//
 	// 界面跑在**系统浏览器**里，而监听端口是固定的（换版本后通常还是同一个端口）
@@ -318,6 +348,12 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store, must-revalidate")
 		w.Header().Set("Pragma", "no-cache")
+		// 首页单独走：返回注入了能力标志的版本。
+		if p := r.URL.Path; p == "/" || p == "/index.html" {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write(indexHTML)
+			return
+		}
 		fileServer.ServeHTTP(w, r)
 	}))
 
@@ -347,7 +383,10 @@ func (s *Server) routes() http.Handler {
 	s.registerScanRoutes(mux)
 
 	// 定时优选任务 API（任务清单 + 本地 IP 池）
-	s.registerScheduleRoutes(mux)
+	// 安卓上没有这个功能（见 allowScheduledTasks），路由也不注册。
+	if allowScheduledTasks {
+		s.registerScheduleRoutes(mux)
+	}
 
 	// 反代优选（出站链路体检）API
 	s.registerRelayRoutes(mux)
@@ -439,6 +478,39 @@ func parseErrorField(raw []byte) string {
 		return ""
 	}
 	return strings.TrimSpace(obj.Error)
+}
+
+// mustReadIndexHTML 读内嵌的首页。
+//
+// 首页是构建中间物，没构建时读不到 —— 那就让界面那边自己报错，
+// 不能因为读不到首页就 panic（那会让整个服务起不来）。
+func mustReadIndexHTML() []byte {
+	raw, err := embeddedFS.ReadFile("assets/index.html")
+	if err != nil {
+		log.Printf("[cfpilot] 读不到内嵌界面（先跑 node scripts/build-desktop.mjs）：%v", err)
+		return nil
+	}
+	return raw
+}
+
+// injectCapabilities 把能力标志脚本插到 </head> 之前。
+//
+// 插不进去（页面结构变了）就原样返回 —— 界面会退回到「靠接口判断」那条路，
+// 也就是最多闪一下，不会出错。
+func injectCapabilities(html []byte, script string) []byte {
+	if len(html) == 0 || script == "" {
+		return html
+	}
+	tag := []byte("</head>")
+	i := bytes.Index(html, tag)
+	if i < 0 {
+		return html
+	}
+	out := make([]byte, 0, len(html)+len(script))
+	out = append(out, html[:i]...)
+	out = append(out, script...)
+	out = append(out, html[i:]...)
+	return out
 }
 
 // withCommonHeaders 统一加安全响应头与 Host 校验。
@@ -638,7 +710,11 @@ func (s *Server) handleServiceStatus(w http.ResponseWriter, r *http.Request) {
 		"keepInTray":    st.KeepRunningInTray,
 		"settingsFile":  config.SettingsPathForDisplay(),
 		"dataDir":       dataDir,
-		"pid":           osGetpid(),
+		// 界面据此决定要不要显示「定时优选任务」模块。
+		"capabilities": map[string]bool{
+			"scheduledTasks": allowScheduledTasks,
+		},
+		"pid": osGetpid(),
 		// 程序版本（界面「运行状态」要显示**真实版本**，不能只写「运行中」）。
 		"version": Version(),
 	})

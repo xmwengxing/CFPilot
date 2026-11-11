@@ -13,6 +13,27 @@
  *   `scripts/check-adapter-contract.mjs` 会校验 Go 版适配层是否符合本契约。
  */
 
+/**
+ * 服务端注入的「本平台有哪些能力」。
+ *
+ * <p>由服务端在首页的 </head> 前注入一行脚本写入（不是接口 ——
+ * 接口要等一次请求回来，期间页签会先闪一下才消失）。
+ *
+ * <p>字段：
+ * <ul>
+ *   <li>scheduledTasks —— 是否提供「定时优选任务」。安卓上为 false
+ *       （系统的后台冻结让定时跑不准，这部分交给容器形态做）。
+ * </ul>
+ */
+interface CFPilotCapabilities {
+  scheduledTasks?: boolean
+}
+
+// 本文件不是模块（没有 import/export），所以直接声明全局接口即可。
+interface Window {
+  __cfpilotCaps?: CFPilotCapabilities
+}
+
 /** 渲染层的 window.cfpilot（由 preload 通过 contextBridge 注入） */
 interface CFPilotLogEntry {
   message: string

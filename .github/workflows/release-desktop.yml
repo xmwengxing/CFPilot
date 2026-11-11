@@ -633,7 +633,17 @@ jobs:
             echo "  ✓ lib/$abi"
           done
 
-      - name: 上传 APK
+      - name: 给 APK 起名字
+        # ⚠️ Gradle 产出的名字是 app-release.apk ——
+        #    用户在 Release 页面看到这个名字不知道是哪个版本。
+        run: |
+          set -euo pipefail
+          cd packages/android/app/build/outputs/apk/release
+          SRC=$(ls *.apk | head -1)
+          mv "$SRC" "cfpilot-${{ steps.ver.outputs.version }}-android.apk"
+          ls -la
+
+      - name: 上传 APK（构建产物）
         uses: actions/upload-artifact@v4
         with:
           name: CFPilot-android-${{ steps.ver.outputs.version }}

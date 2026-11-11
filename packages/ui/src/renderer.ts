@@ -121,6 +121,30 @@ import {
     }
   }
 
+  /**
+   * 按「本平台有哪些能力」隐藏不该出现的模块。
+   *
+   * 目前只有一处：安卓上没有「定时优选任务」
+   * （系统的后台冻结让定时跑不准，这部分交给容器形态做）。
+   *
+   * ⚠️ 用服务端注入的标志（window.__cfpilotCaps），
+   *    不是等接口回来再判断 —— 那样页签会先闪一下才消失。
+   */
+  function applyCapabilities(): void {
+    const caps = window.__cfpilotCaps
+    if (!caps || caps.scheduledTasks !== false) return
+
+    // 优选页签里的「定时优选任务」
+    const tab = document.querySelector('[data-scan-tab="task"]')
+    if (tab) (tab as HTMLElement).hidden = true
+    // 「保存为定时任务」入口
+    const save = document.getElementById('btnSaveTask')
+    if (save) (save as HTMLElement).hidden = true
+    // 整个任务面板（含本地优选 IP 池）
+    const panel = document.getElementById('scanPanelTask')
+    if (panel) (panel as HTMLElement).hidden = true
+  }
+
   function escapeHtml(s: string): string {
     const map: Record<string, string> = {
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -6347,6 +6371,7 @@ import {
     // 顺序很要紧：兜底要在**任何**模块绑定之前就位 ——
     // 否则绑定阶段抛出的错误会漏出去。
     installGlobalErrorHandlers()
+    applyCapabilities()
 
     safeBind('账户', bindProfiles)
     safeBind('运行时状态', bindRuntime)

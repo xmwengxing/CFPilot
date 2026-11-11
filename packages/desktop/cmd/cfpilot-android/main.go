@@ -101,6 +101,13 @@ func startServer(dataDir string) serverInfo {
 	if err != nil {
 		log.Printf("[cfpilot] 读取设置失败，使用默认值：%v", err)
 	}
+
+	// 注入版本号（构建时 ldflags 写入 Version 变量）。
+	//
+	// ⚠️ 版本号存在 **server 包**里（server.appVersion），不是 main 包 ——
+	//    只写 ldflags 不调用 SetVersion 的话，界面右上角会一直显示「vdev」。
+	server.SetVersion(Version)
+
 	// 手机上固定用回环地址：界面在同一个应用进程里，通过 WebView 访问。
 	//
 	// ⚠️ 「允许局域网访问」要走**同一套语义**（与桌面版一致）：

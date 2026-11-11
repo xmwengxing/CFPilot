@@ -868,6 +868,8 @@
       border: 1px solid var(--border);
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 11.5px; color: #93c5fd;
+      /* 路径可能很长（安卓上是应用私有目录），窄屏要能折行而不是被截断 */
+      overflow-wrap: anywhere;
     }
     body.light code { color: #1d4ed8; }
     .kv-row {

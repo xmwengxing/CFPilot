@@ -233,6 +233,52 @@ GNOME 默认不支持（Ubuntu 自带的 AppIndicator 扩展默认启用，所�
 适合的场景：NAS、软路由、小主机、长期挂着跑定时优选任务。
 桌面用户用上面的二进制更合适。
 
+#### ① 直接拉镜像运行（推荐）
+
+镜像在 GitHub Container Registry 上，**一个镜像同时含 amd64 与 arm64**，
+Docker 会自动挑当前机器的架构。
+
+```bash
+# 1. 登录 registry（镜像目前是私有的）
+docker login ghcr.io -u <你的 GitHub 用户名>
+# 密码填带 read:packages 权限的 Personal Access Token
+# （在 https://github.com/settings/tokens/new 勾选 read:packages）
+
+# 2. 拉镜像
+docker pull ghcr.io/xmwengxing/cfpilot:latest
+
+# 3. 运行
+docker run -d --name cfpilot \
+  -p 127.0.0.1:19726:19726 \
+  -v cfpilot-data:/data \
+  -e TZ=Asia/Shanghai \
+  ghcr.io/xmwengxing/cfpilot:latest
+
+# 4. 打开面板：地址在启动日志里（令牌每次启动随机，重启后要从日志里重新拿）
+docker logs cfpilot | grep 管理界面
+```
+
+要固定版本就把 `latest` 换成版本号（如 `0.30.2`）—— 每次发布都有对应标签。
+
+**升级**：重新拉镜像 + 重建容器
+
+```bash
+docker pull ghcr.io/xmwengxing/cfpilot:latest
+docker rm -f cfpilot
+docker run -d --name cfpilot \
+  -p 127.0.0.1:19726:19726 \
+  -v cfpilot-data:/data \
+  -e TZ=Asia/Shanghai \
+  ghcr.io/xmwengxing/cfpilot:latest
+```
+
+⚠️ 删容器**不影响数据** —— 配置、Cloudflare Token、优选历史都在 `cfpilot-data` 卷里。
+⚠️ 但**启动令牌每次重启都会变**，旧地址里的 `?t=` 失效了，要从新的 `docker logs` 里重新取。
+
+#### ② 自己构建
+
+不想用现成镜像（比如要改代码）时，从源码构建：
+
 ```bash
 # 1. 先编出 Linux 产物（镜像不在里面编译，Dockerfile 只做一次 COPY）
 node scripts/build-desktop.mjs --only linux

@@ -254,11 +254,36 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      - name: 诊断 ghcr 权限
+        # ⚠️ 推送失败最常见的原因是**包没关联到本仓库**：
+        #    用个人令牌手工推过的包归用户，仓库自带的令牌没有写权限
+        #    （报 permission_denied: read_package）。
+        #
+        # 这里先把「令牌到底能看见什么」打出来 —— 否则日志里只有一句
+        # permission_denied，根本看不出是权限问题还是包名不对。
+        run: |
+          set -uo pipefail
+          echo "--- 仓库令牌能看到的容器包："
+          GH_TOKEN="${{ secrets.GITHUB_TOKEN }}" gh api \
+            "/user/packages/container/cfpilot" 2>&1 | head -20 || true
+          echo
+          echo "--- 仓库令牌能不能读这个包："
+          GH_TOKEN="${{ secrets.GITHUB_TOKEN }}" gh api \
+            "/users/xmwengxing/packages/container/cfpilot" 2>&1 | head -10 || true
+
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          # ⚠️ 优先用仓库里存的个人令牌（secret: GHCR_TOKEN）。
+          #
+          #    没有它就用仓库自带的令牌 —— 但仓库令牌**只能写「关联到本仓库」的包**。
+          #    包是用个人令牌手工建的（归用户、不关联仓库）时，就必须用个人令牌。
+          #
+          #    建 secret：仓库 Settings → Secrets and variables → Actions →
+          #    New repository secret，名字 GHCR_TOKEN，内容是带
+          #    write:packages 权限的 Personal Access Token。
+          password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: 构建并推送镜像（amd64 + arm64）
         uses: docker/build-push-action@v6

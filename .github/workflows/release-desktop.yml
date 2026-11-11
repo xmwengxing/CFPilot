@@ -356,19 +356,26 @@ jobs:
           set -uo pipefail
           NAME="${{ steps.image.outputs.name }}"
           PKG="${NAME#ghcr.io/}"; PKG="${PKG#*/}"
-          # 读当前可见性。/user/... 需要 OAuth 应用令牌或 classic PAT；
-          # 细粒度 PAT 调这个端点会 404，所以两种都试一遍。
-          CUR=$(gh api "/user/packages/container/$PKG" --jq '.visibility' 2>/dev/null || echo "")
+          # 读当前可见性。
+          #
+          # 两个端点要的令牌不一样：
+          #   /repos/.../packages/...  用仓库令牌（GITHUB_TOKEN）
+          #   /user/packages/...       用个人令牌（细粒度 PAT 调这个会 404）
+          # 所以两个都试一遍，先哪个有结果用哪个。
+          CUR=$(GH_TOKEN="${{ secrets.GITHUB_TOKEN }}" gh api \
+            "/repos/xmwengxing/CFPilot/packages/container/$PKG" --jq '.visibility' 2>/dev/null || echo "")
           if [ -z "$CUR" ]; then
-            CUR=$(gh api "/repos/xmwengxing/CFPilot/packages/container/$PKG" --jq '.visibility' 2>/dev/null || echo "")
+            CUR=$(GH_TOKEN="${{ secrets.GHCR_TOKEN }}" gh api \
+              "/user/packages/container/$PKG" --jq '.visibility' 2>/dev/null || echo "")
           fi
           echo "当前可见性：${CUR:-查不到}"
           if [ "$CUR" = "public" ]; then
             echo "✓ 已是公开，无需改动"
             exit 0
           fi
-          # 置为公开
-          OUT=$(gh api -X PATCH "/user/packages/container/$PKG" -f visibility=public 2>&1 || true)
+          # 置为公开（只有个人令牌能改可见性）
+          OUT=$(GH_TOKEN="${{ secrets.GHCR_TOKEN }}" gh api \
+            -X PATCH "/user/packages/container/$PKG" -f visibility=public 2>&1 || true)
           echo "$OUT" | head -12
           NEW=$(echo "$OUT" | grep -o '"visibility"[^,]*' | head -1 | cut -d'"' -f4)
           if [ "$NEW" = "public" ]; then

@@ -303,6 +303,27 @@ docker logs -f cfpilot
 - **数据**：一定要挂卷（`-v cfpilot-data:/data`），否则容器一删，Cloudflare Token 就要重填。
 - **定时优选任务**：容器常驻，比在手机上跑更合适 —— 这是容器形态的主要价值。
 
+#### 排障
+
+**容器里解析不了域名**（`wget: bad address 'api.cloudflare.com'`）
+
+Docker 的内嵌 DNS（默认 `192.168.65.7`）没把查询转发出去。两种解法，任选其一：
+
+```bash
+# A. 给这个容器指定 DNS（最快）
+docker run --dns 223.5.5.5 --dns 1.1.1.1 ...
+
+# B. 给 Docker 引擎全局指定（所有容器都受益）
+#    Docker Desktop → Settings → Docker Engine → 加上：
+#    { "dns": ["223.5.5.5", "1.1.1.1"] }
+```
+
+**`docker pull` 拉不动镜像**（`Docker Desktop has no HTTPS proxy`）
+
+Docker Desktop 自己的出网也要走代理：Settings → Resources → Proxies → Manual proxy
+→ **HTTP 和 HTTPS 都要填**。地址用宿主机的局域网 IP（如 `192.168.31.19:10808`）——
+daemon 跑在 WSL2 虚拟机里，`127.0.0.1` 指的是虚拟机自己，不是宿主机。
+
 ### 托盘菜单
 
 | 菜单项        | 作用                         |

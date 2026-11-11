@@ -549,6 +549,11 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleServiceStatus(w http.ResponseWriter, r *http.Request) {
 	st := s.Settings()
+	// 数据目录（设置、凭据、日志都在这里）。
+	//
+	// ⚠️ 各平台路径不一样（桌面版是用户目录，安卓版是应用私有目录），
+	//    界面要显示**真实路径** —— 写死一个在别的平台上就是错的。
+	dataDir, _ := config.Dir()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"running":       true,
 		"host":          st.Host,
@@ -557,6 +562,7 @@ func (s *Server) handleServiceStatus(w http.ResponseWriter, r *http.Request) {
 		"uptimeSeconds": int(time.Since(s.startedAt).Seconds()),
 		"keepInTray":    st.KeepRunningInTray,
 		"settingsFile":  config.SettingsPathForDisplay(),
+		"dataDir":       dataDir,
 		"pid":           osGetpid(),
 		// 程序版本（界面「运行状态」要显示**真实版本**，不能只写「运行中」）。
 		"version": Version(),

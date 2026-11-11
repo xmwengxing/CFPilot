@@ -661,6 +661,29 @@ import {
     }
   }
 
+  /**
+   * 把真实的数据目录填进界面里标了路径的位置。
+   *
+   * 设置、凭据、日志三个文件都在数据目录下，所以按文件名拼就行。
+   * 拿不到目录时保持界面上的默认文案（宁可粗略也别写个错的路径）。
+   */
+  function applyDataDir(dir: string): void {
+    const base = dir.replace(/[\\/]+$/, '')
+    const targets: Array<[string, string]> = [
+      ['pathSecrets', base + sep() + 'secrets.json'],
+      ['pathLog', base + sep() + 'cfpilot.log'],
+    ]
+    for (const [id, text] of targets) {
+      const el = document.getElementById(id)
+      if (el) el.textContent = text
+    }
+  }
+
+  /** 拼路径分隔符（Windows 是 \，其它是 /）。 */
+  function sep(): string {
+    return /\\/.test(navigator.userAgent) ? '\\' : '/'
+  }
+
   async function loadRuntimeStatus(): Promise<void> {
     // 本机版本（真实值，不用「运行中」这种没有信息量的说法）
     try {
@@ -672,6 +695,13 @@ import {
       if (badge) {
         badge.textContent = st.version ? 'v' + st.version : ''
         badge.title = st.version ? '本程序版本 ' + st.version : ''
+      }
+      // 凭据与日志的真实路径。
+      //
+      // ⚠️ 不能写死：桌面版在用户目录，安卓版在应用私有目录 ——
+      //    写死的路径在别的平台上就是错的，用户按它去找会找不到。
+      if (st.dataDir) {
+        applyDataDir(st.dataDir)
       }
     } catch {
       $text('rtLocal').textContent = '读取失败'

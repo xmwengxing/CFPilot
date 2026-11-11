@@ -1270,7 +1270,7 @@
             <p class="desc">
               可为多个 Cloudflare 账号各保存一份配置并随时切换。
               每份配置独立保存 Token 与该账号下选择的 KV，互不干扰。<br>
-              凭据仅保存在本机 <code>~/.cfpilot-gui/secrets.json</code>，不会上传到任何服务器。
+              凭据仅保存在本机 <code id="pathSecrets">本机数据目录</code>，不会上传到任何服务器。
             </p>
 
             <!--
@@ -2219,7 +2219,7 @@
             <h2><span class="dot"></span>🔒 安全说明</h2>
             <div class="secure">
               <b>API Token</b> 与<b>面板密码</b>仅写入本机
-              <code>~/.cfpilot-gui/secrets.json</code>，<b>不会上传</b>到任何服务器，
+              <code id="pathSecrets">本机数据目录</code>，<b>不会上传</b>到任何服务器，
               也不随安装包分发。<br><br>
               工具的出境网络请求仅三类：<br>
               · <b>api.cloudflare.com</b> —— 部署必需，令牌仅用于该请求的 Authorization 头<br>
@@ -2269,7 +2269,7 @@
           <div class="card">
             <h2><span class="dot"></span>📄 运行日志 <span class="badge info" id="logsBadge">未加载</span></h2>
             <p class="desc">
-              程序日志写入 <code>~/.cfpilot-gui/cfpilot.log</code>。
+              程序日志写入 <code id="pathLog">本机数据目录</code>。
               下方显示的是文件末尾的若干行；如需查看完整内容或用其它工具分析，
               请点击「打开日志文件所在文件夹」。
             </p>

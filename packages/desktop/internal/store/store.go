@@ -43,6 +43,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/config"
 	"time"
 )
 
@@ -145,12 +147,24 @@ func New(dir string) *Store {
 func (s *Store) DirPath() string { return s.Dir }
 
 // DefaultDir 返回默认配置目录（与 Electron 版一致）。
+//
+// ⚠️ **必须与 config.Dir() 走同一套逻辑**（这里直接调它，不要自己实现一份）。
+//
+//	曾经两边各写一份：config.Dir() 认 `CFPILOT_DATA_DIR` 环境变量，
+//	而这里只看用户主目录 —— 于是「设置与日志在挂载卷里、凭据却落在别处」。
+//
+//	后果是实打实的：
+//	  - 容器部署时凭据不落在挂载卷里 → 重建容器就没了；
+//	  - 安卓版里 `os.UserHomeDir()` 往往取不到（应用进程没有 HOME），
+//	    凭据会被写到**相对路径** `.cfpilot-gui`（相对进程工作目录，通常不可写）
+//	    → 「保存 Token」静默失败。
 func DefaultDir() string {
-	home, err := os.UserHomeDir()
+	dir, err := config.Dir()
 	if err != nil {
+		// 定位不到主目录时用相对路径兜底（与旧行为一致）。
 		return ".cfpilot-gui"
 	}
-	return filepath.Join(home, ".cfpilot-gui")
+	return dir
 }
 
 func (s *Store) path() string { return filepath.Join(s.Dir, "secrets.json") }
@@ -223,22 +237,30 @@ func (s *Store) migrateV1(raw []byte) (*file, error) {
 
 // ---------- 写 ----------
 
+// writeFile 原子写：先写临时文件再改名，避免写一半断电留下坏文件
+// （凭据文件损坏等于用户重新输一遍 Token，代价很高）。
+//
+// ⚠️ 失败信息里要带上**目录路径**：
+//
+//	「写入凭据失败：Access is denied」对用户没用，
+//	加上目录才知道是「这个路径不可写」还是别的毛病。
 func (s *Store) writeFile(f *file) error {
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
-		return fmt.Errorf("创建配置目录失败：%w", err)
+		return fmt.Errorf("创建配置目录 %s 失败：%w", s.Dir, err)
 	}
 	f.Version = 2
 	raw, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return err
 	}
-	// 原子写：先写临时文件再改名，避免写一半断电留下坏文件
-	// （凭据文件损坏等于用户重新输一遍 Token，代价很高）
 	tmp := s.path() + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return fmt.Errorf("写入凭据失败：%w", err)
+		return fmt.Errorf("写入凭据文件 %s 失败：%w", s.path(), err)
 	}
-	return os.Rename(tmp, s.path())
+	if err := os.Rename(tmp, s.path()); err != nil {
+		return fmt.Errorf("保存凭据文件 %s 失败：%w", s.path(), err)
+	}
+	return nil
 }
 
 // ---------- 对外 API ----------

@@ -21,6 +21,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -363,7 +364,81 @@ func (s *Server) routes() http.Handler {
 	// 外部 IP 数据源管理页（Phase 5，唯一 UI 入口；面板零改动）
 	s.registerSourcesRoutes(mux)
 
-	return s.withCommonHeaders(mux)
+	return s.withCommonHeaders(s.logApiFailures(mux))
+}
+
+// apiRecorder 记录接口响应的状态码与响应体。
+//
+// 用于把「接口为什么失败」写进日志 —— 只记状态码没用，
+// 用户要看到的是「写入凭据失败：Access is denied」这种带原因的信息。
+type apiRecorder struct {
+	http.ResponseWriter
+	status int
+	body   bytes.Buffer
+}
+
+func (a *apiRecorder) WriteHeader(code int) {
+	if a.status == 0 {
+		a.status = code
+		a.ResponseWriter.WriteHeader(code)
+	}
+}
+
+func (a *apiRecorder) Write(b []byte) (int, error) {
+	if a.status == 0 {
+		a.status = http.StatusOK
+	}
+	a.body.Write(b)
+	return a.ResponseWriter.Write(b)
+}
+
+// logApiFailures 把「接口返回了错误」写进日志。
+//
+// ## 为什么需要这一层
+//
+// 用户反馈的典型症状是「点了按钮没反应，日志里什么都没有」。
+// 根因是**两层都不出声**：
+//
+//   - 服务端：接口出错只回一个带 error 的 JSON，**不写日志**；
+//   - 界面：按钮的处理函数没接住异常，Promise 拒绝被静默吞掉。
+//
+// 结果就是任何失败都表现为「完全没反应」—— 用户既看不到提示，
+// 也查不到原因，只能来问「是不是坏了」。
+//
+// 这里补上服务端这一层：任何 /api/ 请求返回 4xx / 5xx 都记一条日志，
+// 带上有 error 字段的具体原因。
+//
+// ⚠️ /api/events（SSE）必须排除：那是长连接，
+//
+//	响应体没有边界，缓冲下来会一直涨。
+func (s *Server) logApiFailures(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api/events" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		rec := &apiRecorder{ResponseWriter: w}
+		next.ServeHTTP(rec, r)
+		if rec.status < 400 {
+			return
+		}
+		reason := ""
+		if obj := parseErrorField(rec.body.Bytes()); obj != "" {
+			reason = "：" + obj
+		}
+		s.logLevel(fmt.Sprintf("接口 %s %s 返回 %d%s", r.Method, r.URL.Path, rec.status, reason), "err")
+	})
+}
+
+// parseErrorField 从接口响应体里取出 error 字段（没有就返回空串）。
+func parseErrorField(raw []byte) string {
+	var obj struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(obj.Error)
 }
 
 // withCommonHeaders 统一加安全响应头与 Host 校验。

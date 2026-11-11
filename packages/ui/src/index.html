@@ -1051,6 +1051,18 @@
       nav.tabs button { min-width: 92px; padding: 8px 8px; font-size: 12.5px; }
       .card { padding: 16px; }
       .row { flex-wrap: wrap; }
+      /*
+       * 输入框必须占满一行。
+       *
+       * ⚠️ 只写 flex-wrap 是不够的：输入框是 `flex: 1`（基准宽度 0），
+       *    它的基准宽度是 0，所以永远「放得下」，永远不换行 ——
+       *    旁边两个按钮把宽度吃光后，输入框被压成 0 宽，
+       *    结果是**输入框整个看不见**（手机上没法填 Token）。
+       *
+       * 给它一个最小宽度，放不下时就会换行独占一行 ✓
+       */
+      .row > input[type="password"],
+      .row > input[type="text"] { flex: 1 1 100%; min-width: 100%; }
     }
 
     /* ==============================================================

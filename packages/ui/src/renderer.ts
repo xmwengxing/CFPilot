@@ -128,6 +128,36 @@ import {
     return s.replace(/[&<>"']/g, (c) => map[c]!)
   }
 
+  /**
+   * 全局兜底：把「没人接住的错误」显示出来。
+   *
+   * ## 为什么必须有
+   *
+   * 按钮的处理函数大多是 `async` 的，抛错时产生的是
+   * **未处理的 Promise 拒绝** —— 浏览器只往控制台写一行，
+   * 界面上一点动静都没有。
+   *
+   * 用户看到的症状就是「点了没反应，日志里什么都没有」：
+   * 既不知道成没成功，也查不到原因，只能来问是不是坏了。
+   *
+   * 这里把这类错误也接到界面的日志面板上，
+   * 至少能看见「到底报了什么」。
+   *
+   * ⚠️ 这里只**记录**，不吞掉 —— 不调用 preventDefault，
+   *    开发者控制台里仍然能看到原始错误。
+   */
+  function installGlobalErrorHandlers(): void {
+    window.addEventListener('unhandledrejection', (ev: PromiseRejectionEvent) => {
+      const reason = ev.reason
+      const msg = reason && reason.message ? reason.message : String(reason)
+      log('操作失败：' + msg, 'err')
+    })
+    window.addEventListener('error', (ev: ErrorEvent) => {
+      const msg = ev.message || (ev.error && ev.error.message) || '脚本错误'
+      log('脚本错误：' + msg, 'err')
+    })
+  }
+
 
   /**
    * 部署状态的形状（对应 Electron 的 DeployStatus / Go 版的 /api/deploy/check）。
@@ -976,37 +1006,53 @@ import {
      * 永远建不出第二个。这也是「新建按钮没反应」背后的真实后果。
      */
     document.getElementById('btnSaveToken')!.addEventListener('click', async () => {
-      const token = $('cfToken').value.trim()
-      if (!token) {
-        log('请先填写 API Token', 'warn')
-        $('cfToken').focus()
-        return
-      }
-
-      if (isNewMode()) {
-        const created = await window.cfpilot.createProfile()
-        const saved = await window.cfpilot.updateProfile(created.id, { cfToken: token })
-        if (!saved.ok) {
-          log('新建账户失败：' + (saved.error ?? ''), 'err')
+      // ⚠️ 这里必须自己接住异常。
+      //
+      // 这是个 async 处理函数，抛错时是「未处理的 Promise 拒绝」——
+      // 浏览器只往控制台写一行，界面上一点动静都没有，
+      // 用户看到的症状就是「点了添加并保存，完全没反应」。
+      // （适配层其实会抛出可读的错误，比如「未授权：请从托盘菜单重新打开界面」，
+      //   但没人接就等于没有。）
+      try {
+        const token = $('cfToken').value.trim()
+        if (!token) {
+          log('请先填写 API Token', 'warn')
+          $('cfToken').focus()
           return
         }
-        log(`✅ 已新建账户并保存 Token（${created.name}）`, 'ok')
-        resetAccountContext()
-        // 显式选中刚创建的账户：后端 Create 已将 ActiveID 指向它，
-        // 这里不能再沿用「保持 __new__」的旧规则。
-        await refreshProfiles(created.id)
-        await refreshCredState()
-        // 新建后自动检测，省得用户再点一次
-        await detectAccountAndGuide()
-        return
-      }
 
-      await window.cfpilot.saveCredentials({ cfToken: token })
-      log('Token 已更新到当前账户', 'ok')
-      resetAccountContext()
-      await refreshProfiles()
-      await refreshCredState()
-      await detectAccountAndGuide()
+        if (isNewMode()) {
+          const created = await window.cfpilot.createProfile()
+          const saved = await window.cfpilot.updateProfile(created.id, { cfToken: token })
+          if (!saved.ok) {
+            log('新建账户失败：' + (saved.error ?? ''), 'err')
+            return
+          }
+          log(`✅ 已新建账户并保存 Token（${created.name}）`, 'ok')
+          resetAccountContext()
+          // 显式选中刚创建的账户：后端 Create 已将 ActiveID 指向它，
+          // 这里不能再沿用「保持 __new__」的旧规则。
+          await refreshProfiles(created.id)
+          await refreshCredState()
+          // 新建后自动检测，省得用户再点一次
+          await detectAccountAndGuide()
+          return
+        }
+
+        const saved = await window.cfpilot.saveCredentials({ cfToken: token })
+        if (saved && saved.saved === false) {
+          log('Token 保存失败', 'err')
+          return
+        }
+        log('Token 已更新到当前账户', 'ok')
+        resetAccountContext()
+        await refreshProfiles()
+        await refreshCredState()
+        await detectAccountAndGuide()
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        log('保存 Token 失败：' + msg, 'err')
+      }
     })
 
     // 检测账号：**只绑一次**
@@ -6295,6 +6341,12 @@ import {
         )
       }
     }
+
+    // ⚠️ 先装全局兜底，再绑各个模块。
+    //
+    // 顺序很要紧：兜底要在**任何**模块绑定之前就位 ——
+    // 否则绑定阶段抛出的错误会漏出去。
+    installGlobalErrorHandlers()
 
     safeBind('账户', bindProfiles)
     safeBind('运行时状态', bindRuntime)

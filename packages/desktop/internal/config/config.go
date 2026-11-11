@@ -120,7 +120,12 @@ func Dir() (string, error) {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("无法定位用户主目录：%w", err)
+		// 定位不到主目录时给一个**绝对路径**兜底。
+		//
+		// ⚠️ 不能返回相对路径：相对路径是相对**进程工作目录**解析的 ——
+		//    安卓上工作目录是 /、容器里也是 /，都写不进去，
+		//    而且失败原因完全看不出来（路径本身就不含任何线索）。
+		return filepath.Join(os.TempDir(), "cfpilot-gui"), nil
 	}
 	return filepath.Join(home, ".cfpilot-gui"), nil
 }

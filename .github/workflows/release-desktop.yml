@@ -466,32 +466,46 @@ jobs:
             exit 1
           fi
           echo "NDK 工具链：$NDK_BIN"
-          "$NDK_BIN/aarch64-linux-android24-clang" --version | head -2
-          OUT=../android/app/src/main/jniLibs/arm64-v8a
-          mkdir -p "$OUT"
-          GOOS=android GOARCH=arm64 CGO_ENABLED=1 \
-            CC="$NDK_BIN/aarch64-linux-android24-clang" \
-            CXX="$NDK_BIN/aarch64-linux-android24-clang++" \
-            go build -tags jnilib -buildmode=c-shared -o "$OUT/libcfpilot.so" \
-            -ldflags="-s -w -X main.Version=${{ steps.ver.outputs.version }}" \
-            ./cmd/cfpilot-android
-          ls -la "$OUT"
 
-          # ⚠️ 必须确认 JNI 符号真的在 .so 里。
+          # 两个 ABI：
+          #   arm64-v8a   —— 现代手机全是它
+          #   armeabi-v7a —— 32 位老设备
           #
-          # JVM 是**按名字**找符号的（Java_<包>_<类>_<方法>）：
-          # 符号不在库里，运行时就是 UnsatisfiedLinkError —— 而这个错误
-          # 只在真机上才暴露，编译期完全看不出来。
-          #
-          # 所以这里硬校验：符号表里必须有这两个。
-          for sym in Java_com_xmwengxing_cfpilot_NativeBridge_nativeStart \
-                     Java_com_xmwengxing_cfpilot_NativeBridge_nativeStop; do
-            if ! nm -D "$OUT/libcfpilot.so" | grep -q " T $sym$"; then
-              echo "::error::$OUT/libcfpilot.so 里缺少 JNI 符号 $sym"
-              nm -D "$OUT/libcfpilot.so" | grep Java_ || true
-              exit 1
-            fi
-            echo "  ✓ 符号 $sym"
+          # ⚠️ API level 用 24（比 minSdk 26 低）—— 编译时能用的系统 API 更少，
+          #    在 26+ 的机器上跑反而更安全；NDK 的 clang 包装器也一定有这个档位。
+          for abi in arm64-v8a armeabi-v7a; do
+            case "$abi" in
+              arm64-v8a)   GOARCH=arm64; CLANG=aarch64-linux-android24-clang ;;
+              armeabi-v7a) GOARCH=arm;   CLANG=armv7a-linux-androideabi24-clang ;;
+            esac
+            echo "--- $abi（GOARCH=$GOARCH，$CLANG）"
+            "$NDK_BIN/$CLANG" --version | head -2
+            OUT=../android/app/src/main/jniLibs/$abi
+            mkdir -p "$OUT"
+            GOOS=android GOARCH=$GOARCH CGO_ENABLED=1 \
+              CC="$NDK_BIN/$CLANG" \
+              CXX="$NDK_BIN/$CLANG++" \
+              go build -tags jnilib -buildmode=c-shared -o "$OUT/libcfpilot.so" \
+              -ldflags="-s -w -X main.Version=${{ steps.ver.outputs.version }}" \
+              ./cmd/cfpilot-android
+            ls -la "$OUT"
+
+            # ⚠️ 必须确认 JNI 符号真的在 .so 里。
+            #
+            # JVM 是**按名字**找符号的（Java_<包>_<类>_<方法>）：
+            # 符号不在库里，运行时就是 UnsatisfiedLinkError —— 而这个错误
+            # 只在真机上才暴露，编译期完全看不出来。
+            #
+            # 所以这里硬校验：符号表里必须有这两个。
+            for sym in Java_com_xmwengxing_cfpilot_NativeBridge_nativeStart \
+                       Java_com_xmwengxing_cfpilot_NativeBridge_nativeStop; do
+              if ! nm -D "$OUT/libcfpilot.so" | grep -q " T $sym$"; then
+                echo "::error::$OUT/libcfpilot.so 里缺少 JNI 符号 $sym"
+                nm -D "$OUT/libcfpilot.so" | grep Java_ || true
+                exit 1
+              fi
+              echo "  ✓ 符号 $sym"
+            done
           done
 
       - name: 验证 JNI 契约（真 JVM 调用）
@@ -554,6 +568,21 @@ jobs:
           cd /home/runner/work/CFPilot/CFPilot/packages/android
           ./gradlew --no-daemon :app:assembleRelease
           ls -la app/build/outputs/apk/release/
+
+          # 确认两个 ABI 真的都进包了。
+          #
+          # ⚠️ 只编 arm64 的话，包是能打出来的 —— 但 32 位设备装不上，
+          #    而且这事**不会报错**，只会在用户手机上表现为「装不了」。
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          echo "APK：$APK"
+          for abi in arm64-v8a armeabi-v7a; do
+            if ! unzip -l "$APK" | grep -q "lib/$abi/libcfpilot.so"; then
+              echo "::error::APK 里缺少 lib/$abi/libcfpilot.so"
+              unzip -l "$APK" | grep 'lib/' || true
+              exit 1
+            fi
+            echo "  ✓ lib/$abi"
+          done
 
       - name: 上传 APK
         uses: actions/upload-artifact@v4

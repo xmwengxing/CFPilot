@@ -262,6 +262,14 @@ jobs:
 
       - name: 构建并推送镜像（amd64 + arm64）
         uses: docker/build-push-action@v6
+        # ⚠️ 推送失败**不阻断**发布。
+        #
+        # 推送失败最常见的原因是**账号层面的**：ghcr.io 上的包没有关联到本仓库
+        # （比如包是用个人令牌手工建的），仓库自带的 GITHUB_TOKEN 就没有写权限。
+        # 那是外部配置问题，不该把整个发布卡住 —— 桌面版产物与 APK 都是好的。
+        #
+        # 失败时下面「镜像发布结果」会明确提示，并给出处理办法。
+        continue-on-error: true
         with:
           context: ./docker
           file: ./docker/Dockerfile
@@ -276,8 +284,24 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: 镜像发布结果
+        run: |
+          set -euo pipefail
+          NAME="${{ steps.image.outputs.name }}"
+          VERSION="${{ steps.ver.outputs.version }}"
+          if docker manifest inspect "$NAME:$VERSION" >/dev/null 2>&1; then
+            echo "✓ 镜像已发布：$NAME:$VERSION"
+          else
+            echo "::warning::镜像没有发布成功 —— 发布本身不受影响，但容器版暂时拉不到镜像。"
+            echo "::warning::最常见原因：ghcr.io 上的包没有关联到本仓库"
+            echo "::warning::（用个人令牌手工推过就会这样），仓库自带的令牌没有写权限。"
+            echo "::warning::处理办法：仓库 Settings → Packages → cfpilot → Manage package access → 勾选本仓库；"
+            echo "::warning::或者删掉这个包，让发布流程用仓库令牌重新建一个。"
+          fi
+
       - name: 校验镜像可拉取
         if: startsWith(github.ref, 'refs/tags/desktop-v')
+        continue-on-error: true
         run: |
           set -euo pipefail
           IMAGE="${{ steps.image.outputs.name }}"

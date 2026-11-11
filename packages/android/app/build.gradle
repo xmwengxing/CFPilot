@@ -1,14 +1,6 @@
 apply plugin: 'com.android.application'
 apply plugin: 'org.jetbrains.kotlin.android'
 
-// ---------------------------------------------------------------------------
-// 版本号：唯一真相是**仓库根的 package.json**（AGENTS §6 单一版本源）
-// ---------------------------------------------------------------------------
-def rootPkg = new groovy.json.JsonSlurper().parseText(
-        file('../../package.json').text
-)
-def appVersion = rootPkg.version
-
 android {
     namespace 'com.xmwengxing.cfpilot'
     compileSdk 34
@@ -17,8 +9,15 @@ android {
         applicationId 'com.xmwengxing.cfpilot'
         minSdk 24
         targetSdk 34
-        versionCode Integer.parseInt(appVersion.replaceAll(/\D/g, '').padLeft(6, '0'))
-        versionName appVersion
+
+        // 版本号：唯一真相是**仓库根的 package.json**（AGENTS §6 单一版本源）。
+        //
+        // ⚠️ 路径是三级：app → android → packages → 仓库根。
+        //    （rootDir 在子项目里是 app/ 目录，两级会指到 packages/ —— 那里没有 package.json。）
+        versionName new groovy.json.JsonSlurper()
+                .parseText(new File(rootDir, '../../../package.json').text)
+                .version
+        versionCode Integer.parseInt(versionName.replaceAll('[^0-9]', '').padLeft(6, '0'))
     }
 
     // ⚠️ 这里**不声明** ndk { abiFilters } / ndkVersion。
@@ -26,9 +25,8 @@ android {
     // .so 是 Go 侧编好放进 jniLibs 的（见 sourceSets），Gradle 只负责打包，
     // 不参与原生编译 —— 声明 ndk 反而会让 AGP 要求一个本地 NDK 版本，
     // 徒增环境依赖。APK 里有哪些 ABI 由 jniLibs 里有几个目录决定。
-
+    //
     // .so 由 Go 侧 `go build -buildmode=c-shared` 编好后放进 jniLibs。
-    // 这里只负责把它打进 APK，不参与编译。
     sourceSets {
         main {
             jniLibs.srcDirs = ['src/main/jniLibs']
@@ -54,13 +52,6 @@ android {
 
     kotlinOptions {
         jvmTarget = '17'
-    }
-
-    // Go 的 .so 里带了构建机的路径，strip 掉能小几 MB。
-    packagingOptions {
-        jniLibs {
-            useLegacyPackaging false
-        }
     }
 
     lint {

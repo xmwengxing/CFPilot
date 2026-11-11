@@ -498,8 +498,20 @@ jobs:
         working-directory: packages/android
         run: |
           set -euo pipefail
-          # 用 wrapper 固定 Gradle 版本（runner 上装的是哪个版本不由我们控制）。
-          gradle wrapper --gradle-version 8.9
+          # 固定 Gradle 版本。
+          #
+          # ⚠️ wrapper 必须在**空目录**里生成 ——
+          #    `gradle wrapper` 会先配置（也就是编译）当前项目的构建脚本，
+          #    在项目目录里跑的话，用的是 runner 上那个 Gradle 9.x，
+          #    而 AGP 8.7 不兼容 Gradle 9 → 直接在生成 wrapper 那一步就挂。
+          #
+          # 在空目录里生成就没有脚本可编译，wrapper 只是几个文件。
+          rm -rf /tmp/wrap && mkdir -p /tmp/wrap
+          cd /tmp/wrap
+          gradle wrapper --gradle-version 8.9 --distribution-type bin
+          cp -r gradle gradlew gradlew.bat /home/runner/work/CFPilot/CFPilot/packages/android/
+          chmod +x /home/runner/work/CFPilot/CFPilot/packages/android/gradlew
+          cd /home/runner/work/CFPilot/CFPilot/packages/android
           ./gradlew --no-daemon :app:assembleRelease
           ls -la app/build/outputs/apk/release/
 

@@ -271,19 +271,25 @@ jobs:
           GH_TOKEN="${{ secrets.GITHUB_TOKEN }}" gh api \
             "/users/xmwengxing/packages/container/cfpilot" 2>&1 | head -10 || true
 
-      - uses: docker/login-action@v3
+      # ─────────────────────────────────────────────────────────
+      # 镜像推送：仓库令牌优先，推不动再换个人令牌
+      # ─────────────────────────────────────────────────────────
+      #
+      # 为什么两段：
+      #
+      #   - **仓库令牌**（GITHUB_TOKEN）：能写「关联到本仓库」的包，
+      #     推出来的包默认公开、用仓库令牌就能继续推 —— 不需要任何密钥 ✓
+      #   - **个人令牌**（secret: GHCR_TOKEN）：能写「归用户」的包。
+      #     用个人令牌手工建过包时只有它能推。
+      #
+      # 所以先试仓库令牌；失败了再换个人令牌兜底。
+      # 理想的终态是「包由仓库令牌创建」—— 那样个人令牌这个 secret 就不需要了。
+      - name: 登录 ghcr（仓库令牌）
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          # ⚠️ 优先用仓库里存的个人令牌（secret: GHCR_TOKEN）。
-          #
-          #    没有它就用仓库自带的令牌 —— 但仓库令牌**只能写「关联到本仓库」的包**。
-          #    包是用个人令牌手工建的（归用户、不关联仓库）时，就必须用个人令牌。
-          #
-          #    建 secret：仓库 Settings → Secrets and variables → Actions →
-          #    New repository secret，名字 GHCR_TOKEN，内容是带
-          #    write:packages 权限的 Personal Access Token。
-          password: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 构建并推送镜像（amd64 + arm64）
         uses: docker/build-push-action@v6
@@ -309,6 +315,31 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # 仓库令牌推不动时（包是用个人令牌建的、归用户不关联仓库），
+      # 换个人令牌再试一次。
+      - name: 换个人令牌重试推送
+        if: failure() && startsWith(github.ref, 'refs/tags/desktop-v') && secrets.GHCR_TOKEN != ''
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
+      - name: 重试构建并推送镜像
+        if: failure() && startsWith(github.ref, 'refs/tags/desktop-v') && secrets.GHCR_TOKEN != ''
+        uses: docker/build-push-action@v6
+        continue-on-error: true
+        with:
+          context: ./docker
+          file: ./docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ steps.ver.outputs.version }}
+            ${{ steps.image.outputs.name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
       - name: 确保容器包是公开的
         # 镜像要能被用户**直接 docker pull** —— 私有包就意味着
         # 「把发布者的 Personal Access Token 发给每个用户」，那是不可能的。
@@ -325,14 +356,28 @@ jobs:
           set -uo pipefail
           NAME="${{ steps.image.outputs.name }}"
           PKG="${NAME#ghcr.io/}"; PKG="${PKG#*/}"
+          # 读当前可见性。/user/... 需要 OAuth 应用令牌或 classic PAT；
+          # 细粒度 PAT 调这个端点会 404，所以两种都试一遍。
           CUR=$(gh api "/user/packages/container/$PKG" --jq '.visibility' 2>/dev/null || echo "")
+          if [ -z "$CUR" ]; then
+            CUR=$(gh api "/repos/xmwengxing/CFPilot/packages/container/$PKG" --jq '.visibility' 2>/dev/null || echo "")
+          fi
           echo "当前可见性：${CUR:-查不到}"
           if [ "$CUR" = "public" ]; then
             echo "✓ 已是公开，无需改动"
             exit 0
           fi
-          gh api -X PATCH "/user/packages/container/$PKG" -f visibility=public 2>&1 | head -5 || true
-          echo "（若上面没有报错，包已置为公开）"
+          # 置为公开
+          OUT=$(gh api -X PATCH "/user/packages/container/$PKG" -f visibility=public 2>&1 || true)
+          echo "$OUT" | head -12
+          NEW=$(echo "$OUT" | grep -o '"visibility"[^,]*' | head -1 | cut -d'"' -f4)
+          if [ "$NEW" = "public" ]; then
+            echo "✓ 已置为公开（注册表鉴权同步有延迟，稍后即可匿名拉取）"
+          else
+            echo "::warning::没能自动置为公开。请到包页面手动改："
+            echo "::warning::https://github.com/users/xmwengxing/packages/container/$PKG/settings"
+            echo "::warning::（选 Change visibility → Public）"
+          fi
 
       - name: 镜像发布结果
         run: |

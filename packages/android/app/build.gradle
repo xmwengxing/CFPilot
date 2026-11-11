@@ -7,7 +7,10 @@ android {
 
     defaultConfig {
         applicationId 'com.xmwengxing.cfpilot'
-        minSdk 24
+        // ⚠️ minSdk 26（Android 8.0）而不是更低：
+        //    通知的 channel 构造（Notification.Builder(Context, String)）是 API 26 才有的，
+        //    更低的版本要另写一套 legacy 分支 —— 覆盖到的设备只剩千分之几，不值当。
+        minSdk 26
         targetSdk 34
 
         // 版本号：唯一真相是**仓库根的 package.json**（AGENTS §6 单一版本源）。

@@ -266,7 +266,10 @@ jobs:
           context: ./docker
           file: ./docker/Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: true
+          # ⚠️ 只在**打 tag** 时才推镜像。
+          # workflow_dispatch 是试跑 —— 那时的 HEAD 未必与已发布的某个版本对应，
+          # 推上去会用错的二进制冒充那个版本号。
+          push: ${{ startsWith(github.ref, 'refs/tags/desktop-v') }}
           tags: |
             ${{ steps.image.outputs.name }}:${{ steps.ver.outputs.version }}
             ${{ steps.image.outputs.name }}:latest
@@ -274,6 +277,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: 校验镜像可拉取
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
         run: |
           set -euo pipefail
           IMAGE="${{ steps.image.outputs.name }}"
@@ -462,7 +466,9 @@ jobs:
         working-directory: packages/android
         run: |
           set -euo pipefail
-          gradle --no-daemon :app:assembleRelease
+          # 用 wrapper 固定 Gradle 版本（runner 上装的是哪个版本不由我们控制）。
+          gradle wrapper --gradle-version 8.9
+          ./gradlew --no-daemon :app:assembleRelease
           ls -la app/build/outputs/apk/release/
 
       - name: 上传 APK

@@ -507,6 +507,10 @@ jobs:
           #
           # 在空目录里生成就没有脚本可编译，wrapper 只是几个文件。
           rm -rf /tmp/wrap && mkdir -p /tmp/wrap
+          # Gradle 要求根目录里有 settings.gradle 或 build.gradle 才认这是一个 build，
+          # 空目录直接跑 wrapper 会被拒（"does not contain a Gradle build"）。
+          # 一行 rootProject.name 就够 —— 这里没有任何脚本要编译。
+          printf "rootProject.name = 'wrap'\n" > /tmp/wrap/settings.gradle
           cd /tmp/wrap
           gradle wrapper --gradle-version 8.9 --distribution-type bin
           cp -r gradle gradlew gradlew.bat /home/runner/work/CFPilot/CFPilot/packages/android/

@@ -235,26 +235,21 @@ GNOME 默认不支持（Ubuntu 自带的 AppIndicator 扩展默认启用，所�
 
 #### ① 直接拉镜像运行（推荐）
 
-镜像在 GitHub Container Registry 上，**一个镜像同时含 amd64 与 arm64**，
-Docker 会自动挑当前机器的架构。
+镜像在 GitHub Container Registry 上，**公开可拉、无需登录**，
+**一个镜像同时含 amd64 与 arm64**，Docker 会自动挑当前机器的架构。
 
 ```bash
-# 1. 登录 registry（镜像目前是私有的）
-docker login ghcr.io -u <你的 GitHub 用户名>
-# 密码填带 read:packages 权限的 Personal Access Token
-# （在 https://github.com/settings/tokens/new 勾选 read:packages）
-
-# 2. 拉镜像
+# 1. 拉镜像
 docker pull ghcr.io/xmwengxing/cfpilot:latest
 
-# 3. 运行
+# 2. 运行
 docker run -d --name cfpilot \
   -p 127.0.0.1:19726:19726 \
   -v cfpilot-data:/data \
   -e TZ=Asia/Shanghai \
   ghcr.io/xmwengxing/cfpilot:latest
 
-# 4. 打开面板：地址在启动日志里（令牌每次启动随机，重启后要从日志里重新拿）
+# 3. 打开面板：地址在启动日志里（令牌每次启动随机，重启后要从日志里重新拿）
 docker logs cfpilot | grep 管理界面
 ```
 

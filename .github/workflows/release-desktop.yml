@@ -309,6 +309,31 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: 确保容器包是公开的
+        # 镜像要能被用户**直接 docker pull** —— 私有包就意味着
+        # 「把发布者的 Personal Access Token 发给每个用户」，那是不可能的。
+        #
+        # 所以发布完把包置为公开。幂等：已经是公开的就不会再动。
+        # ⚠️ 哪天想收回可见性，把这一步删掉即可。
+        #
+        # 权限不够时只告警不失败 —— 镜像本身已经推上去了，
+        # 可见性可以在包页面手动改。
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        run: |
+          set -uo pipefail
+          NAME="${{ steps.image.outputs.name }}"
+          PKG="${NAME#ghcr.io/}"; PKG="${PKG#*/}"
+          CUR=$(gh api "/user/packages/container/$PKG" --jq '.visibility' 2>/dev/null || echo "")
+          echo "当前可见性：${CUR:-查不到}"
+          if [ "$CUR" = "public" ]; then
+            echo "✓ 已是公开，无需改动"
+            exit 0
+          fi
+          gh api -X PATCH "/user/packages/container/$PKG" -f visibility=public 2>&1 | head -5 || true
+          echo "（若上面没有报错，包已置为公开）"
+
       - name: 镜像发布结果
         run: |
           set -euo pipefail

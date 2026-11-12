@@ -287,17 +287,73 @@ export function parseCookies(request: Request): Record<string, string> {
   return out
 }
 
+/**
+ * 本 isolate 刚签发的会话。
+ *
+ * ## 为什么需要它
+ *
+ * 会话存在 KV 里，而 **KV 的读是最终一致的**（边缘缓存约 60 秒）。
+ * 于是会出现这个序列：
+ *
+ *   登录请求  → 写 KV（成功）→ Set-Cookie
+ *   紧接着的「查会话」请求 → 读 KV → **可能读不到**（还没传播到那个边缘节点）
+ *   → authenticated=false → 界面弹回登录页
+ *
+ * 表现就是用户说的「密码输对了，又回到登录页面」。
+ *
+ * 这里在 isolate 内留一份**刚签发**的会话：同一个 isolate 处理的下一次请求
+ * 直接命中，不用等 KV 传播。
+ *
+ * ## ⚠️ 安全性
+ *
+ * 只有**本 isolate 自己签发**的令牌才会进这份缓存。
+ * 伪造的令牌既不在缓存里、KV 里也查不到 —— 一样被拒 ✓
+ * 与「直接信任 Cookie」有本质区别。
+ *
+ * ## 容量
+ *
+ * 条目按会话有效期（24 小时）过期，写入时顺带清理过期的。
+ */
+const recentSessions = new Map<string, number>()
+
+/** 清理已过期的会话条目（写入时顺带做，避免无限增长）。 */
+function pruneRecentSessions(now: number): void {
+  for (const [token, expiresAt] of recentSessions) {
+    if (expiresAt <= now) recentSessions.delete(token)
+  }
+}
+
 /** 创建会话并返回 Set-Cookie 值 */
 export async function createSession(store: Store): Promise<string> {
   const token = randomHex(24)
   await store.put(`${SESSION_PREFIX}${token}`, JSON.stringify({ ua: '', t: Date.now() }), SESSION_TTL)
+  const now = Date.now()
+  pruneRecentSessions(now)
+  recentSessions.set(token, now + SESSION_TTL * 1000)
   return token
+}
+
+/**
+ * 请求里是否带了会话 Cookie。
+ *
+ * 界面据此区分两种「会话查不到」：
+ *   - **带了 Cookie 但查不到** → 多半是 KV 还没传播开 → 等一下再试 ✓
+ *   - **压根没带 Cookie** → 确实没登录 → 直接显示登录页 ✓
+ */
+export function hasSessionCookie(request: Request): boolean {
+  return Boolean(parseCookies(request)[SESSION_COOKIE])
 }
 
 /** 校验会话 */
 export async function verifySession(store: Store, request: Request): Promise<boolean> {
   const token = parseCookies(request)[SESSION_COOKIE]
   if (!token) return false
+  // 本 isolate 刚签发的会话：直接认，不再等 KV 传播。
+  const expiresAt = recentSessions.get(token)
+  if (expiresAt !== undefined) {
+    if (expiresAt > Date.now()) return true
+    recentSessions.delete(token)
+  }
   const value = await store.get(`${SESSION_PREFIX}${token}`)
   return Boolean(value)
 }
@@ -312,7 +368,10 @@ export function clearSessionCookie(): string {
 
 export async function destroySession(store: Store, request: Request): Promise<void> {
   const token = parseCookies(request)[SESSION_COOKIE]
-  if (token) await store.delete(`${SESSION_PREFIX}${token}`)
+  if (!token) return
+  // ⚠️ isolate 缓存也要清 —— 否则注销后本 isolate 仍然认这个会话。
+  recentSessions.delete(token)
+  await store.delete(`${SESSION_PREFIX}${token}`)
 }
 
 /** 签发一次性扫描令牌（10 分钟有效，用后即焚） */

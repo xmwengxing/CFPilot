@@ -7,6 +7,7 @@ import {
   createSession,
   destroySession,
   clearSessionCookie,
+  hasSessionCookie,
   issueOneTimeToken,
   sessionCookie,
   discardPlaintextPassword,
@@ -178,7 +179,9 @@ export async function handleApi(
     return json(
       authenticated
         ? { ok: true, authenticated, panelPath: auth.panelPath }
-        : { ok: true, authenticated }
+        : // hasSessionCookie：带了 Cookie 却查不到 → 多半是 KV 还没传播开，
+          // 界面据此等一下再试，而不是直接把人弹回登录页。
+          { ok: true, authenticated, hasSessionCookie: hasSessionCookie(request) }
     )
   }
 

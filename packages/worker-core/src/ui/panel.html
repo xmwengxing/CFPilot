@@ -1022,7 +1022,8 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
     options.headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {});
     return fetch(path, options).then(function (r) {
       var isLogin = /\/api\/v1\/login$/.test(path);
-      if (r.status === 401 && !isLogin) {
+      // ⚠️ quiet401：等待会话生效时不弹登录页（见 waitSession 的说明）。
+      if (r.status === 401 && !isLogin && !options.quiet401) {
         showLogin();
         throw new Error('会话已过期，请重新登录');
       }
@@ -1057,6 +1058,20 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
     if (hint) { hint.textContent = '正在验证身份…'; hint.className = 'muted'; }
     api('/api/v1/login', { method: 'POST', body: JSON.stringify({ password: pwd }) })
       .then(function () {
+        // ⚠️ 登录成功**不等于**会话立刻可用。
+        //
+        // 会话存在 KV 里，而 KV 的读是最终一致的（边缘缓存约 60 秒）。
+        // 登录请求刚写进去，紧接着的「查会话」可能读不到 ——
+        // 于是 authenticated=false，界面把用户弹回登录页。
+        //
+        // 表现就是「密码输对了，又回到登录页面」。
+        //
+        // 这里等一下会话生效再进主界面：宁可多等几秒，
+        // 也不要让用户以为自己密码错了。
+        if (hint) { hint.textContent = '正在验证身份…'; hint.className = 'muted'; }
+        return waitSession();
+      })
+      .then(function () {
         if (hint) hint.textContent = '';
         showApp();
         boot();
@@ -1065,6 +1080,27 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
       .catch(function (e) {
         toast(e.message, true);
         if (hint) { hint.textContent = e.message; hint.className = 'err'; }
+      });
+  }
+
+  /**
+   * 等会话真正生效（KV 传播到位）。
+   *
+   * 登录接口返回成功只说明密码对了；会话能不能被查到还取决于 KV 的传播。
+   * 这里最多等约 12 秒 —— 期间**不弹登录页**（quiet401），
+   * 只在最终仍失败时才当作登录失败。
+   */
+  function waitSession(attempt) {
+    attempt = attempt || 0;
+    return api('/api/v1/session', { quiet401: true })
+      .then(function (s) {
+        if (s.authenticated) return true;
+        throw new Error('会话尚未生效');
+      })
+      .catch(function (e) {
+        if (attempt >= 10) throw e;
+        return new Promise(function (resolve) { setTimeout(resolve, 1200); })
+          .then(function () { return waitSession(attempt + 1); });
       });
   }
 

@@ -52,6 +52,7 @@ import {
   type TlsProbeResult,
   type XhttpProbeResult,
 } from './true-probe'
+import { pool } from './pool'
 import { parseSpeedUrl, withBytes, schemeForPort, DEFAULT_SPEED_URL } from './speed-url'
 import { coloCity, countryOfColo, normalizeCountryFilter } from './countries'
 import { describeUnlock, probeUnlock } from './unlock'
@@ -385,31 +386,6 @@ async function tcpPing(ip: string, port: number, timeoutMs: number): Promise<Tcp
   })
 }
 
-/**
- * 并发池。
- *
- * @param shouldStop 可选的提前终止判定。返回 true 时不再领取新任务
- *   （已在跑的任务会跑完）。用于「已经拿到足够多的目标结果就收工」。
- */
-async function pool<T, R>(
-  items: T[],
-  concurrency: number,
-  worker: (item: T, index: number) => Promise<R>,
-  shouldStop?: () => boolean
-): Promise<R[]> {
-  const out: R[] = new Array(items.length)
-  let cursor = 0
-  const runners = Array.from({ length: Math.max(1, Math.min(concurrency, items.length)) }, async () => {
-    for (;;) {
-      if (shouldStop?.()) return
-      const index = cursor++
-      if (index >= items.length) return
-      out[index] = await worker(items[index]!, index)
-    }
-  })
-  await Promise.all(runners)
-  return out
-}
 
 /**
  * 自适应并发池。
@@ -767,7 +743,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
         return false
       }
     )
-    wsAll = probeResults as unknown as Stage2Item[]
+    wsAll = probeResults
     const wsFiltered = (strictProbe
       ? wsAll.filter((r) => r.probe?.ok && r.probe.pongVerified === true)
       : wsAll.filter((r) => r.probe?.ok)
@@ -777,6 +753,19 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
       countFailure(failures, 'ws101', item.probe?.error)
     }
     wsPool = wsFiltered
+    // ⚠️ 带国家筛选时会**提前收工**：命中数够了就不再领新任务。
+    //    剩下的候选根本没测 —— 得说清楚，否则「只测了 108 个」看着像出错。
+    if (stoppedEarly) {
+      report({
+        type: 'progress',
+        stage: 2,
+        done: probeDone,
+        total: stage1.length,
+        message:
+          `已凑够 ${earlyExitTarget} 个目标国家的可用节点，提前收工` +
+          `（只测了 ${probeDone}/${stage1.length}，其余未测）`,
+      })
+    }
   }
 
   // XHTTP 子阶段（无凭据端点探针：H2 POST 期望 400）
@@ -800,7 +789,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
       options.onObservation?.({ ip: item.ip, ok: result.ok, stage: 'xhttp', error: result.error })
       return { ...item, xhttp: result, colo: item.colo || result.colo || '' }
     })
-    xAll = xResults as unknown as Stage2Item[]
+    xAll = xResults
     for (const item of xAll) {
       if (!item.xhttp?.ok) countFailure(failures, 'xhttp', item.xhttp?.error)
     }

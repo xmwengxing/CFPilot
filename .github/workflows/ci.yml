@@ -30,7 +30,17 @@ jobs:
           go-version: '1.24'
       - run: go install github.com/rhysd/actionlint/cmd/actionlint@latest
       - name: actionlint
-        run: actionlint .github/workflows/*.yml
+        # ⚠️ 这里的 actionlint 是**安全网**，不是风格闸门 ——
+        #    它要抓的是「工作流文件本身写错」（那会让整个工作流在解析阶段被拒，
+        #    一次步骤都不跑，页面只写一句「workflow file issue」）。
+        #
+        # 忽略三个 **info 级**的 shellcheck 提示：
+        #   SC2016 —— `${{ ... }}` 写在单引号里是 Actions 的正常写法
+        #             （那是 Actions 表达式，不是 shell 变量），shellcheck 读不出来；
+        #   SC2012 —— 「用 find 代替 ls」的风格建议，落在发布脚本里已验证可用的写法上，
+        #             改它���风险大于收益（发布路径不能出事）；
+        #   SC2035 —— 同上，「glob 建议写成 ./*glob*」的措辞建议。
+        run: actionlint -ignore SC2016 -ignore SC2012 -ignore SC2035 .github/workflows/*.yml
 
       - name: 类型检查
         run: npm run typecheck

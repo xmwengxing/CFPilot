@@ -295,14 +295,17 @@ jobs:
       #
       # 所以先试仓库令牌；失败了再换个人令牌兜底。
       # 理想的终态是「包由仓库令牌创建」—— 那样个人令牌这个 secret 就不需要了。
-      - name: 登录 ghcr（仓库令牌）
+      - name: 登录 ghcr（个人令牌）
         uses: docker/login-action@v3
+        # ⚠️ 登录失败不阻断 —— 下面的重试会用仓库令牌再试一次。
+        continue-on-error: true
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ env.GHCR_TOKEN }}
 
       - name: 构建并推送镜像（amd64 + arm64）
+        id: push-image
         uses: docker/build-push-action@v6
         # ⚠️ 推送失败**不阻断**发布。
         #
@@ -326,19 +329,23 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # 仓库令牌推不动时（包是用个人令牌建的、归用户不关联仓库），
-      # 换个人令牌再试一次。
-      - name: 换个人令牌重试推送
-        # ⚠️ 这里用 env 而不是 secrets：step 级的 if: 取不到 secrets 上下文。
-        if: failure() && startsWith(github.ref, 'refs/tags/desktop-v') && env.GHCR_TOKEN != ''
+      # 个人令牌推不动时（包已关联到本仓库，仓库令牌才有写权限），
+      # 换仓库令牌再试一次。
+      #
+      # ⚠️ 判据用 `steps.push-image.outcome` 而不是 `failure()`：
+      #    上一步带 continue-on-error，结论是 success，
+      #    `failure()` 永远为假 —— 重试根本不会触发。
+      #    `outcome` 才是 continue-on-error **之前**的原始结果。
+      - name: 换仓库令牌重试推送
+        if: steps.push-image.outcome == 'failure' && startsWith(github.ref, 'refs/tags/desktop-v')
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ env.GHCR_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 重试构建并推送镜像
-        if: failure() && startsWith(github.ref, 'refs/tags/desktop-v') && env.GHCR_TOKEN != ''
+        if: steps.push-image.outcome == 'failure' && startsWith(github.ref, 'refs/tags/desktop-v')
         uses: docker/build-push-action@v6
         continue-on-error: true
         with:

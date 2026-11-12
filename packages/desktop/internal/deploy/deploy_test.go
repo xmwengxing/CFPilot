@@ -970,8 +970,13 @@ func TestConfigTrojanMatchesCLI(t *testing.T) {
 	}
 }
 
-// 8000119：同一个项目先原样重试 3 次，全部失败才换名。
-func TestBlockRetrySameNameThenRename(t *testing.T) {
+// 8000119：**一次失败就停** —— 不重试、不换名重建。
+//
+// ⚠️ 这是账号级封禁的直接原因：旧实现是「同名重试 3 次 → 换随机名再来」，
+// 一次部署最坏打出 9 次部署请求 + 6 个新项目。
+// 而 Cloudflare 的风控画像按发布事件累积 —— 写的还是同一份被标记的代码，
+// 等于把画像坐实。用户已反馈连续部署导致账号被封。
+func TestDeployStopsOnFirstFailure(t *testing.T) {
 	f := newFakeCF()
 	// 原名永远失败
 	f.deployFailPlan["mydata"] = 999
@@ -987,27 +992,25 @@ func TestBlockRetrySameNameThenRename(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// mydata 应被尝试 3 次
-	if f.deployCalls["mydata"] != 3 {
-		t.Errorf("原名应重试 3 次，实际 %d 次", f.deployCalls["mydata"])
+	// ⚠️ 只该尝试 1 次
+	if f.deployCalls["mydata"] != 1 {
+		t.Errorf("失败后应立即停止，实际尝试 %d 次", f.deployCalls["mydata"])
 	}
-	// 之后应换名重试（mydata-xxxx）
-	renamed := false
+	// ⚠️ 不该出现换名项目
 	for name := range f.deployCalls {
 		if strings.HasPrefix(name, "mydata-") {
-			renamed = true
+			t.Errorf("失败后不该换名重建，却出现了 %q", name)
 		}
 	}
-	if !renamed {
-		t.Errorf("3 次失败后应换名重试，实际尝试过：%v", keysOfInt(f.deployCalls))
+	// ⚠️ 控制面也不该继续部署（数据面失败即整个部署中止）
+	if f.deployCalls["mycontrol"] != 0 {
+		t.Errorf("数据面失败后不应继续部署控制面，实际 %d 次", f.deployCalls["mycontrol"])
 	}
 }
 
-// 8000119 第一次就成功：不该换名（间歇性风控，同名重试即可）。
-func TestBlockRetrySucceedsOnSameName(t *testing.T) {
+// 部署成功时项目名保持不变，也不会有换名项目。
+func TestDeploySucceedsOnPreferredName(t *testing.T) {
 	f := newFakeCF()
-	// 只失败前 2 次
-	f.deployFailPlan["mydata"] = 2
 
 	d, _ := newTestDeployer(t, f, func(o *Options) {
 		o.DataProject = "mydata"
@@ -1021,13 +1024,13 @@ func TestBlockRetrySucceedsOnSameName(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if f.deployCalls["mydata"] != 3 {
-		t.Errorf("应在第 3 次成功，实际尝试 %d 次", f.deployCalls["mydata"])
+	if f.deployCalls["mydata"] != 1 {
+		t.Errorf("应只尝试 1 次，实际 %d 次", f.deployCalls["mydata"])
 	}
 	// 不该产生换名项目
 	for name := range f.deployCalls {
 		if strings.HasPrefix(name, "mydata-") {
-			t.Errorf("同项目重试成功时不该换名，却出现了 %q", name)
+			t.Errorf("部署成功时不该换名，却出现了 %q", name)
 		}
 	}
 	if res.Data.Name != "mydata" {
@@ -1035,8 +1038,13 @@ func TestBlockRetrySucceedsOnSameName(t *testing.T) {
 	}
 }
 
-// 域名迁移顺序：旧解绑 → 新绑定 → 删旧项目。
-func TestDomainMigrationOrder(t *testing.T) {
+// 更新部署沿用清单里的项目名 —— 用户的自定义域名因此**不用动**。
+//
+// ⚠️ 旧实现里项目名可能变（8000119 换名重建），于是需要「解绑旧域名 →
+//
+//	绑新域名 → 删旧项目」这套迁移。换名机制取消后，更新部署是**原地**的，
+//	域名跟着项目走，什么都不用迁 —— 也就少了一堆可能失败的操作。
+func TestDeployKeepsProjectNameAndDomain(t *testing.T) {
 	f := newFakeCF()
 	f.kvSeed["CFP_DEPLOY_MANIFEST"] = `{
 		"v": 1,
@@ -1050,8 +1058,6 @@ func TestDomainMigrationOrder(t *testing.T) {
 		"at": "2026-10-20T00:00:00.000Z",
 		"credentials": {"uuid":"u","wsPath":"/ws","panelPath":"p","panelPassword":"pw","trojanPassword":"tp"}
 	}`
-	// 旧数据面永远被拒 → 触发换名
-	f.deployFailPlan["olddata"] = 999
 
 	d, _ := newTestDeployer(t, f, func(o *Options) {
 		o.ControlProject = "mycontrol"
@@ -1061,92 +1067,31 @@ func TestDomainMigrationOrder(t *testing.T) {
 		o.WaitInterval = 10 * time.Millisecond
 	})
 
-	if _, err := d.Run(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-
-	// 找到三个关键操作在 domainOps 里的位置
-	var unbindIdx, bindIdx, deleteIdx = -1, -1, -1
-	for i, op := range f.domainOps {
-		if strings.HasPrefix(op, "unbind:olddata:cf.example.com") && unbindIdx < 0 {
-			unbindIdx = i
-		}
-		// 绑定到**新**项目：新名形如 olddata-xxxx，所以不能用「不含 olddata」判断
-		if strings.HasPrefix(op, "bind:") && strings.Contains(op, "cf.example.com") && bindIdx < 0 {
-			// 排除绑到旧项目本身的情况
-			if !strings.HasPrefix(op, "bind:olddata:") {
-				bindIdx = i
-			}
-		}
-		if op == "delete:olddata" {
-			deleteIdx = i
-		}
-	}
-
-	if unbindIdx < 0 {
-		t.Fatalf("应从旧项目解绑域名，实际操作：%v", f.domainOps)
-	}
-	if bindIdx < 0 {
-		t.Fatalf("应把域名绑到新项目，实际操作：%v", f.domainOps)
-	}
-	if deleteIdx < 0 {
-		t.Fatalf("应删除旧项目，实际操作：%v", f.domainOps)
-	}
-
-	if !(unbindIdx < bindIdx) {
-		t.Errorf("必须先解绑旧项目再绑新项目（否则报 already added），实际顺序：%v", f.domainOps)
-	}
-	if !(bindIdx < deleteIdx) {
-		t.Errorf("必须先绑新项目再删旧项目（否则域名指向不存在的项目），实际顺序：%v", f.domainOps)
-	}
-}
-
-// 域名迁移失败时，绝不能删旧项目（旧项目还挂着用户唯一入口）。
-func TestDomainMigrationFailureKeepsOldProject(t *testing.T) {
-	f := newFakeCF()
-	f.kvSeed["CFP_DEPLOY_MANIFEST"] = `{
-		"v": 1,
-		"controlProject": "mycontrol",
-		"dataProject": "olddata",
-		"dataCustomDomain": "cf.example.com",
-		"build": "old",
-		"credentials": {}
-	}`
-	f.deployFailPlan["olddata"] = 999
-	f.addDomainFail = true // 新项目绑定域名失败
-
-	d, _ := newTestDeployer(t, f, func(o *Options) {
-		o.ControlProject = "mycontrol"
-		o.DataProject = "olddata"
-		o.LocalBuild = "new"
-		o.WaitTimeout = 2 * time.Second
-		o.WaitInterval = 10 * time.Millisecond
-	})
-
 	res, err := d.Run(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// 不能删旧项目
-	for _, name := range f.deleted {
-		if name == "olddata" {
-			t.Error("域名迁移失败时绝不能删旧项目 —— 旧项目还挂着用户唯一的访问入口")
+	// 项目名沿用清单里的
+	if res.Data.Name != "olddata" {
+		t.Errorf("更新部署应沿用清单里的项目名 olddata，实际 %q", res.Data.Name)
+	}
+	// ⚠️ 域名不该被动（项目没换名，域名就跟着走）
+	for _, op := range f.domainOps {
+		if strings.HasPrefix(op, "unbind:") || strings.HasPrefix(op, "delete:") {
+			t.Errorf("项目名没变时不该动域名/删项目，实际操作：%v", f.domainOps)
+			break
 		}
 	}
-	// 要有醒目警告
-	found := false
-	for _, w := range res.Warnings {
-		if strings.Contains(w, "手动") && strings.Contains(w, "域名") {
-			found = true
+	// 旧项目也不能被删
+	for _, op := range f.domainOps {
+		if op == "delete:olddata" {
+			t.Errorf("旧项目不该被删除，实际操作：%v", f.domainOps)
+			break
 		}
-	}
-	if !found {
-		t.Errorf("应给出「请手动改绑域名」的警告，实际：%v", res.Warnings)
 	}
 }
 
-// 同版本跳过部署。
 func TestSkipSameVersion(t *testing.T) {
 	f := newFakeCF()
 	f.kvSeed["CFP_DEPLOY_MANIFEST"] = `{
@@ -1268,7 +1213,7 @@ func TestEmptyScriptSkipsDeploy(t *testing.T) {
 	// 直接调内部方法验证
 	d2 := d
 	d2.opt.DataScript = nil
-	res := d2.deployWithBlockRetry(context.Background(), deployAttemptParams{
+	res := d2.deployOnce(context.Background(), deployAttemptParams{
 		preferredName: "x",
 		code:          nil,
 		label:         "数据面",

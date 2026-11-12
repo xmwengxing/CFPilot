@@ -1306,7 +1306,7 @@ export async function deployPagesSplit(
       }
     }
 
-    const dataAttempt = await deployWithBlockRetry({
+    const dataAttempt = await deployOnce({
       client,
       accountId: options.accountId,
       preferredName: dataName,
@@ -1321,7 +1321,16 @@ export async function deployPagesSplit(
       oldProject: previousDataProject,
       customDomain: dataCustomDomain,
     })
-    if (dataAttempt) {
+    if (!dataAttempt) {
+      // ⚠️ 数据面部署失败 → **整个部署中止**。
+      //
+      // 每一次部署请求都是一次「发布事件」，账号级风控画像按它累积。
+      // 数据面都没部署成功，继续部署控制面只会再多一次事件；
+      // 而且没有可用数据面的控制面本来也没有意义。
+      warnings.push('数据面部署失败，已中止本次部署（控制面不再部署）。')
+      return result
+    }
+    {
       result.data.name = dataAttempt.project ?? options.dataProject
       result.data.subdomain = dataAttempt.subdomain
 
@@ -1387,7 +1396,7 @@ export async function deployPagesSplit(
     }
   }
 
-  const controlAttempt = await deployWithBlockRetry({
+  const controlAttempt = await deployOnce({
     client,
     accountId: options.accountId,
     preferredName: controlName,
@@ -1549,12 +1558,26 @@ async function configureProject(
 }
 
 /**
- * 部署一个 Pages 项目；命中 8000119 时自动换随机项目名重试。
+ * 部署一个 Pages 项目；**失败就停**。
  *
- * 为什么必须换名：平台对代理类项目的封禁是**按项目**生效的，
- * 同一个项目第二次部署必被拒，原地更新不可用。
+ * ## ⚠️ 为什么不再重试、不再换名
+ *
+ * 旧实现是「同名重试 3 次 → 换随机项目名再来 → 换名后再 3 次」，
+ * 一次部署最坏能打出 **9 次部署请求 + 6 个新项目**。
+ *
+ * 而 Cloudflare 的账号级风控画像，正是按**发布事件的累积量**算的。
+ * 用户反馈：连续部署导致账号被封 —— 8000119 命中后继续重试，
+ * 写的还是同一份被标记的代码，等于把风控画像坐实。
+ *
+ * 所以这里的原则改成：**一次失败就停**。
+ *
+ *   - 不换项目名重建 —— 新项目同样是那份代码，风控判定不会因此改变；
+ *   - 不同名重试     —— 平台已经明确拒绝了，再写一次只是累积风险；
+ *   - 网络抖动也停   —— 让人手动重试，比机器替他多打几次更安全。
+ *
+ * 真要重试，请用户等一段时间后自己再点（间隔够长，风控画像不会继续累积）。
  */
-async function deployWithBlockRetry(params: {
+export async function deployOnce(params: {
   client: CloudflareClient
   accountId: string
   preferredName: string
@@ -1646,27 +1669,9 @@ async function deployWithBlockRetry(params: {
     }
   }
 
-  // 候选项目名：首选原名，失败后再换随机名。
-  const candidates = [preferredName]
-  for (let i = 0; i < 2; i++) candidates.push(`${preferredName}-${randomSuffix(4)}`)
-
-  /**
-   * 同一个项目重试的次数。
-   *
-   * `8000119` 的风控判定分两种形态：
-   *   1. **新项目/未承载流量的项目**：间歇性，原样重试即可成功
-   *      （同配置连做 6 次全部成功；最初失败的新项目原样重试也成功）
-   *   2. **已服务真实代理流量的数据面项目**：持久性，重试无意义
-   *      （`ck12akov-…-g3un` 原地重部署连试 4 次全部被拒）
-   *
-   * 因此换名之前必须先原样重试：对新项目这是成功率最高的路径；
-   * 对已承载流量的旧项目，3 次原样重试只是「确认持久封禁」的成本，
-   * 之后换名重建即可（换名会留下一个用不上的旧项目，属预期代价）。
-   */
-  const SAME_PROJECT_ATTEMPTS = 3
-
-  for (const [index, name] of candidates.entries()) {
-    for (let attempt = 1; attempt <= SAME_PROJECT_ATTEMPTS; attempt++) {
+  const name = preferredName
+  {
+    {
       try {
         const deployment = await client.deployPagesWorker(accountId, name, { code })
         slot.name = name
@@ -1692,35 +1697,13 @@ async function deployWithBlockRetry(params: {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         const blocked = /8000119|has been blocked/i.test(message)
-        const isLastAttempt = attempt === SAME_PROJECT_ATTEMPTS
-
-        // 同名重试耗尽：换名再试
-        if (isLastAttempt && index < candidates.length - 1) {
-          log(`⚠ ${label}项目 ${name} 连续 ${SAME_PROJECT_ATTEMPTS} 次被平台拒绝部署（8000119）`)
-          log(`  → 改用品名 ${candidates[index + 1]} 重新部署`)
-          // 换名重试前要先建项目、配变量
-          try {
-            await client.createPagesProject(accountId, { name: candidates[index + 1]!, productionBranch: 'main' })
-            await configureProject(client, accountId, candidates[index + 1]!, label, result, options, log, warnings, effective)
-            log(`  → 已创建并配置 ${candidates[index + 1]}`)
-          } catch (setupErr) {
-            warnings.push(`创建备用${label}项目失败：${setupErr instanceof Error ? setupErr.message : String(setupErr)}`)
-            return null
-          }
-          break
-        }
-
-        if (!isLastAttempt) {
-          log(`⚠ ${label}项目 ${name} 部署被拒（8000119），${SAME_PROJECT_ATTEMPTS - attempt} 次后重试同一项目`)
-          log('  → 该判定是间歇性的，同名重试通常就能成功')
-          continue
-        }
-
         warnings.push(
           `${label}部署失败：${message}` +
-            (blocked
-              ? '（平台已拒绝该项目；已重试并尝试更换项目名，可在 Cloudflare 控制台查看详情）'
-              : '')
+            (blocked ? '（平台已拒绝这次部署）' : '') +
+            '\n' +
+            `  → 已停止，不再重试，也不再换项目名重建。\n` +
+            `  → 连续重试会累积账号的风控画像，可能导致账号被封。\n` +
+            `  → 请到 Cloudflare 控制台查看该项目状态；若是风控拦截，等一段时间后手动再试。`
         )
         return null
       }

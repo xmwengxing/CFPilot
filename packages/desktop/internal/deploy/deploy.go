@@ -557,7 +557,7 @@ func (d *Deployer) Run(ctx context.Context) (*Result, error) {
 			}
 		}
 
-		dataAttempt := d.deployWithBlockRetry(ctx, deployAttemptParams{
+		dataAttempt := d.deployOnce(ctx, deployAttemptParams{
 			preferredName: dataName,
 			code:          d.opt.DataScript,
 			label:         "数据面",
@@ -565,23 +565,30 @@ func (d *Deployer) Run(ctx context.Context) (*Result, error) {
 			oldProject:    previousDataProject,
 			customDomain:  dataCustomDomain,
 		})
-		if dataAttempt != nil {
-			d.result.Data.Name = dataAttempt.project
-			d.result.Data.Subdomain = dataAttempt.subdomain
+		if dataAttempt == nil {
+			// ⚠️ 数据面部署失败 → **整个部署中止**。
+			//
+			// 每一次部署请求都是一次「发布事件」，账号级风控画像按它累积。
+			// 数据面都没部署成功，继续部署控制面只会再多一次事件；
+			// 而且没有可用数据面的控制面本来也没有意义。
+			d.warn("数据面部署失败，已中止本次部署（控制面不再部署）。")
+			return &d.result, nil
+		}
+		d.result.Data.Name = dataAttempt.project
+		d.result.Data.Subdomain = dataAttempt.subdomain
 
-			// 从 Workers 换回 Pages：删掉旧 Worker。
-			// 脚本一删，它上面绑的自定义域名也随之释放 —— 需要用户重新绑到 Pages 项目。
-			if modeSwitched && prevDataMode == "workers" && previousDataProject != "" {
-				if err := d.deleteWorkersDataPlane(ctx, previousDataProject); err != nil {
-					d.warn(fmt.Sprintf("删除旧 Workers 数据面失败（%s）：%v\n"+
-						"  → 它已经不再接收流量，可到控制台手动删除。", previousDataProject, err))
-				} else {
-					d.warn(fmt.Sprintf(
-						"旧 Worker %s 已删除，它上面的自定义域名绑定也随之释放。\n"+
-							"  → 如需继续用原来的域名，请到控制台把它绑到 Pages 项目 %s，\n"+
-							"  → 再到面板「设置 → 数据面域名」填上它。",
-						previousDataProject, d.result.Data.Name))
-				}
+		// 从 Workers 换回 Pages：删掉旧 Worker。
+		// 脚本一删，它上面绑的自定义域名也随之释放 —— 需要用户重新绑到 Pages 项目。
+		if modeSwitched && prevDataMode == "workers" && previousDataProject != "" {
+			if err := d.deleteWorkersDataPlane(ctx, previousDataProject); err != nil {
+				d.warn(fmt.Sprintf("删除旧 Workers 数据面失败（%s）：%v\n"+
+					"  → 它已经不再接收流量，可到控制台手动删除。", previousDataProject, err))
+			} else {
+				d.warn(fmt.Sprintf(
+					"旧 Worker %s 已删除，它上面的自定义域名绑定也随之释放。\n"+
+						"  → 如需继续用原来的域名，请到控制台把它绑到 Pages 项目 %s，\n"+
+						"  → 再到面板「设置 → 数据面域名」填上它。",
+					previousDataProject, d.result.Data.Name))
 			}
 		}
 	}
@@ -596,7 +603,7 @@ func (d *Deployer) Run(ctx context.Context) (*Result, error) {
 	}
 
 	// ---------------- 3b. 部署控制面 ----------------
-	controlAttempt := d.deployWithBlockRetry(ctx, deployAttemptParams{
+	controlAttempt := d.deployOnce(ctx, deployAttemptParams{
 		preferredName: controlName,
 		code:          d.opt.ControlScript,
 		label:         "控制面",
@@ -1070,172 +1077,80 @@ type deployAttemptResult struct {
 
 // sameProjectAttempts 是同一个项目重试的次数。
 //
-// 8000119 的风控判定分两种形态：
-//  1. 新项目 / 未承载流量的项目：间歇性，原样重试即可成功
-//  2. 已服务真实代理流量的数据面项目：持久性，重试无意义
+// deployOnce 部署一个项目；**失败就停**。
 //
-// 因此换名之前必须先原样重试：对新项目这是成功率最高的路径；
-// 对已承载流量的旧项目，3 次原样重试只是「确认持久封禁」的成本。
-const sameProjectAttempts = 3
-
-// deployWithBlockRetry 部署一个项目；命中 8000119 时自动换随机项目名重试。
-func (d *Deployer) deployWithBlockRetry(ctx context.Context, p deployAttemptParams) *deployAttemptResult {
+// ## ⚠️ 为什么不再重试、不再换名
+//
+// 旧实现是「同名重试 3 次 → 换随机项目名再来 → 换名后再 3 次」，
+// 一次部署最坏能打出 **9 次部署请求 + 6 个新项目**（AGENTS.md §2.2 D.1）。
+//
+// 而 Cloudflare 的账号级风控画像，正是按**发布事件的累积量**算的。
+// 用户反馈：连续部署导致账号被封（8000119 命中后继续重试，
+// 写的还是同一份被标记的代码，等于把风控画像坐实）。
+//
+// 所以这里的原则改成：**一次失败就停**。
+//
+//   - 不换项目名重建 —— 新项目同样是那份代码，风控判定不会因此改变；
+//   - 不同名重试     —— 平台已经明确拒绝了，再写一次只是累积风险；
+//   - 网络抖动也停   —— 让人手动重试，比机器替他多打几次更安全。
+//
+// 真要重试，请用户等一段时间后自己再点（间隔够长，风控画像不会继续累积）。
+func (d *Deployer) deployOnce(ctx context.Context, p deployAttemptParams) *deployAttemptResult {
 	if len(p.code) == 0 {
 		d.warn(p.label + "产物为空，跳过部署")
 		return nil
 	}
 
-	// 候选项目名：首选原名，失败后再换随机名。
-	candidates := []string{p.preferredName}
-	for i := 0; i < 2; i++ {
-		candidates = append(candidates, p.preferredName+"-"+randomSuffix(4))
-	}
-
-	for index, name := range candidates {
-		for attempt := 1; attempt <= sameProjectAttempts; attempt++ {
-			dep, err := d.client.DeployPagesWorker(ctx, cfapi.PagesDeployOptions{
-				AccountID:     d.opt.AccountID,
-				Project:       name,
-				Script:        p.code,
-				CommitMessage: "CFPilot desktop deploy",
-			})
-			if err != nil {
-				blocked := isBlocked(err)
-				isLast := attempt == sameProjectAttempts
-
-				// ⚠️ 网络错误绝不能当成 8000119 处理
-				//
-				// 真机日志里出现过：
-				//   Post ".../pages/projects": EOF
-				//   请求超时：Cloudflare API 无响应
-				// 早期实现把这些也走进「8000119 换名重试」分支，
-				// 于是报出「连续 3 次被平台拒绝部署（8000119）」——
-				// **完全是误判**：平台根本没拒绝，是网络断了。
-				//
-				// 用户的真实体验是「部署失败，日志说 8000119」，
-				// 会误以为是账号被风控，实际上重试一下就能成功。
-				//
-				// 所以这里区分：
-				//   - 网络类错误（EOF / 超时 / 连接重置）→ 直接重试 + 明确提示
-				//   - 真正的业务错误（8000119）→ 换名重试
-				if isNetworkError(err) {
-					if !isLast {
-						d.log(fmt.Sprintf("⚠ %s项目 %s 部署时网络中断，%d 次后重试",
-							p.label, name, sameProjectAttempts-attempt))
-						d.log("  → 这不是账号风控，是到 Cloudflare 的网络不稳定")
-						// 退避一下再重试，避免立刻又撞上同一个网络问题
-						select {
-						case <-ctx.Done():
-							return nil
-						case <-time.After(time.Duration(attempt) * 1500 * time.Millisecond):
-						}
-						continue
-					}
-					d.warn(fmt.Sprintf(
-						"%s部署失败：网络无法连接 Cloudflare API（%v）。\n"+
-							"  → 这不是账号风控，请检查网络 / 代理后重试", p.label, err))
-					return nil
-				}
-
-				// 同名重试耗尽：换名再试
-				if isLast && index < len(candidates)-1 {
-					d.log(fmt.Sprintf("⚠ %s项目 %s 连续 %d 次被平台拒绝部署（8000119）",
-						p.label, name, sameProjectAttempts))
-					next := candidates[index+1]
-					d.log("  → 改用新项目名 " + next + " 重新部署")
-
-					// 换名重试前要先建项目、配变量
-					if _, cerr := d.client.CreatePagesProject(ctx, d.opt.AccountID, next, "main"); cerr != nil {
-						if !isAlreadyExists(cerr) {
-							d.warn(fmt.Sprintf("创建备用%s项目失败：%v", p.label, cerr))
-							return nil
-						}
-					}
-					// 注意：换名后控制面的 DATA_HOST 会在上层重新同步
-					if proj, e2 := d.client.GetPagesProject(ctx, d.opt.AccountID, next); e2 == nil && proj != nil {
-						if p.label == "数据面" {
-							d.result.Data.Subdomain = proj.Subdomain
-						}
-						d.configureProject(ctx, next, p.label, p.eff)
-					}
-					d.log("  → 已创建并配置 " + next)
-
-					// ⚠️ 换名成功后必须清理旧项目
-					//
-					// 真机故障：网络抖动导致反复换名重试，账号下堆积了
-					// 8 个孤儿项目（4 组 cpdata + 4 组 cpmanager）。
-					//
-					// 根因：早期只有「8000119 换名成功后」才走
-					// migrateAndCleanup（迁移域名 + 删旧项目），
-					// 而**网络错误触发的换名完全不清理** ——
-					// 新项目建了、旧项目留着，每次重试多一组。
-					//
-					// 现在：只要换了项目名，就把候选链里所有「非最终项目」
-					// 都尝试删掉（含自定义域名迁移）。
-					d.cleanupSupersededProjects(ctx, p, next)
-
-					break
-				}
-
-				if !isLast {
-					d.log(fmt.Sprintf("⚠ %s项目 %s 部署被拒（8000119），%d 次后重试同一项目",
-						p.label, name, sameProjectAttempts-attempt))
-					d.log("  → 该判定是间歇性的，同名重试通常就能成功")
-					continue
-				}
-
-				msg := err.Error()
-				if blocked {
-					msg += "（平台已拒绝该项目；已重试并尝试更换项目名，可在 Cloudflare 控制台查看详情）"
-				}
-				d.warn(fmt.Sprintf("%s部署失败：%s", p.label, msg))
-				return nil
-			}
-
-			// 部署请求已受理
-			if p.label == "数据面" {
-				d.result.Data.Name = name
-				d.result.Data.DeploymentID = dep.ID
-			} else {
-				d.result.Control.Name = name
-				d.result.Control.DeploymentID = dep.ID
-			}
-			d.log(fmt.Sprintf("✅ %s已触发部署：%s（%s）", p.label, name, dep.ID))
-
-			final := d.waitForDeployment(ctx, name, p.label)
-			subdomain := ""
-			if proj, e := d.client.GetPagesProject(ctx, d.opt.AccountID, name); e == nil && proj != nil {
-				subdomain = proj.Subdomain
-			}
-
-			if final == "success" {
-				d.log(fmt.Sprintf("✅ %s部署完成：%s", p.label, name))
-			} else {
-				d.warn(fmt.Sprintf("%s部署未确认成功（项目 %s，状态：%s）",
-					p.label, name, orUnknown(final)))
-			}
-
-			// 换名成功后的收尾，两件事：
-			//
-			// 1. migrateAndCleanup：处理**清单里的旧实例项目**
-			//    （更新部署时旧项目名与新项目名不同）→ 迁域名 + 删旧项目
-			// 2. cleanupSupersededProjects：处理**本次尝试链里被淘汰的项目**
-			//    （网络抖动 / 8000119 反复重试产生的中间项目）→ 全部清理
-			//
-			// 两件事互补，缺任何一件都会留下孤儿项目。
-			// 用户实测：只做第 1 件事，结果账号下堆了 8 个项目。
-			d.migrateAndCleanup(ctx, p, name)
-			// ⚠️ 传的是「刚成功的项目名」而不是 index+1
-			//
-			// 早期写成 candidates[index+1]，那是**下一个候选**（可能根本不存在），
-			// 导致清理逻辑误判最终项目 → 把活跃项目当成孤儿删掉
-			// （真机故障：清单里 dataProject 还在，实际项目被删）。
-			d.cleanupSupersededProjects(ctx, p, name)
-
-			return &deployAttemptResult{project: name, subdomain: subdomain, deploymentID: dep.ID}
+	name := p.preferredName
+	dep, err := d.client.DeployPagesWorker(ctx, cfapi.PagesDeployOptions{
+		AccountID:     d.opt.AccountID,
+		Project:       name,
+		Script:        p.code,
+		CommitMessage: "CFPilot desktop deploy",
+	})
+	if err != nil {
+		msg := err.Error()
+		if isBlocked(err) {
+			msg += "（平台已拒绝这次部署）"
+		} else if isNetworkError(err) {
+			msg += "（网络无法连接 Cloudflare API）"
 		}
+		d.warn(fmt.Sprintf("%s部署失败：%s\n"+
+			"  → 已停止，不再重试，也不再换项目名重建。\n"+
+			"  → 连续重试会累积账号的风控画像，可能导致账号被封。\n"+
+			"  → 请到 Cloudflare 控制台查看该项目状态；若是风控拦截，等一段时间后手动再试。",
+			p.label, msg))
+		return nil
 	}
-	return nil
+
+	// 部署请求已受理
+	if p.label == "数据面" {
+		d.result.Data.Name = name
+		d.result.Data.DeploymentID = dep.ID
+	} else {
+		d.result.Control.Name = name
+		d.result.Control.DeploymentID = dep.ID
+	}
+	d.log(fmt.Sprintf("✅ %s已触发部署：%s（%s）", p.label, name, dep.ID))
+
+	final := d.waitForDeployment(ctx, name, p.label)
+	subdomain := ""
+	if proj, e := d.client.GetPagesProject(ctx, d.opt.AccountID, name); e == nil && proj != nil {
+		subdomain = proj.Subdomain
+	}
+
+	if final == "success" {
+		d.log(fmt.Sprintf("✅ %s部署完成：%s", p.label, name))
+	} else {
+		d.warn(fmt.Sprintf("%s部署未确认成功（项目 %s，状态：%s）",
+			p.label, name, orUnknown(final)))
+	}
+
+	// 收尾：迁移清单里记录的旧实例项目的域名并删掉它
+	// （更新部署时新旧项目名不同 → 用户的自定义域名要迁过去）。
+	d.migrateAndCleanup(ctx, p, name)
+
+	return &deployAttemptResult{project: name, subdomain: subdomain, deploymentID: dep.ID}
 }
 
 func orUnknown(s string) string {

@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net"
@@ -627,6 +628,50 @@ func (s *Server) guard(h http.HandlerFunc) http.HandlerFunc {
 			})
 			return
 		}
+		limitRequestBody(h)(w, r)
+	}
+}
+
+// maxRequestBody 是单个 API 请求体的上限（1 MB）。
+//
+// ## 为什么要有这个闸
+//
+// 界面「自定义候选」输入框在**每敲一个键**时就把整个文本发过来
+// （刷新「已识别 N 个」提示）。清单一大就是几万行 ——
+// 单次请求 = 几 MB 的请求体 + 解析出的几万个字符串 + 同样大的响应，
+// 几个并发请求就能把进程撑爆，表现为「页面卡死、服务也没了」。
+//
+// 上限按「maxCustomCandidates 个候选装得下」取：
+// 5000 × 约 30 字节 ≈ 150 KB，1 MB 留足了余量。
+const maxRequestBody = 1 << 20
+
+// limitRequestBody 给请求体加上限。
+//
+// ⚠️ 不用 http.MaxBytesReader 就完事：那样超限时 body 被截断，
+// handler 里的 json.Decode 会报「请求体不是合法 JSON」——
+// 那个提示会让人以为是数据格式问题，而不是「太大了」。
+// 这里自己读一遍，超了直接给 413 和一句说人话的提示。
+func limitRequestBody(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Body == nil {
+			h(w, r)
+			return
+		}
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBody+1))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error": "读取请求体失败：" + err.Error(),
+			})
+			return
+		}
+		if len(body) > maxRequestBody {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+				"error": fmt.Sprintf("请求体过大（上限 %d MB）", maxRequestBody/1024/1024),
+			})
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
 		h(w, r)
 	}
 }

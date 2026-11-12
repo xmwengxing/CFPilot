@@ -169,6 +169,17 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 	var candidates []string
 	if strings.TrimSpace(req.Candidates) != "" {
 		candidates = scan.ParseCandidateList(req.Candidates)
+		// ⚠️ 自定义清单是「有多少就试多少」，没有采样预算兜着。
+		// 一次几万个候选 = 对几万个边缘 IP 逐个握手：
+		// 本机扛不住，也会成为平台风控的典型特征。
+		if len(candidates) > maxCustomCandidates {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error": fmt.Sprintf(
+					"自定义候选 %d 个，超过上限 %d —— 请分批，或改用「默认（网段采样）」",
+					len(candidates), maxCustomCandidates),
+			})
+			return
+		}
 	}
 	// 实验性：开启自适应采样时按本机网络档案调整网段权重。
 	// 上下文要在生成候选与结束保存之间保持同一份（观测是在扫描过程中写入的）。
@@ -488,7 +499,7 @@ func (s *Server) handleScanDetectHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := cfapi.New(cfapi.Options{Token: profile.CfToken})
+	client := cfapi.New(cfapi.Options{Token: profile.CfToken, APIBase: s.cfBase})
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 
@@ -550,7 +561,7 @@ func (s *Server) handleScanDetectPath(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := cfapi.New(cfapi.Options{Token: profile.CfToken})
+	client := cfapi.New(cfapi.Options{Token: profile.CfToken, APIBase: s.cfBase})
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 
@@ -608,6 +619,8 @@ func (s *Server) handleScanPushResults(w http.ResponseWriter, r *http.Request) {
 		Lines []string `json:"lines"`
 		// Mode 是写入方式：`replace`（默认）/ `append`（增量回填）
 		Mode string `json:"mode"`
+		// Target 是目标池：`local`（默认，订阅的本地优选池）/ `relay`（自定义反代入口池）
+		Target string `json:"target"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
@@ -656,8 +669,16 @@ func (s *Server) handleScanPushResults(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ---- 3. 回填 ----
+	//
+	// target 决定写进哪个池子：
+	//   local —— 本地优选池（订阅的 L1 来源）
+	//   relay —— 自定义反代入口池（反代优选的产出；**不进订阅**）
+	target := scan.TargetLocal
+	if req.Target == string(scan.TargetRelay) {
+		target = scan.TargetRelay
+	}
 	url := scan.DefaultCallbackURL(host)
-	res := scan.PostResults(ctx, url, tok.Token, req.Lines, req.Mode, 20*time.Second)
+	res := scan.PostResultsTo(ctx, url, tok.Token, req.Lines, req.Mode, target, 20*time.Second)
 	if !res.OK {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":    false,
@@ -682,7 +703,7 @@ func (s *Server) resolvePanelAccess(ctx context.Context, profile *store.Profile)
 	if profile == nil || strings.TrimSpace(profile.KVNamespaceID) == "" {
 		return nil, "", ""
 	}
-	client := cfapi.New(cfapi.Options{Token: profile.CfToken})
+	client := cfapi.New(cfapi.Options{Token: profile.CfToken, APIBase: s.cfBase})
 	raw, ok := client.GetKVValue(ctx, profile.AccountID, profile.KVNamespaceID, deploy.ManifestKey)
 	if !ok || strings.TrimSpace(raw) == "" {
 		return nil, "", ""
@@ -751,7 +772,7 @@ func (s *Server) handleScanScannerToken(w http.ResponseWriter, r *http.Request) 
 	// 拿到 Welcome 页，报「令牌响应解析失败：<!DOCTYPE html>...」。
 	var manifest *deploy.Manifest
 	if strings.TrimSpace(profile.KVNamespaceID) != "" {
-		client := cfapi.New(cfapi.Options{Token: profile.CfToken})
+		client := cfapi.New(cfapi.Options{Token: profile.CfToken, APIBase: s.cfBase})
 		if raw, ok := client.GetKVValue(ctx, profile.AccountID, profile.KVNamespaceID, deploy.ManifestKey); ok && strings.TrimSpace(raw) != "" {
 			var m deploy.Manifest
 			if json.Unmarshal([]byte(raw), &m) == nil {
@@ -950,6 +971,18 @@ func (s *Server) handleScanEnvCheck(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"findings": findings, "ipv6": ipv6})
 }
 
+// maxCustomCandidates 自定义候选的数量上限。
+//
+// ## 为什么限
+//
+// 默认模式是**网段采样**（有预算、有上限）；自定义清单则是「有多少就试多少」。
+// 清单塞进几万条时，一次优选就是对几万个边缘 IP 逐个做 TLS 握手 ——
+// 既把本机撑爆，也正是平台风控认定的扫描器特征。
+//
+// 上限取 5000：与默认网段采样同一量级。
+// 真连接优选本来也要按可用率筛掉绝大多数候选，多给并不会多出好结果。
+const maxCustomCandidates = 5000
+
 // handleScanParseCandidates 清洗用户粘贴的候选列表。
 //
 // 界面上「自定义候选」输入框在提交前先调这个，
@@ -968,9 +1001,12 @@ func (s *Server) handleScanParseCandidates(w http.ResponseWriter, r *http.Reques
 	}
 
 	list := scan.ParseCandidateList(req.Raw)
+	// ⚠️ 不回传候选数组：界面只用得着「个数」，
+	// 回传几万个字符串等于把请求体再放大一遍。
 	writeJSON(w, http.StatusOK, map[string]any{
-		"candidates": list,
-		"count":      len(list),
+		"count": len(list),
+		"limit": maxCustomCandidates,
+		"over":  len(list) > maxCustomCandidates,
 	})
 }
 

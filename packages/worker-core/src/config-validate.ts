@@ -117,11 +117,36 @@ function checkRange(
   }
 }
 
+/**
+ * 代理池与反代入口池的默认上限。
+ *
+ * 代理类（proxyIp / socks5 / httpProxy）是「用户自配的一小组出口」，
+ * 20 条足够；反代入口池是「优选出来的候选」，优选一轮出十几条，
+ * 给它单独的额度（见 MAX_RELAY_POOL）。
+ */
+const MAX_PROXY_POOL = 20
+
+/**
+ * 反代入口池的条数上限。
+ *
+ * 反代入口池会被轮换使用（见 collectRelayEndpoints），
+ * 条数多只是多几个备选，不会拖慢出站 —— 但要挡住「误粘几万条」。
+ */
+const MAX_RELAY_POOL = 200
+
+/** 手动指定 IP 列表的条数上限。 */
+const MAX_MANUAL_IPS = 2000
+
 /** 逐行解析的代理池（空行忽略） */
-function checkProxyPool(value: string, field: string, errors: FieldError[]): void {
+function checkProxyPool(
+  value: string,
+  field: string,
+  errors: FieldError[],
+  max = MAX_PROXY_POOL
+): void {
   const lines = value.split(/\r?\n|,/).map((l) => l.trim()).filter(Boolean)
-  if (lines.length > 20) {
-    errors.push({ field, message: `${field} 最多 20 条（当前 ${lines.length}）` })
+  if (lines.length > max) {
+    errors.push({ field, message: `${field} 最多 ${max} 条（当前 ${lines.length}）` })
     return
   }
   for (const line of lines) {
@@ -154,6 +179,16 @@ function checkRemoteSources(value: string, field: string, errors: FieldError[]):
  * 用户看到「保存成功」但订阅里一个节点都没进去。
  */
 function checkIpList(value: string, field: string, errors: FieldError[]): void {
+  const lines = value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+  if (lines.length > MAX_MANUAL_IPS) {
+    // ⚠️ 条数也要限。
+    //
+    // 手动指定的 IP 会进订阅，而订阅请求每次都要读 + 解析这份配置
+    // （配置有 15 秒缓存，超时就要重解析 —— 免费版的 CPU 预算扛不住）。
+    // 粘几万条会让**所有**订阅请求都变慢甚至报错，殃及所有人。
+    errors.push({ field, message: `${field} 最多 ${MAX_MANUAL_IPS} 条（当前 ${lines.length}）` })
+    return
+  }
   const message = validateIpList(value)
   if (message) errors.push({ field, message })
 }
@@ -194,7 +229,9 @@ export function validateConfigPatch(patch: Record<string, unknown>): FieldError[
   if (has('proxyIp')) checkProxyPool(String(patch.proxyIp ?? ''), 'proxyIp', errors)
   if (has('socks5')) checkProxyPool(String(patch.socks5 ?? ''), 'socks5', errors)
   if (has('httpProxy')) checkProxyPool(String(patch.httpProxy ?? ''), 'httpProxy', errors)
-  if (has('relayPool')) checkProxyPool(String(patch.relayPool ?? ''), 'relayPool', errors)
+  if (has('relayPool')) {
+    checkProxyPool(String(patch.relayPool ?? ''), 'relayPool', errors, MAX_RELAY_POOL)
+  }
 
   if (has('officialCount')) {
     checkRange(Number(patch.officialCount), 'officialCount', 1, 200, errors)

@@ -83,14 +83,16 @@ func TestScanParseCandidates(t *testing.T) {
 	}
 	count, _ := body["count"].(float64)
 	if int(count) != 4 {
-		t.Errorf("应认出 4 个（排除表头与非法 IP），实际 %v：%v", count, body["candidates"])
+		t.Errorf("应认出 4 个（排除表头与非法 IP），实际 %v", count)
+	}
+	// 响应只回「个数」：回传整个候选数组等于把请求体再放大一遍
+	// （界面每敲一个键就调一次这个接口）。
+	if _, ok := body["candidates"]; ok {
+		t.Errorf("响应不应回传候选数组，实际 %v", body)
 	}
 
-	list, _ := body["candidates"].([]any)
-	got := make([]string, 0, len(list))
-	for _, v := range list {
-		got = append(got, str(v))
-	}
+	// 认出的具体是哪几个，由同一个解析器保证
+	got := scan.ParseCandidateList(raw)
 	want := map[string]bool{
 		"104.16.1.1":     true,
 		"104.17.2.2":     true,

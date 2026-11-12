@@ -27,8 +27,9 @@ import {
   saveConfig,
   saveDomainLibrary,
   saveRouteProfile,
+  readFreshConfig,
 } from './config'
-import { collectNodes, parseLocalList } from './sub-engine'
+import { collectNodes, parseLocalList, splitValidCandidateLines } from './sub-engine'
 import { buildBuiltinProfileText, ROUTE_MAIN_GROUP } from './route-profile'
 import { loadSubSecret, rotateSubSecret, signSubToken, verifySubToken } from './sub-token'
 import { describeFieldErrors, validateConfigPatch, validateIpList } from './config-validate'
@@ -37,6 +38,14 @@ import { CF_IPV4_CIDRS, COUNTRY_NAMES, PREFERRED_DOMAINS, SUPPORTED_COUNTRIES, c
 import { randomHex } from './util'
 import { CpuBudget } from './budget'
 import { BUILD_VERSION, PKG_VERSION } from './version'
+
+// 回填时的条数上限。
+//
+// 两个池子都是「候选池」，订阅最终只按 maxNodes 取一部分，
+// 留几万条毫无意义，却会让每次订阅请求都读 + 解析一份巨大的 KV 值
+// （配置有 15 秒缓存，超时就要重解析 —— 免费版的 CPU 预算扛不住）。
+const MAX_LOCAL_IPS_ENTRIES = 5000
+const MAX_RELAY_POOL_ENTRIES = 200
 import { normalizeNodeDomain } from './routes/shared'
 
 export const API_PREFIX = '/api/v1'
@@ -256,27 +265,95 @@ export async function handleApi(
     const token = header.startsWith('Bearer ') ? header.slice(7).trim() : header.trim()
     const authorized = await verifyScanToken(store, token)
     if (!authorized) return error('Token 校验失败', 401)
-    let body: { ips?: unknown; mode?: unknown }
+    let body: { ips?: unknown; mode?: unknown; target?: unknown }
     try {
-      body = (await request.json()) as { ips?: unknown; mode?: unknown }
+      body = (await request.json()) as { ips?: unknown; mode?: unknown; target?: unknown }
     } catch {
       return error('请求体解析失败', 400)
     }
     const list = Array.isArray(body.ips) ? body.ips.map((v) => String(v)) : []
-    const incoming = list
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0)
+    const rawLines = list.map((line) => line.trim()).filter((line) => line.length > 0)
+
+    // ⚠️ 逐行清洗：看不懂的行**跳过并回报**，不静默吞掉。
+    //
+    // 解析层对看不懂的行是静默跳过的 —— 用户看到「保存成功」但列表里没有，
+    // 这种失败最难查。写入前先过一遍清洗器，把无效行数报回去。
+    const { valid: incoming, invalid } = splitValidCandidateLines(rawLines)
+
     // mode：
     //   replace（默认）—— 清空后写入（历史行为，调用方不传时不变）
-    //   append         —— 保留池里已有的 IP，只补新的（「增量回填」）
+    //   append         —— 保留池里已有的，只补新的（「增量回填」）
     const append = body.mode === 'append'
+
+    // target：
+    //   local（默认）—— 本地优选池（订阅的 L1 来源）
+    //   relay        —— 自定义反代入口池（反代优选的产出；
+    //                   只影响出站选路，**不进订阅**）
+    const toRelay = body.target === 'relay'
+
     // 同 ip:port 只保留一条：已有的**不动**（保留上一轮的备注），只补真正新的
     const keyOf = (line: string): string =>
       line.split('#')[0]!.trim().replace(/^\[([^\]]+)\]:(\d+)$/, '$1:$2')
 
-    // ⚠️ 先读再比，内容没变就不写。
+    if (incoming.length === 0 && rawLines.length > 0) {
+      // ⚠️ 全都是看不懂的行 —— **不动池子**。
+      //
+      // 空列表是另一回事：那是「清空」的明确语义（历史行为，不能改）。
+      // 但「粘了一堆垃圾」绝不能被当成「清空」—— 那会把用户攒的池子清掉。
+      return error('没有可识别的条目（已跳过 ' + invalid + ' 行）', 400)
+    }
+
+    // ---- 写「自定义反代入口池」（在 CONFIG 里）----
+    if (toRelay) {
+      if (incoming.length === 0) {
+        return error('没有可识别的反代入口', 400)
+      }
+      const limit = MAX_RELAY_POOL_ENTRIES
+      const accepted = incoming.slice(0, limit)
+      const overLimit = incoming.length - accepted.length
+      const current = (config.relayPool ?? '')
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean)
+      let merged: string[]
+      let added = accepted.length
+      if (append) {
+        const seen = new Set(current.map(keyOf))
+        const fresh = accepted.filter((line) => {
+          const key = keyOf(line)
+          if (seen.has(key)) return false
+          seen.add(key)
+          return true
+        })
+        added = fresh.length
+        merged = [...current, ...fresh]
+      } else {
+        merged = accepted
+      }
+      if (merged.length > limit) merged = merged.slice(0, limit)
+
+      // ⚠️ **重新读一次 CONFIG** 再合并。
+      //
+      // config 是 15 秒缓存的（见 getConfig），拿缓存里的旧值写回去，
+      // 会把用户刚在面板上改的东西覆盖掉。这里读 KV 的最新值。
+      const freshConfig = await readFreshConfig(store, config)
+      await saveConfig(store, mergeConfig(freshConfig, { relayPool: merged.join('\n') }))
+      ctx.onConfigChanged()
+      return json({
+        ok: true,
+        target: 'relay',
+        mode: append ? 'append' : 'replace',
+        count: accepted.length,
+        added,
+        invalid,
+        overLimit,
+        limit,
+      })
+    }
+
+    // ---- 写「本地优选池」（独立键，订阅的 L1 来源）----
     //
-    // KV 免费版配额是 **1000 次写/天**，而「一键优选」可能一天跑好几次
+    // ⚠️ KV 免费版配额是 **1000 次写/天**，而「一键优选」可能一天跑好几次
     // （托盘菜单、手册扫描、多实例）。同一批结果重复 put 纯属浪费配额，
     // 写配额耗尽后「保存配置 / 回填」会直接 500。
     const previous = await store.get(LOCAL_IPS_KEY)
@@ -299,6 +376,16 @@ export async function handleApi(
     } else {
       cleaned = incoming.join('\n')
     }
+    // 条数上限：池子是订阅的节点来源，留几万条毫无意义（订阅按 maxNodes 取），
+    // 却会让每次订阅请求都读+解析一份巨大的 KV 值。
+    const overLimit = Math.max(0, cleaned.split('\n').filter((l) => l.trim()).length - MAX_LOCAL_IPS_ENTRIES)
+    if (overLimit > 0) {
+      cleaned = cleaned
+        .split('\n')
+        .filter((l) => l.trim())
+        .slice(0, MAX_LOCAL_IPS_ENTRIES)
+        .join('\n')
+    }
     const changed = previous !== cleaned
     if (changed) await store.put(LOCAL_IPS_KEY, cleaned)
 
@@ -319,9 +406,13 @@ export async function handleApi(
 
     return json({
       ok: true,
+      target: 'local',
       mode: append ? 'append' : 'replace',
       count: incoming.length,
       added,
+      invalid,
+      overLimit,
+      limit: MAX_LOCAL_IPS_ENTRIES,
       clearedManual,
       enabledManual: patch.poolManual === true,
     })

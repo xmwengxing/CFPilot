@@ -20,6 +20,71 @@ import (
 // 一次最多拉 30 个来源：弹窗全选也不该把出站请求打满。
 const maxFetchSelectedSources = 30
 
+// mergeWithLineBudget 合并多份清单，总行数不超过 budget，
+// 返回合并结果与被丢掉的行数。
+//
+// ## 为什么按来源均摊，而不是直接截断拼接结果
+//
+// 直接截断等于「只留前几个来源」—— 后面几十个来源的候选全丢，
+// 候选多样性被毁掉（而优选正需要多样性：不同来源覆盖不同网段与地区）。
+//
+// 均摊之后每个来源都留下一部分，覆盖面保住了。
+//
+// 这些原文最终要进界面那个候选输入框：几万行会让浏览器渲染卡死，
+// 且用户每敲一个键都会把整个文本发回后端解析 —— 后端跟着被撑爆。
+func mergeWithLineBudget(chunks []string, budget int) (string, int) {
+	if len(chunks) == 0 {
+		return "", 0
+	}
+	lines := make([][]string, 0, len(chunks))
+	total := 0
+	for _, c := range chunks {
+		ls := strings.Split(c, "\n")
+		lines = append(lines, ls)
+		total += len(ls)
+	}
+	if total <= budget {
+		return strings.Join(chunks, "\n"), 0
+	}
+
+	// 每个来源先分到 budget/来源数 行，不够的来源把余量让给还有富余的来源。
+	perSource := budget / len(chunks)
+	taken := make([]int, len(chunks))
+	used := 0
+	for i, ls := range lines {
+		taken[i] = perSource
+		if taken[i] > len(ls) {
+			taken[i] = len(ls)
+		}
+		used += taken[i]
+	}
+	for i, ls := range lines {
+		for used < budget && taken[i] < len(ls) {
+			taken[i]++
+			used++
+		}
+	}
+
+	merged := make([]string, 0, used)
+	kept := 0
+	for i, ls := range lines {
+		if taken[i] <= 0 {
+			continue
+		}
+		merged = append(merged, ls[:taken[i]]...)
+		kept += taken[i]
+	}
+	return strings.Join(merged, "\n"), total - kept
+}
+
+// maxFetchCandidateLines 合并后原文的行数上限。
+//
+// 这些原文最终要进界面那个候选输入框：几万行会让浏览器渲染卡死，
+// 且用户每敲一个键都会把整个文本发回后端解析 —— 后端跟着被撑爆。
+//
+// 5000 行与自定义候选上限同量级。
+const maxFetchCandidateLines = 5000
+
 func (s *Server) handleSourcesFetch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "仅支持 POST"})
@@ -104,13 +169,19 @@ func (s *Server) handleSourcesFetch(w http.ResponseWriter, r *http.Request) {
 			chunks = append(chunks, t)
 		}
 	}
-	raw := strings.Join(chunks, "\n")
+	total := 0
+	for _, c := range chunks {
+		total += len(scan.ParseCandidateList(c))
+	}
+	raw, dropped := mergeWithLineBudget(chunks, maxFetchCandidateLines)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":        len(chunks) > 0,
 		"raw":       raw,
 		"count":     len(scan.ParseCandidateList(raw)),
+		"total":     total,
 		"selected":  len(ids),
 		"truncated": truncated,
+		"dropped":   dropped,
 		"errors":    errors,
 	})
 }

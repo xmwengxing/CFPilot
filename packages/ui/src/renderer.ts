@@ -4567,7 +4567,12 @@ import {
     try {
       // 通用解析器同时接受 IP 与域名；反代链路那个只数 IPv4 的接口不再用于预览
       const res = await window.cfpilot.parseScanCandidates(raw)
-      hint.textContent = '已识别 ' + res.count + ' 个候选（IP 或域名）'
+      if (res.over) {
+        hint.textContent =
+          '已识别 ' + res.count + ' 个候选（IP 或域名），超过上限 ' + (res.limit || 0) + ' 个 —— 请分批'
+      } else {
+        hint.textContent = '已识别 ' + res.count + ' 个候选（IP 或域名）'
+      }
     } catch (err) {
       hint.textContent = '识别失败：' + (err instanceof Error ? err.message : String(err))
     }
@@ -4752,6 +4757,12 @@ import {
           }
           await refreshCandidateHint()
           log('已从 ' + (res.selected || ids.length) + ' 个数据源加载 ' + res.count + ' 个候选', 'ok')
+          if ((res.dropped || 0) > 0) {
+            log(
+              '清单太长，只加载了前 ' + res.count + ' 行（还有 ' + (res.dropped || 0) + ' 行未加载）—— 请分批加载',
+              'warn'
+            )
+          }
           if (res.truncated) log('一次最多加载 30 个来源，多选项未生效', 'warn')
           if (res.errors && res.errors.length > 0) log('部分来源失败：' + res.errors.join('；'), 'warn')
         } catch (err) {
@@ -4931,7 +4942,7 @@ import {
             hint.textContent =
               '✅ 已写入 ' + (res.written ?? relayPicked.length) + ' 条，池内共 ' + (res.total ?? '?') + ' 条'
           }
-          log('已写入面板 ProxyIP 池（' + (mode === 'incremental' ? '增量' : '覆盖') + '）', 'ok')
+          log('已写入面板反代入口池（' + (mode === 'incremental' ? '增量' : '覆盖') + '）', 'ok')
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           if (hint) hint.textContent = '写入失败：' + msg

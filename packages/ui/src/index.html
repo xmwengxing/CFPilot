@@ -1673,7 +1673,7 @@
           <!--
             二级页签：两个方向共用数据面配置与日志通道，但**参数完全不同**：
               入口优选 = 采样 CF 网段 + 分族 + 国家筛选 + 测速 → 结果进订阅
-              反代优选 = 导入候选清单 + 隧道体检 → 结果进 ProxyIP 池（不进订阅）
+              反代优选 = 导入候选清单 + 隧道体检 → 结果进自定义反代入口池（不进订阅）
             所以配置分开、结果卡共用，避免长成两套骨架。
           -->
           <div class="subtabs" id="scanTabs">
@@ -2005,9 +2005,9 @@
               <div class="result-box" id="relayOut">暂无结果</div>
               <div class="btn-row" style="margin-top:10px">
                 <button class="btn btn-ghost" id="btnRelayPushAppend" disabled
-                  title="保留面板 ProxyIP 池里已有的条目，只补真正新的。">增量写入 ProxyIP 池</button>
+                  title="保留反代入口池里已有的条目，只补真正新的。">增量写入反代入口池</button>
                 <button class="btn btn-ghost" id="btnRelayPushOverwrite" disabled
-                  title="清空面板 ProxyIP 池后写入这一批。">覆盖写入 ProxyIP 池</button>
+                  title="清空反代入口池后写入这一批。">覆盖写入反代入口池</button>
                 <button class="btn btn-ghost" id="btnRelayCopy" disabled
                   title="只复制 IP 列表到剪贴板，自行粘贴进面板。">复制 IP 列表</button>
               </div>

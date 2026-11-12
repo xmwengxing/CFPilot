@@ -98,6 +98,31 @@ export function cleanIpLine(line: string, defaultPort = DEFAULT_NODE_PORT): Clea
 }
 
 /**
+ * 把一批候选行分成「可用的」与「无法识别的」。
+ *
+ * ## 为什么要有
+ *
+ * 解析层对看不懂的行是**静默跳过**的 —— 用户看到「保存成功」，
+ * 但列表里一个节点都没有，这种失败最难查。
+ * 写入前先过一遍清洗器，把无效行数报回去，调用方才能告诉用户。
+ *
+ * ⚠️ 判据必须与解析层一致（都走 cleanIpLine）——
+ *    否则会出现「校验说没问题但节点没进去」，那比不校验更糟。
+ *
+ * @param lines 原始行（已去空白）
+ * @returns valid —— 可用的行（保持原样，保留 #备注）；invalid —— 无法识别的行数
+ */
+export function splitValidCandidateLines(lines: string[]): { valid: string[]; invalid: number } {
+  const valid: string[] = []
+  let invalid = 0
+  for (const line of lines) {
+    if (cleanIpLine(line)) valid.push(line)
+    else invalid++
+  }
+  return { valid, invalid }
+}
+
+/**
  * 主机名判定（不含协议/路径）。
  *
  * ⚠️ **标签允许纯数字** —— 所以 `999.1.1.1` 按域名规则是合法的。

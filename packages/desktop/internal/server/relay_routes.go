@@ -439,10 +439,29 @@ func (s *Server) handleRelayUUID(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleRelayPushResults 把全通候选写进面板的 ProxyIP 池。
+// relayPoolConfigKey 是反代优选结果写入的配置键。
+//
+// ⚠️ 是「自定义反代入口池」，**不是** `proxyIp`：
+// 两者都是「固定的反代入口」，但触发条件不同 ——
+// `relayPool` 负责「目标解析到 Cloudflare 网段」时的绕行，
+// `proxyIp` 是「配了 SOCKS5 / HTTP 落地代理」时的兜底入口。
+const relayPoolConfigKey = "relayPool"
+
+// handleRelayPushResults 把全通候选写进面板的**自定义反代入口池**。
+//
+// ## 写进哪个池
+//
+// `relayPool`（自定义反代入口池），**不是** `proxyIp`。
+//
+// 两者都是「固定的反代入口」，但触发条件不同：
+//   - `relayPool` —— 目标解析到 Cloudflare 网段时靠它绕开 TCP Loop；
+//   - `proxyIp`   —— 配了 SOCKS5 / HTTP 落地代理时的兜底入口。
+//
+// 反代优选产出的是「第三方的反代服务器」，语义上就是反代入口，
+// 写进 `relayPool` 才对。
 //
 // ⚠️ 与「回填手动优选 IP」是两回事：那个池会进订阅（每个 IP 变成一个节点），
-// 而 `proxyIp` 只影响 Worker 的出站选路，**不进订阅**。
+// 而反代入口池只影响 Worker 的出站选路，**不进订阅**。
 func (s *Server) handleRelayPushResults(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "仅支持 POST"})
@@ -492,7 +511,7 @@ func (s *Server) handleRelayPushResults(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	session, err := openPanelSession(ctx, host, password)
+	session, err := openPanelSessionFn(ctx, host, password)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -503,19 +522,19 @@ func (s *Server) handleRelayPushResults(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	existing := splitPool(strings.TrimSpace(asString(cfg["proxyIp"])))
+	existing := splitPool(strings.TrimSpace(asString(cfg[relayPoolConfigKey])))
 	next := req.IPs
 	if strings.EqualFold(req.Mode, "incremental") || strings.EqualFold(req.Mode, "append") {
 		next = mergePool(existing, req.IPs)
 	}
 
-	if _, err := session.patchConfig(ctx, map[string]any{"proxyIp": strings.Join(next, "\n")}); err != nil {
+	if _, err := session.patchConfig(ctx, map[string]any{relayPoolConfigKey: strings.Join(next, "\n")}); err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 
 	s.logLevel(
-		fmt.Sprintf("✅ 已写入面板 ProxyIP 池：%d 条（池内共 %d 条）", len(req.IPs), len(next)),
+		fmt.Sprintf("✅ 已写入面板反代入口池：%d 条（池内共 %d 条）", len(req.IPs), len(next)),
 		"ok",
 	)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -537,6 +556,19 @@ type panelSession struct {
 	base   string
 	cookie string
 	client *http.Client
+}
+
+// panelConfigClient 是「读面板配置 / 写面板配置」的能力抽象。
+//
+// 生产用真实的 panelSession；测试用假实现（避免真连控制面）。
+type panelConfigClient interface {
+	getConfig(ctx context.Context) (map[string]any, error)
+	patchConfig(ctx context.Context, patch map[string]any) (map[string]any, error)
+}
+
+// openPanelSessionFn 打开面板会话。测试可替换（与 relayFetchGuard 同一套路）。
+var openPanelSessionFn = func(ctx context.Context, host, password string) (panelConfigClient, error) {
+	return openPanelSession(ctx, host, password)
 }
 
 func openPanelSession(ctx context.Context, host, password string) (*panelSession, error) {

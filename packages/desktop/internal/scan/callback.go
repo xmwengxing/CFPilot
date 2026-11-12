@@ -47,17 +47,36 @@ type CallbackResult struct {
 //	append            保留池里已有的 IP，只补真正新的（「增量回填」）
 //
 // 空串按 replace 处理 —— 历史调用方不传时行为完全不变。
+// PushTarget 回填的目标池。
+//
+//	TargetLocal —— 本地优选池（订阅的 L1 来源）
+//	TargetRelay —— 自定义反代入口池（反代优选的产出；只影响出站选路，不进订阅）
+type PushTarget string
+
+const (
+	TargetLocal PushTarget = "local"
+	TargetRelay PushTarget = "relay"
+)
+
 func PostResults(ctx context.Context, callbackURL, token string, entries []string, mode string, timeout time.Duration) CallbackResult {
+	return PostResultsTo(ctx, callbackURL, token, entries, mode, TargetLocal, timeout)
+}
+
+// PostResultsTo 回填到指定的目标池。
+func PostResultsTo(ctx context.Context, callbackURL, token string, entries []string, mode string, target PushTarget, timeout time.Duration) CallbackResult {
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
 	if mode != "append" {
 		mode = "replace"
 	}
+	if target != TargetRelay {
+		target = TargetLocal
+	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	body, err := json.Marshal(map[string]any{"ips": entries, "mode": mode})
+	body, err := json.Marshal(map[string]any{"ips": entries, "mode": mode, "target": string(target)})
 	if err != nil {
 		return CallbackResult{Error: err.Error()}
 	}

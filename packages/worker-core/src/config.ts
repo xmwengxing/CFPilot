@@ -337,6 +337,30 @@ export async function saveConfig(store: Store, config: UserConfig): Promise<void
   await store.put(CONFIG_KEY, JSON.stringify(config))
 }
 
+/**
+ * 重新读一次 KV 里的配置（**绕过 15 秒缓存**）。
+ *
+ * ## 为什么需要
+ *
+ * getConfig 的模块级缓存有 15 秒（见 CACHE_MS）。拿缓存里的旧值去写回，
+ * 会把用户刚在面板上改的东西覆盖掉 —— 表现是「我明明刚改完，怎么又变回去了」。
+ *
+ * 回填反代入口池这类「后台改配置」的动作必须用最新值合并。
+ */
+export async function readFreshConfig(store: Store, fallback: UserConfig): Promise<UserConfig> {
+  try {
+    const raw = await store.get(CONFIG_KEY)
+    if (!raw) return fallback
+    const parsed = JSON.parse(raw) as unknown
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as UserConfig
+    }
+  } catch {
+    // 读失败（键不存在 / 不是合法 JSON）→ 用兜底值
+  }
+  return fallback
+}
+
 /** 读取本地真连接优选池原始文本 */
 export async function loadLocalIps(store: Store): Promise<string> {
   return (await store.get(LOCAL_IPS_KEY)) ?? ''

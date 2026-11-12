@@ -430,8 +430,12 @@ interface Window {
       ok: boolean
       raw: string
       count: number
+      /** 合并后的总行数（未截断前） */
+      total?: number
       selected?: number
       truncated?: boolean
+      /** 因超过行数上限而未加载的行数 */
+      dropped?: number
       errors?: string[]
     }>
 
@@ -765,7 +769,13 @@ interface Window {
     }): Promise<{ ok?: boolean; started?: boolean; count?: number; error?: string }>
     cancelRelay(): Promise<{ ok: boolean; error?: string }>
     /** 候选预览（通用）：IP 与域名都识别，界面当前用这个 */
-    parseScanCandidates(raw: string): Promise<{ candidates: string[]; count: number }>
+    parseScanCandidates(raw: string): Promise<{
+    count: number
+    /** 单次自定义候选的上限 */
+    limit: number
+    /** 识别到的个数是否超过上限 */
+    over: boolean
+  }>
     /** 候选预览（反代链路保留）：返回可识别的 IPv4 与被跳过的条数 */
     parseRelayCandidates(raw: string): Promise<{
       candidates: string[]

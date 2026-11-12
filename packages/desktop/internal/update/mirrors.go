@@ -3,6 +3,7 @@ package update
 import (
 	"context"
 	"fmt"
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/proxy"
 	"log"
 	"net/http"
 	"runtime"
@@ -109,7 +110,7 @@ func fetchReleasesFrom(ctx context.Context, url string) ([]Release, error) {
 	req.Header.Set("User-Agent", "CFPilot-Desktop")
 	req.Header.Set("Accept", "application/vnd.github+json")
 
-	client := &http.Client{Timeout: apiTimeout}
+	client := proxy.Resolve().Client(apiTimeout)
 	res, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -141,12 +142,10 @@ func fetchLatestReleaseWithoutAPI(ctx context.Context) (Release, error) {
 		}
 		req.Header.Set("User-Agent", "CFPilot-Desktop")
 
-		client := &http.Client{
-			Timeout: 15 * time.Second,
-			// 禁止自动跟随 —— 否则读不到 Location
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
+		client := proxy.Resolve().Client(15 * time.Second)
+		// 禁止自动跟随 —— 否则读不到 Location
+		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
 		}
 		res, err := client.Do(req)
 		if err != nil {

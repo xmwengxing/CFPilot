@@ -27,6 +27,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/proxy"
 	"io"
 	"net/http"
 	"net/url"
@@ -127,7 +128,7 @@ func fetchDesktopChecksums(ctx context.Context, tag string) (map[string]string, 
 	}
 	req.Header.Set("User-Agent", "CFPilot-Desktop")
 
-	client := &http.Client{Timeout: 20 * time.Second}
+	client := proxy.Resolve().Client(20 * time.Second)
 	res, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("无法获取 %s：%w", DesktopChecksumsAssetName, err)

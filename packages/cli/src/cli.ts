@@ -8,6 +8,7 @@
 
 import { parseArgs, flagBool } from './shared/args'
 import { NAME, VERSION } from './shared/version'
+import { enableEnvProxy } from './shared/proxy'
 
 const HELP = `
 ${NAME} v${VERSION}
@@ -39,6 +40,10 @@ Cloudflare Pages 代理部署与优选工具
 `
 
 async function main(): Promise<void> {
+  // ⚠️ 必须在**任何 fetch 之前**打开 —— undici 在模块加载时读这个开关，
+  //    晚了就不生效。
+  enableEnvProxy()
+
   const args = parseArgs(process.argv.slice(2))
   const command = args.command
 

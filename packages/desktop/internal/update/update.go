@@ -25,6 +25,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/proxy"
 	"io"
 	"net/http"
 	"os"
@@ -202,7 +203,7 @@ func fetchAllReleases(ctx context.Context) ([]Release, error) {
 	req.Header.Set("User-Agent", "CFPilot-Desktop")
 	req.Header.Set("Accept", "application/vnd.github+json")
 
-	client := &http.Client{Timeout: 20 * time.Second}
+	client := proxy.Resolve().Client(20 * time.Second)
 	res, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("无法连接 GitHub：%w", err)
@@ -399,7 +400,7 @@ func downloadOne(
 	}
 	req.Header.Set("User-Agent", "CFPilot-Desktop")
 
-	client := &http.Client{Timeout: 10 * time.Minute}
+	client := proxy.Resolve().Client(10 * time.Minute)
 	res, err := client.Do(req)
 	if err != nil {
 		return err

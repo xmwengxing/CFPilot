@@ -48,6 +48,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { compareSemver } from '../shared/version-util'
+import { describeProxy } from '../shared/proxy'
 import {
   RELEASES_WEB,
   apiSources,
@@ -579,10 +580,15 @@ export async function loadKernelBundle(
       }
     } catch (err) {
       // 远程下载失败 → 落回本地内置（不抛错：离线是正常情况）
+      //
+      // ⚠️ 文案要说清：部署**照常进行**，且本地内核与当前版本一致 ——
+      //    否则用户会以为部署失败了。
       log(
-        `· 远程内核 ${remote.version} 获取失败，改用内置内核：` +
+        `· 远程内核 ${remote.version} 获取失败，改用内置内核 ${currentVersion}（部署照常进行）：` +
           (err instanceof Error ? err.message : String(err))
       )
+      log(`  → 内置内核与当前版本一致，功能完整；当前访问方式：${describeProxy()}`)
+      log('  → 想要更新的内核请设置 HTTPS_PROXY 后重试')
     }
   }
 

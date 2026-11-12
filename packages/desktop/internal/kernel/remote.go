@@ -45,6 +45,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/proxy"
 	"io"
 	"log"
 	"net/http"
@@ -369,7 +370,16 @@ func LoadPreferred(ctx context.Context, currentVersion string) (*Artifacts, *Rem
 			return nil, info, fmt.Errorf(
 				"远程内核 %s 下载失败：%v；且本地内核不可用：%w", info.Version, rErr, lErr)
 		}
-		return local, info, fmt.Errorf("远程内核 %s 下载失败，已改用本地内核：%w", info.Version, rErr)
+		// ⚠️ 文案要说清三件事，否则用户会以为「部署失败了」：
+		//   1. 部署**照常进行**，用的是本地内置内核（= 当前应用版本）；
+		//   2. 本地内核与当前应用版本一致，不是「坏了」；
+		//   3. 怎么才能拿到新版 —— 开代理或设环境变量。
+		return local, info, fmt.Errorf(
+			"远程内核 %s 下载失败，已改用本地内置内核 %s（部署照常进行）。\n"+
+				"  → 本地内核与当前应用版本一致，功能完整。\n"+
+				"  → 想要更新的内核：开代理后重试，或设置环境变量 HTTPS_PROXY=http://127.0.0.1:<端口>。\n"+
+				"  → 当前访问方式：%s\n"+
+				"  → 原因：%w", info.Version, current, proxy.Resolve().Source, rErr)
 	}
 
 	// ---- 3. 用内嵌内核 ----
@@ -463,7 +473,7 @@ func downloadAssetFrom(ctx context.Context, url, name string) ([]byte, error) {
 	}
 	req.Header.Set("User-Agent", "CFPilot-Desktop")
 
-	client := &http.Client{Timeout: remoteTimeout}
+	client := proxy.Resolve().Client(remoteTimeout)
 	res, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("%w", err)

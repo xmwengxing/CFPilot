@@ -16,6 +16,22 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+
+      - name: 装 actionlint
+        # ⚠️ 必须单独跑 actionlint —— 工作流文件本身写错时，
+        #    GitHub 会在**解析阶段**就拒绝它：一次步骤都不跑，
+        #    页面只写「This run likely failed because of a workflow file issue」，
+        #    连报错位置都看不到。
+        #
+        #    踩过的坑：step 级的 `if:` 里用了 `secrets` 上下文
+        #    （GitHub 不允许），整个发布工作流连挂三次。
+        uses: docker/setup-go-action@v5
+        with:
+          go-version: '1.24'
+      - run: go install github.com/rhysd/actionlint/cmd/actionlint@latest
+      - name: actionlint
+        run: actionlint .github/workflows/*.yml
+
       - name: 类型检查
         run: npm run typecheck
       - name: 单元测试

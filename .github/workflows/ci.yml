@@ -25,7 +25,7 @@ jobs:
         #
         #    踩过的坑：step 级的 `if:` 里用了 `secrets` 上下文
         #    （GitHub 不允许），整个发布工作流连挂三次。
-        uses: docker/setup-go-action@v5
+        uses: actions/setup-go@v5
         with:
           go-version: '1.24'
       - run: go install github.com/rhysd/actionlint/cmd/actionlint@latest

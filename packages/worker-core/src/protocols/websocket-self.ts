@@ -104,6 +104,18 @@ const MAX_RETAINED_TOTAL_BYTES = 32 * 1024 * 1024
 let retainedTotalBytes = 0
 
 /**
+ * 拨号窗口暂存（pendingUplink）的 isolate 级总量（审计 L5）。
+ *
+ * retained 有 isolate 总预算，但拨号期间（writer 未就绪）的暂存原先只有单连接
+ * 8MiB 上限、无总量闸门 —— 并发 20 条拨号连接各留 8MiB 就是 160MiB，顶穿 128MiB。
+ * 这里给 pendingUplink 独立的 isolate 总量上限；drain 进 retained 时把额度从
+ * 本计数转交给 retainedTotalBytes（retain 重新计入），两池不重复计数。
+ */
+const MAX_PENDING_TOTAL_BYTES = 32 * 1024 * 1024
+/** 拨号暂存池只允许通过属性更新，避免增加模块级可变 let（作用域护栏测试）。 */
+const pendingBudget = { bytes: 0 }
+
+/**
  * 截断 close reason 到 RFC 6455 允许的长度。
  *
  * 超出 123 字节会让 Cloudflare 边缘**静默丢弃 close frame**（真机实测）。
@@ -451,6 +463,8 @@ export async function handleWebSocket(
     if (cleanupDone) return
     cleanupDone = true
     clearRetained()
+    // 归还拨号暂存的 isolate 额度（审计 L5），再清空缓冲。
+    pendingBudget.bytes = Math.max(0, pendingBudget.bytes - pendingUplinkBytes)
     pendingUplink = []
     pendingUplinkBytes = 0
     clearFirstPacketTimer()
@@ -729,6 +743,9 @@ export async function handleWebSocket(
     pendingUplink = []
     pendingUplinkBytes = 0
     for (const chunk of pending) {
+      // 额度从「拨号暂存池」转交给「留存池」：先归还 pending 计数，
+      // retain 会重新计入 retainedTotalBytes，两池不重复计数（审计 L5）。
+      pendingBudget.bytes = Math.max(0, pendingBudget.bytes - chunk.byteLength)
       // 逐块留存：重放需要的是**原始帧边界**，拼成一块既多一次复制、也让留存配额失真。
       retain(chunk)
       await target.write(chunk)
@@ -1194,8 +1211,14 @@ export async function handleWebSocket(
       // ⚠️ 不能写成 `concatBytes(buffer, bytes)`：那会把已有全部字节每帧重拷一遍，
       // 是 O(n²)，拨号窗口里传 1 MB 就会撞穿 10 ms CPU 预算（见 `pendingUplink` 注释）。
       if (!writer) {
+        // isolate 级总预算（审计 L5）：并发拨号连接各留几 MiB 就能把内存吃穿。
+        if (pendingBudget.bytes + bytes.byteLength > MAX_PENDING_TOTAL_BYTES) {
+          closeWith(1009, '实例内存预算已满，请重试')
+          return
+        }
         pendingUplink.push(bytes)
         pendingUplinkBytes += bytes.byteLength
+        pendingBudget.bytes += bytes.byteLength
         // 兜底防内存膨胀：拨号期间暂存上限（协议头之后就是负载，允许较大值）
         if (pendingUplinkBytes > MAX_RELAY_BUFFER_BYTES) {
           closeWith(1009, '拨号期间数据过多')

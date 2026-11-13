@@ -426,7 +426,8 @@ export async function runScanCommand(args: ParsedArgs): Promise<void> {
         `  ${NAME} 本地桥接服务已启动`,
         `  监听地址：http://${host}:${handle.port}`,
         `  版本：v${BRIDGE_VERSION}`,
-        '  可用 HTTP 接口：GET /status、POST /start-scan、GET /events、GET /results',
+        `  桥接令牌：${handle.token}`,
+        '  可用 HTTP 接口：GET /status、POST /start-scan、GET /events、GET /results（请求头 x-cfpilot-bridge-token）',
         '  按 Ctrl+C 退出。',
         '',
       ].join('\n')

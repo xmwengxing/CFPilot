@@ -96,4 +96,24 @@ describe('部署失败即停', () => {
     expect(deployCalls.length).toBe(1)
     expect(warnings.length).toBe(0)
   })
+
+  it('部署受理但最终 failure 时返回 null，不让调用方继续下一面', async () => {
+    const deployCalls: string[] = []
+    const client = {
+      async deployPagesWorker(_accountId: string, name: string) {
+        deployCalls.push(name)
+        return { id: 'dep-failure' }
+      },
+      async getPagesDeployments() {
+        return [{ id: 'dep-failure', latest_stage: { status: 'failure' } }]
+      },
+    } as unknown as CloudflareClient
+    const warnings: string[] = []
+
+    const res = await deployOnce({ ...baseParams, client, warnings })
+
+    expect(res).toBeNull()
+    expect(deployCalls).toEqual(['cpdata'])
+    expect(warnings.join('\n')).toContain('未确认成功')
+  })
 })

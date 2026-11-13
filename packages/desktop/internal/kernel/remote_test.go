@@ -48,6 +48,9 @@ func fakeGitHub(t *testing.T, build func(baseURL string) []map[string]any, asset
 	var hits int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		base := "http://" + r.Host
+		// 资产名提取：兼容 /asset/<name> 与官方模板 /releases-web/download/<tag>/<name>
+		// （审计 D1/C2 修复后，FetchRemoteInfo 一律构造官方下载路径）。
+		var assetName string
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/releases"):
 			w.Header().Set("Content-Type", "application/json")
@@ -59,26 +62,30 @@ func fakeGitHub(t *testing.T, build func(baseURL string) []map[string]any, asset
 				list = []map[string]any{}
 			}
 			_ = json.NewEncoder(w).Encode(list)
+			return
 		case strings.HasPrefix(r.URL.Path, "/asset/"):
-			name := strings.TrimPrefix(r.URL.Path, "/asset/")
-			body, ok := assets[name]
-			if !ok && name == ChecksumsAssetName {
-				// 没有显式提供清单时，按当前资产内容现场生成一份 sha256sum
-				body, ok = []byte(checksumsFor(assets[ControlAssetName], assets[DataAssetName])), true
-			}
-			if !ok {
-				w.WriteHeader(http.StatusNotFound)
-				return
-			}
-			// 清单不计入「产物下载次数」：断言关心的是产物本身有没有重复下载
-			if name != ChecksumsAssetName {
-				atomic.AddInt64(&hits, 1)
-			}
-			w.Header().Set("Content-Length", fmt.Sprint(len(body)))
-			_, _ = w.Write(body)
+			assetName = strings.TrimPrefix(r.URL.Path, "/asset/")
+		case strings.Contains(r.URL.Path, "/download/"):
+			assetName = r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
 		default:
 			w.WriteHeader(http.StatusNotFound)
+			return
 		}
+		body, ok := assets[assetName]
+		if !ok && assetName == ChecksumsAssetName {
+			// 没有显式提供清单时，按当前资产内容现场生成一份 sha256sum
+			body, ok = []byte(checksumsFor(assets[ControlAssetName], assets[DataAssetName])), true
+		}
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		// 清单不计入「产物下载次数」：断言关心的是产物本身有没有重复下载
+		if assetName != ChecksumsAssetName {
+			atomic.AddInt64(&hits, 1)
+		}
+		w.Header().Set("Content-Length", fmt.Sprint(len(body)))
+		_, _ = w.Write(body)
 	}))
 	t.Cleanup(srv.Close)
 	return srv, &hits
@@ -552,5 +559,103 @@ func TestFetchRemoteKernelRejectsMissingChecksums(t *testing.T) {
 func TestFetchRemoteKernelNilInfo(t *testing.T) {
 	if _, err := FetchRemoteKernel(context.Background(), nil); err == nil {
 		t.Error("info 为 nil 时应报错")
+	}
+}
+
+// ---------- 供应链官方化（审计 D1/C2/D6/C5，与 CLI 对照）----------
+
+// 镜像 API 返回非官方资产 URL 时，下载地址仍按官方模板构造（审计 D1/C2）。
+func TestFetchRemoteInfoIgnoresMirrorAssetURLs(t *testing.T) {
+	srv, _ := fakeGitHub(t, func(base string) []map[string]any {
+		rel := releaseJSON("v0.7.6", base, true)
+		// 篡改资产 URL 指向攻击者服务器（被接管的镜像 API 形态）
+		assets := rel["assets"].([]map[string]any)
+		for _, a := range assets {
+			a["browser_download_url"] = "https://evil.example/attack/" + a["name"].(string)
+		}
+		return []map[string]any{rel}
+	}, map[string][]byte{})
+	withGitHubBase(t, srv.URL)
+
+	info, err := FetchRemoteInfo(context.Background())
+	if err != nil {
+		t.Fatalf("不该报错：%v", err)
+	}
+	if strings.Contains(info.ControlURL, "evil.example") ||
+		strings.Contains(info.DataURL, "evil.example") ||
+		strings.Contains(info.ChecksumsURL, "evil.example") {
+		t.Errorf("下载地址不得取自镜像资产 URL：%+v", info)
+	}
+	if !strings.HasPrefix(info.ControlURL, update.ReleasesWebBase+"/download/v0.7.6/") {
+		t.Errorf("控制面下载地址应按官方模板构造：%q", info.ControlURL)
+	}
+	if !strings.Contains(info.ChecksumsURL, ChecksumsAssetName) {
+		t.Errorf("清单下载地址不对：%q", info.ChecksumsURL)
+	}
+}
+
+// 携带路径穿越 tag 的发行版要被跳过（审计 D6）。
+func TestFetchRemoteInfoSkipsPathTraversalTag(t *testing.T) {
+	srv, _ := fakeGitHub(t, func(base string) []map[string]any {
+		return []map[string]any{releaseJSON("v9.9.9/../../evil", base, true)}
+	}, map[string][]byte{})
+	withGitHubBase(t, srv.URL)
+	if _, err := FetchRemoteInfo(context.Background()); err == nil {
+		t.Error("携带路径穿越 tag 的发行版应被跳过")
+	}
+}
+
+// cacheDir 拒绝含路径分隔符 / .. 的版本号（审计 D6 防御纵深）。
+func TestCacheDirRejectsPathTraversal(t *testing.T) {
+	useCacheDir(t)
+	for _, v := range []string{"../evil", "0.7.6/../../evil", "a/b", "a\\b", ""} {
+		if _, err := cacheDir(v); err == nil {
+			t.Errorf("版本号 %q 应被拒绝", v)
+		}
+	}
+	if _, err := cacheDir("0.7.6"); err != nil {
+		t.Errorf("合法版本号不应被拒绝：%v", err)
+	}
+}
+
+// 缓存清单被篡改时仍从官方重取并拒绝恶意缓存（审计 C5）。
+func TestFetchRemoteKernelRefetchesChecksumsIgnoringCachedSums(t *testing.T) {
+	cacheRoot := useCacheDir(t)
+	withoutMirrors(t)
+
+	// 预置缓存：本机攻击者植入的恶意产物 + 配套自洽清单
+	malControl := []byte("const BUILD_VERSION = \"evil1111-evil2222\";\n// evil control\n")
+	malData := []byte("const BUILD_VERSION = \"evil1111-evil2222\";\n// evil data\n")
+	dir := filepath.Join(cacheRoot, "0.7.6")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "control.js"), malControl, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "dataplane.js"), malData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SHA256SUMS"), []byte(checksumsFor(malControl, malData)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 官方清单对应合法内容（与缓存里的恶意产物不符）
+	srv, _ := fakeGitHub(t, nil, map[string][]byte{
+		ControlAssetName: []byte(fakeControlJS),
+		DataAssetName:    []byte(fakeDataJS),
+	})
+	info := &RemoteInfo{
+		Version:      "0.7.6",
+		ControlURL:   srv.URL + "/asset/" + ControlAssetName,
+		DataURL:      srv.URL + "/asset/" + DataAssetName,
+		ChecksumsURL: srv.URL + "/asset/" + ChecksumsAssetName,
+	}
+	arts, err := FetchRemoteKernel(context.Background(), info)
+	if err != nil {
+		t.Fatalf("应官方重取清单并重新下载合法产物：%v", err)
+	}
+	if string(arts.Control) != fakeControlJS {
+		t.Error("缓存清单不作信任锚：恶意缓存产物应被拒，改用官方产物")
 	}
 }

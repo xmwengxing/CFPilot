@@ -248,10 +248,14 @@ async function connectWithTimeout(
 ): Promise<SocketLike> {
   // 惰性加载：模块启动阶段不触碰 sockets，避免 isolate 启动失败（1101）
   const connect = await getConnect()
-  // ⚠️ 第二个参数才是 options —— 见函数注释
+  // ⚠️ 第二个参数才是 options —— 见函数注释。
+  // ⚠️ expectedServerHostname 必须**同时**放进 connect() 的 options（审计 L1）：
+  // 真机复核发现只传给 startTls() 不生效 —— 对端收不到 SNI、SNI 路由型代理直接 RST。
   const socket = connect(
     { hostname, port },
-    secureTransport ? { secureTransport } : undefined
+    secureTransport
+      ? { secureTransport, ...(expectedServerHostname ? { expectedServerHostname } : {}) }
+      : undefined
   ) as unknown as SocketLike
 
   /** 单阶段超时（每次等待都重新计时，避免共用一个已被消耗的计时器） */
@@ -287,9 +291,12 @@ async function connectWithTimeout(
     }
     return socket
   } catch (err) {
-    // 超时或失败后立即关闭，避免 socket 泄漏
+    // 超时或失败后关闭 socket，避免泄漏。
+    // ⚠️ 必须 fire-and-forget（审计 L2）：对**仍在建连**的 socket，close() 会等
+    // 对端 TCP 握手走完（实测约 20s，AGENTS §31.1），await 它会把失败上报拖慢整整
+    // 一个 close 窗口，竞速批次的失败转移随之卡住。立即 throw，让 close 后台收尾。
     try {
-      await (secure ?? socket).close()
+      void Promise.resolve((secure ?? socket).close()).catch(() => {})
     } catch {
       /* 已关闭 */
     }

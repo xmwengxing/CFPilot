@@ -190,3 +190,56 @@ describe('XHTTP 订阅链接', () => {
     expect(extra.noGRPCHeader).toBe(true)
   })
 })
+
+describe('XHTTP 暂存逐块记账（审计 B1）', () => {
+  beforeEach(() => {
+    clearXhttpSessions()
+    dialMock.mockReset()
+  })
+
+  it('泵出一块后，剩余 pending 块仍计入 isolate 预算', async () => {
+    const written: Uint8Array[] = []
+    // 写入首块即永久阻塞：模拟目标慢读，让剩余块留在 pending
+    const writer = new WritableStream<Uint8Array>({
+      write(chunk) {
+        written.push(chunk.slice())
+        return new Promise<void>(() => {})
+      },
+    })
+    const readable = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new Uint8Array([9, 9]))
+        c.close()
+      },
+    })
+    dialMock.mockResolvedValue({
+      readable,
+      writable: writer,
+      via: 'direct',
+      endpoint: 'example.com:443',
+      close: async () => {},
+    })
+
+    const big = new Uint8Array(10 * 1024 * 1024)
+    const post = (id: string, seq: number, body: Uint8Array) =>
+      handleXhttp(
+        new Request(`https://worker.test/xhttp/${id}/${seq}`, { method: 'POST', body: Buffer.from(body) }),
+        baseConfig,
+        []
+      )
+    // 会话 A：seq0 空载 + seq1/2/3 各 10MiB（共预留 30MiB）
+    expect((await post('b1', 0, buildSeq0(new Uint8Array(0))))!.status).toBe(200)
+    for (const seq of [1, 2, 3]) expect((await post('b1', seq, big))!.status).toBe(200)
+
+    // 触发下行 → 启动上行泵；泵归还 seq1（10MiB）后阻塞在 seq1 的写入，
+    // seq2/seq3 仍留在 pending（修复后应仍占 20MiB；旧实现全额归还则占 0）。
+    const down = (await handleXhttp(new Request('https://worker.test/xhttp/b1', { method: 'GET' }), baseConfig, []))!
+    expect(down.status).toBe(200)
+    await vi.waitFor(() => expect(written.length).toBe(1))
+
+    // 会话 B：首块 10MiB（20+10=30≤32）应过；第二块（30+10=40>32）必须被拒。
+    // 旧实现 A 全额归还后预算为 0，B 两块都会通过 —— 据此区分。
+    expect((await post('b1b', 1, big))!.status).toBe(200)
+    expect((await post('b1b', 2, big))!.status).toBe(503)
+  })
+})

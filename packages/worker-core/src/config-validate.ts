@@ -218,6 +218,20 @@ export function validateConfigPatch(patch: Record<string, unknown>): FieldError[
     }
   }
 
+  if (has('proxyMode')) {
+    const mode = String(patch.proxyMode ?? '')
+    if (!['only', 'global', 'fallback', 'smart'].includes(mode)) {
+      errors.push({ field: 'proxyMode', message: 'proxyMode 值无效' })
+    }
+  }
+
+  if (has('clientFingerprint')) {
+    const fingerprint = String(patch.clientFingerprint ?? '').trim()
+    if (fingerprint.length > 32 || !/^[A-Za-z0-9._-]*$/.test(fingerprint)) {
+      errors.push({ field: 'clientFingerprint', message: 'clientFingerprint 值无效' })
+    }
+  }
+
   if (has('subDomain')) {
     const domain = String(patch.subDomain ?? '').trim()
     // 留空是合法的（表示用请求域名）

@@ -150,6 +150,12 @@ func (s *Server) WelcomeURL() string {
 	return fmt.Sprintf("http://%s:%d/?t=%s", browseHost(s.settings.Host), s.port(), s.bootToken)
 }
 
+// WelcomeURLForLog 返回不含启动令牌的地址。
+// 启动令牌是一次性高权限凭据，不能落入持久日志或错误报告。
+func (s *Server) WelcomeURLForLog() string {
+	return fmt.Sprintf("http://%s:%d/", browseHost(s.settings.Host), s.port())
+}
+
 // ServiceURL 返回独立服务管理页的地址。
 func (s *Server) ServiceURL() string {
 	return fmt.Sprintf("http://%s:%d/service", browseHost(s.settings.Host), s.port())
@@ -713,6 +719,9 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
+	// 启动令牌只允许成功换取一次会话；验证与失效必须在同一把锁下完成，
+	// 避免并发请求双花并反复踢掉当前会话。
+	s.bootToken = ""
 	s.sessionToken = token
 	s.mu.Unlock()
 

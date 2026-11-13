@@ -752,12 +752,15 @@ export function measureThroughput(options: ThroughputOptions): Promise<Throughpu
     /** 响应头不匹配（目标没有探针端点）：立即判失败，不必等时长跑完 */
     let headerMismatch = false
     const sockets: tls.TLSSocket[] = []
+    /** 错峰建连定时器；提前失败时必须全部取消，避免后续候选残留 socket。 */
+    const staggerTimers: ReturnType<typeof setTimeout>[] = []
 
     const finish = (): void => {
       if (settled) return
       settled = true
       clearInterval(ticker)
       clearTimeout(timer)
+      for (const handle of staggerTimers) clearTimeout(handle)
       for (const s of sockets) {
         try {
           s.destroy()
@@ -801,6 +804,8 @@ export function measureThroughput(options: ThroughputOptions): Promise<Throughpu
 
     /** 单条连接的接收逻辑 */
     const openOne = (): void => {
+      // headerMismatch / 全部连接结束后，尚未到点的错峰定时器不能再创建 socket。
+      if (settled) return
       let headerDone = false
       /**
        * 响应头缓冲（Buffer 累积）。
@@ -893,7 +898,8 @@ export function measureThroughput(options: ThroughputOptions): Promise<Throughpu
 
     // 逐条建立连接，略微错开避免同时挤在同一拥塞窗口
     for (let i = 0; i < connCount; i++) {
-      setTimeout(openOne, i * 60)
+      const handle = setTimeout(openOne, i * 60)
+      staggerTimers.push(handle)
     }
   })
 }

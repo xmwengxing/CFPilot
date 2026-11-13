@@ -112,4 +112,41 @@ describe('DoH 空应答短路', () => {
       { hostname: '5.6.7.8', port: 443 },
     ])
   })
+
+  it('同一域名的并发解析共用一个在途请求（singleflight，审计 B6）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        calls.push(url)
+        // 延迟一拍，确保 6 个并发解析都在首个完成前发起
+        await new Promise((r) => setTimeout(r, 5))
+        if (url.includes('type=TXT')) return jsonResponse({ Status: 0, Answer: [] })
+        return jsonResponse({ Status: 0, Answer: [{ type: 1, data: '93.184.216.34' }] })
+      })
+    )
+
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () => resolveEndpointIps('concurrent.example', 443))
+    )
+    for (const r of results) expect(r).toContainEqual({ hostname: '93.184.216.34', port: 443 })
+    // 6 并发只发一次 TXT + 一次 A（而非 6×2）
+    expect(calls.filter((u) => u.includes('type=TXT'))).toHaveLength(1)
+    expect(calls.filter((u) => u.includes('type=A'))).toHaveLength(1)
+  })
+
+  it('空应答短缓存：重复解析不再发 DoH（负缓存，审计 B14）', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        calls.push(url)
+        return jsonResponse({ Status: 3, Answer: [] }) // NXDOMAIN
+      })
+    )
+
+    expect(await resolveEndpointIps('neg.example', 443)).toEqual([])
+    const callsAfterFirst = calls.length
+    expect(await resolveEndpointIps('neg.example', 443)).toEqual([])
+    // 命中负缓存，无新请求
+    expect(calls.length).toBe(callsAfterFirst)
+  })
 })

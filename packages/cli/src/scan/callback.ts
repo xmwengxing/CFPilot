@@ -35,10 +35,12 @@ export async function postResults(
       },
       body: JSON.stringify({ ips: entries, mode }),
       signal: AbortSignal.timeout(timeoutMs),
+      // callback 来自本地桥接请求，禁止自动跟随到内网或其它主机，
+      // 避免把 Bearer 令牌转发给重定向目标。
+      redirect: 'manual',
     })
     if (!response.ok) {
-      const text = await response.text().catch(() => '')
-      return { ok: false, status: response.status, error: `回传失败 HTTP ${response.status} ${text}`.trim() }
+      return { ok: false, status: response.status, error: `回传失败 HTTP ${response.status}` }
     }
     return { ok: true, status: response.status }
   } catch (err) {

@@ -89,7 +89,13 @@ const newSecret = (): string => randomHex(32)
  */
 export async function loadSubSecret(store: Store): Promise<string> {
   const existing = (await store.get(SUB_SECRET_KEY))?.trim()
-  if (existing) return existing
+  if (existing) {
+    // 键重新可见，说明此前的缺失窗口已结束；下一次陈旧读必须重新计时。
+    subSecretAbsentSince = 0
+    pendingSecret = null
+    localSecret = existing
+    return existing
+  }
   // 未绑定 KV（本地调试）：不写回，每次一个新密钥。
   // ⚠️ 这是**刻意**的行为：未绑定 KV 时每个请求都是新的 MemoryStore，
   // 自动写回等于每个请求一把新密钥，签出来的链接下一个请求就校验失败。
@@ -144,6 +150,10 @@ export async function rotateSubSecret(store: Store): Promise<string> {
     // 内存存储（本地调试）也写一次，保证同一实例内前后一致
     await store.put(SUB_SECRET_KEY, fresh)
   }
+  // 轮换后立即同步本 isolate 缓存，避免 KV 陈旧读继续签出/验证旧密钥。
+  localSecret = fresh
+  pendingSecret = null
+  subSecretAbsentSince = 0
   return fresh
 }
 

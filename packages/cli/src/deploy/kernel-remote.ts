@@ -147,10 +147,36 @@ export function versionFromTag(tag: string): string {
   for (const prefix of ['desktop-v', 'gui-v', 'v']) {
     if (text.startsWith(prefix)) {
       const rest = text.slice(prefix.length)
-      return /^\d+\.\d+\.\d+/.test(rest) ? rest : ''
+      // ⚠️ 必须**锚定整段**（审计 D6）：旧实现只判前缀 `^\d+\.\d+\.\d+`，
+      // 会把 `1.2.3-rc1/../../evil` 的剩余串整体当版本号返回，
+      // 后续 cacheDir(version) 据此建目录 → 路径穿越写到缓存根之外。
+      // 现在只接受纯 semver（可带 -prerelease / +build），拒绝任何尾随垃圾。
+      const m = /^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$/.exec(rest)
+      return m ? m[1]! : ''
     }
   }
   return ''
+}
+
+/**
+ * 发行版 tag 是否可安全用于构造官方下载路径（审计 D6 防御纵深）。
+ *
+ * 只允许 `v / desktop-v / gui-v` 前缀 + 纯 semver；拒绝路径分隔符、空白等
+ * 可能越出 `releases/download/<tag>/` 路径的字符。
+ */
+function isSafeReleaseTag(tag: string): boolean {
+  return /^(?:desktop-v|gui-v|v)\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(tag)
+}
+
+/**
+ * 按**官方模板**构造资产下载地址（审计 D1/C2）。
+ *
+ * 仓库基址硬编码（RELEASES_WEB），tag 已通过 isSafeReleaseTag 校验。
+ * 镜像 API 响应只用于**发现版本号**，绝不取其中的 browser_download_url ——
+ * 那份 URL 可被恶意镜像指向攻击者服务器，使「清单 + 产物」摘要自洽、校验整体失效。
+ */
+function officialAssetUrl(tag: string, assetName: string): string {
+  return `${RELEASES_WEB}/download/${tag}/${assetName}`
 }
 
 /**
@@ -180,14 +206,24 @@ export async function fetchRemoteKernelInfo(
     .sort((a, b) => compareSemver(b.version, a.version))
 
   for (const item of sorted) {
-    const controlUrl = findAssetUrl(item.release.assets ?? [], CONTROL_ASSET_NAME)
-    const dataUrl = findAssetUrl(item.release.assets ?? [], DATA_ASSET_NAME)
-    const checksumsUrl = findAssetUrl(item.release.assets ?? [], CHECKSUMS_ASSET_NAME)
-    if (!controlUrl || !dataUrl) {
+    const assets = item.release.assets ?? []
+    // 资产列表只用于判断「该发行版是否带内核产物」。
+    // ⚠️ 绝不取其中的 browser_download_url（审计 D1/C2）：release 列表可能来自
+    // 被镜像接管的 API 响应，URL 可被指向攻击者服务器，使清单与产物摘要自洽、
+    // 供应链校验整体失效。下载地址一律按官方模板构造（见 officialAssetUrl）。
+    if (!hasAsset(assets, CONTROL_ASSET_NAME) || !hasAsset(assets, DATA_ASSET_NAME)) {
       // 这个发行版没带完整的内核资产，跳过
       continue
     }
-    return { version: item.version, controlUrl, dataUrl, checksumsUrl }
+    const tag = item.release.tag_name.trim()
+    // 版本号已由 versionFromTag 锚定校验；这里再显式拒绝路径分隔符等（审计 D6）。
+    if (!isSafeReleaseTag(tag)) continue
+    return {
+      version: item.version,
+      controlUrl: officialAssetUrl(tag, CONTROL_ASSET_NAME),
+      dataUrl: officialAssetUrl(tag, DATA_ASSET_NAME),
+      checksumsUrl: officialAssetUrl(tag, CHECKSUMS_ASSET_NAME),
+    }
   }
   return null
 }
@@ -253,14 +289,15 @@ async function fetchReleasesWithFallback(timeoutMs: number): Promise<GitHubRelea
   return [pseudo]
 }
 
-/** 在附件列表里找指定名字的资产下载地址。 */
-function findAssetUrl(assets: GitHubAsset[], name: string): string {
-  // 附件名比较统一忽略大小写（摘要清单的名字里带大写 SHA256）
+/** 附件列表里是否带指定名字的资产。
+ *
+ * ⚠️ 只判**存在**，不取其中的 browser_download_url（审计 D1/C2）：
+ * 下载地址一律按官方模板构造，镜像 API 响应只用于发现版本与资产有无。
+ * 附件名比较统一忽略大小写（摘要清单的名字里带大写 SHA256）。
+ */
+function hasAsset(assets: GitHubAsset[], name: string): boolean {
   const want = name.trim().toLowerCase()
-  for (const asset of assets) {
-    if (asset.name.trim().toLowerCase() === want) return asset.browser_download_url
-  }
-  return ''
+  return assets.some((asset) => asset.name.trim().toLowerCase() === want)
 }
 
 /**
@@ -612,23 +649,13 @@ async function fetchRemoteKernel(
   const dir = cacheDir(info.version)
   const controlPath = join(dir, 'control.js')
   const dataPath = join(dir, 'dataplane.js')
-  const sumsPath = join(dir, 'SHA256SUMS')
 
-  // ---- 1. 先取（或复用）校验清单 ----
+  // ---- 1. 每次部署都从官方地址重取校验清单 ----
   //
-  // 缓存目录里的 SHA256SUMS 是上一次从**官方地址**取回的，可以复用；
-  // 没有就重新取。清单本身也参与缓存，避免每次部署都多一次网络请求。
-  let sumsText = await readCached(sumsPath)
-  let sums = sumsText ? parseChecksums(sumsText) : null
-  const sumsComplete =
-    sums !== null &&
-    sums.has(CONTROL_ASSET_NAME.toLowerCase()) &&
-    sums.has(DATA_ASSET_NAME.toLowerCase())
-  if (!sums || !sumsComplete) {
-    const fetched = await downloadChecksums(info, timeoutMs)
-    sumsText = fetched.text
-    sums = fetched.map
-  }
+  // ⚠️ 缓存里的 SHA256SUMS **不作信任锚**（审计 C5）：能写缓存目录的本机攻击者
+  // 可同时植入恶意产物与配套清单，校验自洽通过、无需触网。清单体积很小，
+  // 每次官方重取；缓存只用于产物本体（产物仍逐个对照官方清单校验）。
+  const { map: sums } = await downloadChecksums(info, timeoutMs)
 
   // ---- 2. 缓存命中也要校验（缓存文件同样会被篡改或写坏）----
   let control = await readCached(controlPath)
@@ -660,7 +687,7 @@ async function fetchRemoteKernel(
   if (!data.trim()) throw new Error('下载到的数据面产物为空')
 
   // ---- 4. 落缓存（失败不影响本次使用，只是下次要重新下载）----
-  await writeCached(sumsPath, sumsText!).catch(() => undefined)
+  // 只缓存产物本体；清单每次官方重取，不落缓存（审计 C5）。
   await writeCached(controlPath, control).catch(() => undefined)
   await writeCached(dataPath, data).catch(() => undefined)
 

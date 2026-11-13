@@ -86,6 +86,14 @@ const DOH_TIMEOUT_MS = 4000
 const CACHE_TTL_MS = 5 * 60 * 1000
 
 /**
+ * 负结果（空应答）缓存时长（ms，审计 B14）。
+ *
+ * IPv6-only / 不存在域名原先每次连接都付完整 DoH 成本（最多 8 次子请求）。
+ * 短 TTL 负缓存挡住重复查询；取 30s 而非更长，避免一次性网络抖动被缓存太久。
+ */
+const NEGATIVE_TTL_MS = 30 * 1000
+
+/**
  * 缓存条目上限。
  *
  * TTL 只保证「读到时判过期」，不会主动删记录；长期运行的 isolate
@@ -99,6 +107,20 @@ interface CacheEntry {
 }
 
 const cache = new Map<string, CacheEntry>()
+
+/**
+ * 在途解析 Promise 表（singleflight，审计 B6）。
+ *
+ * 同一未缓存域名的 N 条并发连接原先各自发 TXT+A（最多 8 次子请求），
+ * 浏览器 6 并发即可吃掉大量 50 子请求配额并倍增首包延迟。
+ * 现在并发解析共用同一个在途 Promise，每类型只发一次查询。
+ */
+const inflight = new Map<string, Promise<DnsAnswer[]>>()
+
+/** 缓存条目的有效 TTL：正结果长缓存，负结果短缓存。 */
+function entryTtl(entry: CacheEntry): number {
+  return entry.ips.length > 0 ? CACHE_TTL_MS : NEGATIVE_TTL_MS
+}
 
 /** 一条解析结果（落地 IP + 端口） */
 export interface DnsAnswer {
@@ -290,13 +312,31 @@ export async function resolveEndpointIps(
 
   const key = `${target}:${port}`
   const hit = cache.get(key)
-  if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
+  if (hit && Date.now() - hit.at < entryTtl(hit)) {
     // 命中即移到末尾，让「最久没用」排在最前，淘汰时近似 LRU
     cache.delete(key)
     cache.set(key, hit)
     return hit.ips
   }
 
+  // singleflight：同一域名的并发解析共用一个在途 Promise（审计 B6），
+  // 避免 N 条并发连接各自发 TXT+A 打穿子请求配额、倍增首包延迟。
+  const existing = inflight.get(key)
+  if (existing) return existing
+  const task = resolveUncached(target, port, key, opts).finally(() => {
+    inflight.delete(key)
+  })
+  inflight.set(key, task)
+  return task
+}
+
+/** 实际发起 DoH 查询并写缓存（含负缓存）。由 resolveEndpointIps 经 singleflight 调用。 */
+async function resolveUncached(
+  target: string,
+  port: number,
+  key: string,
+  opts: ResolveEndpointOptions
+): Promise<DnsAnswer[]> {
   const answers: DnsAnswer[] = []
 
   // ⚠️ 这里**刻意只查 A、不查 AAAA**。
@@ -355,22 +395,23 @@ export async function resolveEndpointIps(
     deduped.push(item)
   }
 
-  if (deduped.length > 0) {
-    const now = Date.now()
-    for (const [k, v] of cache) {
-      if (now - v.at >= CACHE_TTL_MS) cache.delete(k)
-    }
-    while (cache.size >= CACHE_MAX_ENTRIES) {
-      const oldest = cache.keys().next().value
-      if (oldest === undefined) break
-      cache.delete(oldest)
-    }
-    cache.set(key, { at: now, ips: deduped })
+  // 写缓存：正结果长缓存、负结果短缓存（审计 B14）。
+  // 空应答也缓存（短 TTL），挡住 IPv6-only / 不存在域名的重复 DoH 开销。
+  const now = Date.now()
+  for (const [k, v] of cache) {
+    if (now - v.at >= entryTtl(v)) cache.delete(k)
   }
+  while (cache.size >= CACHE_MAX_ENTRIES) {
+    const oldest = cache.keys().next().value
+    if (oldest === undefined) break
+    cache.delete(oldest)
+  }
+  cache.set(key, { at: now, ips: deduped })
   return deduped
 }
 
 /** 清空解析缓存（测试用） */
 export function clearDnsCache(): void {
   cache.clear()
+  inflight.clear()
 }

@@ -237,6 +237,7 @@ export async function handleApi(
   }
 
   if (path === '/logout' && method === 'POST') {
+    // destroySession 先读再删：随机伪造 Cookie 不会消耗 KV 删除配额。
     await destroySession(store, request)
     return json({ ok: true }, 200, { 'Set-Cookie': clearSessionCookie() })
   }
@@ -263,7 +264,7 @@ export async function handleApi(
   if (path === '/preferred-ips' && method === 'POST') {
     const header = request.headers.get('Authorization') ?? ''
     const token = header.startsWith('Bearer ') ? header.slice(7).trim() : header.trim()
-    const authorized = await verifyScanToken(store, token)
+    const authorized = await verifyScanToken(store, token, env)
     if (!authorized) return error('Token 校验失败', 401)
     let body: { ips?: unknown; mode?: unknown; target?: unknown }
     try {
@@ -468,6 +469,8 @@ export async function handleApi(
     const invalid = validateConfigPatch(body.config as Record<string, unknown>)
     if (invalid.length > 0) return error(describeFieldErrors(invalid), 400)
     const merged = mergeConfig(config, body.config)
+    const mergedInvalid = validateConfigPatch(merged as unknown as Record<string, unknown>)
+    if (mergedInvalid.length > 0) return error(describeFieldErrors(mergedInvalid), 400)
     await saveConfig(store, merged)
     ctx.onConfigChanged()
     return json({ ok: true, config: merged })
@@ -504,6 +507,8 @@ export async function handleApi(
     if (diff.length === 0) return json({ ok: true, applied: 0, diff: [], config })
 
     const merged = mergeConfig(config, incoming as Partial<UserConfig>)
+    const mergedInvalid = validateConfigPatch(merged as unknown as Record<string, unknown>)
+    if (mergedInvalid.length > 0) return error(describeFieldErrors(mergedInvalid), 400)
     await saveConfig(store, merged)
     ctx.onConfigChanged()
     return json({ ok: true, applied: diff.length, diff, config: merged })

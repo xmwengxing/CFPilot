@@ -156,6 +156,8 @@ export interface PagesSplitDeployResult {
    */
   panelPassword?: string
   warnings: string[]
+  /** 部署是否完整成功；旧调用方未提供时按兼容语义视为成功。 */
+  success?: boolean
 }
 
 /**
@@ -902,6 +904,7 @@ export async function deployPagesSplit(
     control: { name: options.controlProject, subdomain: '' },
     data: { name: options.dataProject, subdomain: '' },
     warnings,
+    success: true,
   }
 
   const kv = { KV: { namespace_id: options.kvNamespaceId } }
@@ -1328,6 +1331,7 @@ export async function deployPagesSplit(
       // 数据面都没部署成功，继续部署控制面只会再多一次事件；
       // 而且没有可用数据面的控制面本来也没有意义。
       warnings.push('数据面部署失败，已中止本次部署（控制面不再部署）。')
+      result.success = false
       return result
     }
     {
@@ -1412,11 +1416,14 @@ export async function deployPagesSplit(
   if (controlAttempt) {
     result.control.name = controlAttempt.project ?? controlName
     result.control.subdomain = controlAttempt.subdomain
+  } else {
+    // 控制面未确认成功：不得写成功清单，也不得向调用方报告成功。
+    result.success = false
   }
 
   /* ---------------- 4. 写回部署清单（下次更新靠它识别同源项目） ---------------- */
 
-  if (result.control.subdomain && result.data.subdomain) {
+  if (result.success !== false && result.control.subdomain && result.data.subdomain) {
     // ⚠️ 不要写 `'unknown'` 这种假版本号。
     //
     // 早年这里写 `options.localBuild ?? 'unknown'`，于是清单里留下真正的字符串
@@ -1693,7 +1700,8 @@ export async function deployOnce(params: {
           return { project: name, subdomain: slot.subdomain, deploymentId: deployment.id }
         }
         warnings.push(`${label}部署未确认成功（项目 ${name}，状态：${final?.latest_stage?.status ?? '未知'}）`)
-        return { project: name, subdomain: slot.subdomain, deploymentId: deployment.id }
+        // failure/canceled/超时一律视为失败：调用方不得继续部署下一面或写入成功清单。
+        return null
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         const blocked = /8000119|has been blocked/i.test(message)

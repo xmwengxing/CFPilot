@@ -378,13 +378,21 @@ export async function runDeployCommand(args: ParsedArgs): Promise<void> {
   })
 
   process.stdout.write(`\n${'─'.repeat(52)}\n`)
-  process.stdout.write(`控制面：https://${result.control.subdomain}${result.panelPath ?? ''}\n`)
-  process.stdout.write(`数据面：https://${result.data.subdomain}\n`)
+  if (result.control.subdomain) {
+    process.stdout.write(`控制面：https://${result.control.subdomain}${result.panelPath ?? ''}\n`)
+  }
+  if (result.data.subdomain) process.stdout.write(`数据面：https://${result.data.subdomain}\n`)
   if (result.uuid) process.stdout.write(`UUID：${result.uuid}\n`)
   if (result.wsPath) process.stdout.write(`WS 路径：${result.wsPath}\n`)
   if (result.panelPassword) process.stdout.write(`面板密码：${result.panelPassword}\n`)
 
-  process.stdout.write(`✅ 部署成功\n`)
+  const deploySucceeded = result.success !== false
+  if (deploySucceeded) {
+    process.stdout.write(`✅ 部署成功\n`)
+  } else {
+    process.exitCode = 1
+    process.stdout.write(`❌ 部署未完成\n`)
+  }
 
   if (result.warnings.length > 0) {
     process.stdout.write(`\n告警（${result.warnings.length} 条）：\n`)

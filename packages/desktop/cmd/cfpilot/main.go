@@ -170,7 +170,8 @@ func main() {
 	}
 
 	url := srv.WelcomeURL()
-	log.Printf("[cfpilot] 管理界面：%s", url)
+	// URL 中的 ?t= 是一次性高权限启动令牌，不能写入持久日志。
+	log.Printf("[cfpilot] 管理界面：%s（启动令牌已通过本地打开流程传递）", srv.WelcomeURLForLog())
 
 	// ⚠️ 允许局域网访问时的风险警告。
 	//
@@ -352,7 +353,7 @@ func main() {
 	// 所以这里降级为「无托盘模式」：服务继续跑并打开浏览器，至少还能用。
 	if app.Failed() {
 		log.Printf("[cfpilot] 托盘不可用，降级为无托盘模式（服务继续运行）")
-		log.Printf("[cfpilot] 管理界面：%s", url)
+		log.Printf("[cfpilot] 管理界面：%s（启动令牌已通过本地打开流程传递）", srv.WelcomeURLForLog())
 		if !*noBrowser {
 			if err := openBrowser(url); err != nil {
 				log.Printf("[cfpilot] 打开浏览器失败，请手动访问 %s：%v", url, err)

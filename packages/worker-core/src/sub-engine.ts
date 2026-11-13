@@ -879,6 +879,8 @@ export function clearRemoteTextCache(): void {
  */
 const BROWSER_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+/** 远程优选池单响应上限，防止 response.text() 把 isolate 内存吃满。 */
+const REMOTE_TEXT_MAX_BYTES = 2 * 1024 * 1024
 
 /**
  * 拉取远程文本（带 TTL 内存缓存）。
@@ -909,7 +911,39 @@ async function fetchText(url: string, timeoutMs: number, bypassCache = false): P
     headers: { 'User-Agent': BROWSER_USER_AGENT },
   })
   if (!response.ok) throw new Error(`HTTP ${response.status}`)
-  const text = await response.text()
+  const declared = Number(response.headers.get('content-length') ?? 0)
+  if (Number.isFinite(declared) && declared > REMOTE_TEXT_MAX_BYTES) {
+    throw new Error(`远程优选池响应超过 ${REMOTE_TEXT_MAX_BYTES} 字节上限`)
+  }
+  let text: string
+  if (!response.body) {
+    text = await response.text()
+    if (new TextEncoder().encode(text).byteLength > REMOTE_TEXT_MAX_BYTES) {
+      throw new Error(`远程优选池响应超过 ${REMOTE_TEXT_MAX_BYTES} 字节上限`)
+    }
+  } else {
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let total = 0
+    let out = ''
+    try {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        if (!value) continue
+        total += value.byteLength
+        if (total > REMOTE_TEXT_MAX_BYTES) {
+          await reader.cancel().catch(() => undefined)
+          throw new Error(`远程优选池响应超过 ${REMOTE_TEXT_MAX_BYTES} 字节上限`)
+        }
+        out += decoder.decode(value, { stream: true })
+      }
+      out += decoder.decode()
+    } finally {
+      reader.releaseLock()
+    }
+    text = out
+  }
 
   // 只有成功拿到正文才写缓存。
   // bypass 请求拿到的也是**新鲜数据**，同样写回去刷新缓存（下一次订阅就能直接受益）。
@@ -1428,6 +1462,11 @@ function yamlQuote(value: string): string {
   return `"${safe.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
 }
 
+/** client-fingerprint 允许简单 token 保持兼容输出，复杂值仍安全引用。 */
+function yamlFingerprint(value: string): string {
+  return /^[A-Za-z0-9._-]+$/.test(value) ? value : yamlQuote(value)
+}
+
 /**
  * 生成 Clash / Mihomo YAML（主组扁平，避免客户端只显示分组）
  *
@@ -1496,7 +1535,7 @@ export function renderClash(ctx: RenderContext): string {
               `    network: ws`,
               `    tls: true`,
               `    servername: ${ctx.domain}`,
-              `    client-fingerprint: ${ctx.config.clientFingerprint}`,
+              `    client-fingerprint: ${yamlFingerprint(ctx.config.clientFingerprint)}`,
               ...echLines(),
               `    ws-opts:`,
               `      path: ${yamlQuote(ctx.config.wsPath)}`,
@@ -1519,7 +1558,7 @@ export function renderClash(ctx: RenderContext): string {
               `    network: ws`,
               `    tls: true`,
               `    sni: ${ctx.domain}`,
-              `    client-fingerprint: ${ctx.config.clientFingerprint}`,
+              `    client-fingerprint: ${yamlFingerprint(ctx.config.clientFingerprint)}`,
               ...echLines(),
               `    ws-opts:`,
               `      path: ${yamlQuote(ctx.config.trojanPath)}`,

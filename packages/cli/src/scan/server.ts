@@ -14,6 +14,7 @@
  * 供脚本 / 自动化按 HTTP 接口驱动扫描。
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { randomBytes } from 'node:crypto'
 import { formatEntries, runScan, type ScanEvent, type ScanEntry } from './scan'
 import { postResults } from './callback'
 import {
@@ -148,6 +149,8 @@ interface Job {
 export interface BridgeHandle {
   server: Server
   port: number
+  /** 调用桥接 API 所需的本地鉴权令牌。 */
+  token: string
   close(): Promise<void>
 }
 
@@ -260,8 +263,18 @@ function sendJson(res: ServerResponse, status: number, data: unknown): void {
 }
 
 async function readBody(req: IncomingMessage): Promise<string> {
+  const declared = Number(req.headers['content-length'] ?? 0)
+  if (Number.isFinite(declared) && declared > MAX_BRIDGE_BODY_BYTES) {
+    throw new Error('请求体超过 2MiB 上限')
+  }
   const chunks: Buffer[] = []
-  for await (const chunk of req) chunks.push(chunk as Buffer)
+  let total = 0
+  for await (const chunk of req) {
+    const part = chunk as Buffer
+    total += part.byteLength
+    if (total > MAX_BRIDGE_BODY_BYTES) throw new Error('请求体超过 2MiB 上限')
+    chunks.push(part)
+  }
   return Buffer.concat(chunks).toString('utf8')
 }
 
@@ -314,9 +327,10 @@ function broadcast(job: Job, event: ScanEvent): void {
 export function startBridge(options: { port?: number; host?: string } = {}): Promise<BridgeHandle> {
   const host = options.host ?? '127.0.0.1'
   const port = options.port ?? DEFAULT_BRIDGE_PORT
+  const token = randomBytes(24).toString('hex')
 
   const server = createServer((req, res) => {
-    void handleRequest(req, res).catch((err) => {
+    void handleRequest(req, res, token).catch((err) => {
       sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) })
     })
   })
@@ -330,6 +344,7 @@ export function startBridge(options: { port?: number; host?: string } = {}): Pro
       resolve({
         server,
         port: boundPort,
+        token,
         close: () =>
           new Promise<void>((done) => {
             for (const job of jobs.values()) {
@@ -343,8 +358,18 @@ export function startBridge(options: { port?: number; host?: string } = {}): Pro
   })
 }
 
-async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+const MAX_BRIDGE_BODY_BYTES = 2 * 1024 * 1024
+const BRIDGE_TOKEN_HEADER = 'x-cfpilot-bridge-token'
+
+async function handleRequest(req: IncomingMessage, res: ServerResponse, bridgeToken: string): Promise<void> {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`)
+
+  // 桥接服务会驱动本机扫描并持有回填令牌，CORS 不能替代鉴权。
+  // 所有接口统一要求启动时随机生成的本地令牌；/status 也不能作为无鉴权探测口。
+  if (req.headers[BRIDGE_TOKEN_HEADER] !== bridgeToken) {
+    sendJson(res, 401, { ok: false, error: '桥接服务未授权' })
+    return
+  }
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204, corsHeaders())

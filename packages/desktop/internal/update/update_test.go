@@ -287,6 +287,11 @@ func TestReleaseVersion(t *testing.T) {
 		"release-0.7.5":  "",
 		"vfoo":           "",
 		"":               "",
+		// 审计 D6：锚定整段，拒绝尾随路径穿越等垃圾（与 CLI versionFromTag 一致）
+		"v1.2.3-rc1/../../evil": "",
+		"v1.2.3/../../evil":     "",
+		"desktop-v1.2.3foo":     "",
+		"v1.2.3+build.5":        "1.2.3+build.5",
 	}
 	for tag, want := range cases {
 		if got := releaseVersion(tag); got != want {

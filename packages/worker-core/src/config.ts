@@ -128,6 +128,13 @@ function text(value: unknown, fallback: string): string {
   return String(value)
 }
 
+/** 环境变量路径也必须与面板配置保持前导斜杠语义。 */
+function normalizeConfigPath(value: string): string {
+  const trimmed = value.trim()
+  if (!trimmed) return DEFAULT_CONFIG.wsPath
+  return `/${trimmed.replace(/^\/+/, '')}`
+}
+
 /** 从环境变量构造默认配置 */
 export function configFromEnv(env: Env): UserConfig {
   return {
@@ -135,7 +142,7 @@ export function configFromEnv(env: Env): UserConfig {
     trojanPassword: text(env.TROJAN_PASSWORD, ''),
     // WS 路径：PATH 是 旧版的历史命名，WS_PATH 是本项目的命名。
     // 两者都读，避免部署向导注入的 PATH 被静默忽略。
-    wsPath: text(env.WS_PATH || env.PATH, DEFAULT_CONFIG.wsPath),
+    wsPath: normalizeConfigPath(text(env.WS_PATH || env.PATH, DEFAULT_CONFIG.wsPath)),
     trojanPath: DEFAULT_CONFIG.trojanPath,
     xhttpPath: DEFAULT_CONFIG.xhttpPath,
     add: text(env.ADD, ''),
@@ -214,6 +221,8 @@ export function mergeConfig(base: UserConfig, override: Partial<UserConfig>): Us
       key === 'unlockProbe'
     ) {
       ;(merged as unknown as Record<string, boolean>)[key] = bool(value, false)
+    } else if (key === 'proxyMode') {
+      ;(merged as unknown as Record<string, string>)[key] = normalizeProxyMode(String(value))
     } else if (key === 'subProtocol') {
       const v = String(value)
       ;(merged as unknown as Record<string, string>)[key] = v === 'vless' || v === 'trojan' || v === 'both' ? v : 'both'

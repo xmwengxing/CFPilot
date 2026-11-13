@@ -507,4 +507,9 @@ func releaseVersion(tag string) string {
 }
 
 // semverRe 匹配 x.y.z 形式的版本号。
-var semverRe = regexp.MustCompile(`^\d+\.\d+\.\d+`)
+//
+// ⚠️ 必须**锚定整段**（审计 D6，与 CLI versionFromTag 一致）：旧实现只判前缀
+// `^\d+\.\d+\.\d+`，会把 `1.2.3-rc1/../../evil` 的剩余串整体当版本号返回，
+// 后续 kernel.cacheDir(version) 据此建目录 → 路径穿越写到缓存根之外。
+// 现在只接受纯 semver（可带 -prerelease / +build），拒绝任何尾随垃圾。
+var semverRe = regexp.MustCompile(`^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$`)

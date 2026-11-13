@@ -559,6 +559,11 @@ func MeasureThroughput(ctx context.Context, opt MeasureOptions) DownloadResult {
 	if duration <= 0 {
 		duration = defMeasureDurationMs * time.Millisecond
 	}
+	if duration < 2000*time.Millisecond {
+		// 与 CLI true-probe 的 command 层保持一致：低于 2 秒会落在慢启动期，
+		// 稳态吞吐不可比且会系统性低估快链路。
+		duration = 2000 * time.Millisecond
+	}
 	if duration > maxMeasureDurationMs*time.Millisecond {
 		duration = maxMeasureDurationMs * time.Millisecond
 	}
@@ -763,9 +768,8 @@ func MeasureThroughput(ctx context.Context, opt MeasureOptions) DownloadResult {
 			_ = tlsConn.SetReadDeadline(overallDeadline)
 			n, readErr := tlsConn.Read(buf)
 			if n > 0 {
-				var total int64
 				if headerDone {
-					total = meter.add(int64(n))
+					meter.add(int64(n))
 				} else {
 					headerBuf = append(headerBuf, buf[:n]...)
 					idx := bytes.Index(headerBuf, []byte("\r\n\r\n"))
@@ -801,15 +805,12 @@ func MeasureThroughput(ctx context.Context, opt MeasureOptions) DownloadResult {
 					}
 					headerDone = true
 					// 响应头之后的字节才算负载（可能和响应头在同一个 chunk 里）。
-					total = meter.add(int64(len(headerBuf) - idx - 4))
+					meter.add(int64(len(headerBuf) - idx - 4))
 					headerBuf = nil
 				}
-				// 收满请求的字节数就提前收工：探针端点按 bytes 封顶，
-				// 没有继续读的必要（对应 CLI 里所有 socket 读完后 finish）。
-				if total >= int64(opt.BytesWanted) {
-					finish()
-					return
-				}
+				// 不按跨连接累计字节数提前收工。
+				// CLI 口径是持续测量到 duration 或所有连接结束；按总量提前结束会在
+				// 快链路上早于 1 秒 warmup 收工，steadyMBps 退回整段平均并系统性低估。
 			}
 			if readErr != nil {
 				if !isDone() {

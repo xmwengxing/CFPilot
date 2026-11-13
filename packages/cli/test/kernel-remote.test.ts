@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { rmSync } from 'node:fs'
+import { rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { compareSemver, parseVersion } from '../src/shared/version-util'
 import {
   fetchRemoteKernelInfo,
@@ -164,6 +164,18 @@ describe('versionFromTag', () => {
     expect(versionFromTag('vnotaversion')).toBe('')
     expect(versionFromTag('')).toBe('')
   })
+
+  it('拒绝尾随路径穿越等垃圾（审计 D6）', () => {
+    expect(versionFromTag('v1.2.3-rc1/../../evil')).toBe('')
+    expect(versionFromTag('v1.2.3/../../evil')).toBe('')
+    expect(versionFromTag('desktop-v1.2.3foo')).toBe('')
+    // 首尾空白被 trim 归一（非安全问题）；内部垃圾才拒绝
+    expect(versionFromTag('v1.2.3 ')).toBe('1.2.3')
+    // 合法 semver（含预发布/构建后缀）仍接受
+    expect(versionFromTag('v1.2.3')).toBe('1.2.3')
+    expect(versionFromTag('v1.2.3-rc1')).toBe('1.2.3-rc1')
+    expect(versionFromTag('desktop-v1.2.3+build.5')).toBe('1.2.3+build.5')
+  })
 })
 
 describe('fetchRemoteKernelInfo', () => {
@@ -204,6 +216,38 @@ describe('fetchRemoteKernelInfo', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({}, false))
     await expect(fetchRemoteKernelInfo()).resolves.toBeNull()
   })
+
+  it('镜像 API 返回非官方资产 URL 时，下载地址仍按官方模板构造（审计 D1/C2）', async () => {
+    // 模拟被接管的镜像 API：资产 URL 全指向攻击者服务器
+    const evil = {
+      tag_name: 'v9.9.9',
+      draft: false,
+      prerelease: false,
+      assets: [
+        { name: CONTROL_ASSET_NAME, browser_download_url: 'https://evil.example/attack/control.js' },
+        { name: DATA_ASSET_NAME, browser_download_url: 'https://evil.example/attack/dataplane.js' },
+        { name: CHECKSUMS_ASSET_NAME, browser_download_url: 'https://evil.example/attack/SHA256SUMS' },
+      ],
+    }
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse([evil]))
+    const info = await fetchRemoteKernelInfo()
+    expect(info).not.toBeNull()
+    // 下载地址一律官方构造，绝不取镜像响应里的 URL
+    expect(info!.controlUrl).toBe(
+      'https://github.com/xmwengxing/CFPilot/releases/download/v9.9.9/cfpilot-kernel-control.js'
+    )
+    expect(info!.checksumsUrl).toBe(
+      'https://github.com/xmwengxing/CFPilot/releases/download/v9.9.9/cfpilot-kernel-SHA256SUMS'
+    )
+    expect(info!.controlUrl).not.toContain('evil.example')
+    expect(info!.dataUrl).not.toContain('evil.example')
+    expect(info!.checksumsUrl).not.toContain('evil.example')
+  })
+
+  it('携带路径穿越 tag 的发行版被跳过（审计 D6）', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse([release('v9.9.9/../../evil')]))
+    await expect(fetchRemoteKernelInfo()).resolves.toBeNull()
+  })
 })
 
 describe('loadKernelBundle', () => {
@@ -215,10 +259,12 @@ describe('loadKernelBundle', () => {
   function mockRemoteKernel(control: string, data: string, sums = checksumsFor(control, data)) {
     return async (input: unknown) => {
       const url = String(input)
-      if (url.includes('/releases')) return jsonResponse([release('v9.9.9')])
+      // ⚠️ 先按资产名匹配：官方下载 URL 形如 …/releases/download/<tag>/<name>，
+      // 也含 '/releases'，必须先于 API 列表分支判定（审计 D1/C2 修复后 URL 官方化）。
       if (url.includes('SHA256SUMS')) return textResponse(sums)
       if (url.includes('control.js')) return textResponse(control)
       if (url.includes('dataplane.js')) return textResponse(data)
+      if (url.includes('/releases')) return jsonResponse([release('v9.9.9')])
       throw new Error('unexpected url: ' + url)
     }
   }
@@ -251,11 +297,11 @@ describe('loadKernelBundle', () => {
   it('缺少校验清单 → 拒绝远程内核', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: unknown) => {
       const url = String(input)
-      if (url.includes('/releases')) return jsonResponse([release('v9.9.9')])
       // 清单取不到（发行版没发布 / 官方地址不可达）
       if (url.includes('SHA256SUMS')) return textResponse('', false)
       if (url.includes('control.js')) return textResponse('export default {remote:"control"}')
       if (url.includes('dataplane.js')) return textResponse('export default {remote:"data"}')
+      if (url.includes('/releases')) return jsonResponse([release('v9.9.9')])
       throw new Error('unexpected url: ' + url)
     })
 
@@ -288,10 +334,12 @@ describe('loadKernelBundle', () => {
   it('远程下载失败 → 回退内置并记录日志', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: unknown) => {
       const url = String(input)
-      if (url.includes('/releases')) {
-        return jsonResponse([release('v9.9.9')])
+      // 产物下载失败（清单本身正常）→ 精确覆盖「下载资产失败」分支
+      if (url.includes('control.js') || url.includes('dataplane.js')) return textResponse('', false)
+      if (url.includes('SHA256SUMS')) {
+        return textResponse(checksumsFor('export default {remote:"control"}', 'export default {remote:"data"}'))
       }
-      // 下载资产时失败
+      if (url.includes('/releases')) return jsonResponse([release('v9.9.9')])
       return textResponse('', false)
     })
 
@@ -299,5 +347,27 @@ describe('loadKernelBundle', () => {
     const bundle = await loadKernelBundle('0.7.5', { log: (m) => logs.push(m) })
     expect(bundle.source).toContain('内置')
     expect(logs.some((l) => l.includes('远程内核'))).toBe(true)
+  })
+
+  it('缓存清单被篡改时仍从官方重取并拒绝恶意缓存（审计 C5）', async () => {
+    const maliciousControl = 'export default {evil:"control"}'
+    const maliciousData = 'export default {evil:"data"}'
+    // 预置缓存：本机攻击者植入的恶意产物 + 配套自洽清单
+    const dir = join(cacheRoot, '9.9.9')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'control.js'), maliciousControl)
+    writeFileSync(join(dir, 'dataplane.js'), maliciousData)
+    writeFileSync(join(dir, 'SHA256SUMS'), checksumsFor(maliciousControl, maliciousData))
+
+    // 官方清单对应合法内容（与缓存里的恶意产物不符）
+    const legitControl = 'export default {remote:"control"}'
+    const legitData = 'export default {remote:"data"}'
+    vi.spyOn(globalThis, 'fetch').mockImplementation(mockRemoteKernel(legitControl, legitData))
+
+    const bundle = await loadKernelBundle('0.7.5')
+    // 缓存清单不作信任锚：官方重取后，恶意缓存产物校验失败 → 重新下载官方产物
+    expect(bundle.control).toContain('remote')
+    expect(bundle.control).not.toContain('evil')
+    expect(bundle.data).not.toContain('evil')
   })
 })

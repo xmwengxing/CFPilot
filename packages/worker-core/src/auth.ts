@@ -29,6 +29,7 @@
  * 10 万次 ≈ 12.3ms。故取 3 万次：仍在预算内，且比单次 SHA-256 慢约 300 倍。
  */
 import type { Store } from './store'
+import { KvStore } from './store'
 import {
   ADMIN_PW_HASH_KEY,
   ADMIN_PW_PLAIN_KEY,
@@ -41,6 +42,9 @@ import { randomHex, randomAlnum, sha256Hex, timingSafeEqual } from './util'
 
 export const SESSION_COOKIE = 'cfpilot_sess'
 const SESSION_TTL = 60 * 60 * 24 // 24 小时
+/** 刚签发会话的 isolate 桥接缓存只覆盖 KV 传播窗口，不等同于会话 TTL。 */
+const RECENT_SESSION_BRIDGE_TTL = 90
+const BOOTSTRAP_ABSENT_GRACE_MS = 90_000
 const ONE_TIME_TTL = 60 * 10 // 10 分钟
 
 export interface AuthContext {
@@ -56,6 +60,15 @@ export interface AuthContext {
 const PBKDF2_ITERATIONS = 30000
 /** 派生格式前缀 */
 const KDF_PREFIX = 'pbkdf2'
+
+/** KV 陈旧读宽限期间的引导临时状态（只用于 KvStore；不替代持久化值）。 */
+const bootstrapState = {
+  panelAbsentSince: 0,
+  pendingPanelPath: null as string | null,
+  passwordAbsentSince: 0,
+  pendingPasswordHash: null as string | null,
+  pendingGeneratedPassword: null as string | null,
+}
 
 /** 字节数组 → 小写十六进制 */
 function bytesToHex(bytes: Uint8Array): string {
@@ -166,14 +179,34 @@ export async function ensureBootstrap(
   let panelPath = (await store.get(PANEL_PATH_KEY)) ?? ''
   const envPathNorm = envPath && envPath.trim() ? normalizePath(envPath) : ''
   if (envPathNorm) {
+    bootstrapState.panelAbsentSince = 0
+    bootstrapState.pendingPanelPath = null
     // 环境变量优先：与 KV 不一致时以环境变量为准并回写
     if (panelPath !== envPathNorm) {
       panelPath = envPathNorm
       await store.put(PANEL_PATH_KEY, panelPath)
     }
-  } else if (!panelPath) {
+  } else if (panelPath) {
+    bootstrapState.panelAbsentSince = 0
+    bootstrapState.pendingPanelPath = null
+  } else if (!(store instanceof KvStore)) {
     panelPath = normalizePath(`${PANEL_PATH_DEFAULT}-${randomAlnum(6)}`)
     await store.put(PANEL_PATH_KEY, panelPath)
+  } else {
+    // KV 读不到键不等于首次引导：可能只是最终一致性传播窗口内的陈旧读。
+    const now = Date.now()
+    if (bootstrapState.panelAbsentSince === 0) bootstrapState.panelAbsentSince = now
+    if (now - bootstrapState.panelAbsentSince <= BOOTSTRAP_ABSENT_GRACE_MS) {
+      if (!bootstrapState.pendingPanelPath) {
+        bootstrapState.pendingPanelPath = normalizePath(`${PANEL_PATH_DEFAULT}-${randomAlnum(6)}`)
+      }
+      panelPath = bootstrapState.pendingPanelPath
+    } else {
+      panelPath = normalizePath(`${PANEL_PATH_DEFAULT}-${randomAlnum(6)}`)
+      await store.put(PANEL_PATH_KEY, panelPath)
+      bootstrapState.panelAbsentSince = 0
+      bootstrapState.pendingPanelPath = null
+    }
   }
 
   /* ---- 密码 ---- */
@@ -193,6 +226,9 @@ export async function ensureBootstrap(
   const envPw = envPassword && envPassword.trim() ? envPassword.trim() : ''
 
   if (envPw) {
+    bootstrapState.passwordAbsentSince = 0
+    bootstrapState.pendingPasswordHash = null
+    bootstrapState.pendingGeneratedPassword = null
     // 环境变量优先：密码变化时必须按新环境变量重新派生（重新部署即可改密码，
     // 不需要手动清 KV）；但密码未变时复用 KV 里那份哈希，避免每次引导都重写。
     if (!passwordHash || !(await hashMatches(passwordHash, envPw))) {
@@ -204,7 +240,11 @@ export async function ensureBootstrap(
     // delete 同样消耗一次写配额，所以先 get：只有确实存在残留才删。
     const plain = await store.get(ADMIN_PW_PLAIN_KEY)
     if (plain) await store.delete(ADMIN_PW_PLAIN_KEY)
-  } else if (!passwordHash) {
+  } else if (passwordHash) {
+    bootstrapState.passwordAbsentSince = 0
+    bootstrapState.pendingPasswordHash = null
+    bootstrapState.pendingGeneratedPassword = null
+  } else if (!(store instanceof KvStore)) {
     // 未注入密码：随机生成并保留明文副本供用户取回
     const password = `cfp-${randomHex(8)}`
     const salt = randomHex(8)
@@ -212,6 +252,31 @@ export async function ensureBootstrap(
     await store.put(ADMIN_PW_HASH_KEY, passwordHash)
     generatedPassword = password
     await store.put(ADMIN_PW_PLAIN_KEY, password)
+  } else {
+    // KV 读不到哈希不等于首次引导：传播窗口内只返回隔离体稳定的临时凭据，禁止写回。
+    const now = Date.now()
+    if (bootstrapState.passwordAbsentSince === 0) bootstrapState.passwordAbsentSince = now
+    if (now - bootstrapState.passwordAbsentSince <= BOOTSTRAP_ABSENT_GRACE_MS) {
+      if (!bootstrapState.pendingGeneratedPassword || !bootstrapState.pendingPasswordHash) {
+        bootstrapState.pendingGeneratedPassword = `cfp-${randomHex(8)}`
+        bootstrapState.pendingPasswordHash = await hashPassword(
+          bootstrapState.pendingGeneratedPassword,
+          randomHex(8)
+        )
+      }
+      passwordHash = bootstrapState.pendingPasswordHash
+      generatedPassword = bootstrapState.pendingGeneratedPassword
+    } else {
+      const password = `cfp-${randomHex(8)}`
+      const salt = randomHex(8)
+      passwordHash = await hashPassword(password, salt)
+      await store.put(ADMIN_PW_HASH_KEY, passwordHash)
+      generatedPassword = password
+      await store.put(ADMIN_PW_PLAIN_KEY, password)
+      bootstrapState.passwordAbsentSince = 0
+      bootstrapState.pendingPasswordHash = null
+      bootstrapState.pendingGeneratedPassword = null
+    }
   }
 
   return { panelPath, passwordHash, generatedPassword }
@@ -329,7 +394,7 @@ export async function createSession(store: Store): Promise<string> {
   await store.put(`${SESSION_PREFIX}${token}`, JSON.stringify({ ua: '', t: Date.now() }), SESSION_TTL)
   const now = Date.now()
   pruneRecentSessions(now)
-  recentSessions.set(token, now + SESSION_TTL * 1000)
+  recentSessions.set(token, now + RECENT_SESSION_BRIDGE_TTL * 1000)
   return token
 }
 
@@ -369,9 +434,22 @@ export function clearSessionCookie(): string {
 export async function destroySession(store: Store, request: Request): Promise<void> {
   const token = parseCookies(request)[SESSION_COOKIE]
   if (!token) return
+  const key = `${SESSION_PREFIX}${token}`
   // ⚠️ isolate 缓存也要清 —— 否则注销后本 isolate 仍然认这个会话。
+  const recentlyIssued = recentSessions.has(token)
   recentSessions.delete(token)
-  await store.delete(`${SESSION_PREFIX}${token}`)
+  // 本 isolate 刚签发的会话：KV 可能还没传播到，但确实是我们签发的真实会话，直接删。
+  if (recentlyIssued) {
+    await store.delete(key)
+    return
+  }
+  // 其余情况**先读再删**：delete 同样占 KV 写配额（AGENTS §1.30）。
+  // /logout 在会话鉴权门之前（注销不需要先登录），若携带随机伪造的 Cookie，
+  // 键在 KV 里根本不存在 —— 先读判定可避免每次请求都白耗一次写配额。
+  // 否则攻击者无需任何凭据，1000 次请求即打光当日配额，
+  // 之后登录发会话 / 保存配置 / 回填优选全部 500，实例写面瘫痪。
+  const existing = await store.get(key)
+  if (existing) await store.delete(key)
 }
 
 /** 签发一次性扫描令牌（10 分钟有效，用后即焚） */
@@ -382,10 +460,17 @@ export async function issueOneTimeToken(store: Store): Promise<string> {
 }
 
 /** 校验扫描回调令牌：支持长期 SCANNER_TOKEN 与一次性令牌 */
-export async function verifyScanToken(store: Store, provided: string | null): Promise<boolean> {
+export async function verifyScanToken(
+  store: Store,
+  provided: string | null,
+  env?: { SCANNER_TOKEN?: string }
+): Promise<boolean> {
   if (!provided) return false
   const longTerm = await store.get('SCANNER_TOKEN')
   if (longTerm && timingSafeEqual(longTerm, provided)) return true
+  // 部署向导注入的长期令牌位于环境变量；KV 优先，环境变量作为回退。
+  const envToken = env?.SCANNER_TOKEN?.trim()
+  if (envToken && timingSafeEqual(envToken, provided)) return true
   const oneTime = await store.get(`${ONE_TIME_TOKEN_PREFIX}${provided}`)
   if (oneTime) {
     await store.delete(`${ONE_TIME_TOKEN_PREFIX}${provided}`)

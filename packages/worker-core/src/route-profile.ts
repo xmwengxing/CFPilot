@@ -469,7 +469,10 @@ function resolveMember(member: string, mainGroup: string, autoGroup: string): st
 /** YAML 字符串：含特殊字符时加双引号 */
 function yamlStr(value: string): string {
   if (/^[A-Za-z0-9._-]+$/.test(value)) return value
-  return `"${value.replace(/"/g, '\\"')}"`
+  // 双引号 YAML 标量必须先转义反斜杠，再转义双引号；控制字符直接剔除，
+  // 否则自定义组名可能生成非法 YAML 或注入后续键（审计 A10）。
+  const safe = value.replace(/[\u0000-\u001f\u007f]/g, '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  return `"${safe}"`
 }
 
 /**

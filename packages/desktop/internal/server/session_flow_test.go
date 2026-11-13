@@ -65,7 +65,8 @@ func TestSessionFlowFullPath(t *testing.T) {
 	}
 
 	// ---- 2. 前端换会话（adapter.js 的动作）----
-	sessionRes, err := http.Get(base + "/__session?t=" + s.BootToken())
+	bootToken := s.BootToken()
+	sessionRes, err := http.Get(base + "/__session?t=" + bootToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,6 +84,17 @@ func TestSessionFlowFullPath(t *testing.T) {
 	}
 	if cookie == nil {
 		t.Fatal("换会话没有返回 Cookie")
+	}
+
+	// 启动令牌是一次性凭据：首次换取成功后再次使用必须拒绝，
+	// 避免日志/浏览器历史中的令牌在进程生命周期内持续可换会话。
+	replay, err := http.Get(base + "/__session?t=" + bootToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = replay.Body.Close()
+	if replay.StatusCode != http.StatusForbidden {
+		t.Fatalf("启动令牌重复使用应 403，实际 %d", replay.StatusCode)
 	}
 
 	// ---- 3. 带 Cookie 调各种 API（界面初始化时全部会调）----

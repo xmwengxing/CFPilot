@@ -51,6 +51,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -108,7 +109,9 @@ const remoteQueryTimeout = 6 * time.Second
 type RemoteInfo struct {
 	// Version 是远程内核版本（semver，如 "0.7.6"）
 	Version string
-	// ControlURL / DataURL 是两个内核产物的下载地址
+	// Tag 是发行版 tag（如 "v0.7.6"），用于按官方模板构造下载地址。
+	Tag string
+	// ControlURL / DataURL 是两个内核产物的下载地址（一律官方构造，见 officialAssetURL）
 	ControlURL string
 	DataURL    string
 	// ChecksumsURL 是摘要清单的下载地址（空串 = 该发行版没有清单）
@@ -127,36 +130,63 @@ func FetchRemoteInfo(ctx context.Context) (*RemoteInfo, error) {
 		return nil, err
 	}
 	for _, rel := range releases {
-		controlURL, dataURL, checksumsURL := findKernelAssets(rel.Assets)
-		if controlURL == "" || dataURL == "" {
+		// 资产列表只用于判断「该发行版是否带内核产物」。
+		// ⚠️ 绝不取其中的 browser_download_url（审计 D1/C2，与 CLI 一致）：
+		// release 列表可能来自被镜像接管的 API 响应，URL 可被指向攻击者服务器，
+		// 使清单与产物摘要自洽、供应链校验整体失效。下载地址一律按官方模板构造。
+		if !hasKernelAssets(rel.Assets) {
 			// 这个发行版没带完整的内核资产，跳过
+			continue
+		}
+		tag := strings.TrimSpace(rel.Tag)
+		// 版本号已由 releaseVersion 锚定校验；这里再显式拒绝路径分隔符等（审计 D6）。
+		if !isSafeReleaseTag(tag) {
 			continue
 		}
 		return &RemoteInfo{
 			Version:      rel.Version,
-			ControlURL:   controlURL,
-			DataURL:      dataURL,
-			ChecksumsURL: checksumsURL,
+			Tag:          tag,
+			ControlURL:   officialAssetURL(tag, ControlAssetName),
+			DataURL:      officialAssetURL(tag, DataAssetName),
+			ChecksumsURL: officialAssetURL(tag, ChecksumsAssetName),
 		}, nil
 	}
 	return nil, fmt.Errorf("没有找到带内核产物的发行版")
 }
 
-// findKernelAssets 在附件列表里找内核产物与摘要清单。
+// hasKernelAssets 判断附件列表是否同时带两个内核产物。
 //
-// 返回空串表示没找到。
-func findKernelAssets(assets []update.Asset) (controlURL, dataURL, checksumsURL string) {
+// ⚠️ 只判**存在**，不取其中的 browser_download_url（审计 D1/C2）：
+// 下载地址一律按官方模板构造，镜像 API 响应只用于发现版本与资产有无。
+func hasKernelAssets(assets []update.Asset) bool {
+	var hasControl, hasData bool
 	for _, a := range assets {
 		switch strings.ToLower(strings.TrimSpace(a.Name)) {
 		case ControlAssetName:
-			controlURL = a.URL
+			hasControl = true
 		case DataAssetName:
-			dataURL = a.URL
-		case strings.ToLower(ChecksumsAssetName):
-			checksumsURL = a.URL
+			hasData = true
 		}
 	}
-	return controlURL, dataURL, checksumsURL
+	return hasControl && hasData
+}
+
+// safeReleaseTagRe 只允许 v / desktop-v / gui-v 前缀 + 纯 semver（审计 D6）。
+var safeReleaseTagRe = regexp.MustCompile(`^(?:desktop-v|gui-v|v)\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$`)
+
+// isSafeReleaseTag 判断 tag 是否可安全用于构造官方下载路径。
+//
+// 拒绝路径分隔符、空白等可能越出 `releases/download/<tag>/` 路径的字符。
+func isSafeReleaseTag(tag string) bool {
+	return safeReleaseTagRe.MatchString(tag)
+}
+
+// officialAssetURL 按**官方模板**构造资产下载地址（审计 D1/C2）。
+//
+// 仓库基址硬编码（update.ReleasesWebBase），tag 已通过 isSafeReleaseTag 校验。
+// 与 CLI 版 kernel-remote.ts 的 officialAssetUrl、桌面自更新 verify.go 同口径。
+func officialAssetURL(tag, assetName string) string {
+	return update.ReleasesWebBase + "/download/" + tag + "/" + assetName
 }
 
 // FetchRemoteKernel 下载指定版本的内核产物，缓存到 ~/.cfpilot-gui/kernel/<version>/。
@@ -180,18 +210,15 @@ func FetchRemoteKernel(ctx context.Context, info *RemoteInfo) (*Artifacts, error
 	}
 	controlPath := filepath.Join(dir, "control.js")
 	dataPath := filepath.Join(dir, "dataplane.js")
-	sumsPath := filepath.Join(dir, "SHA256SUMS")
 
-	// ---- 1. 先取（或复用）校验清单 ----
-	sumsText := readCached(sumsPath)
-	sums := parseChecksums(string(sumsText))
-	if !hasBothDigests(sums) {
-		fetched, fetchedSums, fetchErr := downloadChecksums(ctx, info)
-		if fetchErr != nil {
-			return nil, fetchErr
-		}
-		sumsText = []byte(fetched)
-		sums = fetchedSums
+	// ---- 1. 每次部署都从官方地址重取校验清单 ----
+	//
+	// ⚠️ 缓存里的 SHA256SUMS 不作信任锚（审计 C5，与 CLI 一致）：能写缓存目录的
+	// 本机攻击者可同时植入恶意产物与配套清单，校验自洽通过、无需触网。清单体积很小，
+	// 每次官方重取；缓存只用于产物本体（产物仍逐个对照官方清单校验）。
+	_, sums, fetchErr := downloadChecksums(ctx, info)
+	if fetchErr != nil {
+		return nil, fetchErr
 	}
 
 	// ---- 2. 缓存命中也要校验（缓存文件同样会被篡改或写坏）----
@@ -242,9 +269,7 @@ func FetchRemoteKernel(ctx context.Context, info *RemoteInfo) (*Artifacts, error
 	}
 
 	// ---- 4. 落缓存（失败不影响本次使用，只是下次要重新下载）----
-	if err := writeCached(sumsPath, sumsText); err != nil {
-		log.Printf("[cfpilot] 写入内核缓存失败：%v", err)
-	}
+	// 只缓存产物本体；清单每次官方重取，不落缓存（审计 C5）。
 	if err := writeCached(controlPath, control); err != nil {
 		log.Printf("[cfpilot] 写入内核缓存失败：%v", err)
 	}
@@ -404,6 +429,10 @@ func loadLocal(version string) (*Artifacts, error) {
 //
 // 默认在 ~/.cfpilot-gui/kernel/<版本>/（桌面版本地数据的统一位置）。
 func cacheDir(version string) (string, error) {
+	// 审计 D6：拒绝路径分隔符 / ..，防止恶意版本号越出缓存根目录。
+	if version == "" || strings.ContainsAny(version, "/\\") || strings.Contains(version, "..") {
+		return "", fmt.Errorf("非法的内核版本号：%q", version)
+	}
 	root := strings.TrimSpace(os.Getenv(cacheDirEnv))
 	if root == "" {
 		home, err := os.UserHomeDir()

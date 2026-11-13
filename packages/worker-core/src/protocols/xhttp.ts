@@ -263,6 +263,22 @@ function releaseSessionRetained(session: XhttpSession): void {
 }
 
 /**
+ * 归还**指定字节数**的暂存额度（逐块记账，审计 B1）。
+ *
+ * ⚠️ 泵出一块时只能归还**这一块**的字节，不能调 releaseSessionRetained 全额归还 ——
+ * 否则首块泵出后，pending 里剩余块（最多 29×10MB）就不再计入 isolate 预算，
+ * 新 POST 又能再预留 32MiB；目标慢读时单会话实际暂存可达 300MB，顶穿 128MB（1101）。
+ * 每块预留字节恰等于其 byteLength（见 handleSessionUplink 的 reserveRetained 调用），
+ * 故按块归还与实际暂存始终一致；会话关闭时剩余预留仍由 releaseSessionRetained 兜底归还。
+ */
+function releaseRetainedBytes(session: XhttpSession, bytes: number): void {
+  if (bytes <= 0) return
+  const give = Math.min(bytes, session.reservedBytes)
+  retainedTotalBytes = Math.max(0, retainedTotalBytes - give)
+  session.reservedBytes -= give
+}
+
+/**
  * 预留 isolate 级暂存额度；超限返回 false（调用方应拒绝并关闭会话）。
  *
  * 注意：预留发生在**写入 pending 之前**，所以额度与实际暂存始终一致；
@@ -343,13 +359,13 @@ function getOrCreateSession(
   authenticated: boolean
 ): XhttpSession | null {
   const now = Date.now()
-  // 惰性清理过期与闲置会话，避免无界增长
+  // 惰性清理过期与闲置会话，避免无界增长；活跃隧道不受 createdAt 硬上限影响。
   //
   // ⚠️ 这里必须走 closeSession（而不是直接 delete）：
   // 直接 delete 会**漏掉暂存字节的归还**，额度只增不减 ——
   // 跑到一定量之后所有新会话都会被 503 拒掉（假死）。
   for (const [key, value] of XHTTP_SESSIONS) {
-    if (value.closed || isSessionIdle(value, now) || now - value.createdAt > 30 * 60_000) {
+    if (value.closed || isSessionIdle(value, now) || (!value.header && now - value.createdAt > 30 * 60_000)) {
       closeSession(key, value)
     }
   }
@@ -566,8 +582,8 @@ async function pumpUplink(session: XhttpSession, dialResult: DialResult): Promis
       if (chunk) {
         session.pending.delete(session.nextPumpSeq)
         session.nextPumpSeq += 1
-        // 泵出即归还暂存额度（否则额度只增不减，最终把所有会话都拒掉）
-        releaseSessionRetained(session)
+        // 泵出一块只归还**这一块**的额度（审计 B1：全额归还会使剩余块脱离 isolate 预算）
+        releaseRetainedBytes(session, chunk.byteLength)
         if (chunk.byteLength === 0) continue
         if (session.traffic.add(chunk.byteLength)) {
           recordXhttpDiagnostics(session.targetLabel, { kind: 'budget', message: '流量超限', candidate: 'traffic' }, 'XHTTP 上行流量超限')

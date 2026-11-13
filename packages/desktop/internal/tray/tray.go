@@ -546,7 +546,8 @@ func (a *App) toggle() {
 }
 
 func (a *App) copyURL() {
-	url := fmt.Sprintf("http://%s:%d/", a.srv.Settings().Host, a.srv.Settings().Port)
+	// 复制完整欢迎链接，包含本机启动令牌；用户可粘贴到另一个浏览器建立独立会话。
+	url := a.srv.WelcomeURL()
 	if err := copyToClipboard(url); err != nil {
 		log.Printf("[cfpilot] 复制失败：%v", err)
 	}

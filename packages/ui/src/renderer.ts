@@ -3558,7 +3558,7 @@ import {
           if (host.ok && host.host) {
             $('optHost').value = host.host
             const source = host.source ?? ''
-            if (source.includes('自定义域名')) {
+            if (source === 'custom' || source.includes('自定义域名')) {
               log(`已填入自定义域名：${host.host}`, 'ok')
             } else {
               log(`已填入 ${host.host}（来源：${source || '未知'}）`, 'warn')

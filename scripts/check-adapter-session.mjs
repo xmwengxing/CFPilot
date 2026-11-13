@@ -56,7 +56,10 @@ async function runAdapter(opts) {
     const u = String(url)
     fetched.push(u)
     if (u.startsWith('/__session')) {
-      return { ok: opts.tokenStatus === 200, status: opts.tokenStatus, text: async () => '' }
+      // 带 t= 的欢迎链接或首页下发的 BootCookie 才能换会话；
+      // 无令牌刷新场景下，旧服务应 403，再回退探测已有 Cookie。
+      const status = opts.search ? opts.tokenStatus : 403
+      return { ok: status === 200, status, text: async () => '' }
     }
     if (u.startsWith('/api/service/status')) {
       return { ok: opts.sessionStatus === 200, status: opts.sessionStatus, text: async () => '' }

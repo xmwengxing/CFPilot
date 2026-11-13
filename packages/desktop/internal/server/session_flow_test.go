@@ -86,15 +86,30 @@ func TestSessionFlowFullPath(t *testing.T) {
 		t.Fatal("换会话没有返回 Cookie")
 	}
 
-	// 启动令牌是一次性凭据：首次换取成功后再次使用必须拒绝，
-	// 避免日志/浏览器历史中的令牌在进程生命周期内持续可换会话。
+	// 另一个浏览器使用欢迎链接应能建立独立会话，不影响已有 Cookie。
 	replay, err := http.Get(base + "/__session?t=" + bootToken)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = replay.Body.Close()
-	if replay.StatusCode != http.StatusForbidden {
-		t.Fatalf("启动令牌重复使用应 403，实际 %d", replay.StatusCode)
+	defer func() { _ = replay.Body.Close() }()
+	if replay.StatusCode != http.StatusOK {
+		t.Fatalf("第二个浏览器换取会话应 200，实际 %d", replay.StatusCode)
+	}
+	var secondCookie *http.Cookie
+	for _, c := range replay.Cookies() {
+		if c.Name == SessionCookie {
+			secondCookie = c
+		}
+	}
+	if secondCookie == nil || secondCookie.Value == cookie.Value {
+		t.Fatal("第二个浏览器应得到独立会话 Cookie")
+	}
+
+	// 两个浏览器的会话应并行有效，互不踢下线。
+	for _, c := range []*http.Cookie{cookie, secondCookie} {
+		if code := doGet(t, base+"/api/service/status", map[string]string{"Cookie": c.String()}); code != http.StatusOK {
+			t.Fatalf("并行浏览器会话应可用，实际 HTTP %d", code)
+		}
 	}
 
 	// ---- 3. 带 Cookie 调各种 API（界面初始化时全部会调）----

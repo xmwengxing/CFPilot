@@ -11,9 +11,9 @@
 // 这个服务能读写 Cloudflare Token，是本地的高价值目标，因此：
 //
 //  1. **只监听回环地址**（127.0.0.1），不监听 0.0.0.0 —— 局域网不可达。
-//  2. **启动令牌**：进程启动时生成一次性 token，拼在欢迎 URL 里。
-//     首次访问用它换一个 HttpOnly Cookie，之后的 API 请求只认 Cookie。
-//     这样别的网页没法直接调用本服务的 API（它拿不到 token）。
+//  2. **启动令牌 + 独立会话**：进程启动时生成随机 token，拼在欢迎 URL 里。
+//     每个浏览器用它换取独立的 HttpOnly Cookie 会话；服务端并行维护多个会话，
+//     一个浏览器建立会话不会使其它浏览器下线。这样别的网页没法直接调用本服务的 API（它拿不到 token）。
 //  3. **Origin 校验**：凡是带 Origin 头的请求，必须是本站 Origin。
 //     防止恶意网页用跨站请求打本地端口。
 //  4. **Host 校验**：只接受 localhost / 127.0.0.1 的 Host 头，
@@ -49,8 +49,12 @@ import (
 //go:embed all:assets
 var embeddedFS embed.FS
 
-// SessionCookie 是换取会话用的 Cookie 名。
+// SessionCookie 是 API 鉴权用的 HttpOnly Cookie 名。
 const SessionCookie = "cfpilot_session"
+
+// BootCookie 是直接打开本地首页时下发的短期引导 Cookie 名。
+const BootCookie = "cfpilot_boot"
+const bootCookieTTL = 10 * time.Minute
 
 // allowScheduledTasks 本平台是否提供「定时优选任务」。
 //
@@ -70,9 +74,9 @@ const allowScheduledTasks = runtime.GOOS != "android"
 type Server struct {
 	mu       sync.RWMutex
 	settings config.DesktopSettings
-	// sessionToken 是当前有效的会话令牌（HttpOnly Cookie 的值）
-	sessionToken string
-	// bootToken 是启动时打印在 URL 里的一次性令牌
+	// sessions 保存各浏览器的独立会话及服务端到期时间。
+	sessions map[string]time.Time
+	// bootToken 是进程级欢迎链接凭据，不写入持久日志，可供多个浏览器建立独立会话。
 	bootToken string
 	listener  net.Listener
 	httpSrv   *http.Server
@@ -117,6 +121,7 @@ func New(settings config.DesktopSettings) (*Server, error) {
 	return &Server{
 		settings:    settings,
 		bootToken:   boot,
+		sessions:    make(map[string]time.Time),
 		startedAt:   time.Now(),
 		store:       store.New(""),
 		events:      newEventBus(),
@@ -140,14 +145,20 @@ func (s *Server) SetCFAPIBase(base string) {
 	s.cfBase = base
 }
 
-// BootToken 返回一次性启动令牌（供托盘「打开界面」拼接 URL）。
+// BootToken 返回本进程内的启动令牌（供托盘「打开界面」拼接 URL）。
 func (s *Server) BootToken() string {
+	return s.bootTokenValue()
+}
+
+func (s *Server) bootTokenValue() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.bootToken
 }
 
 // WelcomeURL 返回带启动令牌的欢迎地址。
 func (s *Server) WelcomeURL() string {
-	return fmt.Sprintf("http://%s:%d/?t=%s", browseHost(s.settings.Host), s.port(), s.bootToken)
+	return fmt.Sprintf("http://%s:%d/?t=%s", browseHost(s.settings.Host), s.port(), s.bootTokenValue())
 }
 
 // WelcomeURLForLog 返回不含启动令牌的地址。
@@ -357,6 +368,12 @@ func (s *Server) routes() http.Handler {
 		w.Header().Set("Pragma", "no-cache")
 		// 首页单独走：返回注入了能力标志的版本。
 		if p := r.URL.Path; p == "/" || p == "/index.html" {
+			// 直接输入本地地址的浏览器没有 ?t= 欢迎参数。下发短期引导 Cookie，
+			// 让 Chrome/Firefox 等浏览器也能建立自己的独立会话；API 仍只认 session Cookie。
+			http.SetCookie(w, &http.Cookie{
+				Name: BootCookie, Value: s.bootTokenValue(), Path: "/", MaxAge: int(bootCookieTTL.Seconds()),
+				HttpOnly: true, SameSite: http.SameSiteLaxMode,
+			})
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			_, _ = w.Write(indexHTML)
 			return
@@ -688,12 +705,9 @@ func (s *Server) hasValidSession(r *http.Request) bool {
 		return false
 	}
 	s.mu.RLock()
-	want := s.sessionToken
+	expiresAt, ok := s.sessions[c.Value]
 	s.mu.RUnlock()
-	if want == "" || c.Value == "" {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(c.Value), []byte(want)) == 1
+	return ok && c.Value != "" && time.Now().Before(expiresAt)
 }
 
 func (s *Server) originAllowed(origin, host string) bool {
@@ -709,7 +723,13 @@ func (s *Server) originAllowed(origin, host string) bool {
 
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	t := r.URL.Query().Get("t")
-	if t == "" || subtle.ConstantTimeCompare([]byte(t), []byte(s.bootToken)) != 1 {
+	if t == "" {
+		if c, err := r.Cookie(BootCookie); err == nil {
+			t = c.Value
+		}
+	}
+	wantBoot := s.bootTokenValue()
+	if t == "" || subtle.ConstantTimeCompare([]byte(t), []byte(wantBoot)) != 1 {
 		http.Error(w, "启动令牌无效", http.StatusForbidden)
 		return
 	}
@@ -719,10 +739,23 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	// 启动令牌只允许成功换取一次会话；验证与失效必须在同一把锁下完成，
-	// 避免并发请求双花并反复踢掉当前会话。
-	s.bootToken = ""
-	s.sessionToken = token
+	// 每个浏览器独立建会话，不能覆盖其它浏览器的 Cookie。
+	now := time.Now()
+	if s.sessions == nil {
+		s.sessions = make(map[string]time.Time)
+	}
+	for key, expiry := range s.sessions {
+		if !now.Before(expiry) {
+			delete(s.sessions, key)
+		}
+	}
+	// 容量满时拒绝新会话，不驱逐正在使用的浏览器。
+	if len(s.sessions) >= 64 {
+		s.mu.Unlock()
+		http.Error(w, "会话数量已达上限，请稍后重试", http.StatusTooManyRequests)
+		return
+	}
+	s.sessions[token] = now.Add(12 * time.Hour)
 	s.mu.Unlock()
 
 	http.SetCookie(w, &http.Cookie{

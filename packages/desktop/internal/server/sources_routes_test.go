@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/config"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/scan"
@@ -24,7 +25,7 @@ func newSourcesAPIServer(t *testing.T) (*httptest.Server, *http.Client, string) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.sessionToken = "test-session-token"
+	s.sessions["test-session-token"] = time.Now().Add(time.Hour)
 	ts := httptest.NewServer(s.routes())
 	t.Cleanup(ts.Close)
 	return ts, ts.Client(), ts.URL

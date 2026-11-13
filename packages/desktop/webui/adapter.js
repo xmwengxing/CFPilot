@@ -78,14 +78,18 @@
       // → 实时日志（优选进度、部署日志）全部收不到。
       // 表现：点「开始优选」后运行日志窗口一片空白。
       //
-      // 所以这里**探一次**：拿现有的会话 Cookie 问一个受保护的接口，
-      // 通了就算会话还在（后面的 SSE 就能带上 Cookie 建立）。
-      return fetch('/api/service/status', {
+      // 先用首页下发的短期 BootCookie 换取当前浏览器自己的会话；
+      // 如果已有 session Cookie，则服务端会返回新的独立会话，多个浏览器互不覆盖。
+      return fetch('/__session', {
         method: 'GET',
         credentials: 'same-origin',
       })
         .then(function (res) {
-          return res.ok
+          if (res.ok) return true
+          // 兼容旧服务：没有 BootCookie 时再探测已有 session Cookie。
+          return fetch('/api/service/status', { credentials: 'same-origin' }).then(function (probe) {
+            return probe.ok
+          })
         })
         .catch(function () {
           return false
@@ -109,7 +113,7 @@
       })
       .then(function (ok) {
         // 令牌用过就从地址栏抹掉，避免：
-        //   1. 刷新页面时重复使用（后端一次性令牌，第二次会 403）
+        //   1. 减少令牌留在地址栏、截图和分享中的机会
         //   2. 截图/分享时泄露令牌
         try {
           if (ok && location.search) {
@@ -138,7 +142,9 @@
    */
   async function call(method, path, body) {
     // 等会话建立完成（已建立则立即返回）
-    await sessionReady
+    if (!(await sessionReady)) {
+      throw new Error('当前浏览器尚未授权：请使用托盘打开的完整欢迎链接；不同浏览器不共享登录 Cookie。')
+    }
 
     const opts = {
       method: method,

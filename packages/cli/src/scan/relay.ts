@@ -473,6 +473,15 @@ async function resolveVerifyHosts(userRaw: string, quiet: boolean): Promise<stri
  * 链路与 probeOne 一致，只是 TLS SNI 与 HTTP Host 换成校验网址；
  * 收到任何 HTTP 状态行都算转发成功（403 也证明 SNI 转发到了 CF 边缘）。
  */
+/** 已知「边缘拦截页」标记：403 且 body 精确命中其一 → 该入口出口被目标站拦截。 */
+const WAF_BLOCK_MARKS = new Set(['IPv6'])
+
+/** 与 Go 版 internal/relay/probe.go 的 isWafBlockPage 同口径（改一处必须同步另一处）。 */
+function isWafBlockPage(status: number, body: string): boolean {
+  if (status !== 403 || body.length > 64) return false
+  return WAF_BLOCK_MARKS.has(body.trim())
+}
+
 async function verifyOne(
   opts: { wsUrl: string; uuid: string },
   ip: string,
@@ -497,9 +506,11 @@ async function verifyOne(
       s.once('error', reject)
     })
     socket.write(
-      `GET / HTTP/1.1\r\nHost: ${verifyHost}\r\nUser-Agent: cfpilot-relay-verify\r\nConnection: close\r\n\r\n`
+      `POST / HTTP/1.1\r\nHost: ${verifyHost}\r\nContent-Length: 0\r\nUser-Agent: cfpilot-relay-verify\r\nConnection: close\r\n\r\n`
     )
     const res = await readHttp(socket, timeoutMs)
+    // 与 Go 版同口径：403 + 短拦截标记 = 该入口的出口被目标站边缘拦截（假成功）
+    if (isWafBlockPage(res.status, res.body)) return false
     return res.status > 0
   } catch {
     return false

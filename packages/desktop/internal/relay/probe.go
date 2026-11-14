@@ -292,8 +292,13 @@ func verifyForwarding(ctx context.Context, opt Options, ip, verifyHost string) (
 	}
 
 	request := strings.Join([]string{
-		"GET / HTTP/1.1",
+		// ⚠️ 用 POST 而不是 GET：部分站点的边缘规则（WAF）只对 POST 生效
+		// （实测 X：GET 任意路径正常放行、POST api.x.com/graphql 才触发拦截），
+		// 终检必须用与真实 app 流量相同的方法才能探出「出口被拦」的入口。
+		// 任意站点的 POST / 最多 404 / 405 —— 都是非拦截响应，不影响判定。
+		"POST / HTTP/1.1",
 		"Host: " + verifyHost,
+		"Content-Length: 0",
 		"Connection: close",
 		"User-Agent: cfpilot-relay-verify",
 		"",
@@ -307,9 +312,36 @@ func verifyForwarding(ctx context.Context, opt Options, ip, verifyHost string) (
 		return false, 0, fmt.Errorf("读响应失败：%v", shortErr(err))
 	}
 	defer func() { _ = res.Body.Close() }()
-	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
-	// 收到任何 HTTP 状态行都算转发成功
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+	// 收到 HTTP 响应 = 转发成功；但「WAF 拦截页」是假成功 ——
+	// 目标站点的边缘规则会按「请求到达边缘时的源」区别对待，被拦截的
+	// 入口虽然 TCP/TLS/HTTP 全程活着，但 app/web 的真实请求同样会被拦
+	//（2026-11-15 实测：X 对部分反代出口返回 403 body=IPv6，app 全挂）。
+	if isWafBlockPage(res.StatusCode, body) {
+		return false, 0, fmt.Errorf("目标站点边缘拦截了该入口的出口（WAF %d）", res.StatusCode)
+	}
 	return res.StatusCode > 0, 0, nil
+}
+
+// wafBlockMarks 是「边缘拦截页」的响应体标记集合：
+// 状态码 403 且 body 精确匹配其一 → 判定为「该入口的出口被目标站边缘拦截」。
+//
+// 「IPv6」：X (x.com) 在 Cloudflare 上按源拦截反代类出口的规则响应
+// （实测 2026-11-15：部分反代入口 POST api.x.com/graphql → 403 IPv6，
+// 另一些入口直达后端 405 —— 同一站点、不同入口，结果由出口决定）。
+var wafBlockMarks = map[string]bool{
+	"IPv6": true,
+}
+
+// isWafBlockPage 判断响应是否为「边缘拦截页」：
+// 403 且响应体（去空白后）精确命中已知拦截标记。响应体超过 64 字节
+// 一律不算 —— 真实的 403（登录页 / JSON 错误）都不会这么短。
+func isWafBlockPage(status int, body []byte) bool {
+	if status != 403 || len(body) > 64 {
+		return false
+	}
+	trimmed := strings.TrimSpace(string(body))
+	return wafBlockMarks[trimmed]
 }
 
 // shortErr 把 error 压成一行（去掉 dial 里冗长的包装）。

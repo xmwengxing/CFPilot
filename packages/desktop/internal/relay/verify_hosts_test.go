@@ -92,9 +92,32 @@ func TestResolveVerifyHostsBuiltinExempt(t *testing.T) {
 	}
 }
 
+// WAF 拦截页判定：403 + 短拦截标记 = 该入口的出口被目标站边缘拦截（假成功）。
+// 背景：X 对部分反代出口返回 403 body=IPv6，app 全挂；被拦入口必须从池里剔除。
+func TestIsWafBlockPage(t *testing.T) {
+	if !isWafBlockPage(403, []byte("IPv6")) {
+		t.Error("403 + IPv6 标记应判定为拦截页")
+	}
+	if !isWafBlockPage(403, []byte("  IPv6\r\n")) {
+		t.Error("含首尾空白的拦截标记也应判定")
+	}
+	for _, tc := range []struct {
+		status int
+		body   string
+	}{
+		{403, "IPv6!"},
+		{401, "IPv6"},
+		{200, "IPv6"},
+		{403, `{"errors":[{"code":32}]}`},
+	} {
+		if isWafBlockPage(tc.status, []byte(tc.body)) {
+			t.Errorf("status=%d body=%q 不应判定为拦截页", tc.status, tc.body)
+		}
+	}
+}
+
 // 终检超时不能拖死整轮体检。
-func TestVerifyForwardingTimeout(t *testing.T) {
-	// 不可达地址 → 在 opt.Timeout 内快速失败（不是永久挂起）
+func TestVerifyForwardingTimeout(t *testing.T) { // 不可达地址 → 在 opt.Timeout 内快速失败（不是永久挂起）
 	opt := Options{
 		Host:    "invalid.data-plane.invalid",
 		WSPath:  "/ws",

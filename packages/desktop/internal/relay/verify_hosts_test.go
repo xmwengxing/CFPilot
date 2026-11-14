@@ -102,7 +102,7 @@ func TestVerifyForwardingTimeout(t *testing.T) {
 		Timeout: 2 * time.Second,
 	}
 	start := time.Now()
-	_, err := verifyForwarding(context.Background(), opt, "203.0.113.1", "cloudflare.com")
+	_, _, err := verifyForwarding(context.Background(), opt, "203.0.113.1", "cloudflare.com")
 	if err == nil {
 		t.Fatal("不可达目标应返回错误")
 	}

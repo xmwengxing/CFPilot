@@ -40,6 +40,16 @@ type RunOptions struct {
 	OnProgress func(done, total int, ip string, ok bool)
 }
 
+// RelayVerifyDetail 是单个候选对**一个校验网址**的终检结果。
+type RelayVerifyDetail struct {
+	// Host 是校验网址
+	Host string `json:"host"`
+	// Ms 是整条链路（隧道 + TLS + HTTP）的耗时；失败时也记录实际耗时
+	Ms int64 `json:"ms"`
+	// Ok 表示收到了该站点的 HTTP 响应（403/302 也算转发成功）
+	Ok bool `json:"ok"`
+}
+
 // Aggregate 是单个候选的多轮汇总。
 type Aggregate struct {
 	IP         string `json:"ip"`
@@ -52,8 +62,11 @@ type Aggregate struct {
 	HTTPMs     int64  `json:"httpMs"`
 	// VerifyOK 是「校验网址终检」结论；nil = 未执行终检（没配校验网址）。
 	// false = 候选能转发到数据面、却转发不了 CF 网段站点（假入口），已剔除。
-	VerifyOK *bool    `json:"verifyOk,omitempty"`
-	Errors   []string `json:"errors"`
+	VerifyOK *bool `json:"verifyOk,omitempty"`
+	// VerifyDetails 是每个校验网址的逐项结果（含耗时），
+	// 展示给用户对比各候选对各个站点的转发快慢。
+	VerifyDetails []RelayVerifyDetail `json:"verifyDetails,omitempty"`
+	Errors        []string            `json:"errors"`
 }
 
 // Summary 是一次批量体检的完整结果。
@@ -216,7 +229,10 @@ func Run(ctx context.Context, opt RunOptions) (*Summary, error) {
 	//
 	// 只对「多轮全通」的候选做（候选全通的量级有限，成本可控）：
 	// 逐个建独立隧道，实测「能不能把流量转到 CF 网段站点」。
-	// 任一网址转发成功即通过；全部失败 = 假入口，从池里剔除。
+	// 全部网址失败 = 假入口，从池里剔除。
+	//
+	// 每个候选对**每一个**校验网址都测一遍（不做「任一成功即停」）：
+	// 用户需要看到各候选对不同站点的转发延迟来挑入口。
 	if len(opt.VerifyHosts) > 0 {
 		var toVerify []int
 		for i, a := range summary.Aggregates {
@@ -243,16 +259,16 @@ func Run(ctx context.Context, opt RunOptions) (*Summary, error) {
 
 					passed := false
 					var firstErr error
+					details := make([]RelayVerifyDetail, 0, len(opt.VerifyHosts))
 					for _, host := range opt.VerifyHosts {
 						if ctx.Err() != nil {
 							break
 						}
-						ok, err := verifyForwarding(ctx, probeOpt, ip, host)
+						ok, ms, err := verifyForwarding(ctx, probeOpt, ip, host)
+						details = append(details, RelayVerifyDetail{Host: host, Ms: ms, Ok: ok})
 						if ok {
 							passed = true
-							break
-						}
-						if firstErr == nil {
+						} else if firstErr == nil {
 							firstErr = err
 						}
 					}
@@ -264,6 +280,7 @@ func Run(ctx context.Context, opt RunOptions) (*Summary, error) {
 
 					mu.Lock()
 					summary.Aggregates[i].VerifyOK = &passed
+					summary.Aggregates[i].VerifyDetails = details
 					if !passed && firstErr != nil {
 						summary.Aggregates[i].Errors = append(summary.Aggregates[i].Errors,
 							"校验网址失败："+shortErr(firstErr))

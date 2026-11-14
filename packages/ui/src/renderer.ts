@@ -2008,6 +2008,10 @@ import {
     if (mask) mask.hidden = false
   }
 
+  /** 入口优选结果表的当前排序（null = 默认：按下行速度降序；跳过测速时按 TLS 升序）。 */
+  let scanSort: { key: ScanSortKey; dir: 1 | -1 } | null = null
+  type ScanSortKey = 'ip' | 'colo' | 'tls' | 'tcp' | 'speed'
+
   function renderScanResult(payload: {
     entries: Array<{
       ip: string
@@ -2041,8 +2045,46 @@ import {
     }
     const table = document.getElementById('scanTable') as HTMLTableElement
     const tbody = table.querySelector('tbody')!
+
+    // ---- 排序 ----
+    //
+    // 默认按**下行速度降序**（跳过测速时按 TLS 握手升序）——
+    // 用户看结果第一眼要知道「最快的在哪」，原序是扫描阶段的产出顺序，
+    // 与速度无关，看起来像乱序。
+    const effectiveSort = scanSort ?? { key: (payload.skippedSpeed ? 'tls' : 'speed') as ScanSortKey, dir: (payload.skippedSpeed ? 1 : -1) as 1 | -1 }
+    const scanComparators: Record<ScanSortKey, (a: typeof payload.entries[number], b: typeof payload.entries[number]) => number> = {
+      ip: (a, b) => a.ip.localeCompare(b.ip, undefined, { numeric: true }) || a.port - b.port,
+      colo: (a, b) => (a.colo || '').localeCompare(b.colo || '') || b.speed - a.speed,
+      tls: (a, b) => a.tlsMs - b.tlsMs,
+      tcp: (a, b) => (a.tcpMs ?? a.latency) - (b.tcpMs ?? b.latency),
+      speed: (a, b) => b.speed - a.speed || a.tlsMs - b.tlsMs,
+    }
+    const sorted = [...payload.entries].sort(
+      (a, b) => scanComparators[effectiveSort.key](a, b) * effectiveSort.dir
+    )
+
+    // 表头点击排序：再点同一列翻转方向，点其它列切换。
+    // 「#」与「质量检测」两列不可排序。
+    const ths = table.querySelectorAll('thead th')
+    const thKeys: Array<ScanSortKey | null> = [null, 'ip', 'colo', 'tls', 'tcp', 'speed', null]
+    ths.forEach((th, i) => {
+      const key = thKeys[i]
+      if (!key) return
+      const thEl = th as HTMLElement
+      thEl.style.cursor = 'pointer'
+      const dirMark = effectiveSort.key === key ? (effectiveSort.dir === -1 ? ' ▼' : ' ▲') : ''
+      // 表头文字保留原语义（下行列会标明是否跳过测速）
+      const base = (thEl.textContent || '').replace(/ [▲▼]$/, '')
+      thEl.textContent = base + dirMark
+      thEl.title = '点击按此列排序（再点一次翻转方向）'
+      thEl.onclick = () => {
+        scanSort = { key, dir: effectiveSort.key === key ? ((effectiveSort.dir * -1) as 1 | -1) : -1 }
+        renderScanResult(payload)
+      }
+    })
+
     tbody.innerHTML = ''
-    payload.entries.forEach((e, i) => {
+    sorted.forEach((e, i) => {
       const tr = document.createElement('tr')
       // 跳过测速时速度本就是 0，显示 — 而不是 0，避免误解成「测出来是 0」
       const speed = payload.skippedSpeed ? '—' : String(e.speed)
@@ -2118,7 +2160,6 @@ import {
       })
     })
     table.hidden = payload.entries.length === 0
-
     // 表头也标明速度列是否有效
     const speedHead = table.querySelectorAll('th')[5]
     if (speedHead) speedHead.textContent = payload.skippedSpeed ? '下行(已跳过)' : '下行(MB/s)'
@@ -3978,6 +4019,10 @@ import {
     updateHistoryButtons()
   }
 
+  /** 优选历史条目表的当前排序（null = 保留历史原序）。所有会话共用。 */
+  let historySort: { key: HistorySortKey; dir: 1 | -1 } | null = null
+  type HistorySortKey = 'ip' | 'colo' | 'tls' | 'tcp' | 'speed'
+
   /** 构建某次会话的条目表：勾选列 + 基本指标 + 最近复测状态列 */
   function buildHistoryTable(sess: ScanHistorySession): HTMLTableElement {
     const table = document.createElement('table')
@@ -4001,16 +4046,55 @@ import {
     })
     thCheck.appendChild(selAll)
     hrow.appendChild(thCheck)
-    for (const h of ['#', '地址', '机房', 'TLS(ms)', 'TCP(ms)', '下行(MB/s)', '最近复测', '质量报告']) {
+
+    // ---- 可排序列（点击表头排序，再点翻转；跨会话共用同一排序）----
+    const historyThKeys: Array<{ label: string; key: HistorySortKey | null }> = [
+      { label: '#', key: null },
+      { label: '地址', key: 'ip' },
+      { label: '机房', key: 'colo' },
+      { label: 'TLS(ms)', key: 'tls' },
+      { label: 'TCP(ms)', key: 'tcp' },
+      { label: '下行(MB/s)', key: 'speed' },
+      { label: '最近复测', key: null },
+      { label: '质量报告', key: null },
+    ]
+    for (const { label, key } of historyThKeys) {
       const th = document.createElement('th')
-      th.textContent = h
+      if (key) {
+        const dirMark = historySort && historySort.key === key ? (historySort.dir === -1 ? ' ▼' : ' ▲') : ''
+        th.textContent = label + dirMark
+        th.style.cursor = 'pointer'
+        th.title = '点击按此列排序（再点一次翻转方向）'
+        th.addEventListener('click', () => {
+          historySort =
+            historySort && historySort.key === key
+              ? { key, dir: (historySort.dir * -1) as 1 | -1 }
+              : { key, dir: key === 'speed' ? -1 : 1 }
+          renderScanHistory()
+        })
+      } else {
+        th.textContent = label
+      }
       hrow.appendChild(th)
     }
     thead.appendChild(hrow)
     table.appendChild(thead)
 
+    // 排序副本：只影响显示顺序，不改动历史数据本身；
+    // 勾选状态按 ip:port 记录，与顺序无关。
+    const effectiveHistorySort = historySort ?? { key: 'speed' as HistorySortKey, dir: -1 as 1 | -1 }
+    const historyComparators: Record<HistorySortKey, (a: ScanHistorySession['entries'][number], b: ScanHistorySession['entries'][number]) => number> = {
+      ip: (a, b) => a.ip.localeCompare(b.ip, undefined, { numeric: true }) || a.port - b.port,
+      colo: (a, b) => (a.colo || '').localeCompare(b.colo || '') || b.speed - a.speed,
+      tls: (a, b) => a.tlsMs - b.tlsMs,
+      tcp: (a, b) => (a.tcpMs ?? a.latency) - (b.tcpMs ?? b.latency),
+      speed: (a, b) => b.speed - a.speed || a.tlsMs - b.tlsMs,
+    }
+    const sortedEntries = [...sess.entries].sort(
+      (a, b) => historyComparators[effectiveHistorySort.key](a, b) * effectiveHistorySort.dir
+    )
     const tbody = document.createElement('tbody')
-    sess.entries.forEach((e, i) => {
+    sortedEntries.forEach((e, i) => {
       const tr = document.createElement('tr')
 
       const tdCheck = document.createElement('td')
@@ -4974,23 +5058,37 @@ import {
     if (!out) return
 
     out.textContent = ''
+    const all = payload.entries ?? []
+    const pickedSet = new Set(relayPicked)
+    // 只显示「保留条数」内的结果 —— 回填（增量 / 覆盖）写的就是 picked 这几条，
+    // 把一百多条体检明细全摆出来会让用户误以为全部都会被回填。
+    const shown = relayPicked.length > 0
+      ? relayPicked.map((ip) => all.find((e) => e.ip === ip)).filter((e): e is NonNullable<typeof e> => Boolean(e))
+      : []
     const head = document.createElement('p')
     head.className = 'hint'
     head.textContent =
-      '全通 ' + (payload.alwaysOk ?? 0) +
+      '体检 ' + all.length + ' 条 · 全通 ' + (payload.alwaysOk ?? 0) +
       ' · 抖动 ' + (payload.flaky ?? 0) +
       ' · 全挂 ' + (payload.neverOk ?? 0) +
-      ' · 期望 build ' + (payload.expectedBuild ?? '—')
+      ' → 入选 ' + shown.length + ' 条' +
+      (payload.verifyHosts && payload.verifyHosts.length > 0 ? ' · 校验网址 ' + payload.verifyHosts.join(' / ') : '')
     out.appendChild(head)
+    const onlyPicked = document.createElement('p')
+    onlyPicked.className = 'hint'
+    onlyPicked.textContent = hasPicked
+      ? '↓ 只列出入选的 ' + shown.length + ' 条（保留条数上限内、按质量排序）—— 增量 / 覆盖回填写入的**只有这几条**。'
+      : '没有符合保留条件的结果（需要多轮全通且通过校验网址终检）。'
+    out.appendChild(onlyPicked)
 
     const table = document.createElement('table')
     const thead = document.createElement('thead')
     thead.innerHTML =
       '<tr><th>#</th><th>IP</th><th>成功%</th><th>轮次</th><th>隧道(ms)</th>' +
-      '<th>TLS(ms)</th><th>TLSP95</th><th>HTTP(ms)</th><th>失败原因</th></tr>'
+      '<th>TLS(ms)</th><th>TLSP95</th><th>HTTP(ms)</th><th>校验延迟</th></tr>'
     table.appendChild(thead)
     const tbody = document.createElement('tbody')
-    for (const [index, entry] of (payload.entries ?? []).entries()) {
+    for (const [index, entry] of shown.entries()) {
       const tr = document.createElement('tr')
       const cells = [
         String(index + 1),
@@ -5001,13 +5099,24 @@ import {
         String(entry.tlsMs),
         String(entry.tlsP95),
         String(entry.httpMs),
-        (entry.errors && entry.errors[0]) || '',
       ]
       for (const cell of cells) {
         const td = document.createElement('td')
         td.textContent = cell
         tr.appendChild(td)
       }
+      // 校验延迟列：每个校验网址一行（多行文本），一眼对比各候选对不同站点的转发快慢
+      const verifyTd = document.createElement('td')
+      verifyTd.style.whiteSpace = 'pre-line'
+      const details = entry.verifyDetails ?? []
+      if (details.length > 0) {
+        verifyTd.textContent = details
+          .map((d) => d.host + ' ' + (d.ok ? d.ms + 'ms' : '失败(' + d.ms + 'ms)'))
+          .join('\n')
+      } else {
+        verifyTd.textContent = entry.verifyOk === false ? '全部失败' : '—'
+      }
+      tr.appendChild(verifyTd)
       tbody.appendChild(tr)
     }
     table.appendChild(tbody)
@@ -5015,8 +5124,8 @@ import {
 
     if (pushHint) {
       pushHint.textContent = hasPicked
-        ? '可写入 ' + relayPicked.length + ' 条（只含全通项）'
-        : '没有全通项，无法写入'
+        ? '可写入 ' + relayPicked.length + ' 条（只含全通且通过校验网址终检的入选项）'
+        : '没有符合保留条件的结果，无法写入'
     }
   }
 

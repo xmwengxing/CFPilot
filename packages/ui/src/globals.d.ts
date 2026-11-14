@@ -864,6 +864,10 @@ interface CFPilotRelayEntry {
   tlsMs: number
   tlsP95: number
   httpMs: number
+  /** 校验网址终检：nil = 未执行；false = 全部失败（假入口，已剔除） */
+  verifyOk?: boolean | null
+  /** 每个校验网址的逐项结果（含整条链路耗时，供对比各候选的转发快慢） */
+  verifyDetails?: Array<{ host: string; ms: number; ok: boolean }> | null
   errors?: string[] | null
 }
 
@@ -881,6 +885,8 @@ interface CFPilotRelayResult {
   flaky?: number
   picked?: string[]
   entries?: CFPilotRelayEntry[]
+  /** 本次终检实际使用的校验网址（已剔除非 CF 网段网址） */
+  verifyHosts?: string[]
   at?: string
 }
 

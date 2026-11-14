@@ -214,6 +214,12 @@ const relayVerifyChecks = [
   ['部署异步受理后保持置灰', /markDeployInFlight/.test(rendererSrc) && /markDeploySettled/.test(rendererSrc), '防止部署中途重复点击'],
   ['纯净度评分按分值着色', /function purityScoreColor/.test(rendererSrc), '0~10 绿 / 中黄 / 高分红'],
   ['场景适配不再挤成一行重复渲染', !rendererSrc.includes("'purity.scenarios'"), '报告底部已有独立单列展示'],
+  // 反代优选结果与排序（2026-11-14）
+  ['反代结果只显示保留条数内的入选项', /只列出入选的/.test(rendererSrc), '回填语义一目了然，不会误以为全部都会被回填'],
+  ['反代结果显示各校验网址延迟', /verifyDetails/.test(rendererSrc) && /校验延迟/.test(rendererSrc), '每个候选对每个校验网址的耗时可见'],
+  ['入口优选结果默认按下行速度排序', /scanComparators/.test(rendererSrc) && /speed: \(a, b\) => b\.speed - a\.speed/.test(rendererSrc), '最快的排最前'],
+  ['入口优选结果表头可点击排序', /thEl\.onclick = \(\) => \{/.test(rendererSrc), '再点一次翻转方向'],
+  ['优选历史表头可点击排序', /historySort =/.test(rendererSrc) && /historyComparators/.test(rendererSrc), '历史条目可按列排序'],
 ]
 for (const [label, ok, desc] of relayVerifyChecks) {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}  —— ${desc}`)

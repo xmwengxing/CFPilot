@@ -242,7 +242,13 @@ func orDash(v string) string {
 //
 // 剔除的是「能转发到自己的数据面、却转发不了别的站点」的假入口
 // （只白名单特定 SNI 的转发器）。
-func verifyForwarding(ctx context.Context, opt Options, ip, verifyHost string) (bool, error) {
+//
+// 返回值里的耗时（毫秒）是整条链路（隧道 + TLS + HTTP）的完成时间，
+// 展示给用户对比各候选对不同站点的转发快慢。
+func verifyForwarding(ctx context.Context, opt Options, ip, verifyHost string) (ok bool, ms int64, err error) {
+	start := time.Now()
+	defer func() { ms = time.Since(start).Milliseconds() }()
+
 	timeout := opt.Timeout
 	if timeout <= 0 {
 		timeout = DefaultTimeout
@@ -253,23 +259,23 @@ func verifyForwarding(ctx context.Context, opt Options, ip, verifyHost string) (
 
 	conn, err := DialWebSocket(probeCtx, opt.Host, opt.Port, opt.WSPath, timeout)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	defer func() { _ = conn.Close() }()
 
 	uuid, err := ParseUUID(opt.UUID)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	target, err := resolveProbeTarget(probeCtx, ip)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
 	if _, err := conn.Write(BuildVLESSRequest(uuid, target, 443)); err != nil {
-		return false, err
+		return false, 0, err
 	}
 	if _, _, err := ReadVLESSReply(conn); err != nil {
-		return false, err
+		return false, 0, err
 	}
 
 	tlsConfig := &tls.Config{
@@ -282,7 +288,7 @@ func verifyForwarding(ctx context.Context, opt Options, ip, verifyHost string) (
 	}
 	tlsConn := tls.Client(conn, tlsConfig)
 	if err := tlsConn.HandshakeContext(probeCtx); err != nil {
-		return false, fmt.Errorf("TLS 握手失败（候选没有转发到 %s）：%v", verifyHost, shortErr(err))
+		return false, 0, fmt.Errorf("TLS 握手失败（候选没有转发到 %s）：%v", verifyHost, shortErr(err))
 	}
 
 	request := strings.Join([]string{
@@ -294,16 +300,16 @@ func verifyForwarding(ctx context.Context, opt Options, ip, verifyHost string) (
 		"",
 	}, "\r\n")
 	if _, err := io.WriteString(tlsConn, request); err != nil {
-		return false, err
+		return false, 0, err
 	}
 	res, err := http.ReadResponse(bufio.NewReader(tlsConn), nil)
 	if err != nil {
-		return false, fmt.Errorf("读响应失败：%v", shortErr(err))
+		return false, 0, fmt.Errorf("读响应失败：%v", shortErr(err))
 	}
 	defer func() { _ = res.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
 	// 收到任何 HTTP 状态行都算转发成功
-	return res.StatusCode > 0, nil
+	return res.StatusCode > 0, 0, nil
 }
 
 // shortErr 把 error 压成一行（去掉 dial 里冗长的包装）。

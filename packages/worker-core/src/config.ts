@@ -4,6 +4,7 @@
 import type { Env, UserConfig, ProxyMode
 } from './types'
 import { randomUuid } from './util'
+import { parsePinnedHosts } from './outbound/pinned'
 import type { Store } from './store'
 import { KvStore } from './store'
 
@@ -55,7 +56,13 @@ export const DEFAULT_CONFIG: UserConfig = {
   // 默认保守：只修「直连假活」，不替用户在代理出口上擅自换路
   aggressiveRedial: false,
   relayPool: '',
-  pinnedHosts: '',
+  // 出厂固定落地 / 固定反代入口（2026-11-14）：
+  // x.com 的权威 DNS 把流量分散到多家 CDN，直连随 DNS 漂移时好时坏；
+  // cloudflare.com 在 CF 网段，直连必被 TCP Loop 拒绝，只能固定反代入口。
+  // 这两条是**出厂修复**，与用户在面板配置的 pinnedHosts **按域名合并**
+  // （用户条目优先，见 mergeConfig 的 pinnedHosts 分支）——
+  // 用户只为 jable.tv 等其他站点写映射时，这两条依然生效。
+  pinnedHosts: 'x.com=151.101.194.146\ncloudflare.com=r:45.76.246.192',
   useBuiltinRelay: true,
   enableTrojan: true,
   enableXhttp: true,
@@ -168,7 +175,7 @@ export function configFromEnv(env: Env): UserConfig {
     resolvePreferred: bool(env.RESOLVE_PREFERRED, DEFAULT_CONFIG.resolvePreferred),
     aggressiveRedial: bool(env.AGGRESSIVE_REDIAL, DEFAULT_CONFIG.aggressiveRedial),
     relayPool: text(env.RELAY_POOL, ''),
-    pinnedHosts: text(env.PINNED_HOSTS, ''),
+    pinnedHosts: text(env.PINNED_HOSTS, DEFAULT_CONFIG.pinnedHosts),
     useBuiltinRelay: bool(env.USE_BUILTIN_RELAY, DEFAULT_CONFIG.useBuiltinRelay),
     enableTrojan: bool(env.ENABLE_TROJAN ?? env.TROJAN, DEFAULT_CONFIG.enableTrojan),
     enableXhttp: bool(env.ENABLE_XHTTP ?? env.XHTTP, DEFAULT_CONFIG.enableXhttp),
@@ -193,9 +200,39 @@ export function configFromEnv(env: Env): UserConfig {
   }
 }
 
+/**
+ * 固定落地映射的合并：用户条目优先，fallback 里用户没写的域名条目补在后面。
+ *
+ * 按「条目键」去重（与 pinned.ts 的 entryKey 同语义）：
+ * 直连条目键 = 域名；反代入口条目键 = `relay:域名`。
+ * 同域名的直连条目与反代条目是两个不同的键 —— 用户把 cloudflare.com 从
+ * 反代形态改成直连形态时，出厂的反代条目会保留（两类分池存放，互不覆盖），
+ * 出站直连失败后仍可经出厂反代入口兜底。
+ *
+ * 行文本原样保留（含逗号分隔多 IP 的写法），不重新格式化。
+ */
+function mergePinnedHosts(fallback: string, user: string): string {
+  const userText = String(user ?? '').trim()
+  if (!userText) return String(fallback ?? '')
+  const fallbackText = String(fallback ?? '').trim()
+  if (!fallbackText) return userText
+  const entryKey = (e: { host: string; relay: boolean }): string =>
+    e.relay ? `relay:${e.host}` : e.host
+  const userKeys = new Set(parsePinnedHosts(userText).map(entryKey))
+  const extra = String(fallback)
+    .split(/\r?\n/)
+    .filter((line) => {
+      const trimmed = line.trim()
+      if (!trimmed || trimmed.startsWith('#')) return false
+      const entries = parsePinnedHosts(trimmed)
+      if (entries.length === 0) return false
+      return !entries.some((e) => userKeys.has(entryKey(e)))
+    })
+  return extra.length > 0 ? [userText, ...extra].join('\n') : userText
+}
+
 /** 合并配置：KV 覆盖环境变量覆盖默认值 */
-export function mergeConfig(base: UserConfig, override: Partial<UserConfig>): UserConfig {
-  const merged: UserConfig = { ...base }
+export function mergeConfig(base: UserConfig, override: Partial<UserConfig>): UserConfig {  const merged: UserConfig = { ...base }
   for (const [key, value] of Object.entries(override)) {
     if (value === undefined || value === null) continue
     if (
@@ -233,6 +270,13 @@ export function mergeConfig(base: UserConfig, override: Partial<UserConfig>): Us
       ;(merged as unknown as Record<string, string>)[key] = v === 'ws' || v === 'xhttp' || v === 'both' ? v : 'both'
     } else if (key === 'subToken') {
       ;(merged as unknown as Record<string, string>)[key] = normalizeSubTokenMode(String(value))
+    } else if (key === 'pinnedHosts') {
+      // 固定落地映射**按域名合并**（2026-11-14）：
+      // base 侧含出厂修复（x.com / cloudflare.com），override 侧是用户在面板
+      // 写的映射。若整体覆盖，用户只为 jable.tv 配一条就会把出厂修复顶掉 ——
+      // x.com 的漂移与 cloudflare.com 的 TCP Loop 会随之复发。
+      // 语义：用户条目优先；base 里用户没写的域名条目原样保留在后面。
+      merged.pinnedHosts = mergePinnedHosts(base.pinnedHosts ?? '', String(value ?? ''))
     } else if (key === 'udpDns') {
       ;(merged as unknown as Record<string, string>)[key] = normalizeUdpDns(String(value))
     } else {

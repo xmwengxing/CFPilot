@@ -776,7 +776,7 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
           <div class="field">
             <label>固定落地 IP / 固定反代入口</label>
             <textarea id="cfgPinnedHosts" class="mono" placeholder="example.com=203.0.113.10&#10;cloudflare.com=r:198.51.100.7"></textarea>
-            <p class="tip">按域名写死出站落地地址，跳过 DNS 轮询；r: 前缀 = 固定反代入口（Cloudflare 网段站点用）。</p>
+            <p class="tip">按域名写死出站落地地址，跳过 DNS 轮询；r: 前缀 = 固定反代入口（Cloudflare 网段站点用）。此处留空时内核自带 x.com 与 cloudflare.com 的出厂优化；你写的条目按域名合并、同域名以这里为准。</p>
             <p class="tip">按域名写死出站落地地址（每行一条，可逗号分隔多个 IP），命中后跳过 DNS 轮询只连这些地址。用于解析在多家 CDN 间漂移、刷新时好时坏的站点；`*.前缀` 可匹配子域名，留空不启用。</p>
           </div>
         </div>

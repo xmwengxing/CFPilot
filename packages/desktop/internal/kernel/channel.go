@@ -135,3 +135,29 @@ func channelRemoteInfo(channel *KernelVersionManifest) *RemoteInfo {
 		ChecksumsURL: channelAssetURL(ChecksumsAssetName),
 	}
 }
+
+// CheckChannelUpdate 轻量检查内核热更新通道是否有比内置锚点更新的内核。
+//
+// 供托盘后台检查使用：只拉版本清单（几 KB），不下载内核产物。
+// currentVersion 是当前工具版本（兼容护栏用；空串 = 跳过护栏判断）。
+// 返回值 hasUpdate 为 false 的两种情况语义不同：
+//   - 通道不可用（离线 / kernel-latest 还没发布）→ info 为 nil；
+//     调用方按「通道没消息」继续走包 Release 通道的检查。
+//   - 通道可用但没有比内置新的内核 → info 非 nil（版本号形如 k202611141800）。
+func CheckChannelUpdate(ctx context.Context, currentVersion string) (info *RemoteInfo, hasUpdate bool) {
+	channel := fetchChannelVersion(ctx)
+	if channel == nil {
+		return nil, false
+	}
+	if channel.MinToolVersion != "" &&
+		strings.TrimSpace(currentVersion) != "" &&
+		CompareSemver(currentVersion, channel.MinToolVersion) < 0 {
+		// 兼容护栏：通道内核要求更新的工具版本。不当作「有更新」提示，
+		// 否则用户点开部署页只会看到一句「先升级工具」。
+		return channelRemoteInfo(channel), false
+	}
+	if !isChannelNewer(channel, loadBuiltinKernelVersion()) {
+		return channelRemoteInfo(channel), false
+	}
+	return channelRemoteInfo(channel), true
+}

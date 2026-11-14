@@ -254,6 +254,12 @@ func main() {
 			return update.Check(ctx, server.Version()), nil
 		},
 		func(ctx context.Context) (*tray.DeployCheckResult, error) {
+			// 优先走内核热更新通道（固定滚动 Release，只拉几 KB 的版本清单）：
+			// 只改内核、不发新包时，只有这条通道知道「有新内核」。
+			// 通道没消息（离线 / 尚未发布）→ 回退旧的包 Release 语义。
+			if info, has := kernel.CheckChannelUpdate(ctx, server.Version()); has {
+				return &tray.DeployCheckResult{RemoteVersion: info.Version, RemoteNewer: true}, nil
+			}
 			info, err := kernel.FetchRemoteInfo(ctx)
 			if err != nil {
 				return nil, err
@@ -338,6 +344,14 @@ func main() {
 			notify.ShowViaShell(notify.Message{
 				Title: "CFPilot 有新版本",
 				Body:  fmt.Sprintf("发现新版本 %s，可从托盘菜单「检查应用更新」查看。", st.AppLatest),
+			})
+		}
+		if st.DeployHasUpdate {
+			// 内核有新版的气泡 —— 只改内核、不发新包时（内核热更新通道），
+			// 用户不开界面就完全看不到「线上部署有更新」，气泡是唯一主动提醒。
+			notify.ShowViaShell(notify.Message{
+				Title: "CFPilot 内核有更新",
+				Body:  fmt.Sprintf("发现新内核 %s，可从托盘菜单「检查部署更新」更新线上部署。", st.DeployLatest),
 			})
 		}
 	})

@@ -796,10 +796,15 @@ func TestLoadPrefersLocalWhenChannelToolTooOld(t *testing.T) {
 	useLocalKernelVersion(t, 202611140000, "aaa1111-bbbb2222")
 	useCacheDir(t)
 
-	channelAssets(t, `{"seq": 202611141000, "build": "ccc3333-dddd4444", "minToolVersion": "99.0.0"}`, map[string][]byte{
+	srv := channelAssets(t, `{"seq": 202611141000, "build": "ccc3333-dddd4444", "minToolVersion": "99.0.0"}`, map[string][]byte{
 		ControlAssetName: []byte("const BUILD_VERSION = \"ccc3333-dddd4444\";"),
 		DataAssetName:    []byte("const BUILD_VERSION = \"ccc3333-dddd4444\";"),
 	})
+	// ⚠️ 必须把包 Release 通道也指向假服务器（/releases 404 = 没有发行版）。
+	// 不指的话这里会打到**真实 GitHub**：真线上 Release 的版本号比
+	// 测试里的 0.40.6 新时（例如发了 0.40.9），本测试就会随机挂掉 ——
+	// 这个隐性网络依赖正是 2026-11-14 全量测试偶红的原因。
+	withGitHubBase(t, srv)
 
 	arts, _, err := LoadPreferred(context.Background(), "0.40.6")
 	if err != nil {
@@ -808,6 +813,46 @@ func TestLoadPrefersLocalWhenChannelToolTooOld(t *testing.T) {
 	if strings.Contains(arts.Source, "远程") {
 		t.Errorf("工具版本不足时不应使用远程内核，实际 %q", arts.Source)
 	}
+}
+
+// CheckChannelUpdate 的三个分支：有更新 / 无更新 / 通道不可用。
+// 守护托盘后台检查的语义：内核热更新通道的新内核要能触发「有新版」提示。
+func TestCheckChannelUpdate(t *testing.T) {
+	t.Run("通道序号更新 → hasUpdate=true", func(t *testing.T) {
+		useLocalKernel(t)
+		useLocalKernelVersion(t, 202611140000, "aaa1111-bbbb2222")
+		channelAssets(t, `{"seq": 202611141000, "build": "ccc3333-dddd4444"}`, map[string][]byte{
+			ControlAssetName: []byte("const BUILD_VERSION = \"ccc3333-dddd4444\";"),
+			DataAssetName:    []byte("const BUILD_VERSION = \"ccc3333-dddd4444\";"),
+		})
+		info, has := CheckChannelUpdate(context.Background(), "0.40.9")
+		if !has {
+			t.Fatal("通道序号比内置新，应判定有更新")
+		}
+		if info == nil || !strings.HasPrefix(info.Version, "k") {
+			t.Errorf("远程信息应带 k 前缀版本号，实际 %+v", info)
+		}
+	})
+
+	t.Run("通道无更新 → hasUpdate=false 且 info 非空", func(t *testing.T) {
+		useLocalKernel(t)
+		useLocalKernelVersion(t, 202611141000, "aaa1111-bbbb2222")
+		channelAssets(t, `{"seq": 202611141000, "build": "aaa1111-bbbb2222"}`, nil)
+		_, has := CheckChannelUpdate(context.Background(), "0.40.9")
+		if has {
+			t.Fatal("通道与内置同序号同构建，不应判定有更新")
+		}
+	})
+
+	t.Run("minToolVersion 高于当前工具 → 不提示更新", func(t *testing.T) {
+		useLocalKernel(t)
+		useLocalKernelVersion(t, 202611140000, "aaa1111-bbbb2222")
+		channelAssets(t, `{"seq": 202611141000, "build": "ccc3333-dddd4444", "minToolVersion": "99.0.0"}`, nil)
+		_, has := CheckChannelUpdate(context.Background(), "0.40.9")
+		if has {
+			t.Fatal("工具版本不满足兼容护栏时不应提示有更新")
+		}
+	})
 }
 
 // 分支零：通道清单不可读（坏 JSON）→ 视为通道不可用，走包 Release 通道。

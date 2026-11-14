@@ -749,11 +749,6 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
               <p class="tip">支持 https:// 与 #sni=。</p>
             </div>
           </div>
-          <div class="field">
-            <label>链式代理</label>
-            <textarea id="cfgProxyIp" class="mono" placeholder="1.2.3.4:443"></textarea>
-            <p class="tip">连接此地址、转发到目标站（按下方调度模式参与选路）。</p>
-          </div>
         </div>
         <div>
           <div class="grid-pair">
@@ -768,17 +763,29 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
               <p class="tip">uTLS Fingerprint 指纹名。</p>
             </div>
           </div>
-          <div class="field">
-            <label>自定义反代入口池</label>
-            <textarea id="cfgRelayPool" class="mono" placeholder="1.2.3.4:443&#10;relay.example.com:443"></textarea>
-            <p class="tip">relayPool：自配第三方反代入口，优先于内置反代；直连/优选失败、Cloudflare 网段目标时启用。</p>
-          </div>
-          <div class="field">
-            <label>固定落地 IP / 固定反代入口</label>
-            <textarea id="cfgPinnedHosts" class="mono" placeholder="example.com=203.0.113.10&#10;cloudflare.com=r:198.51.100.7"></textarea>
-            <p class="tip">按域名写死出站落地地址，跳过 DNS 轮询；r: 前缀 = 固定反代入口（Cloudflare 网段站点用）。此处留空时内核自带 x.com 与 cloudflare.com 的出厂优化；你写的条目按域名合并、同域名以这里为准。</p>
-            <p class="tip">按域名写死出站落地地址（每行一条，可逗号分隔多个 IP），命中后跳过 DNS 轮询只连这些地址。用于解析在多家 CDN 间漂移、刷新时好时坏的站点；`*.前缀` 可匹配子域名，留空不启用。</p>
-          </div>
+        </div>
+      </div>
+
+      <!--
+        三个出站映射填写框并列一行（2026-11-14）：链式代理 / 自定义反代入口池 /
+        固定落地 IP 同属「出站地址改写」，原来分散在两列里不易对照。
+        窄屏（auto-fit）自动落成单列。
+      -->
+      <div class="grid-3">
+        <div class="field">
+          <label>链式代理</label>
+          <textarea id="cfgProxyIp" class="mono" rows="3" placeholder="1.2.3.4:443"></textarea>
+          <p class="tip">连接此地址、转发到目标站（按下方调度模式参与选路）。</p>
+        </div>
+        <div class="field">
+          <label>自定义反代入口池</label>
+          <textarea id="cfgRelayPool" class="mono" rows="3" placeholder="1.2.3.4:443&#10;relay.example.com:443"></textarea>
+          <p class="tip">自配第三方反代入口，优先于内置反代；直连/优选失败、Cloudflare 网段目标时启用。</p>
+        </div>
+        <div class="field">
+          <label>固定落地 IP / 固定反代入口</label>
+          <textarea id="cfgPinnedHosts" class="mono" rows="3" placeholder="example.com=203.0.113.10&#10;cloudflare.com=r:198.51.100.7"></textarea>
+          <p class="tip">按域名写死落地地址，r: 前缀 = 固定反代入口（Cloudflare 网段站点用）；留空时内核自带 x.com / cloudflare.com 出厂优化，你写的条目按域名合并、同域名以这里为准。</p>
         </div>
       </div>
 

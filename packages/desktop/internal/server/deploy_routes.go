@@ -580,14 +580,28 @@ func (s *Server) handleDeployCheck(w http.ResponseWriter, r *http.Request) {
 	if liveKernel != "" && liveKernel != "dev" {
 		ks.Deployed = liveKernel
 	}
-	remoteCtx, cancelRemote := context.WithTimeout(ctx, 8*time.Second)
-	if info, e := kernel.FetchRemoteInfo(remoteCtx); e != nil {
-		ks.RemoteErr = e.Error()
-		s.logLevel("⚠ 查询远程内核版本失败："+e.Error(), "warn")
-	} else if info != nil {
-		ks.Remote = info.Version
+	// 内核热更新通道优先（2026-11-14）：
+	// 只改内核、不发新包时（kernel-latest 滚动 Release），只有这条通道知道
+	// 「有新内核」。而且它只拉几 KB 的版本清单，比包 Release 的查询更容易
+	// 在受限网络下成功。通道有新内核 → 直接判定可升级，与线上版本号无关
+	// （通道版本号是 k<序号>，semver 比不了）。
+	// 通道没消息（离线 / 未发布 / 需要更高工具版本）→ 回退包 Release 通道。
+	channelCtx, cancelChannel := context.WithTimeout(ctx, 8*time.Second)
+	chInfo, chNewer := kernel.CheckChannelUpdate(channelCtx, Version())
+	cancelChannel()
+	if chNewer && chInfo != nil {
+		ks.ChannelNewer = true
+		ks.Remote = chInfo.Version
+	} else {
+		remoteCtx, cancelRemote := context.WithTimeout(ctx, 8*time.Second)
+		if info, e := kernel.FetchRemoteInfo(remoteCtx); e != nil {
+			ks.RemoteErr = e.Error()
+			s.logLevel("⚠ 查询远程内核版本失败："+e.Error(), "warn")
+		} else if info != nil {
+			ks.Remote = info.Version
+		}
+		cancelRemote()
 	}
-	cancelRemote()
 
 	// 检查过状态 = 拿到了最新的部署记录 → 顺手刷新本地快照，
 	// 这样「运行状态」卡片在下次打开时能直接显示它（不用再调 Token）。
@@ -652,13 +666,21 @@ type kernelStatus struct {
 	Deployed string
 	// Local 是应用内嵌的内核版本（= 应用版本）
 	Local string
-	// Remote 是远程最新的内核版本（查不到就是空串）
+	// Remote 是远程最新的内核版本（查不到就是空串；内核热更新通道的
+	// 版本号形如 k202611141435，不是 semver）
 	Remote string
+	// ChannelNewer 表示「有更新」来自内核热更新通道（而非包 Release）。
+	// 此时 Updatable 无条件为 true —— 通道序号比内置锚点新就意味着
+	// 「内置内核已经落后」，与线上部署的是哪个版本无关。
+	ChannelNewer bool
 	// RemoteErr 是远程查询失败的原因（没有失败就是空串）
 	RemoteErr string
 }
 
 // Updatable 判断远程内核是否比线上更新。
+//
+// 内核热更新通道判定「有更新」时（ChannelNewer）无条件可升级 ——
+// 通道序号是单调递增的，比内置锚点新就是有新内核。
 //
 // ⚠️ 线上版本未知（空串）时，CompareSemver 把空串当成「更旧」，
 // 于是结果为 true —— 这是**故意的**：
@@ -666,6 +688,9 @@ type kernelStatus struct {
 //
 // 远程版本查不到（离线）时永远是 false —— 不能凭「查不到」就催用户更新。
 func (k kernelStatus) Updatable() bool {
+	if k.ChannelNewer {
+		return true
+	}
 	if strings.TrimSpace(k.Remote) == "" {
 		return false
 	}

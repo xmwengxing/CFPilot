@@ -69,6 +69,33 @@ func TestDeployStatusHasKernelVersionFields(t *testing.T) {
 	}
 }
 
+// 内核热更新通道判定「有更新」时，无论线上是什么版本都应判定可升级。
+//
+// 守护 2026-11-14 的用户回归：通道发布新内核后，「检查部署状态」完全无感
+// —— 旧逻辑只查包 Release（semver 比对 0.40.9 == 0.40.9 → 永远无更新），
+// 通道版本号是 k<序号>，semver 根本比不了。
+func TestDeployStatusChannelNewerAlwaysUpdatable(t *testing.T) {
+	m := &deploy.Manifest{Build: "abc1234-deadbeef", KernelVersion: "0.40.9"}
+
+	// 线上与「应用版本」一致、且包 Release 通道没有任何远程内核（Remote 空）
+	// —— 只有热更新通道判定有新内核 → 必须可升级。
+	ks := kernelStatus{Deployed: "0.40.9", Local: "0.40.9", Remote: "k202611141435", ChannelNewer: true}
+	body := buildDeployStatusResponse(m, "latest", "abc1234-deadbeef", "abc1234-deadbeef", ks)
+	if body["kernelUpdatable"] != true {
+		t.Errorf("通道有新内核时 kernelUpdatable 应为 true，实际 %v", body["kernelUpdatable"])
+	}
+	if body["remoteKernelVersion"] != "k202611141435" {
+		t.Errorf("remoteKernelVersion 应是通道序号版本，实际 %v", body["remoteKernelVersion"])
+	}
+
+	// 通道没有更新时维持原语义：Remote 空 → 不可升级
+	ks2 := kernelStatus{Deployed: "0.40.9", Local: "0.40.9", Remote: "", ChannelNewer: false}
+	body2 := buildDeployStatusResponse(m, "latest", "abc1234-deadbeef", "abc1234-deadbeef", ks2)
+	if body2["kernelUpdatable"] != false {
+		t.Errorf("通道没消息且包 Release 查不到时 kernelUpdatable 应为 false，实际 %v", body2["kernelUpdatable"])
+	}
+}
+
 // 旧清单没有 kernelVersion → 线上版本未知（空串）。
 func TestDeployStatusLegacyManifestKernelVersion(t *testing.T) {
 	m := &deploy.Manifest{Build: "abc1234-deadbeef"}

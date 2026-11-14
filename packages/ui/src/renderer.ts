@@ -5593,9 +5593,9 @@ import {
         setBtn('重新部署', false)
         if (status.kernelUpdatable) {
           setTip(
-            '👉 GitHub 上发布了更新的内核（可更新到 ' +
+            '👉 官方发布了更新的内核（可更新到 ' +
               (status.remoteKernelVersion || '最新版') +
-              '），点下面的「更新现有部署」即可升级 —— 不需要升级本程序。',
+              '），点下面的「重新部署」即可升级线上实例 —— 不需要升级本程序。',
             true
           )
         } else {
@@ -5603,7 +5603,7 @@ import {
         }
         setHint(
           status.kernelUpdatable
-            ? '「已部署」与「本程序内置」一致，但 GitHub 上有更新的内核 —— 点「重新部署」会升到最新版。'
+            ? '「已部署」与「本程序内置」一致，但官方内核通道发布了更新的内核 —— 点「重新部署」会升到最新版。'
             : '「已部署」与「本程序内置」是同一份产物，通常不需要再部署。'
         )
         return

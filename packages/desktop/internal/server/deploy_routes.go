@@ -602,6 +602,27 @@ func (s *Server) handleDeployCheck(w http.ResponseWriter, r *http.Request) {
 		}
 		cancelRemote()
 	}
+	// 线上 build == 官方通道最新 build → 线上已经是官方最新内核。
+	//
+	// 这纠正 build 比对的**方向性盲区**：build 指纹只知「相同/不同」，
+	// 不知道谁新谁旧。线上 ≠ 本程序内置时，若线上恰好就是通道的最新
+	// build（例如用户刚在别的工具里更新过内核），绝不是 outdated ——
+	// 此时把按钮标成「更新到最新内核」会让用户把新内核打回旧版
+	//（2026-11-14 用户实际踩到：检查后按钮提示更新，点下去反而降级）。
+	channelBuild := ""
+	if chInfo != nil {
+		channelBuild = chInfo.Build
+	}
+	channelLatest := channelBuild != "" && remoteBuild == channelBuild
+	if channelLatest {
+		ks.ChannelLatest = true
+		if chInfo != nil {
+			ks.Remote = chInfo.Version
+		}
+		// 覆盖上方 build 比对的方向性盲区：线上已是官方最新内核时，
+		// 无论与本程序内置是否一致，都不是 outdated。
+		state = "latest"
+	}
 
 	// 检查过状态 = 拿到了最新的部署记录 → 顺手刷新本地快照，
 	// 这样「运行状态」卡片在下次打开时能直接显示它（不用再调 Token）。
@@ -673,6 +694,10 @@ type kernelStatus struct {
 	// 此时 Updatable 无条件为 true —— 通道序号比内置锚点新就意味着
 	// 「内置内核已经落后」，与线上部署的是哪个版本无关。
 	ChannelNewer bool
+	// ChannelLatest 表示线上已部署的 build 就是官方通道的最新 build。
+	// 此时无论与本程序内置是否一致，都不需要更新（可能是用户刚在
+	// 别的工具里更新过内核，线上比内置还新）。
+	ChannelLatest bool
 	// RemoteErr 是远程查询失败的原因（没有失败就是空串）
 	RemoteErr string
 }
@@ -681,6 +706,8 @@ type kernelStatus struct {
 //
 // 内核热更新通道判定「有更新」时（ChannelNewer）无条件可升级 ——
 // 通道序号是单调递增的，比内置锚点新就是有新内核。
+// 线上已是通道最新（ChannelLatest）时不可升级 —— 就算它和本程序内置不一致
+// （线上可能比内置还新，点「更新」反而会降级）。
 //
 // ⚠️ 线上版本未知（空串）时，CompareSemver 把空串当成「更旧」，
 // 于是结果为 true —— 这是**故意的**：
@@ -688,6 +715,9 @@ type kernelStatus struct {
 //
 // 远程版本查不到（离线）时永远是 false —— 不能凭「查不到」就催用户更新。
 func (k kernelStatus) Updatable() bool {
+	if k.ChannelLatest {
+		return false
+	}
 	if k.ChannelNewer {
 		return true
 	}
@@ -757,6 +787,10 @@ func buildDeployStatusResponse(
 		"remoteKernelVersion": ks.Remote,
 		"kernelUpdatable":     ks.Updatable(),
 		"kernelRemoteError":   ks.RemoteErr,
+		// 线上 build == 官方通道最新 build：界面用它把「已经是最新」
+		// 说清楚（哪怕线上与本程序内置的 build 不同 —— 用户在别的工具
+		// 里更新过内核时，「更新」按钮反而是降级，必须拦住）。
+		"kernelChannelLatest": ks.ChannelLatest,
 	}
 }
 

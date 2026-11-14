@@ -211,6 +211,13 @@ import {
     kernelUpdatable?: boolean
     /** 查远程失败的原因（不阻断其它状态） */
     kernelRemoteError?: string
+    /**
+     * 线上 build 就是官方内核通道的最新 build（2026-11-14）。
+     * 此时无论与本程序内置是否一致都**不需要更新** ——
+     * 线上可能比内置还新（用户刚在别的工具里更新过内核），
+     * 点「更新」反而是降级。
+     */
+    kernelChannelLatest?: boolean
     controlProject?: string
     dataProject?: string
     controlSubdomain?: string
@@ -5571,17 +5578,31 @@ import {
         : status.kernelRemoteError
           ? '最新发布查询失败'
           : ''
-      // 「可升级」单独着色加粗 —— 用户一眼就知道该不该点更新。
+      // 三种结论各有专属视觉，绝不让用户在「按钮 vs 提示」之间猜：
+      //   可升级     → 黄色「可升级」+ 警示 tip
+      //   已是最新   → 绿色「✓ 已是最新」+ 明确结论（也写进日志）
+      //   方向未知   → 「更新部署」按钮 + 提示里讲清风险
       const kernelHtml =
         escapeHtml(deployedText) +
         (latestText ? ' ｜ ' + escapeHtml(latestText) : '') +
-        (status.kernelUpdatable ? ' <span class="rt-upg">可升级</span>' : '')
+        (status.kernelChannelLatest
+          ? ' <span class="rt-latest">✓ 已是官方最新</span>'
+          : status.kernelUpdatable
+            ? ' <span class="rt-upg">可升级</span>'
+            : '')
       renderKernelInfo(
-        [deployedText, latestText].filter(Boolean).join(' ｜ ') + (status.kernelUpdatable ? ' 可升级' : ''),
+        [deployedText, latestText].filter(Boolean).join(' ｜ ') +
+          (status.kernelChannelLatest ? ' ✓已是官方最新' : status.kernelUpdatable ? ' 可升级' : ''),
         status.kernelUpdatable === true,
-        '当前已部署 = Cloudflare 上正在运行的内核；最新发布 = GitHub 上的最新内核',
+        '当前已部署 = Cloudflare 上正在运行的内核；最新发布 = 官方内核通道的最新发布',
         kernelHtml
       )
+      // 结论也进日志 —— 界面上的小字会被忽略，日志不会。
+      if (status.kernelChannelLatest) {
+        log('✓ 内核检查结论：当前部署已是官方最新内核' + (status.remoteKernelVersion ? '（' + status.remoteKernelVersion + '）' : '') + '，无需更新。', 'ok')
+      } else if (status.kernelUpdatable) {
+        log('⚠ 内核检查结论：官方发布了更新的内核' + (status.remoteKernelVersion ? '（' + status.remoteKernelVersion + '）' : '') + '，点「重新部署」即可升级。', 'warn')
+      }
 
       // 部署实例：项目名（检查时才知道的更准）+ 部署时间
       const instanceText =
@@ -5591,7 +5612,16 @@ import {
 
       if (status.state === 'latest') {
         setBtn('重新部署', false)
-        if (status.kernelUpdatable) {
+        if (status.kernelChannelLatest) {
+          // 线上 = 官方通道最新，但与本程序内置不同 —— 用户在别的工具里
+          // 更新过内核。此时「更新」是降级，按钮是中性 ghost 并讲明原因。
+          setTip(
+            '✓ 当前部署的内核已是官方最新发布' +
+              (status.remoteKernelVersion ? '（' + status.remoteKernelVersion + '）' : '') +
+              '。它与本程序内置的版本不同（内置偏旧），但**当前部署不需要动**。',
+            false
+          )
+        } else if (status.kernelUpdatable) {
           setTip(
             '👉 官方发布了更新的内核（可更新到 ' +
               (status.remoteKernelVersion || '最新版') +
@@ -5599,12 +5629,14 @@ import {
             true
           )
         } else {
-          setTip('当前已部署的内核已是最新发布版本，无需更新。')
+          setTip('✓ 当前已部署的内核已是最新发布版本，无需更新。')
         }
         setHint(
-          status.kernelUpdatable
-            ? '「已部署」与「本程序内置」一致，但官方内核通道发布了更新的内核 —— 点「重新部署」会升到最新版。'
-            : '「已部署」与「本程序内置」是同一份产物，通常不需要再部署。'
+          status.kernelChannelLatest
+            ? '当前部署与官方最新发布一致。本程序内置的内核偏旧不影响已部署的实例。'
+            : status.kernelUpdatable
+              ? '「已部署」与「本程序内置」一致，但官方内核通道发布了更新的内核 —— 点「重新部署」会升到最新版。'
+              : '「已部署」与「本程序内置」是同一份产物，通常不需要再部署。'
         )
         return
       }
@@ -5626,17 +5658,30 @@ import {
         return
       }
 
-      // 正常差异：已部署的比本程序内置的旧
+      // 正常差异：已部署的与本程序内置的内核不同。
+      //
+      // ⚠️ build 指纹没有方向性（只能比「同/异」），通道比对已排除
+      // 「线上比内置还新」的情况（那种会走上面的 latest 分支），
+      // 但本程序内置的内核也可能偏旧 —— 提示里要讲清「更新后线上会
+      // 变成内置的版本」，用户自己能判断要不要。
+      log(
+        '⚠ 内核检查结论：线上与本程序内置的内核不同' +
+          (status.kernelUpdatable ? '，官方有更新的内核可升级。' : '。更新会把当前部署对齐为本程序内置的版本。'),
+        status.kernelUpdatable ? 'warn' : undefined
+      )
       setBtn('更新到最新内核', true)
       if (status.kernelUpdatable) {
         setTip(
-          '👉 GitHub 上发布了更新的内核（可更新到 ' +
+          '👉 官方发布了更新的内核（可更新到 ' +
             (status.remoteKernelVersion || '最新版') +
-            '），点下面的「更新现有部署」即可升级 —— 不需要升级本程序。',
+            '），点下面的「更新到最新内核」即可升级 —— 不需要升级本程序。',
           true
         )
       } else {
-        setTip('「已部署」与「本程序内置」不是同一份产物，点下面的「更新到最新内核」即可对齐。')
+        setTip(
+          '「已部署」与「本程序内置」的内核不同，点下面的按钮会把当前部署对齐为本程序内置的版本。' +
+            '如果你刚在其它工具里更新过内核（当前部署可能更新），请先核对再操作。'
+        )
       }
       setHint(
         '「已部署」与「本程序内置」不是同一份产物，更新会换成后者。沿用原 UUID 与 WS 路径，客户端订阅地址不用改。'

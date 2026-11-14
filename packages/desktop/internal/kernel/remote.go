@@ -107,10 +107,13 @@ const remoteQueryTimeout = 6 * time.Second
 
 // RemoteInfo 是远程可用内核的信息。
 type RemoteInfo struct {
-	// Version 是远程内核版本（semver，如 "0.7.6"）
+	// Version 是远程内核版本（semver 如 "0.7.6"；内核热更新通道为 k<序号>）
 	Version string
 	// Tag 是发行版 tag（如 "v0.7.6"），用于按官方模板构造下载地址。
 	Tag string
+	// Build 是远程内核的构建指纹（仅内核热更新通道提供 —— 清单里带 build，
+	// 不用下载产物就能拿到；包 Release 通道此字段为空，指纹要下载后提取）
+	Build string
 	// ControlURL / DataURL 是两个内核产物的下载地址（一律官方构造，见 officialAssetURL）
 	ControlURL string
 	DataURL    string

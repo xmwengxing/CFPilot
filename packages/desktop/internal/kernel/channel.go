@@ -128,8 +128,11 @@ func isChannelNewer(channel, builtin *KernelVersionManifest) bool {
 func channelRemoteInfo(channel *KernelVersionManifest) *RemoteInfo {
 	version := fmt.Sprintf("k%d", channel.Seq)
 	return &RemoteInfo{
-		Version:      version,
-		Tag:          KernelChannelTag,
+		Version: version,
+		Tag:     KernelChannelTag,
+		// Build 不用下载产物即可获得 —— 「检查部署状态」用它直接比对
+		// 线上 build，判定「线上是否已是官方最新内核」。
+		Build:        channel.Build,
 		ControlURL:   channelAssetURL(ControlAssetName),
 		DataURL:      channelAssetURL(DataAssetName),
 		ChecksumsURL: channelAssetURL(ChecksumsAssetName),

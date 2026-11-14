@@ -88,6 +88,22 @@ describe('反代入口池汇总', () => {
     })
     expect(result).toHaveLength(1)
   })
+
+  it('内置冗余表全部参与候选，表头优先顺序不变', async () => {
+    // Cloudflare 网段目标（x.com → 172.66.x）完全依赖反代。
+    // 只取前 6 个会让后 18 个固定 IP 永远轮不到 —— 表头几个失效后目标长期不可用。
+    const result = await collectRelayEndpoints({})
+    expect(result).toHaveLength(BUILTIN_RELAY_DOMAINS.length)
+    expect(result.slice(0, 6).map((r) => r.ip)).toEqual(BUILTIN_RELAY_DOMAINS.slice(0, 6))
+    // 固定 IP 零 DoH：全表候选不产生任何子请求
+    expect(result.every((r) => BUILTIN_RELAY_DOMAINS.includes(r.ip))).toBe(true)
+  })
+
+  it('用户自配入口排在全表内置入口之前', async () => {
+    const result = await collectRelayEndpoints({ userEntries: '9.9.9.9' })
+    expect(result[0]!.ip).toBe('9.9.9.9')
+    expect(result.slice(1).map((r) => r.ip)).toEqual([...BUILTIN_RELAY_DOMAINS])
+  })
 })
 
 describe('反代候选进入选路', () => {

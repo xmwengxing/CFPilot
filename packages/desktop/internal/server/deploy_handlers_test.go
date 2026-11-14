@@ -42,12 +42,15 @@ type fakeCF struct {
 	seenToken []string
 	// createdKvTitles 记录被新建的 KV 命名空间名称。
 	createdKvTitles []string
+	// pagesDomains 是 Pages 项目名 → 绑定的域名列表（查面板自定义域名用）。
+	pagesDomains map[string][]string
 }
 
 func newFakeCF() *fakeCF {
 	return &fakeCF{
-		accounts: map[string][]map[string]string{},
-		kv:       map[string]map[string]string{},
+		accounts:     map[string][]map[string]string{},
+		kv:           map[string]map[string]string{},
+		pagesDomains: map[string][]string{},
 	}
 }
 
@@ -122,6 +125,22 @@ func (f *fakeCF) handler(t *testing.T) http.HandlerFunc {
 				"success": true,
 				"result": []map[string]any{
 					{"rate_plan": map[string]any{"id": "free", "public_name": "Cloudflare Free Plan"}},
+				},
+			})
+			return
+		}
+		// ---- 单个 Pages 项目：返回它绑定的域名（面板自定义域名从这读）----
+		if strings.Contains(r.URL.Path, "/pages/projects/") {
+			name := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+			domains := f.pagesDomains[name]
+			if domains == nil {
+				domains = []string{name + ".pages.dev"}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"result": map[string]any{
+					"name": name, "subdomain": name + ".pages.dev", "domains": domains,
 				},
 			})
 			return
@@ -331,6 +350,67 @@ func TestDeployCredentialsFallsBackToProfileKV(t *testing.T) {
 	_, body := postJSON(t, base+"/api/deploy/credentials", cookie, map[string]any{})
 	if got := body["panelPassword"]; got != "PASSWORD-FOR-PROFILE-KV" {
 		t.Errorf("不传 KV 时应回落到 profile 的 KV，实际 %v", got)
+	}
+}
+
+// 「查看面板凭据」必须同时给出生链接与自定义域名链接；
+// 未绑定自定义域名时该字段为空串，由界面给出「未绑定」提示。
+func TestDeployCredentialsPanelUrls(t *testing.T) {
+	cases := []struct {
+		name       string
+		domains    []string
+		wantCustom string
+	}{
+		{
+			name:       "绑定了自定义域名",
+			domains:    []string{"cpmanager.pages.dev", "panel.example.com"},
+			wantCustom: "https://panel.example.com/panel-cpmanager",
+		},
+		{
+			name:       "只有生产域名",
+			domains:    []string{"cpmanager.pages.dev"},
+			wantCustom: "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFakeCF()
+			f.kv["kv-1"] = map[string]string{
+				"CFP_DEPLOY_MANIFEST": manifestJSON("cpmanager", "PW"),
+			}
+			f.pagesDomains["cpmanager"] = c.domains
+			cfSrv := httptest.NewServer(f.handler(t))
+			t.Cleanup(cfSrv.Close)
+
+			s, base := newTestServer(t)
+			s.SetCFAPIBase(cfSrv.URL)
+			st := newEmptyStore(t)
+			if _, err := st.Create("a", nil); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.SaveActive(store.Patch{
+				CfToken:       ptr("cfat_testtoken"),
+				AccountID:     ptr("acc123"),
+				KVNamespaceID: ptr("kv-1"),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			s.SetStore(st)
+			cookie := loginCookie(t, s, base)
+
+			_, body := postJSON(t, base+"/api/deploy/credentials", cookie, map[string]any{
+				"kvNamespaceId": "kv-1",
+			})
+			if ok, _ := body["ok"].(bool); !ok {
+				t.Fatalf("应返回 ok=true，实际 %v", body)
+			}
+			if got := body["panelUrl"]; got != "https://cpmanager.pages.dev/panel-cpmanager" {
+				t.Errorf("生产链接不对，实际 %v", got)
+			}
+			if got, _ := body["panelCustomUrl"].(string); got != c.wantCustom {
+				t.Errorf("自定义域名链接：期望 %q，实际 %q", c.wantCustom, got)
+			}
+		})
 	}
 }
 

@@ -161,6 +161,38 @@ for (const [label, re, desc] of profileChecks) {
   if (!ok) bad++
 }
 
+/* ---------------- 6. 部署按钮状态机 & 面板凭据两种入口 ---------------- */
+//
+// 2026-11-14 真机：点过「检查部署状态」后，按钮文案被固定下来；
+// 再切换「自动判断 / 更新现有部署 / 全新部署」时按钮不跟着变，
+// 且未检查状态下也能直接点部署。
+console.log('\n=== 部署按钮状态机 & 面板凭据 ===\n')
+
+const uiHtml = readFileSync('packages/ui/src/index.html', 'utf8')
+const deployButtonChecks = [
+  ['三种模式切换有监听', /querySelectorAll\('input\[name="mode"\]'\)/, '切换后必须重算按钮'],
+  ['统一状态机存在', /function syncDeployButton\(\): void/, '按钮文案 / 可用性 / 提示集中计算'],
+  ['未检查状态置灰', /btn\.disabled = .*!deployChecked/, '自动判断未检查时不允许部署'],
+  ['忙碌态结束重新同步', /if \(!busy\) syncDeployButton\(\)/, '避免 setBusy(false) 无条件放开按钮'],
+  ['自动判断引导提示', /请先点击「检查部署状态」按钮判断部署操作选择/, '切回自动判断时给出指引'],
+  ['更新模式按钮名', /btn\.textContent = '更新现有部署'/, '按钮名与实际动作一致'],
+  ['全新模式按钮名', /btn\.textContent = '全新部署'/, '按钮名与实际动作一致'],
+]
+for (const [label, re, desc] of deployButtonChecks) {
+  const ok = re.test(rendererSrc)
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}  —— ${desc}`)
+  if (!ok) bad++
+}
+
+const credChecks = [
+  ['弹窗有自定义域名行', uiHtml.includes('id="credPanelCustomUrl"'), '两种面板地址都要展示'],
+  ['凭据接口读自定义域名', rendererSrc.includes('panelCustomUrl'), '界面要消费后端返回的自定义域名链接'],
+]
+for (const [label, ok, desc] of credChecks) {
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}  —— ${desc}`)
+  if (!ok) bad++
+}
+
 console.log(
   bad === 0 ? '\n全部通过：界面 ↔ 适配层 ↔ 后端 三方接口一致。' : `\n${bad} 项不一致 —— 界面会静默失效。`
 )

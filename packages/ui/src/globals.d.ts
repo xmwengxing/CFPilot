@@ -267,8 +267,12 @@ interface Window {
   getDeployCredentials(kvNamespaceId?: string): Promise<{
     ok: boolean
     error?: string
-    /** 面板完整地址（https://<控制面域名><面板路径>） */
+    /** 面板完整地址（https://<控制面生产域名><面板路径>） */
     panelUrl?: string
+    /** 控制面绑定的自定义域名（未绑定时为空串） */
+    panelCustomDomain?: string
+    /** 面板完整地址（https://<控制面自定义域名><面板路径>，未绑定时为空串） */
+    panelCustomUrl?: string
     panelPassword?: string
     uuid?: string
     wsPath?: string

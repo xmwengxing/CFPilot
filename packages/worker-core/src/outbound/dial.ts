@@ -503,6 +503,17 @@ async function dialViaProxy(
 export const MAX_SIMULTANEOUS_CONNECTS = 6
 
 /**
+ * 反代入口的连接超时（ms）。
+ *
+ * 内置表是固定 IP，实测 TLS 握手 168~203ms；失效 IP 则是完全不应答。
+ * 让它们等满常规 5s 没有任何收益，反而会挤掉总预算：
+ * 24 个入口按 6 个一批要分 4 批，4 × 5s 会顶穿 15s 拨号预算，
+ * 后面几批只能因「预算已用尽」被跳过（等于白扩容）。
+ * 反代单独压到 2.5s，4 批约 10s，能把全表覆盖完。
+ */
+export const RELAY_CONNECT_TIMEOUT_MS = 2500
+
+/**
  * 单条错误信息里最多展开多少条失败原因。
  *
  * 失败证据不能丢（会进 `/__diag`），但也不能无限膨胀 ——
@@ -848,7 +859,12 @@ export async function dial(options: DialOptions): Promise<DialResult> {
     if (remaining <= 0) {
       throw new Error(`拨号预算已用尽（${budgetMs}ms）：${options.hostname}:${options.port}`)
     }
-    const connectTimeout = Math.max(200, Math.min(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, remaining))
+    // 反代入口失效时应快速失败，把总预算留给后续批次；只缩短、不放大用户设置。
+    const baseTimeout =
+      candidate.source === 'relay'
+        ? Math.min(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, RELAY_CONNECT_TIMEOUT_MS)
+        : options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+    const connectTimeout = Math.max(200, Math.min(baseTimeout, remaining))
     const attemptOptions: DialOptions = { ...options, timeoutMs: connectTimeout }
     try {
       // IPv6 字面量目标 + 非出站代理候选 → 立刻失败，不发任何 socket。

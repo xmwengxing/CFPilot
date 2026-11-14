@@ -376,6 +376,10 @@ import {
     }
     // 换了 KV 之后，之前那次检测结果就不适用了 —— 清掉，回到本地留档显示。
     deployChecked = null
+    autoDeployLabel = '开始部署'
+    autoDeployPrimary = true
+    autoDeployHint = '请先点击「检查部署状态」按钮判断部署操作选择。'
+    syncDeployButton()
     // KV 列表变化后，部署页的「部署实例」信息也要跟着更新
     // （控制面 / 数据面项目名就来自这份列表）。
     void loadLocalDeployInfo()
@@ -1020,6 +1024,19 @@ import {
    */
   let deployChecked: DeployStatusLike | null = null
 
+  /**
+   * 「自动判断」模式下，最近一次「检查部署状态」推导出的按钮文案与提示。
+   *
+   * ⚠️ 只存**结果**，不直接改 DOM：用户随时会切换本次操作模式，
+   * 最终显示什么一律由 syncDeployButton() 按当前模式重新计算。
+   */
+  let autoDeployLabel = '开始部署'
+  let autoDeployPrimary = true
+  let autoDeployHint = '请先点击「检查部署状态」按钮判断部署操作选择。'
+
+  /** 是否有长任务在跑（部署 / 扫描）。忙碌期间按钮不能被模式切换重新放开。 */
+  let uiBusy = false
+
   function bindCredentials(): void {
     /**
      * 保存 Token。
@@ -1171,6 +1188,7 @@ import {
    * 必须用 removeAttribute 或直接操作 .disabled 属性。
    */
   function setBusy(busy: boolean): void {
+    uiBusy = busy
     for (const id of [
       'btnDeploy',
       'btnCheck',
@@ -1184,6 +1202,50 @@ import {
       const el = document.getElementById(id) as HTMLButtonElement | null
       if (el) el.disabled = busy
     }
+    // 忙碌态结束不能无条件放开「开始部署」：自动判断且未检查状态时它必须保持置灰。
+    if (!busy) syncDeployButton()
+  }
+
+  /**
+   * 统一计算「开始部署」按钮的文案 / 可用性 / 提示。
+   *
+   * 输入只有两个：当前操作模式（readMode）与是否已检查部署状态（deployChecked）。
+   * 「检查部署状态」的结果只影响 auto 模式的文案，不会把按钮状态固定下来 ——
+   * 用户切到任意模式都会重新算一遍，按钮名与实际触发的动作始终一致。
+   */
+  function syncDeployButton(): void {
+    const btn = document.getElementById('btnDeploy') as HTMLButtonElement | null
+    const hint = document.getElementById('deployActionHint')
+    if (!btn) return
+    const mode = readMode()
+
+    if (mode === 'auto') {
+      btn.textContent = autoDeployLabel
+      btn.classList.toggle('btn-primary', autoDeployPrimary)
+      btn.classList.toggle('btn-ghost', !autoDeployPrimary)
+      // 没点过「检查部署状态」就不允许部署：避免拿过期结论去跑自动判断。
+      // 长任务进行中也不能放开（此时切模式会重算按钮，不能把禁用冲掉）。
+      btn.disabled = uiBusy || !deployChecked
+      if (hint) {
+        hint.textContent = deployChecked
+          ? autoDeployHint
+          : '请先点击「检查部署状态」按钮判断部署操作选择。'
+      }
+      return
+    }
+
+    btn.classList.add('btn-primary')
+    btn.classList.remove('btn-ghost')
+    btn.disabled = uiBusy
+    if (mode === 'update') {
+      btn.textContent = '更新现有部署'
+      if (hint) {
+        hint.textContent = '复用「凭据」页选中的 KV 与原有参数，更新控制面与数据面（不新建实例）。'
+      }
+    } else {
+      btn.textContent = '全新部署'
+      if (hint) hint.textContent = '新建独立 KV 与实例，不影响现有部署。'
+    }
   }
 
   function bindDeploy(): void {
@@ -1195,6 +1257,24 @@ import {
       })
     })
     syncDataPlaneUI()
+
+    // 「本次操作」切换时，按钮文案 / 可用性 / 提示必须立刻重新计算：
+    // 不能停留在「检查部署状态」算出的那一次结果，否则按钮名与实际动作不符。
+    document.querySelectorAll('input[name="mode"]').forEach((el) => {
+      el.addEventListener('change', () => {
+        syncDeployButton()
+        const value = (el as HTMLInputElement).value
+        if (value === 'auto') {
+          log('已切换到「自动判断」，请点击「检查部署状态」按钮判断部署操作选择')
+        } else if (value === 'update') {
+          log('已切换到「更新现有部署」，将复用当前 KV 与原有参数')
+        } else {
+          log('已切换到「全新部署」，将新建独立 KV 与实例')
+        }
+      })
+    })
+    // 初始状态：自动判断且尚未检查 → 置灰并提示先检查状态。
+    syncDeployButton()
 
     /**
      * 渲染「部署状态」卡片的函数引用。
@@ -1222,6 +1302,12 @@ import {
       // 白白消耗免费额度。所以按钮也一并移除了。
       const select = $sel('kvSelect')
       const mode = readMode()
+      // 自动判断必须先有检测结果：按钮默认置灰，这里再兜一层，
+      // 防止通过键盘 / 脚本绕过禁用状态直接触发部署。
+      if (mode === 'auto' && !deployChecked) {
+        log('请先点击「检查部署状态」按钮判断部署操作选择', 'warn')
+        return
+      }
       let kvId = select.value
       if (mode === 'fresh') {
         // 全新部署 = 再开一套实例：**忽略**「Cloudflare 凭据」页选中的 KV，
@@ -1258,7 +1344,14 @@ import {
         }
       }
       setBusy(true)
-      log('── 开始部署 ──')
+      // 日志里的动作名与按钮文案、实际传给后端的 mode 保持一致。
+      log(
+        mode === 'fresh'
+          ? '── 开始全新部署 ──'
+          : mode === 'update'
+            ? '── 开始更新现有部署 ──'
+            : '── 开始部署（自动判断）──'
+      )
 
       // 部署页的面板密码**直接随部署请求传下去**，不写进账户
       // 。
@@ -1392,10 +1485,25 @@ import {
           const el = document.getElementById(id)
           if (el) el.textContent = v || '—'
         }
-        set('credPanelUrl', r.panelUrl ?? '')
+        const prodUrl = (r.panelUrl ?? '').trim()
+        const customUrl = (r.panelCustomUrl ?? '').trim()
+        // 两种入口都展示：缺哪一种就在那一行写明，而不是只留一个「—」。
+        set('credPanelUrl', prodUrl || '未记录生产链接')
+        set('credPanelCustomUrl', customUrl || '未绑定自定义域名')
         set('credPanelPw', r.panelPassword ?? '')
         set('credUuid', r.uuid ?? '')
         set('credWsPath', r.wsPath ?? '')
+        const urlHint = document.getElementById('credUrlHint')
+        if (urlHint) {
+          urlHint.textContent =
+            !prodUrl && !customUrl
+              ? '未读取到可用的面板地址，请先在「部署」页完成一次部署。'
+              : !customUrl
+                ? '控制面项目未绑定自定义域名；可在 Cloudflare 控制台给控制面项目绑定后再查看。'
+                : !prodUrl
+                  ? '未记录 Cloudflare 生产链接，请使用自定义域名访问面板。'
+                  : '两个地址都能打开面板；自定义域名需在 Cloudflare 控制台绑定后才会显示。'
+        }
         modal.hidden = false
 
         // 自动复制到剪贴板
@@ -1403,7 +1511,8 @@ import {
         // 用户点「查看面板凭据」几乎总是为了拿去登录面板，
         // 再点一次「复制全部」属于多余步骤。
         const text = [
-          '面板地址：' + (r.panelUrl ?? ''),
+          '面板地址（生产链接）：' + (prodUrl || '未记录'),
+          '面板地址（自定义域名）：' + (customUrl || '未绑定'),
           '面板密码：' + (r.panelPassword ?? ''),
           'UUID：' + (r.uuid ?? ''),
           'WS 路径：' + (r.wsPath ?? ''),
@@ -1437,7 +1546,8 @@ import {
     document.getElementById('btnCopyCreds')?.addEventListener('click', async () => {
       const g = (id: string): string => document.getElementById(id)?.textContent ?? ''
       const text = [
-        '面板地址：' + g('credPanelUrl'),
+        '面板地址（生产链接）：' + g('credPanelUrl'),
+        '面板地址（自定义域名）：' + g('credPanelCustomUrl'),
         '面板密码：' + g('credPanelPw'),
         'UUID：' + g('credUuid'),
         'WS 路径：' + g('credWsPath'),
@@ -5210,15 +5320,19 @@ import {
     })
 
     /**
-     * 渲染部署状态，并**同步驱动部署按钮的语义**。
+     * 渲染部署状态，并推导「自动判断」模式下的按钮语义。
      *
      * 交互设计：
      *   - 状态卡只回答「现在什么情况」，不承载操作；
-     *   - 部署卡的按钮文案随状态变化：
+     *   - 「自动判断」的按钮文案随状态变化：
      *       none     → 「开始首次部署」
      *       outdated → 「更新到最新内核」(primary 高亮)
      *       latest   → 「重新部署」(ghost，弱化)
      *   - 用户不需要理解「auto/update/fresh」也能直接用默认的「自动判断」。
+     *
+     * ⚠️ 这里**不直接改按钮 DOM**：算出的文案存进 autoDeploy*，
+     * 由 syncDeployButton() 按当前操作模式统一渲染。
+     * 否则切到「更新现有部署 / 全新部署」后，按钮会停留在上次检查状态的文案。
      *
      * ⚠️ 不自动填 optHost：`dataProject` 是**项目名**不是域名，
      * 项目名与子域不保证一致（用户可自定义子域）。
@@ -5226,18 +5340,26 @@ import {
      */
     // 赋值给前面声明的引用：让「检查部署状态」按钮也能调用同一个渲染逻辑
     applyDeployStatus = (status: DeployStatusLike): void => {
-      const btn = document.getElementById('btnDeploy') as HTMLButtonElement | null
-      const hint = document.getElementById('deployActionHint')
       const tip = document.getElementById('rtTip')
-      if (!btn) return
 
       // 记住这次检测结果：本地快照不再覆盖它（否则点了按钮看不到变化）。
       deployChecked = status
+      // 每次检查都从默认语义重新推导，不沿用上一次的按钮文案。
+      autoDeployLabel = '开始部署'
+      autoDeployPrimary = true
+      autoDeployHint = '请先点击「检查部署状态」按钮判断部署操作选择。'
 
+      // ⚠️ 只记录「自动判断」模式下的文案，不直接改按钮 DOM：
+      // 用户可能正处在「更新现有部署 / 全新部署」，或稍后切过去，
+      // 最终显示什么一律由 syncDeployButton() 按当前模式决定。
       const setBtn = (label: string, primary: boolean): void => {
-        btn.textContent = label
-        btn.classList.toggle('btn-primary', primary)
-        btn.classList.toggle('btn-ghost', !primary)
+        autoDeployLabel = label
+        autoDeployPrimary = primary
+        syncDeployButton()
+      }
+      const setHint = (text: string): void => {
+        autoDeployHint = text
+        syncDeployButton()
       }
 
       /** 运行状态卡片底部的提示（升级建议等）。 */
@@ -5275,17 +5397,15 @@ import {
         )
         renderKernelInfo('无法检测线上状态（需先完成设置）', false, '缺少前置条件时无法读取线上部署状态')
         setBtn('开始部署', true)
-        btn.disabled = false
-        if (hint) hint.textContent = '完成上面的设置后，回来再点一次「检查部署状态」。'
+        setHint('完成上面的设置后，回来再点一次「检查部署状态」。')
         return
       }
-      btn.disabled = false
 
       if (!status.hasDeploy) {
         setTip('当前选中的 KV 里还没有部署记录 —— 点下面的「开始首次部署」即可创建实例。')
         renderKernelInfo('尚未部署', false, '这个 KV 里没有部署记录')
         setBtn('开始首次部署', true)
-        if (hint) hint.textContent = '首次部署会生成新的 UUID、WS 路径与面板密码，请存好。'
+        setHint('首次部署会生成新的 UUID、WS 路径与面板密码，请存好。')
         return
       }
 
@@ -5376,11 +5496,11 @@ import {
         } else {
           setTip('当前已部署的内核已是最新发布版本，无需更新。')
         }
-        if (hint) {
-          hint.textContent = status.kernelUpdatable
+        setHint(
+          status.kernelUpdatable
             ? '「已部署」与「本程序内置」一致，但 GitHub 上有更新的内核 —— 点「重新部署」会升到最新版。'
             : '「已部署」与「本程序内置」是同一份产物，通常不需要再部署。'
-        }
+        )
         return
       }
 
@@ -5389,10 +5509,7 @@ import {
         // 已部署的内核读不到版本（早期部署的，或数据面探测不到且清单里没记）
         setBtn('更新并记录版本', true)
         setTip('读不到「已部署」内核的版本号（较早版本部署的，或数据面暂时探测不到）—— 更新一次即可写入版本号。', true)
-        if (hint) {
-          hint.textContent =
-            '更新一次即可写入版本号，之后就能正常比对。会沿用原 UUID 与 WS 路径。'
-        }
+        setHint('更新一次即可写入版本号，之后就能正常比对。会沿用原 UUID 与 WS 路径。')
         return
       }
 
@@ -5400,7 +5517,7 @@ import {
         // 本地读不到版本 —— 通常是产物缺失
         setBtn('重新部署', false)
         setTip('读不到「本程序内置」的内核版本 —— 应用内的内核产物可能缺失，请重新安装。', true)
-        if (hint) hint.textContent = '请重新安装或联系维护者；直接部署可能上传不完整的产物。'
+        setHint('请重新安装或联系维护者；直接部署可能上传不完整的产物。')
         return
       }
 
@@ -5416,10 +5533,9 @@ import {
       } else {
         setTip('「已部署」与「本程序内置」不是同一份产物，点下面的「更新到最新内核」即可对齐。')
       }
-      if (hint) {
-        hint.textContent =
-          '「已部署」与「本程序内置」不是同一份产物，更新会换成后者。沿用原 UUID 与 WS 路径，客户端订阅地址不用改。'
-      }
+      setHint(
+        '「已部署」与「本程序内置」不是同一份产物，更新会换成后者。沿用原 UUID 与 WS 路径，客户端订阅地址不用改。'
+      )
     }
 
     // 事件入口：部署完成后主进程 / SSE 推送状态时也走同一个渲染函数

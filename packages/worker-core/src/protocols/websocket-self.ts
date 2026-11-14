@@ -71,8 +71,18 @@ const DIAL_TIMEOUT_MS = 5000
  */
 const DOWNLINK_STALL_MS = 2500
 
-/** 反代重拨的最多次数（含内置入口的轮换） */
-const MAX_RELAY_REDIAL = 2
+/**
+ * 一次假活重拨最多依次尝试几个反代入口。
+ *
+ * 早期只试 2 个：Cloudflare 网段目标（如 x.com → 172.66.x）完全依赖反代，
+ * 表头 2 个 IP 一旦对目标失效就直接放弃，表现为「大部分情况打不开、偶尔可以」。
+ * 现在配合 `RELAY_DOMAIN_LIMIT` 取全表，重拨可覆盖 4 个不同入口
+ * （`triedRelays` 去重，串行、不增加并发出站数）。
+ */
+const MAX_RELAY_REDIAL = 4
+
+/** 重拨单入口的拨号超时；比常规拨号短，避免多个入口串行把总延迟拖爆。 */
+const REDIAL_DIAL_TIMEOUT_MS = 3000
 
 /** 握手头最大长度 */
 const MAX_HEADER_BYTES = 64 * 1024
@@ -1067,6 +1077,8 @@ export async function handleWebSocket(
     } catch {
       endpoints = []
     }
+    // 当前这条假活连接若本身就是反代入口，先记入已试集合，避免重拨时原地重试。
+    if (dialed?.endpoint) triedRelays.add(dialed.endpoint)
     // 过滤已试过的，避免同一入口反复重试
     const fresh = endpoints.filter((e) => !triedRelays.has(`${e.ip}:${e.port}`))
     if (fresh.length === 0) {
@@ -1103,7 +1115,7 @@ export async function handleWebSocket(
         const socket = await dial({
           hostname: endpoint.ip,
           port: endpoint.port,
-          timeoutMs: DIAL_TIMEOUT_MS,
+          timeoutMs: REDIAL_DIAL_TIMEOUT_MS,
           // 反代路径不做 DoH 解析（入口已是解析好的 IP）
           resolvePreferred: false,
           // 反代入口不是用户目标，不走目标地址策略（见 outbound/guard.ts）

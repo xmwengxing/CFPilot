@@ -245,10 +245,23 @@ export const RELAY_BATCH_SIZE = 6
  *
  * ⚠️ 内置表已经是**固定 IP**，不需要 DoH 解析 —— 所以这里的上限不再受
  * 「子请求预算」约束（早前 14 个域名全解析要 42+ 次 DoH，才压到 3 个）。
- * 取 6 个：与 `RELAY_BATCH_SIZE` 对齐（一批最多 6 条并发），
- * 既给了竞速足够的选择，又不会一次顶穿 `MAX_SIMULTANEOUS_CONNECTS`。
+ *
+ * 取**全表**（24 个）：内置表本身就是按实测质量排好序的冗余池，
+ * 固定 IP 会随时间失效，只取前 6 个会让后 18 个永远轮不到 ——
+ * Cloudflare 网段目标（如 x.com → 172.66.x）完全依赖反代，
+ * 表头几个 IP 一旦失效，整个目标就长期不可用。
+ *
+ * ## 为什么全表不会顶穿「单请求 6 条并发出站」
+ *
+ * `dial.ts` 的 `tryRelayInBatches` 用 `RELAY_BATCH_SIZE = 6` 把候选**分批**：
+ * 批内最多 6 条并发竞速，一批全失败才发下一批，同时连接数始终 ≤ 6。
+ * 表头优先的顺序不变 → 前 6 个仍是最先尝试的一批，出口 IP 保持稳定
+ * （不会像随机/域名竞速那样让同一会话的请求来自不同出口）。
+ *
+ * 固定 IP 零 DoH 子请求，扩大候选只增加「前几批全失败」时的串行重试轮数，
+ * 且 `attemptOf` 有总预算 deadline 兜底，不会无限拖。
  */
-export const RELAY_DOMAIN_LIMIT = 6
+export const RELAY_DOMAIN_LIMIT = BUILTIN_RELAY_DOMAINS.length
 
 /**
  * 单个入口的解析结果缓存（ms）。
@@ -386,7 +399,8 @@ export interface RelayPoolOptions {
  * 按表顺序精选内置反代入口（**纯函数**，便于测试）。
  *
  * 内置表是固定 IP，没有地区信息 —— 顺序本身就是实测质量排序，
- * 取前 N 个即「当前地区优先」的替代：确定性、出口稳定。
+ * 从表头取即「当前地区优先」的替代：确定性、出口稳定。
+ * 默认取全表，由 `dial.ts` 分批串行消费（见 `RELAY_DOMAIN_LIMIT` 注释）。
  * （2026-11-08 起删除了按 colo 的地区排序分支：固定 IP 无地区可分，
  * 留着只会让「当前地区 2 个 / 备用 1 个」这类分支长期走不到。）
  *
@@ -405,12 +419,11 @@ export function selectRelayDomains(
  *
  * 顺序：**用户自配优先**（用户明确指定的更可信），其次内置表。
  *
- * ⚠️ **内置表按地区精选，不是全量**：
- * 14 个域名全解析 = 每个域名 TXT(3 提供商全失败) + A ≈ 4~6 次 DoH，
- * 合计 56~84 次子请求，加上连接竞速必然顶穿 Worker 50 次/调用 上限
- * （真机实测 CF 网段目标 100% 报 "Too many subrequests"）。
- * 现在与 vendor 同构：当前 colo 地区 + 2 个备用域名，
- * 当前地区取 2 个 IP、备用取 1 个，且跳过无谓的 TXT 查询。
+ * ⚠️ 固定 IP 不需要 DoH，取全表也**不消耗子请求**：
+ * 早前域名表 14 个域名 × TXT+A ≈ 56~84 次子请求，会顶穿 Worker 50 次/调用
+ * 上限（真机实测 CF 网段目标 100% 报 "Too many subrequests"），才必须精选。
+ * 现在表内全是 IP 字面量，`resolveRelayEntry` 直接返回、零网络开销，
+ * 所以可以把 24 条冗余全部交给 `dial.ts` 分批兜底。
  */
 export async function collectRelayEndpoints(options: RelayPoolOptions = {}): Promise<RelayEndpoint[]> {
   const perDomain = options.perDomain ?? BUILTIN_PER_DOMAIN

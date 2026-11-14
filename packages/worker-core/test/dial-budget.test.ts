@@ -18,7 +18,7 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import { clearDnsCache, resolveEndpointIps } from '../src/outbound/doh'
-import { dial } from '../src/outbound/dial'
+import { dial, RELAY_CONNECT_TIMEOUT_MS } from '../src/outbound/dial'
 import {
   BUILTIN_RELAY_DOMAINS,
   RELAY_DOMAIN_LIMIT,
@@ -28,9 +28,11 @@ import {
 } from '../src/outbound/relay'
 
 describe('内置反代入口精选', () => {
-  it('默认选 6 个入口（固定 IP 不需要 DoH，不再受子请求预算约束）', () => {
-    expect(RELAY_DOMAIN_LIMIT).toBe(6)
-    expect(selectRelayDomains()).toHaveLength(6)
+  it('默认取全表（固定 IP 零 DoH，冗余池不再被截断在前 6 个）', () => {
+    // Cloudflare 网段目标（x.com → 172.66.x）完全依赖反代；
+    // 只取表头 6 个会让后 18 个固定 IP 永远轮不到，表头失效后目标长期不可用。
+    expect(RELAY_DOMAIN_LIMIT).toBe(BUILTIN_RELAY_DOMAINS.length)
+    expect(selectRelayDomains()).toHaveLength(BUILTIN_RELAY_DOMAINS.length)
     expect(selectRelayDomains(6)).toHaveLength(6)
   })
 
@@ -54,6 +56,13 @@ describe('内置反代入口精选', () => {
 
   it('连接批次 ≤8：32 个并发 connect 会顶穿子请求上限', () => {
     expect(RELAY_BATCH_SIZE).toBeLessThanOrEqual(8)
+  })
+
+  it('全表分批后，单批超时 × 批数仍落在总预算内', () => {
+    // 24 个入口 / 每批 6 = 4 批；反代单入口 2.5s → 10s < 15s 拨号预算，
+    // 不会因预算耗尽把后面几批跳过。
+    const batches = Math.ceil(BUILTIN_RELAY_DOMAINS.length / RELAY_BATCH_SIZE)
+    expect(batches * RELAY_CONNECT_TIMEOUT_MS).toBeLessThanOrEqual(15000)
   })
 })
 

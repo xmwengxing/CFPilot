@@ -338,7 +338,14 @@ export async function handleApi(
       // config 是 15 秒缓存的（见 getConfig），拿缓存里的旧值写回去，
       // 会把用户刚在面板上改的东西覆盖掉。这里读 KV 的最新值。
       const freshConfig = await readFreshConfig(store, config)
-      await saveConfig(store, mergeConfig(freshConfig, { relayPool: merged.join('\n') }))
+      if (append) {
+        // 增量：走合并（出厂兜底条目由 saveConfig 剥离，不固化进 KV）
+        await saveConfig(store, mergeConfig(freshConfig, { relayPool: merged.join('\n') }))
+      } else {
+        // 覆盖：relayPool 用户层**直接替换** —— 不能走 mergeConfig 的合并分支，
+        // 否则旧条目会跟着保留（覆盖的语义就是「清掉旧的」）。
+        await saveConfig(store, { ...freshConfig, relayPool: merged.join('\n') })
+      }
       ctx.onConfigChanged()
       return json({
         ok: true,

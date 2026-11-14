@@ -99,3 +99,30 @@ describe('pinnedHosts 按域名合并（用户条目优先）', () => {
     }
   })
 })
+
+describe('出厂 relayPool（反代入口池）', () => {
+  it('出厂值非空且逐行是 IP / 域名形态', () => {
+    const pool = DEFAULT_CONFIG.relayPool.split('\n').filter(Boolean)
+    expect(pool.length).toBeGreaterThanOrEqual(5)
+    for (const line of pool) expect(line).toMatch(/^[\w.:-]+$/)
+  })
+
+  it('用户只配自己的入口 → 出厂可用入口仍保留', () => {
+    const merged = mergeConfig(
+      { ...DEFAULT_CONFIG, relayPool: DEFAULT_CONFIG.relayPool },
+      { relayPool: 'my-relay.example.com:443' }
+    )
+    const lines = merged.relayPool.split('\n')
+    expect(lines[0]).toBe('my-relay.example.com:443')
+    expect(lines.length).toBeGreaterThanOrEqual(6)
+  })
+
+  it('用户重复的行不重复保留', () => {
+    const merged = mergeConfig(
+      { ...DEFAULT_CONFIG, relayPool: DEFAULT_CONFIG.relayPool },
+      { relayPool: DEFAULT_CONFIG.relayPool.split('\n')[0] }
+    )
+    const hits = merged.relayPool.split('\n').filter((l) => l === DEFAULT_CONFIG.relayPool.split('\n')[0])
+    expect(hits.length).toBe(1)
+  })
+})

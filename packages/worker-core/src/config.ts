@@ -55,7 +55,13 @@ export const DEFAULT_CONFIG: UserConfig = {
   resolvePreferred: true,
   // 默认保守：只修「直连假活」，不替用户在代理出口上擅自换路
   aggressiveRedial: false,
-  relayPool: '',
+  // 出厂反代入口池（2026-11-15）：
+  // 不同反代入口转发同一个 CF 网段站点，目标站点（如 X 的 api.x.com）
+  // 在 Cloudflare 上的 WAF 会按「请求到达边缘时的源」区别对待 ——
+  // 实测部分入口的出口会被 X 拦截（403 body=「IPv6」），部分直达后端。
+  // 这 7 个是逐个实测确认「POST api.x.com/graphql 能到达 X 后端」的入口，
+  // 与用户配置的 relayPool **按行合并**（用户条目优先，出厂条目补充）。
+  relayPool: '155.248.181.189\n64.181.255.215\n23.144.20.184\n38.244.150.113\n151.244.201.207\n194.87.62.139\n192.18.136.255',
   // 出厂固定落地 / 固定反代入口（2026-11-14）：
   // x.com 的权威 DNS 把流量分散到多家 CDN，直连随 DNS 漂移时好时坏；
   // cloudflare.com 在 CF 网段，直连必被 TCP Loop 拒绝，只能固定反代入口。
@@ -206,6 +212,21 @@ export function configFromEnv(env: Env): UserConfig {
   }
 }
 
+/** 通用行列表合并：用户行在前，fallback 里用户没写的行原样保留（去重、跳过注释/空行）。 */
+function mergeLineList(fallback: string, user: string): string {
+  const userText = String(user ?? '').trim()
+  if (!userText) return String(fallback ?? '')
+  const fallbackText = String(fallback ?? '').trim()
+  if (!fallbackText) return userText
+  const key = (line: string): string => line.trim().toLowerCase()
+  const userKeys = new Set(userText.split(/\r?\n/).map(key))
+  const extra = String(fallback)
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#') && !userKeys.has(key(l)))
+  return extra.length > 0 ? [userText, ...extra].join('\n') : userText
+}
+
 /**
  * 固定落地映射的合并：用户条目优先，fallback 里用户没写的域名条目补在后面。
  *
@@ -283,6 +304,11 @@ export function mergeConfig(base: UserConfig, override: Partial<UserConfig>): Us
       // x.com 的漂移与 cloudflare.com 的 TCP Loop 会随之复发。
       // 语义：用户条目优先；base 里用户没写的域名条目原样保留在后面。
       merged.pinnedHosts = mergePinnedHosts(base.pinnedHosts ?? '', String(value ?? ''))
+    } else if (key === 'relayPool') {
+      // 反代入口池**按行合并**（2026-11-15）：与 pinnedHosts 同理，
+      // 出厂入口池是逐个实测过的可用入口，用户只补几条自己的入口时
+      // 不应把出厂可用入口整体顶掉。
+      merged.relayPool = mergeLineList(base.relayPool ?? '', String(value ?? ''))
     } else if (key === 'udpDns') {
       ;(merged as unknown as Record<string, string>)[key] = normalizeUdpDns(String(value))
     } else {
@@ -393,9 +419,40 @@ export function resetConfigBootstrapState(): void {
   configAbsentSince = 0
 }
 
+/**
+ * 把「读时合并的出厂兜底」从 KV 存储值里剥掉：KV 只存**用户层**。
+ *
+ * pinnedHosts / relayPool 的出厂条目是在**读配置时**动态合并的
+ * （mergeConfig 的对应分支）——绝不能被持久化进 KV：
+ * 写入路径到处都是 `saveConfig(mergeConfig(fresh, patch))`，只要合并发生在
+ * 写之前，出厂条目就会跟着固化进 KV，之后出厂条目更新（比如入口失效换新）
+ * 时，KV 里的旧条目永远残留且无法通过面板清除。
+ *
+ * 剥离判据：整行与出厂值一致 → 视为出厂行（用户显式写同一条时，读时合并
+ * 会补回来，最终生效值不变，无信息丢失）。
+ */
+export function stripFactoryOverlays(config: UserConfig): UserConfig {
+  const out: UserConfig = { ...config }
+  const factoryLines = (key: 'pinnedHosts' | 'relayPool'): Set<string> =>
+    new Set(
+      DEFAULT_CONFIG[key]
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean)
+    )
+  for (const key of ['pinnedHosts', 'relayPool'] as const) {
+    const factory = factoryLines(key)
+    const lines = String(config[key] ?? '')
+      .split('\n')
+      .map((l) => l.trim())
+    out[key] = lines.filter((l) => l && !factory.has(l)).join('\n')
+  }
+  return out
+}
+
 /** 持久化配置到 KV */
 export async function saveConfig(store: Store, config: UserConfig): Promise<void> {
-  await store.put(CONFIG_KEY, JSON.stringify(config))
+  await store.put(CONFIG_KEY, JSON.stringify(stripFactoryOverlays(config)))
 }
 
 /**

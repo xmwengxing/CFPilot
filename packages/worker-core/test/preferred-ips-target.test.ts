@@ -108,12 +108,19 @@ describe('回填到自定义反代入口池', () => {
     expect(await store.get(LOCAL_IPS_KEY)).toBeNull()
   })
 
-  it('覆盖模式：先清空再写入', async () => {
+  it('覆盖模式：KV 只存用户层（覆盖清掉旧条目），读时合并补出厂兜底', async () => {
     config = mergeConfig(DEFAULT_CONFIG, { relayPool: '1.1.1.1:443' })
     store.map.set(CONFIG_KEY, JSON.stringify(config))
 
     await push({ ips: ['9.9.9.9:443'], target: 'relay' })
-    expect((await savedConfig()).relayPool).toBe('9.9.9.9:443')
+    const pool = (await savedConfig()).relayPool ?? ''
+    // KV 层只存用户层：覆盖清掉旧条目，出厂条目**不固化**进 KV
+    expect(pool).toBe('9.9.9.9:443')
+    // 运行时（读时合并）出厂兜底条目仍在
+    const runtime = mergeConfig(DEFAULT_CONFIG, { relayPool: pool })
+    for (const factoryLine of DEFAULT_CONFIG.relayPool.split('\n').filter(Boolean)) {
+      expect(runtime.relayPool).toContain(factoryLine)
+    }
   })
 
   it('增量模式：保留原有的，只补新的', async () => {
@@ -136,7 +143,10 @@ describe('回填到自定义反代入口池', () => {
     for (let i = 0; i < 260; i++) many.push(`9.9.9.${i % 256}:443`)
     const { json } = await push({ ips: many, target: 'relay' })
     expect(json.overLimit).toBeGreaterThan(0)
-    expect(((await savedConfig()).relayPool ?? '').split('\n').length).toBeLessThanOrEqual(200)
+    // KV 层截断到 200（出厂兜底不占配额、不固化进 KV，读时动态合并）
+    const kvPool = ((await savedConfig()).relayPool ?? '').split('\n')
+    expect(kvPool.length).toBeLessThanOrEqual(200)
+    expect(kvPool[0]).toContain('9.9.9.')
   })
 })
 

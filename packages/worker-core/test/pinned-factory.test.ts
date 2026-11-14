@@ -19,6 +19,16 @@ describe('出厂 pinnedHosts 默认值', () => {
     ])
   })
 
+  it('*.x.com 通配覆盖手机 app 的子域（api.x.com 等），裸域由精确条目覆盖', () => {
+    // X 手机 app 走的是子域而不是 x.com 本身 —— 通配条目守护这条链路
+    expect(pinnedIpsFor(DEFAULT_CONFIG.pinnedHosts, 'api.x.com', 443)).toEqual([
+      { ip: '151.101.194.146', port: 443 },
+    ])
+    expect(pinnedIpsFor(DEFAULT_CONFIG.pinnedHosts, 'upload.x.com', 443)).toEqual([
+      { ip: '151.101.194.146', port: 443 },
+    ])
+  })
+
   it('configFromEnv 未设 PINNED_HOSTS 时保留出厂值', () => {
     const cfg = configFromEnv({})
     expect(pinnedIpsFor(cfg.pinnedHosts, 'x.com', 443)).toHaveLength(1)

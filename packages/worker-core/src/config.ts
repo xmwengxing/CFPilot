@@ -62,7 +62,13 @@ export const DEFAULT_CONFIG: UserConfig = {
   // 这两条是**出厂修复**，与用户在面板配置的 pinnedHosts **按域名合并**
   // （用户条目优先，见 mergeConfig 的 pinnedHosts 分支）——
   // 用户只为 jable.tv 等其他站点写映射时，这两条依然生效。
-  pinnedHosts: 'x.com=151.101.194.146\ncloudflare.com=r:45.76.246.192',
+  //
+  // `*.x.com` 通配（2026-11-15）：X 的**手机 app** 走的是子域
+  // （api.x.com / upload.x.com 等），不是 x.com 本身 —— 只固定裸域时
+  // 「电脑网页能开、手机 app 打不开」。实测 Fastly 落地对全部 x.com
+  // 子域都服务（api 404 / upload 410 都是完整 TLS+HTTP 往返），
+  // 且比默认链路快 3 倍。通配与裸域是两条独立条目（通配不匹配裸域）。
+  pinnedHosts: 'x.com=151.101.194.146\n*.x.com=151.101.194.146\ncloudflare.com=r:45.76.246.192',
   useBuiltinRelay: true,
   enableTrojan: true,
   enableXhttp: true,

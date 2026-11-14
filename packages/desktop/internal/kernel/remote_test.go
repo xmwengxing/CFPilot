@@ -151,6 +151,11 @@ func withGitHubBase(t *testing.T, base string) {
 	oldWeb := update.ReleasesWebBase
 	update.ReleasesWebBase = base + "/releases-web"
 	t.Cleanup(func() { update.ReleasesWebBase = oldWeb })
+
+	// 内核热更新通道基址同样指向假服务器：
+	// assets map 里没有 VERSION 清单 → 404 → 通道按「不可用」处理，
+	// 不影响既有用例的语义；通道相关用例自行覆盖这个环境变量。
+	t.Setenv(kernelChannelBaseEnv, base+"/asset")
 }
 
 // useLocalKernel 让 Load() 优先读临时目录里的「本地内核」。
@@ -657,5 +662,180 @@ func TestFetchRemoteKernelRefetchesChecksumsIgnoringCachedSums(t *testing.T) {
 	}
 	if string(arts.Control) != fakeControlJS {
 		t.Error("缓存清单不作信任锚：恶意缓存产物应被拒，改用官方产物")
+	}
+}
+
+// ---------- 内核热更新通道（kernel-latest） ----------
+
+// useLocalKernelVersion 在本地内核目录里写入内置 VERSION 清单。
+func useLocalKernelVersion(t *testing.T, seq int64, build string) {
+	t.Helper()
+	dir := os.Getenv("CFPILOT_KERNEL_DIR")
+	if dir == "" {
+		t.Fatal("useLocalKernelVersion 必须在 useLocalKernel 之后调用")
+	}
+	manifest := fmt.Sprintf(`{"seq": %d, "build": %q, "minToolVersion": ""}`, seq, build)
+	if err := os.WriteFile(filepath.Join(dir, KernelVersionAssetName), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// 通道用例的假服务器：/asset/<name> 提供 VERSION 与内核资产。
+func channelAssets(t *testing.T, manifest string, assets map[string][]byte) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/asset/")
+		if name == KernelVersionAssetName {
+			_, _ = w.Write([]byte(manifest))
+			return
+		}
+		body, ok := assets[name]
+		if !ok && name == ChecksumsAssetName {
+			body, ok = []byte(checksumsFor(assets[ControlAssetName], assets[DataAssetName])), true
+		}
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Length", fmt.Sprint(len(body)))
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv(kernelChannelBaseEnv, srv.URL+"/asset")
+	return srv.URL
+}
+
+func TestParseKernelVersionManifest(t *testing.T) {
+	m := parseKernelVersionManifest([]byte(`{"seq": 202611141000, "build": "aaa1111-bbbb2222", "minToolVersion": "0.40.6"}`))
+	if m == nil {
+		t.Fatal("合法清单不该解析失败")
+	}
+	if m.Seq != 202611141000 || m.Build != "aaa1111-bbbb2222" || m.MinToolVersion != "0.40.6" {
+		t.Errorf("字段不匹配：%+v", m)
+	}
+	for _, bad := range []string{"{}", `{"seq": 1.5}`, `{"seq": -1}`, "not-json", "[]"} {
+		if parseKernelVersionManifest([]byte(bad)) != nil {
+			t.Errorf("%q 应解析失败", bad)
+		}
+	}
+}
+
+func TestIsChannelNewer(t *testing.T) {
+	m := func(seq int64, build string) *KernelVersionManifest {
+		return &KernelVersionManifest{Seq: seq, Build: build}
+	}
+	if !isChannelNewer(m(2, "b"), m(1, "a")) {
+		t.Error("序号更高应视为新")
+	}
+	if isChannelNewer(m(1, "a"), m(2, "b")) {
+		t.Error("序号更低不应视为新")
+	}
+	if !isChannelNewer(m(5, "b2"), m(5, "b1")) {
+		t.Error("同序号不同指纹应视为新（同序号覆盖发布）")
+	}
+	if isChannelNewer(m(5, "b1"), m(5, "b1")) {
+		t.Error("同序号同指纹不应视为新")
+	}
+	if !isChannelNewer(m(1, "a"), &KernelVersionManifest{}) {
+		t.Error("内置没有清单（旧包）时任何通道内核都应视为新")
+	}
+}
+
+// 分支零（新）：通道序号比内置新 → 用通道内核，来源带序号。
+func TestLoadPrefersChannelWhenNewer(t *testing.T) {
+	useLocalKernel(t)
+	useLocalKernelVersion(t, 202611140000, "aaa1111-bbbb2222")
+	useCacheDir(t)
+
+	channelControl := "const BUILD_VERSION = \"ccc3333-dddd4444\";\n// channel control\n"
+	channelData := "const BUILD_VERSION = \"ccc3333-dddd4444\";\n// channel data\n"
+	channelAssets(t,
+		fmt.Sprintf(`{"seq": 202611141000, "build": %q, "minToolVersion": ""}`, "ccc3333-dddd4444"),
+		map[string][]byte{ControlAssetName: []byte(channelControl), DataAssetName: []byte(channelData)})
+
+	arts, info, err := LoadPreferred(context.Background(), "0.40.6")
+	if err != nil {
+		t.Fatalf("不该报错：%v", err)
+	}
+	if info == nil || info.Version != "k202611141000" {
+		t.Fatalf("应返回通道内核信息，实际 %+v", info)
+	}
+	if string(arts.Control) != channelControl {
+		t.Errorf("控制面应是通道下载的内容，实际 %q", string(arts.Control)[:40])
+	}
+	if arts.Build != "ccc3333-dddd4444" {
+		t.Errorf("build 指纹应是通道产物的，实际 %q", arts.Build)
+	}
+}
+
+// 分支零：通道序号不比内置新 → 走包 Release 通道（原有行为）。
+func TestLoadPrefersChannelWhenNotNewer(t *testing.T) {
+	useLocalKernel(t)
+	useLocalKernelVersion(t, 202611150000, "aaa1111-bbbb2222")
+	useCacheDir(t)
+
+	// 通道给的序号更旧；Release 通道给 v0.7.4（也比 0.7.5 旧）→ 最终本地
+	srv := channelAssets(t, `{"seq": 202611140000, "build": "ccc3333-dddd4444"}`, map[string][]byte{
+		ControlAssetName: []byte("const BUILD_VERSION = \"ccc3333-dddd4444\";"),
+		DataAssetName:    []byte("const BUILD_VERSION = \"ccc3333-dddd4444\";"),
+	})
+	withGitHubBase(t, srv)
+
+	arts, _, err := LoadPreferred(context.Background(), "0.7.5")
+	if err != nil {
+		t.Fatalf("不该报错：%v", err)
+	}
+	if strings.Contains(arts.Source, "远程") {
+		t.Errorf("通道与 Release 都不更新，应用本地内核，实际 %q", arts.Source)
+	}
+}
+
+// 分支零：通道要求更高工具版本 → 明确提示，不用远程内核。
+func TestLoadPrefersLocalWhenChannelToolTooOld(t *testing.T) {
+	useLocalKernel(t)
+	useLocalKernelVersion(t, 202611140000, "aaa1111-bbbb2222")
+	useCacheDir(t)
+
+	channelAssets(t, `{"seq": 202611141000, "build": "ccc3333-dddd4444", "minToolVersion": "99.0.0"}`, map[string][]byte{
+		ControlAssetName: []byte("const BUILD_VERSION = \"ccc3333-dddd4444\";"),
+		DataAssetName:    []byte("const BUILD_VERSION = \"ccc3333-dddd4444\";"),
+	})
+
+	arts, _, err := LoadPreferred(context.Background(), "0.40.6")
+	if err != nil {
+		t.Fatalf("不该报错：%v", err)
+	}
+	if strings.Contains(arts.Source, "远程") {
+		t.Errorf("工具版本不足时不应使用远程内核，实际 %q", arts.Source)
+	}
+}
+
+// 分支零：通道清单不可读（坏 JSON）→ 视为通道不可用，走包 Release 通道。
+func TestLoadPrefersReleaseWhenChannelManifestBroken(t *testing.T) {
+	useLocalKernel(t)
+	useLocalKernelVersion(t, 202611140000, "aaa1111-bbbb2222")
+	useCacheDir(t)
+
+	// 同一台假服务器同时服务两个通道：
+	// VERSION 资产返回坏 JSON → 通道按「不可用」处理；
+	// /releases 提供 v0.7.6 → 包 Release 通道接管。
+	srv, _ := fakeGitHub(t, func(base string) []map[string]any {
+		return []map[string]any{releaseJSON("v0.7.6", base, true)}
+	}, map[string][]byte{
+		KernelVersionAssetName: []byte("not-json"),
+		ControlAssetName:       []byte(fakeControlJS),
+		DataAssetName:          []byte(fakeDataJS),
+	})
+	withGitHubBase(t, srv.URL)
+
+	arts, info, err := LoadPreferred(context.Background(), "0.7.5")
+	if err != nil {
+		t.Fatalf("不该报错：%v", err)
+	}
+	if info == nil || info.Version != "0.7.6" {
+		t.Fatalf("应回退到包 Release 通道（v0.7.6），实际 %+v", info)
+	}
+	if string(arts.Control) != fakeControlJS {
+		t.Errorf("应使用 Release 下载的内核，实际 build %q", arts.Build)
 	}
 }

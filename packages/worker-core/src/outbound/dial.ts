@@ -36,7 +36,7 @@ import {
 } from './proxy-health'
 import { isIpv4 } from '../protocols/address'
 import { resolveEndpointIps } from './doh'
-import { collectRelayEndpoints, RELAY_BATCH_SIZE, type RelayPoolOptions } from './relay'
+import { collectRelayEndpoints, RELAY_BATCH_SIZE, stableRelayIndex, type RelayPoolOptions } from './relay'
 import {
   buildRouteCandidates,
   classifyDialFailure,
@@ -109,6 +109,21 @@ export interface DialOptions {
   relay?: Array<{ ip: string; port: number; label: string }>
   /** 反代入口池配置（用户自配 + 可选的内置表） */
   relayPool?: RelayPoolOptions
+  /**
+   * 命中「固定落地 IP」映射时预解析出的候选。
+   *
+   * 非空表示调用方已为该目标域名写明落地地址：跳过 DoH 轮询与不可控的
+   * 域名直连，只连这些地址 —— 落点确定，不再随 DNS 轮询漂移。
+   */
+  pinnedIps?: Array<{ ip: string; port: number }>
+  /**
+   * 命中「固定反代入口」映射（`域名=r:IP`）时的反代入口候选。
+   *
+   * 目标本身在 Cloudflare 网段时直连任何落地 IP 都会被 TCP Loop 拒绝，
+   * 只能靠反代按 SNI 转发；这里写明的入口会**优先于反代池的粘性哈希**
+   * 被单拨 —— 用于固定实测最快的入口（如 cloudflare.com）。
+   */
+  pinnedRelays?: Array<{ ip: string; port: number }>
   /**
    * 是否允许自动做 DoH 解析以获得优选 IP 候选。
    *
@@ -765,10 +780,15 @@ export async function dial(options: DialOptions): Promise<DialResult> {
   //
   // ⚠️ 解析结果里可能混入 Cloudflare 网段（Worker 连不回自家 Anycast），
   // 降权由 buildRouteCandidates 统一处理 —— 这里不做过滤，避免丢信息。
-  const optimized = [...(options.optimizedIps ?? [])]
+  // 命中「固定落地 IP」映射：用户已写明落地地址，不再轮询 DoH、不再把域名
+  // 丢给运行时解析 —— 那两种做法都会让落点随 DNS 轮询漂移（真机表现：
+  // 同一页面刷新时好时坏）。此时只用这批明确 IP。
+  const pinned = options.pinnedIps ?? []
+  const pinnedActive = pinned.length > 0
+  const optimized = pinnedActive ? [...pinned] : [...(options.optimizedIps ?? [])]
   /** 是否成功解析出目标域名（用于判断「域名直连」是否值得优先） */
-  let resolvedTarget = false
-  if (options.resolvePreferred) {
+  let resolvedTarget = pinnedActive
+  if (options.resolvePreferred && !pinnedActive) {
     try {
       const resolved = await resolveEndpointIps(options.hostname, options.port, { deadline })
       if (resolved.length > 0) {
@@ -843,8 +863,10 @@ export async function dial(options: DialOptions): Promise<DialResult> {
     // 大流量在反代入口上必断。改为：直连（域名 + 优选）永远先跑，
     // 失败后分批走反代兜底（见 dialRelay）。CF 目标上域名直连的失败
     // 是快速拒绝（TCP Loop detected），不是挂起等待，代价可控。
-    // 降权只留给**字面量 CF 网段目标**（那种连域名都没有，必然被拒）。
-    deprioritizeDirect: targetIsCfIp,
+    // 降权只留给**字面量 CF 网段目标**（那种连域名都没有，必然被拒），
+    // 以及**命中固定落地 IP 映射**时（域名直连由运行时解析，落点会漂移，
+    // 必须让位给用户明确写明的那批 IP）。
+    deprioritizeDirect: targetIsCfIp || pinnedActive,
     relay: [],
   })
 
@@ -1038,11 +1060,43 @@ export async function dial(options: DialOptions): Promise<DialResult> {
    *   其它场景：这里才第一次解析反代入口，正常路径零开销）
    */
   const dialRelay = async (): Promise<DialResult | null> => {
+    // 固定反代入口（`域名=r:IP`）优先于一切：用户为该域名实测后写死的入口，
+    // 不参与粘性哈希与分批竞速；全部失败才回退到常规反代池。
+    const pinnedRelays = options.pinnedRelays ?? []
+    for (const p of pinnedRelays) {
+      try {
+        return await attemptOf({
+          source: 'relay',
+          host: p.ip,
+          port: p.port,
+          label: `固定反代 ${p.ip}:${p.port}`,
+        })()
+      } catch {
+        /* 固定入口失败 → 试下一个固定入口，再回退常规池 */
+      }
+    }
+
     let restRelay = relayRest
     if (restRelay.length === 0 && options.relayPool) {
       restRelay = await collectRelay([], { ...options.relayPool, deadline })
     }
-    return await tryRelayInBatches(restRelay, attemptOf, concurrent)
+    if (restRelay.length === 0) return null
+
+    // 粘性首选：同一目标在全球任意 isolate 都落到同一个反代入口，
+    // 避免「竞速挑最快」让同一会话的请求从不同出口 IP 出去被目标站风控。
+    // 先单拨这一个；它失效才回退到全表分批竞速（不丢冗余）。
+    const sticky = restRelay[stableRelayIndex(options.hostname, restRelay.length)]!
+    try {
+      return await attemptOf({
+        source: 'relay',
+        host: sticky.ip,
+        port: sticky.port,
+        label: `反代 ${sticky.label}`,
+      })()
+    } catch {
+      const rest = restRelay.filter((r) => r !== sticky)
+      return await tryRelayInBatches(rest, attemptOf, concurrent)
+    }
   }
 
   /** 降权候选（CF 网段）：顺序尝试 */

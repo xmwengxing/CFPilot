@@ -631,6 +631,8 @@
         top: p.top || 10,
         timeoutMs: p.timeoutMs || 12000,
         candidates: p.candidates || '',
+        // 校验网址：终检候选能否转发到 CF 网段站点（留空用内置清单）
+        verifyHosts: Array.isArray(p.verifyHosts) ? p.verifyHosts : [],
       })
     },
 

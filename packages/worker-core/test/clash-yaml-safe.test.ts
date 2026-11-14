@@ -24,6 +24,7 @@ function makeConfig(over: Partial<UserConfig> = {}): UserConfig {
     resolvePreferred: true,
     aggressiveRedial: false,
     relayPool: '',
+    pinnedHosts: '',
     useBuiltinRelay: true,
     subVariants: 'vless-ws',
     subName: 'CFPilot',

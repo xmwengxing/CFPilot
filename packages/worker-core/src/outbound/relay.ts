@@ -415,6 +415,34 @@ export function selectRelayDomains(
 }
 
 /**
+ * 按目标域名稳定地选一个反代入口下标（FNV-1a，纯函数）。
+ *
+ * ## 为什么必须「稳定」而不是「竞速挑最快」
+ *
+ * 反代是第三方按 SNI 转发的服务器，**出口 IP 就是它的 IP**。
+ * 有登录态 / 会做 Bot 判定的站点（X、Google 等）会把出口 IP 绑进会话：
+ * 同一会话的请求一会儿从这个 IP 来、一会儿从那个 IP 来，会被判成
+ * 机器人或会话劫持 —— 真机表现就是「有时能打开，刷新一下又 403 / 掉线」。
+ *
+ * 竞速（谁先连上用谁）天然会让赢家随网络抖动变化，即使候选是固定 IP
+ * 也照样漂移。所以用**目标名做稳定哈希**，让同一域名在全球任意 isolate
+ * 都落到同一个入口：无状态、无需 KV、跨机房一致。
+ *
+ * 注意：粘性只保证「出口稳定」，不保证「这个出口当前没被目标站拉黑」。
+ * 入口失效时由 `dialRelay` 回退到全表分批兜底，并在下一次请求重新哈希。
+ */
+export function stableRelayIndex(target: string, count: number): number {
+  if (count <= 0) return 0
+  const s = (target || '').toLowerCase()
+  let h = 2166136261
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return (h >>> 0) % count
+}
+
+/**
  * 汇总所有可用的反代入口。
  *
  * 顺序：**用户自配优先**（用户明确指定的更可信），其次内置表。

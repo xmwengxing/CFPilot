@@ -193,6 +193,33 @@ for (const [label, ok, desc] of credChecks) {
   if (!ok) bad++
 }
 
+// 说明页：检查更新卡片置顶 + 发布说明渲染
+const aboutSection = uiHtml.match(/<section class="page" id="page-about">([\s\S]*?)<\/section>/)
+const updateCardChecks = [
+  ['检查更新卡片在说明页最上方', Boolean(aboutSection) && aboutSection[1].trimStart().startsWith('<div class="card">') && aboutSection[1].includes('⬆️ 检查更新'), '用户进说明页第一眼看到更新'],
+  ['发布说明容器存在', uiHtml.includes('id="updateNotes"'), '检查更新后展示更新内容'],
+  ['renderer 消费 notes 渲染发布说明', /renderUpdateNotes\(/.test(rendererSrc), '不能只拿版本号不拿说明'],
+]
+for (const [label, ok, desc] of updateCardChecks) {
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}  —— ${desc}`)
+  if (!ok) bad++
+}
+
+// 反代优选校验网址 + 质量报告/部署页修复（2026-11-14）
+const relayVerifyChecks = [
+  ['反代优选有校验网址填写框', uiHtml.includes('id="optRelayVerifyHosts"'), '终检候选能否转发 CF 网段站点'],
+  ['renderer 传 verifyHosts', /verifyHosts: \(/.test(rendererSrc), '填写框要传给后端'],
+  ['adapter 透传 verifyHosts', /verifyHosts: Array\.isArray\(p\.verifyHosts\)/.test(adapter), '界面参数要进 API'],
+  ['部署实例未选账户有警告', /rt-warn/.test(rendererSrc) && rendererSrc.includes('未选择账户'), '部署前就要看见失败原因'],
+  ['部署异步受理后保持置灰', /markDeployInFlight/.test(rendererSrc) && /markDeploySettled/.test(rendererSrc), '防止部署中途重复点击'],
+  ['纯净度评分按分值着色', /function purityScoreColor/.test(rendererSrc), '0~10 绿 / 中黄 / 高分红'],
+  ['场景适配不再挤成一行重复渲染', !rendererSrc.includes("'purity.scenarios'"), '报告底部已有独立单列展示'],
+]
+for (const [label, ok, desc] of relayVerifyChecks) {
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}  —— ${desc}`)
+  if (!ok) bad++
+}
+
 console.log(
   bad === 0 ? '\n全部通过：界面 ↔ 适配层 ↔ 后端 三方接口一致。' : `\n${bad} 项不一致 —— 界面会静默失效。`
 )

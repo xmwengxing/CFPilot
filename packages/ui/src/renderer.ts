@@ -628,12 +628,18 @@ import {
     }
   }
 
-  /** 运行状态：部署实例那一行的展示内容（账号 · KV · 控制面/数据面）。 */
-  function renderDeployInstance(text: string, highlight: boolean): void {
+  /**
+   * 运行状态：部署实例那一行的展示内容（账号 · KV · 控制面/数据面）。
+   *
+   * warn=true 时整行红色高亮 —— 用于「凭据页没选账号 / 识别不到账号」：
+   * 直接部署必然失败，必须让用户在部署前就看懂原因，而不是部署报错后再翻日志。
+   */
+  function renderDeployInstance(text: string, highlight: boolean, warn = false): void {
     const el = $text('rtDeploy')
     const wrap = document.getElementById('rtDeployWrap')
     el.textContent = text
     el.classList.toggle('rt-hl', highlight)
+    el.classList.toggle('rt-warn', warn)
     if (wrap) {
       wrap.title = text
       setupMarquee(wrap, el)
@@ -689,10 +695,16 @@ import {
       const instanceParts: string[] = []
       if (account) instanceParts.push(account)
       if (control || data) instanceParts.push((control || '?') + ' / ' + (data || '?'))
-      renderDeployInstance(
-        instanceParts.length > 0 ? instanceParts.join(' · ') : '尚未选择账号（凭据页检测账号后自动显示）',
-        instanceParts.length > 0
-      )
+      if (instanceParts.length > 0) {
+        renderDeployInstance(instanceParts.join(' · '), true)
+      } else {
+        // 凭据页没选账户 / 识别不到：部署必然失败，用醒目警告让用户先懂原因
+        renderDeployInstance(
+          '⚠️ 未选择账户 —— 请先到「凭据」页检测账号，否则部署会失败',
+          true,
+          true
+        )
+      }
 
       // 内核版本：本程序内置 + 最近一次部署
       //
@@ -714,7 +726,7 @@ import {
         '本程序内置 = 当前桌面版自带的内核产物；最近部署 = 本机留档的上一次部署记录'
       )
     } catch {
-      renderDeployInstance('读取本地部署记录失败', false)
+      renderDeployInstance('⚠️ 读取部署信息失败 —— 请到「凭据」页重新检测账号', true, true)
       renderKernelInfo('读取失败', false, '')
     }
   }
@@ -1248,6 +1260,39 @@ import {
     }
   }
 
+  /**
+   * 部署在途标志：Go 版部署是**异步受理**（接口返回 {started:true}，真正
+   * 的成败走 SSE deploy-status 事件）。受理后部署还在后台跑几分钟，
+   * 此期间「开始部署」必须保持置灰 —— 否则用户重复点击就是重复部署
+   * （每次都是 2 次 CF 发布事件，还可能触发账号风控）。
+   *
+   * 解锁时机：SSE deploy-status 带出 ok/error（部署真正结束）时；
+   * 兜底：SSE 断线可能丢事件，15 分钟后强制解锁（部署本身最坏几分钟）。
+   */
+  let deployInFlight = false
+  let deployInFlightTimer: ReturnType<typeof setTimeout> | null = null
+
+  function markDeployInFlight(): void {
+    deployInFlight = true
+    if (deployInFlightTimer) clearTimeout(deployInFlightTimer)
+    deployInFlightTimer = setTimeout(() => {
+      if (deployInFlight) {
+        deployInFlight = false
+        setBusy(false)
+        log('部署等待超时（后台仍在执行，结果以日志为准）—— 已恢复界面', 'warn')
+      }
+    }, 15 * 60 * 1000)
+  }
+
+  function markDeploySettled(): void {
+    deployInFlight = false
+    if (deployInFlightTimer) {
+      clearTimeout(deployInFlightTimer)
+      deployInFlightTimer = null
+    }
+    setBusy(false)
+  }
+
   function bindDeploy(): void {
     // 数据面形态：切换时更新说明文案与「自定义域名」输入框
     document.querySelectorAll('input[name="dataPlane"]').forEach((el) => {
@@ -1405,7 +1450,10 @@ import {
          */
         // 「当前部署状态」卡已并入「运行状态」卡，这里只在日志里给出进度。
         if (result.started) {
-          log('⏳ 部署进行中…（进度见下方日志）')
+          // 异步受理成功：部署还在后台跑，「开始部署」保持置灰，
+          // 直到 SSE deploy-status 带出最终结果（见 markDeploySettled）。
+          markDeployInFlight()
+          log('⏳ 部署进行中…（进度见下方日志；部署期间按钮已锁定，防止重复部署）')
         } else if (result.ok === false || result.error) {
           log('❌ 部署失败：' + (result.error ?? ''), 'err')
         } else {
@@ -1422,7 +1470,9 @@ import {
       } catch (err) {
         log('部署异常：' + (err instanceof Error ? err.message : String(err)), 'err')
       } finally {
-        setBusy(false)
+        // 异步受理成功时**不要**在这里解锁 —— 部署还在后台跑，
+        // 等 SSE deploy-status 到达（markDeploySettled）再放开按钮。
+        if (!deployInFlight) setBusy(false)
       }
     })
 
@@ -4141,12 +4191,8 @@ import {
       kind: 'text',
       tip: '【是什么】该 IP 命中的公开黑名单（Spamhaus / Firehol 等）。\n【来源】质量检测时查公开信誉画像。\n【影响】命中越多越容易被风控直接拒绝。',
     },
-    'purity.scenarios': {
-      label: '场景适配',
-      unit: '',
-      kind: 'text',
-      tip: '【是什么】按信誉画像推导的各使用场景倾向（常规浏览 / 账号登录 / 流媒体与 AI / 风控严格站点）。\n【来源】由评分、身份标记与黑名单推导，不是实测解锁结论。\n【影响】给使用者一个取舍参考；真实能否通过仍取决于目标站策略与**出口 IP**。',
-    },
+    // ⚠️ 「purity.scenarios」不再作为字段渲染 —— 场景适配在报告底部有独立的
+    // 单列展示块（含逐场景理由），挤成一行的那份是重复信息，2026-11-14 去重。
     'purity.attribution': {
       label: '归属信息',
       unit: '',
@@ -4167,9 +4213,19 @@ import {
     },
   }
 
+  /**
+   * 纯净度评分的颜色（0~100，越高越脏）：
+   * 0~10 绿（很干净）、11~50 黄（一般）、>50 红（偏脏）。
+   * 阈值与字段说明里的口径一致（0~10 干净，25 以上偏脏）。
+   */
+  function purityScoreColor(score: number): string {
+    if (score <= 10) return 'var(--ok, #34d399)'
+    if (score <= 50) return 'var(--warn, #fbbf24)'
+    return 'var(--err, #f87171)'
+  }
+
   /** 延迟类指标的阈值（毫秒）：低于 good 绿，低于 warn 黄，其余红。 */
-  function latencyColor(value: number, kind: string): string {
-    const thresholds: Record<string, [number, number]> = {
+  function latencyColor(value: number, kind: string): string {    const thresholds: Record<string, [number, number]> = {
       ms: [80, 200],
       'ms-tls': [300, 800],
       'ms-p95': [120, 250],
@@ -4324,6 +4380,12 @@ import {
         } else if (info && info.unit && numeric && info.kind !== 'text') {
           value.textContent = `${raw} ${info.unit}`
           value.className = 'q-value ' + (info.kind === 'speed' ? speedColor(field.value as number) : latencyColor(field.value as number, info.kind))
+        } else if (field.name === 'purity.score' && numeric) {
+          // 纯净度评分按分值颜色高亮：低分绿（干净）、中黄、高分红（脏）
+          value.textContent = raw
+          value.className = 'q-value'
+          value.style.color = purityScoreColor(field.value as number)
+          value.style.fontWeight = '600'
         } else {
           value.textContent = raw
           value.className = 'q-value'
@@ -5009,6 +5071,11 @@ import {
             top: Number($('optRelayTop').value) || 10,
             timeoutMs: Number($('optRelayTimeout').value) || 12000,
             candidates: useBuiltin ? '' : raw,
+            // 校验网址：留空 = 用内置清单；填了会先由后端剔除非 CF 网段网址
+            verifyHosts: ((document.getElementById('optRelayVerifyHosts') as HTMLTextAreaElement | null)?.value || '')
+              .split(/\r?\n|,/)
+              .map((v) => v.trim())
+              .filter(Boolean),
           })
           if (!res.ok) {
             log('启动失败：' + (res.error || '未知错误'), 'err')
@@ -5199,6 +5266,40 @@ import {
   let pendingUpdateUrl = ''
 
   /**
+   * 渲染发布说明（GitHub Release 正文，markdown 行格式）。
+   *
+   * 只支持项目实际使用的三种行：`## 标题`、`- 条目`、普通行；
+   * 其余按普通行展示。全部经 escapeHtml 后输出 —— 内容来自远端，
+   * 不做任何未转义的 innerHTML 拼接。
+   */
+  function renderUpdateNotes(version: string | null, notes: string): void {
+    const box = document.getElementById('updateNotes')
+    if (!box) return
+    const body = (notes ?? '').replace(/\r\n/g, '\n').trim()
+    if (!body) {
+      box.hidden = true
+      box.innerHTML = ''
+      return
+    }
+    const parts: string[] = []
+    if (version) parts.push(`<b>📋 ${escapeHtml(version)} 更新内容</b><br>`)
+    for (const raw of body.split('\n')) {
+      const line = escapeHtml(raw.trim())
+      if (!line) {
+        parts.push('<br>')
+      } else if (line.startsWith('## ')) {
+        parts.push(`<b>${escapeHtml(line.slice(3))}</b><br>`)
+      } else if (line.startsWith('- ')) {
+        parts.push(`· ${escapeHtml(line.slice(2))}<br>`)
+      } else {
+        parts.push(`${line}<br>`)
+      }
+    }
+    box.innerHTML = parts.join('')
+    box.hidden = false
+  }
+
+  /**
    * 执行一次更新检查并渲染结果。
    *
    * 抽成函数是为了让「说明」页打开时能**自动跑一次** ——
@@ -5222,6 +5323,7 @@ import {
         badge.textContent = '检查失败'
         badge.className = 'badge err'
         hint.textContent = '检查失败：' + result.error + '（网络问题，稍后再试）'
+        renderUpdateNotes(null, '')
         return
       }
       if (!result.hasUpdate) {
@@ -5229,6 +5331,7 @@ import {
         badge.className = 'badge ok'
         hint.textContent = '当前版本 ' + result.current + '，没有新版本。'
         ;(document.getElementById('btnUpdate') as HTMLButtonElement).disabled = true
+        renderUpdateNotes(result.latest, result.notes)
         return
       }
       badge.textContent = '有新版 ' + (result.latest ?? '')
@@ -5236,10 +5339,12 @@ import {
       hint.textContent = '发现新版本 ' + result.latest + '（当前 ' + result.current + '）。点击「下载并安装」。'
       pendingUpdateUrl = result.downloadUrl ?? ''
       ;(document.getElementById('btnUpdate') as HTMLButtonElement).disabled = !pendingUpdateUrl
+      renderUpdateNotes(result.latest, result.notes)
     } catch (err) {
       badge.textContent = '检查失败'
       badge.className = 'badge err'
       hint.textContent = '检查失败：' + (err instanceof Error ? err.message : String(err))
+      renderUpdateNotes(null, '')
     } finally {
       if (btn) btn.disabled = false
     }
@@ -5550,6 +5655,8 @@ import {
       const s = event as CFPilotDeployStatus & DeployStatusLike
       if (typeof s.ok === 'boolean') {
         log(s.ok ? '── 部署成功（详细信息见上方汇总）──' : '── 部署失败 ──', s.ok ? 'ok' : 'err')
+        // 部署真正结束：解锁「开始部署」按钮（异步受理期间它一直置灰）
+        markDeploySettled()
         // 部署结束后运行状态会过时（版本、项目名都变了），静默刷新一次
         if (s.ok) {
           const select = $sel('kvSelect')

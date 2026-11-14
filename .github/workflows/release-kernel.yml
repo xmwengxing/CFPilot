@@ -1,0 +1,118 @@
+name: Release Kernel
+
+# 内核热更新通道：把 control.js / dataplane.js 发布到固定滚动 Release
+# `kernel-latest`，与包版本（v* / desktop-v*）完全解耦。
+#
+# ## 为什么需要独立通道
+#
+# 包 Release 的内核资产以 tag 的包版本号参与「最新」判定 ——
+# 只改内核时不发新包，CLI / 桌面版就看不到新内核，被迫全量发版。
+# 本工作流单独覆盖 `kernel-latest` 上的 4 个资产：
+#
+#   cfpilot-kernel-VERSION      序号清单（seq / build / minToolVersion）
+#   cfpilot-kernel-control.js   控制面产物
+#   cfpilot-kernel-dataplane.js 数据面产物
+#   cfpilot-kernel-SHA256SUMS   摘要清单（CLI/桌面版官方直连校验）
+#
+# 消费端（kernel-remote.ts / kernel/channel.go）先取 VERSION 的序号
+# 与内置序号比较，更新才下载产物 —— 检查保持秒级。
+#
+# ## 触发方式
+#
+#   - push 标签 kernel-v*（标签本身不携带语义，只作发布动作）
+#   - workflow_dispatch 手动触发（可填 minToolVersion 兼容护栏）
+#
+# ## 纪律（AGENTS.md §1.37 内核通道）
+#
+# 发布前必须过完整 verify（脱敏 / 体积 / 测试）；
+# 本工作流是唯一允许覆盖 kernel-latest 资产的东西；
+# minToolVersion 只在面板 API / 部署协议出现不兼容变更时才填。
+
+on:
+  push:
+    tags:
+      - 'kernel-v*'
+  workflow_dispatch:
+    inputs:
+      min_tool_version:
+        description: '最低工具版本（留空 = 不设兼容护栏；仅在协议不兼容时填，如 0.41.0）'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  kernel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # BUILD_VERSION 由构建脚本从 git 计算内容哈希，完整检出保证一致
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 全量验证（脱敏 / 体积 / 测试）
+        # 坏内核不许出通道：verify 不过就没有「发布」这一步
+        run: npm run verify
+
+      - name: 构建内核产物
+        run: npm run build -w @cfpilot/worker-core
+
+      - name: 生成版本清单与摘要
+        run: |
+          set -e
+          mkdir -p kernel-assets
+          cp packages/worker-core/dist/control.js   kernel-assets/cfpilot-kernel-control.js
+          cp packages/worker-core/dist/dataplane.js kernel-assets/cfpilot-kernel-dataplane.js
+          # 版本清单：seq 用 UTC yyyymmddHHMM（纯数字单调递增），
+          # build 与产物里的 BUILD_VERSION 同源提取（与消费端正则同口径）。
+          node -e '
+            const fs = require("node:fs");
+            const control = fs.readFileSync("kernel-assets/cfpilot-kernel-control.js", "utf8");
+            const m = /["'\'']([0-9a-f]{7,10}-(?:[0-9a-f]{4,16}|[0-9]{12}))["'\'']/.exec(control);
+            const manifest = {
+              seq: Number(new Date().toISOString().slice(0, 16).replace(/[-T:]/g, "")),
+              build: m ? m[1] : "",
+              minToolVersion: process.env.MIN_TOOL_VERSION || "",
+            };
+            fs.writeFileSync("kernel-assets/cfpilot-kernel-VERSION", JSON.stringify(manifest, null, 2) + "\n");
+            console.log("VERSION:", JSON.stringify(manifest));
+            if (!manifest.build) {
+              console.error("::error::无法从 control.js 提取 BUILD_VERSION —— 产物格式变了？");
+              process.exit(1);
+            }
+          '
+          # 摘要清单：消费端只从官方地址取它，逐字节校验下载产物。
+          # 格式：sha256sum 标准输出（<hex>  <文件名>），与包 Release 的内核资产一致。
+          ( cd kernel-assets && sha256sum \
+              cfpilot-kernel-control.js \
+              cfpilot-kernel-dataplane.js \
+              > cfpilot-kernel-SHA256SUMS )
+          cat kernel-assets/cfpilot-kernel-SHA256SUMS
+        env:
+          MIN_TOOL_VERSION: ${{ inputs.min_tool_version }}
+
+      - name: 发布到 kernel-latest（固定滚动 Release）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          # 固定 tag：已存在就复用，不存在就创建（不可变历史对热更新通道没有意义）
+          gh release view kernel-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create kernel-latest \
+                 --repo "$GITHUB_REPOSITORY" \
+                 --title "CFPilot 内核热更新通道" \
+                 --notes "本 Release 由内核发布工作流自动覆盖维护，资产始终是最新内核。CLI / 桌面版部署前会自动检查并拉取，无需手动下载。" \
+                 --latest=false
+          # --clobber：同名资产直接覆盖 —— 「滚动最新」语义的落点
+          gh release upload kernel-latest kernel-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+          echo "已发布："
+          gh release view kernel-latest --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'

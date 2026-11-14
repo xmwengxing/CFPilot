@@ -151,6 +151,17 @@ for (const f of ['control.js', 'dataplane.js']) {
   console.log(`[desktop] 内核产物 ${f} → internal/kernel/assets/ (${kb} KB)`)
 }
 
+// 内核版本清单（内核热更新通道的内置序号锚点，go:embed 进 exe）。
+// 与 CLI 共用同一份（packages/cli/assets/cfpilot-kernel-VERSION，由 sync-asset 生成）：
+// 序号取构建时间，包发布时间 ≥ 任何已有内核发布 → 内置序号不会误判落后。
+const kernelVersionSrc = join(repoRoot, 'packages', 'cli', 'assets', 'cfpilot-kernel-VERSION')
+if (existsSync(kernelVersionSrc)) {
+  copyFileSync(kernelVersionSrc, join(kernelDstDir, 'cfpilot-kernel-VERSION'))
+  console.log('[desktop] 内核版本清单 cfpilot-kernel-VERSION → internal/kernel/assets/')
+} else {
+  console.warn('[desktop] 未找到 cfpilot-kernel-VERSION（先跑 npm run build -w cfpilot）；通道将视内置序号为 0')
+}
+
 // ---- 1c. 同步内置反代候选清单（go:embed 打进 exe）----
 //
 // 与 CLI 共用**同一份文件**（packages/cli/assets/relay-ip-builtin.txt）：

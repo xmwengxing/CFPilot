@@ -755,6 +755,8 @@
     .rt-marquee.scroll:hover > span { animation-play-state: paused; }
     /* 运行状态里的关键信息：加粗 + 轻微高亮，扫一眼就能看到 */
     .rt-hl { font-weight: 600; color: var(--text-main); }
+/* 部署实例行：账户未选/识别不到时的醒目警告（部署前就要看见原因） */
+.rt-warn { color: var(--err, #f87171) !important; font-weight: 700; }
     /* 可升级提示：加粗 + 警示色（与「已是最新」区分开） */
     .rt-upg { font-weight: 700; color: var(--warn); }
 
@@ -1989,6 +1991,10 @@
                   <label title="单个候选的总超时（隧道 + TLS + HTTP 三跳）。跨境链路通常 2~5 秒。">单条超时(ms)</label>
                   <input type="number" id="optRelayTimeout" value="12000" min="3000" max="30000" step="1000" />
                 </div>
+                <div class="field span-2">
+                  <label title="终检用的 Cloudflare 网段站点：优选结束后实测每个候选能否把流量转发到这些站点，转发不了的假入口自动剔除。每行一个网址；留空使用内置清单。">校验网址</label>
+                  <textarea id="optRelayVerifyHosts" class="mono" rows="3" placeholder="留空使用内置清单（cloudflare.com / chatgpt.com / canva.com / discord.com / x.com）。可自行填写使用 Cloudflare 网段的网站，每行一个；解析结果不在 Cloudflare 网段的网址会被自动剔除。"></textarea>
+                </div>
               </div>
               <div class="btn-row" style="margin-top:12px">
                 <button class="btn btn-primary" id="btnRelayRun">开始反代优选</button>
@@ -2205,6 +2211,21 @@
         <!-- ============ 说明 ============ -->
         <section class="page" id="page-about">
           <div class="card">
+            <h2><span class="dot"></span>⬆️ 检查更新 <span class="badge info" id="updateBadge">未检查</span></h2>
+            <p class="desc">从 GitHub Releases 获取最新版本并下载安装包到程序目录下的 updates 文件夹，请退出程序后手动替换。</p>
+            <div class="btn-row">
+              <button class="btn btn-ghost" id="btnCheckUpdate">检查更新</button>
+              <button class="btn btn-primary" id="btnUpdate" disabled>下载安装包</button>
+            </div>
+            <p class="tip" id="updateHint" style="margin-top:10px">
+              没有新版本时会提示当前版本。下载完成后按提示替换旧程序即可。
+            </p>
+            <div class="progress" id="updateProgressWrap" hidden><i id="updateBar"></i></div>
+            <p class="tip" id="updateProgressText" style="margin-top:6px" hidden></p>
+            <div class="links" id="updateNotes" hidden style="margin-top:10px"></div>
+          </div>
+
+          <div class="card">
             <h2><span class="dot"></span>📘 功能说明</h2>
             <p class="hint" style="line-height:1.9">
               CFPilot 的图形化部署与维护工具。功能与命令行版
@@ -2252,20 +2273,6 @@
               · 你主动点击的官方链接 —— 以系统浏览器打开<br><br>
               不存在「把令牌发到第三方」的路径。可随时点击「删除本地账号/凭据」清除。
             </div>
-          </div>
-
-          <div class="card">
-            <h2><span class="dot"></span>⬆️ 检查更新 <span class="badge info" id="updateBadge">未检查</span></h2>
-            <p class="desc">从 GitHub Releases 获取最新版本并下载安装包到程序目录下的 updates 文件夹，请退出程序后手动替换。</p>
-            <div class="btn-row">
-              <button class="btn btn-ghost" id="btnCheckUpdate">检查更新</button>
-              <button class="btn btn-primary" id="btnUpdate" disabled>下载安装包</button>
-            </div>
-            <p class="tip" id="updateHint" style="margin-top:10px">
-              没有新版本时会提示当前版本。下载完成后按提示替换旧程序即可。
-            </p>
-            <div class="progress" id="updateProgressWrap" hidden><i id="updateBar"></i></div>
-            <p class="tip" id="updateProgressText" style="margin-top:6px" hidden></p>
           </div>
 
           <div class="card">

@@ -22,6 +22,7 @@ import type { DialResult, ProxyEndpoint } from '../outbound/dial'
 import { relay, TrafficMeter } from '../budget'
 
 import { dial } from '../outbound/dial'
+import { pinnedIpsFor, pinnedRelaysFor } from '../outbound/pinned'
 
 /**
  * XHTTP 请求头读取截止时间。
@@ -552,6 +553,12 @@ async function ensureDial(
         userEntries: config.relayPool || undefined,
         useBuiltin: config.useBuiltinRelay,
       },
+      pinnedIps: config.pinnedHosts
+        ? pinnedIpsFor(config.pinnedHosts, header.hostname, header.port)
+        : undefined,
+      pinnedRelays: config.pinnedHosts
+        ? pinnedRelaysFor(config.pinnedHosts, header.hostname, header.port)
+        : undefined,
       onFailure: (failure) => {
         recordXhttpDiagnostics(session.targetLabel, failure, `XHTTP 出站失败（${failure.candidate}）：${failure.message}`)
       },
@@ -930,6 +937,14 @@ async function handleStreamOne(
       userEntries: config.relayPool || undefined,
       useBuiltin: config.useBuiltinRelay,
     },
+    // 固定落地 IP 映射（与 WS 入站路径保持一致）
+    pinnedIps: config.pinnedHosts
+      ? pinnedIpsFor(config.pinnedHosts, parsed.header.hostname, parsed.header.port)
+      : undefined,
+    // 固定反代入口（`域名=r:IP`，与 WS 入站路径保持一致）
+    pinnedRelays: config.pinnedHosts
+      ? pinnedRelaysFor(config.pinnedHosts, parsed.header.hostname, parsed.header.port)
+      : undefined,
     // 失败分级上报：XHTTP 出站失败此前**完全不可诊断**（表现就是客户端延迟 -1），
     // 排查时看不到任何线索。现在记录到诊断端点。
     onFailure: (failure) => {

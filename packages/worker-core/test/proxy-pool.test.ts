@@ -109,6 +109,7 @@ describe('数据面出站池汇总（逻辑与 routes/data.ts 的 collectProxies
     resolvePreferred: true,
     aggressiveRedial: false,
     relayPool: '',
+    pinnedHosts: '',
     useBuiltinRelay: true,
     subVariants: 'vless-ws',
     subName: 'CFPilot',

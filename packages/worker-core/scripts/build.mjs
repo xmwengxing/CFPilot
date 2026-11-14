@@ -239,10 +239,14 @@ for (const target of TARGETS) {
   //   3. 80KB 时控制面只剩 26 字节余量，等于「下一个功能必然破线」，
   //      这种卡点只会逼着后续改动去删有用的话术。
   //
+  // 2026-11-14 控制面与数据面**分开预算**：
+  //   - 数据面是转发热路径，保持 96KB —— 面越小越难藏东西，脱敏审查也快；
+  //   - 控制面是面板 + 订阅 + 配置 API，功能多、中文话术多，放宽到 108KB，
+  //     避免每加一个配置项就去删提示文案。
   // 仍然保留上限是有意义的：它挡住「随手塞进一个大依赖」。
   // 真要再往上放，请先看 `npm run build` 的实际体积与脱敏膨胀比例。
-  const SIZE_BUDGET_KB = 96
-  if (target.out !== 'worker.js' && size > SIZE_BUDGET_KB * 1024) {
-    console.warn(`[worker-core] 警告：${target.label} 超过 ${SIZE_BUDGET_KB}KB 预算上限`)
+  const sizeBudgetKb = target.out === 'dataplane.js' ? 96 : 108
+  if (target.out !== 'worker.js' && size > sizeBudgetKb * 1024) {
+    console.warn(`[worker-core] 警告：${target.label} 超过 ${sizeBudgetKb}KB 预算上限`)
   }
 }

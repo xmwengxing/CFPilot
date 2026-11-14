@@ -6,7 +6,9 @@ import { rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { compareSemver, parseVersion } from '../src/shared/version-util'
 import {
   fetchRemoteKernelInfo,
+  isChannelNewer,
   loadKernelBundle,
+  parseKernelVersionManifest,
   versionFromTag,
   CHECKSUMS_ASSET_NAME,
   CONTROL_ASSET_NAME,
@@ -109,6 +111,8 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks()
   delete process.env.CFPILOT_KERNEL_CACHE_DIR
+  delete process.env.CFPILOT_KERNEL_CHANNEL_BASE
+  delete process.env.CFPILOT_KERNEL_DIR
   if (cacheRoot) {
     rmSync(cacheRoot, { recursive: true, force: true })
   }
@@ -369,5 +373,141 @@ describe('loadKernelBundle', () => {
     expect(bundle.control).toContain('remote')
     expect(bundle.control).not.toContain('evil')
     expect(bundle.data).not.toContain('evil')
+  })
+})
+
+describe('parseKernelVersionManifest', () => {
+  it('解析合法清单', () => {
+    const m = parseKernelVersionManifest(
+      JSON.stringify({ seq: 202611140800, build: 'f4493ce-10650979', minToolVersion: '0.40.6' })
+    )
+    expect(m).toEqual({ seq: 202611140800, build: 'f4493ce-10650979', minToolVersion: '0.40.6' })
+  })
+
+  it('缺 seq / 非整数 / 非正数 / 坏 JSON 都返回 null', () => {
+    expect(parseKernelVersionManifest('{}')).toBeNull()
+    expect(parseKernelVersionManifest(JSON.stringify({ seq: 1.5 }))).toBeNull()
+    expect(parseKernelVersionManifest(JSON.stringify({ seq: -1 }))).toBeNull()
+    expect(parseKernelVersionManifest('not-json')).toBeNull()
+    expect(parseKernelVersionManifest('[]')).toBeNull()
+  })
+})
+
+describe('isChannelNewer', () => {
+  it('序号更高 → 新', () => {
+    expect(isChannelNewer({ seq: 2, build: 'b', minToolVersion: '' }, { seq: 1, build: 'a', minToolVersion: '' })).toBe(true)
+    expect(isChannelNewer({ seq: 1, build: 'a', minToolVersion: '' }, { seq: 2, build: 'b', minToolVersion: '' })).toBe(false)
+  })
+
+  it('同序号且构建指纹不同 → 新（同序号覆盖发布）', () => {
+    expect(isChannelNewer({ seq: 5, build: 'b2', minToolVersion: '' }, { seq: 5, build: 'b1', minToolVersion: '' })).toBe(true)
+    expect(isChannelNewer({ seq: 5, build: 'b1', minToolVersion: '' }, { seq: 5, build: 'b1', minToolVersion: '' })).toBe(false)
+  })
+
+  it('内置没有清单（旧包）→ 任何通道内核都视为新', () => {
+    expect(isChannelNewer({ seq: 1, build: 'a', minToolVersion: '' }, { seq: 0, build: '', minToolVersion: '' })).toBe(true)
+  })
+})
+
+describe('内核热更新通道（kernel-latest）', () => {
+  /** 搭一个内置内核目录（产物 + 内置 VERSION 清单）。 */
+  function setupBuiltin(builtin: { seq: number; build: string }): string {
+    const dir = join(cacheRoot, 'builtin')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'control.js'), 'export default {control:1}')
+    writeFileSync(join(dir, 'dataplane.js'), 'export default {data:1}')
+    writeFileSync(join(dir, 'cfpilot-kernel-VERSION'), JSON.stringify({ ...builtin, minToolVersion: '' }))
+    return dir
+  }
+
+  /** 通道 mock：VERSION + 三资产，按 URL 分发。 */
+  function mockChannel(
+    manifest: { seq: number; build: string; minToolVersion?: string },
+    opts: { control?: string; data?: string; sums?: string; assetsFail?: boolean } = {}
+  ) {
+    const control = opts.control ?? 'export default {channel:"control"}'
+    const data = opts.data ?? 'export default {channel:"data"}'
+    const sums = opts.sums ?? checksumsFor(control, data)
+    return async (input: unknown) => {
+      const url = String(input)
+      if (url.includes('cfpilot-kernel-VERSION')) {
+        return textResponse(JSON.stringify(manifest))
+      }
+      if (url.includes('SHA256SUMS')) return textResponse(opts.assetsFail ? '' : sums, !opts.assetsFail)
+      if (url.includes('control.js')) return textResponse(control, !opts.assetsFail)
+      if (url.includes('dataplane.js')) return textResponse(data, !opts.assetsFail)
+      if (url.includes('/releases')) return jsonResponse([release('v0.1.0')]) // Release 通道更旧
+      throw new Error('unexpected url: ' + url)
+    }
+  }
+
+  it('通道序号比内置新 → 用通道内核，来源带序号', async () => {
+    process.env.CFPILOT_KERNEL_DIR = setupBuiltin({ seq: 202611140000, build: 'aaa-1111' })
+    process.env.CFPILOT_KERNEL_CHANNEL_BASE = 'https://channel.test/kernel-latest'
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      mockChannel({ seq: 202611141000, build: 'bbb-2222' })
+    )
+
+    const bundle = await loadKernelBundle('0.40.6')
+    expect(bundle.source).toContain('远程内核 k202611141000')
+    expect(bundle.source).toContain('bbb-2222')
+    expect(bundle.control).toContain('channel')
+  })
+
+  it('通道序号不比内置新 → 走包 Release 通道（原有行为）', async () => {
+    process.env.CFPILOT_KERNEL_DIR = setupBuiltin({ seq: 202611150000, build: 'aaa-1111' })
+    process.env.CFPILOT_KERNEL_CHANNEL_BASE = 'https://channel.test/kernel-latest'
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      mockChannel({ seq: 202611140000, build: 'bbb-2222' })
+    )
+
+    const bundle = await loadKernelBundle('0.40.6')
+    // Release mock 给了 v0.1.0（比 0.40.6 旧）→ 最终内置
+    expect(bundle.source).toContain('内置')
+    expect(bundle.control).not.toContain('channel')
+  })
+
+  it('通道要求更高工具版本 → 明确提示，不用远程内核', async () => {
+    process.env.CFPILOT_KERNEL_DIR = setupBuiltin({ seq: 202611140000, build: 'aaa-1111' })
+    process.env.CFPILOT_KERNEL_CHANNEL_BASE = 'https://channel.test/kernel-latest'
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      mockChannel({ seq: 202611141000, build: 'bbb-2222', minToolVersion: '99.0.0' })
+    )
+
+    const logs: string[] = []
+    const bundle = await loadKernelBundle('0.40.6', { log: (m) => logs.push(m) })
+    expect(bundle.source).toContain('内置')
+    expect(logs.some((l) => l.includes('请先升级'))).toBe(true)
+  })
+
+  it('通道产物下载失败 → 回退内置并记日志', async () => {
+    process.env.CFPILOT_KERNEL_DIR = setupBuiltin({ seq: 202611140000, build: 'aaa-1111' })
+    process.env.CFPILOT_KERNEL_CHANNEL_BASE = 'https://channel.test/kernel-latest'
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      mockChannel({ seq: 202611141000, build: 'bbb-2222' }, { assetsFail: true })
+    )
+
+    const logs: string[] = []
+    const bundle = await loadKernelBundle('0.40.6', { log: (m) => logs.push(m) })
+    expect(bundle.source).toContain('内置')
+    expect(logs.some((l) => l.includes('k202611141000'))).toBe(true)
+  })
+
+  it('通道清单不可读（坏 JSON）→ 视为通道不可用，走原有逻辑', async () => {
+    process.env.CFPILOT_KERNEL_DIR = setupBuiltin({ seq: 202611140000, build: 'aaa-1111' })
+    process.env.CFPILOT_KERNEL_CHANNEL_BASE = 'https://channel.test/kernel-latest'
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: unknown) => {
+      const url = String(input)
+      if (url.includes('cfpilot-kernel-VERSION')) return textResponse('not-json')
+      if (url.includes('SHA256SUMS')) return textResponse(checksumsFor('export default {remote:"control"}', 'export default {remote:"data"}'))
+      if (url.includes('control.js')) return textResponse('export default {remote:"control"}')
+      if (url.includes('dataplane.js')) return textResponse('export default {remote:"data"}')
+      if (url.includes('/releases')) return jsonResponse([release('v9.9.9')])
+      throw new Error('unexpected url: ' + url)
+    })
+
+    const bundle = await loadKernelBundle('0.40.6')
+    // Release 通道 v9.9.9 更新 → 用 Release 内核（原有行为不受影响）
+    expect(bundle.version).toBe('9.9.9')
   })
 })

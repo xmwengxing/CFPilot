@@ -55,6 +55,7 @@ export const DEFAULT_CONFIG: UserConfig = {
   // 默认保守：只修「直连假活」，不替用户在代理出口上擅自换路
   aggressiveRedial: false,
   relayPool: '',
+  pinnedHosts: '',
   useBuiltinRelay: true,
   enableTrojan: true,
   enableXhttp: true,
@@ -167,6 +168,7 @@ export function configFromEnv(env: Env): UserConfig {
     resolvePreferred: bool(env.RESOLVE_PREFERRED, DEFAULT_CONFIG.resolvePreferred),
     aggressiveRedial: bool(env.AGGRESSIVE_REDIAL, DEFAULT_CONFIG.aggressiveRedial),
     relayPool: text(env.RELAY_POOL, ''),
+    pinnedHosts: text(env.PINNED_HOSTS, ''),
     useBuiltinRelay: bool(env.USE_BUILTIN_RELAY, DEFAULT_CONFIG.useBuiltinRelay),
     enableTrojan: bool(env.ENABLE_TROJAN ?? env.TROJAN, DEFAULT_CONFIG.enableTrojan),
     enableXhttp: bool(env.ENABLE_XHTTP ?? env.XHTTP, DEFAULT_CONFIG.enableXhttp),

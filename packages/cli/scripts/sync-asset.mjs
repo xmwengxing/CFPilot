@@ -16,7 +16,7 @@
  * 即：npx cfpilot deploy 在 npm 上是坏的。
  * 合并版 worker.js 仍然保留（兼容旧调用方），但不再是部署所需。
  */
-import { copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -82,3 +82,27 @@ if (existsSync(vpsScript)) {
 }
 
 console.log(`[cfpilot] 内核资产合计 ${total.toFixed(1)} KB → assets/`)
+
+// 生成内核版本清单（内核热更新通道的「内置序号」锚点）。
+//
+// CLI/桌面版部署前会比对 kernel-latest 通道的序号与本文件：
+// 只改内核、不发新包时，通道序号会超过这里 → 正确拉新内核；
+// 包发布时构建时间 ≥ 任何已有内核发布 → 内置序号天然 ≥ 最新内核，
+// 不会误判「有新版」。
+// seq 用 UTC `yyyymmddHHMM`（分钟级，纯数字单调）；
+// build 与 control.js 产物里的 BUILD_VERSION 同源（同一正则提取）。
+const buildRe = /["']([0-9a-f]{7,10}-(?:[0-9a-f]{4,16}|[0-9]{12}))["']/
+const controlSource = readFileSync(resolve(targetDir, 'control.js'), 'utf8')
+const buildMatch = buildRe.exec(controlSource)
+const versionManifest = {
+  seq: Number(new Date().toISOString().slice(0, 16).replace(/[-T:]/g, '')),
+  build: buildMatch ? buildMatch[1] : '',
+  minToolVersion: '',
+}
+writeFileSync(
+  resolve(targetDir, 'cfpilot-kernel-VERSION'),
+  `${JSON.stringify(versionManifest, null, 2)}\n`
+)
+console.log(
+  `[cfpilot] 已同步 cfpilot-kernel-VERSION (seq=${versionManifest.seq}, build=${versionManifest.build || '未知'})`
+)

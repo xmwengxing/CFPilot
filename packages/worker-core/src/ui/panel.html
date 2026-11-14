@@ -773,6 +773,12 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
             <textarea id="cfgRelayPool" class="mono" placeholder="1.2.3.4:443&#10;relay.example.com:443"></textarea>
             <p class="tip">relayPool：自配第三方反代入口，优先于内置反代；直连/优选失败、Cloudflare 网段目标时启用。</p>
           </div>
+          <div class="field">
+            <label>固定落地 IP / 固定反代入口</label>
+            <textarea id="cfgPinnedHosts" class="mono" placeholder="example.com=203.0.113.10&#10;cloudflare.com=r:198.51.100.7"></textarea>
+            <p class="tip">按域名写死出站落地地址，跳过 DNS 轮询；r: 前缀 = 固定反代入口（Cloudflare 网段站点用）。</p>
+            <p class="tip">按域名写死出站落地地址（每行一条，可逗号分隔多个 IP），命中后跳过 DNS 轮询只连这些地址。用于解析在多家 CDN 间漂移、刷新时好时坏的站点；`*.前缀` 可匹配子域名，留空不启用。</p>
+          </div>
         </div>
       </div>
 
@@ -1268,6 +1274,7 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
     $('cfgHttpProxy').value = c.httpProxy || '';
     $('cfgNat64').value = c.nat64 || '';
     $('cfgRelayPool').value = c.relayPool || '';
+    $('cfgPinnedHosts').value = c.pinnedHosts || '';
     // 代理调度模式：读不懂的值一律回落 'only'（与后端 normalizeProxyMode 一致）
     $('cfgProxyMode').value = c.proxyMode || 'only';
     $('cfgBuiltinRelay').checked = c.useBuiltinRelay !== false;
@@ -1497,6 +1504,7 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
       httpProxy: $('cfgHttpProxy').value.trim(),
       nat64: $('cfgNat64').value.trim(),
       relayPool: $('cfgRelayPool').value.trim(),
+      pinnedHosts: $('cfgPinnedHosts').value.trim(),
       proxyMode: $('cfgProxyMode').value,
       useBuiltinRelay: $('cfgBuiltinRelay').checked,
       clientFingerprint: $('cfgFingerprint').value.trim() || 'chrome',

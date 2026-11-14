@@ -29,21 +29,31 @@ type RunOptions struct {
 	Candidates []string
 	/** 数据面 build；留空则自动拉取 */
 	ExpectedBuild string
+	/**
+	 * 校验网址（Cloudflare 网段站点）：终检候选能否转发到 CF 边缘。
+	 *
+	 * 留空 = 不做终检。已由调用方完成「剔除非 CF 网段网址」
+	 * （relay.resolveVerifyHosts），这里拿到的是最终列表。
+	 */
+	VerifyHosts []string
 	/** 进度回调（每完成一个候选调一次），可为空 */
 	OnProgress func(done, total int, ip string, ok bool)
 }
 
 // Aggregate 是单个候选的多轮汇总。
 type Aggregate struct {
-	IP         string   `json:"ip"`
-	Rounds     int      `json:"rounds"`
-	Passed     int      `json:"passed"`
-	SuccessPct int      `json:"successPct"`
-	TunnelMs   int64    `json:"tunnelMs"`
-	TLSMs      int64    `json:"tlsMs"`
-	TLSP95     int64    `json:"tlsP95"`
-	HTTPMs     int64    `json:"httpMs"`
-	Errors     []string `json:"errors"`
+	IP         string `json:"ip"`
+	Rounds     int    `json:"rounds"`
+	Passed     int    `json:"passed"`
+	SuccessPct int    `json:"successPct"`
+	TunnelMs   int64  `json:"tunnelMs"`
+	TLSMs      int64  `json:"tlsMs"`
+	TLSP95     int64  `json:"tlsP95"`
+	HTTPMs     int64  `json:"httpMs"`
+	// VerifyOK 是「校验网址终检」结论；nil = 未执行终检（没配校验网址）。
+	// false = 候选能转发到数据面、却转发不了 CF 网段站点（假入口），已剔除。
+	VerifyOK *bool    `json:"verifyOk,omitempty"`
+	Errors   []string `json:"errors"`
 }
 
 // Summary 是一次批量体检的完整结果。
@@ -60,6 +70,9 @@ type Summary struct {
 //
 // 池子不是越大越好：每条都要参与 Worker 的出站拨号竞速，
 // 塞几百条反而拖慢选路。
+//
+// 校验网址终检失败的候选（VerifyOK=false）不进池 ——
+// 它们转发不了 CF 网段站点，进池反而让 Worker 出站走到坏入口。
 func (s *Summary) Picked(top int) []string {
 	if top <= 0 {
 		top = 10
@@ -67,6 +80,9 @@ func (s *Summary) Picked(top int) []string {
 	out := make([]string, 0, top)
 	for _, a := range s.Aggregates {
 		if a.SuccessPct != 100 {
+			continue
+		}
+		if a.VerifyOK != nil && !*a.VerifyOK {
 			continue
 		}
 		out = append(out, a.IP)
@@ -195,6 +211,87 @@ func Run(ctx context.Context, opt RunOptions) (*Summary, error) {
 		}
 		return a.TLSMs < b.TLSMs
 	})
+
+	// ---- 校验网址终检 ----
+	//
+	// 只对「多轮全通」的候选做（候选全通的量级有限，成本可控）：
+	// 逐个建独立隧道，实测「能不能把流量转到 CF 网段站点」。
+	// 任一网址转发成功即通过；全部失败 = 假入口，从池里剔除。
+	if len(opt.VerifyHosts) > 0 {
+		var toVerify []int
+		for i, a := range summary.Aggregates {
+			if a.SuccessPct == 100 {
+				toVerify = append(toVerify, i)
+			}
+		}
+		if len(toVerify) > 0 {
+			totalVerify := len(toVerify)
+			verifyDone := 0
+			var vmu sync.Mutex
+			vIdx := 0
+			vWorker := func() {
+				for {
+					vmu.Lock()
+					k := vIdx
+					vIdx++
+					vmu.Unlock()
+					if k >= len(toVerify) {
+						return
+					}
+					i := toVerify[k]
+					ip := summary.Aggregates[i].IP
+
+					passed := false
+					var firstErr error
+					for _, host := range opt.VerifyHosts {
+						if ctx.Err() != nil {
+							break
+						}
+						ok, err := verifyForwarding(ctx, probeOpt, ip, host)
+						if ok {
+							passed = true
+							break
+						}
+						if firstErr == nil {
+							firstErr = err
+						}
+					}
+
+					vmu.Lock()
+					verifyDone++
+					current := verifyDone
+					vmu.Unlock()
+
+					mu.Lock()
+					summary.Aggregates[i].VerifyOK = &passed
+					if !passed && firstErr != nil {
+						summary.Aggregates[i].Errors = append(summary.Aggregates[i].Errors,
+							"校验网址失败："+shortErr(firstErr))
+					}
+					mu.Unlock()
+
+					if opt.OnProgress != nil {
+						// 终检进度接在主循环之后，进度条连续推进不回退
+						opt.OnProgress(total+current, total+totalVerify, ip, passed)
+					}
+				}
+			}
+			var vWg sync.WaitGroup
+			vWorkers := concurrency
+			if vWorkers > len(toVerify) {
+				vWorkers = len(toVerify)
+			}
+			for w := 0; w < vWorkers; w++ {
+				vWg.Add(1)
+				go func() {
+					defer vWg.Done()
+					vWorker()
+				}()
+			}
+			vWg.Wait()
+		}
+	}
+
 	for _, a := range summary.Aggregates {
 		switch a.SuccessPct {
 		case 100:

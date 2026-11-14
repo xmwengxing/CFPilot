@@ -234,6 +234,78 @@ func orDash(v string) string {
 	return v
 }
 
+// verifyForwarding 终检一个候选能否把流量转发到**指定的 CF 网段站点**。
+//
+// 链路与 Probe 完全一致，只是 TLS SNI 与 HTTP Host 换成校验网址，
+// 且判定放宽为「收到任何 HTTP 响应就算通过」—— 403 / 302 也证明
+// 入口确实把 SNI 转到了 CF 边缘（站点自己的风控与入口无关）。
+//
+// 剔除的是「能转发到自己的数据面、却转发不了别的站点」的假入口
+// （只白名单特定 SNI 的转发器）。
+func verifyForwarding(ctx context.Context, opt Options, ip, verifyHost string) (bool, error) {
+	timeout := opt.Timeout
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+	deadline := time.Now().Add(timeout)
+	probeCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+
+	conn, err := DialWebSocket(probeCtx, opt.Host, opt.Port, opt.WSPath, timeout)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = conn.Close() }()
+
+	uuid, err := ParseUUID(opt.UUID)
+	if err != nil {
+		return false, err
+	}
+	target, err := resolveProbeTarget(probeCtx, ip)
+	if err != nil {
+		return false, err
+	}
+	if _, err := conn.Write(BuildVLESSRequest(uuid, target, 443)); err != nil {
+		return false, err
+	}
+	if _, _, err := ReadVLESSReply(conn); err != nil {
+		return false, err
+	}
+
+	tlsConfig := &tls.Config{
+		ServerName: verifyHost,
+		MinVersion: tls.VersionTLS12,
+		NextProtos: []string{"http/1.1"},
+	}
+	if dialTLSConfigHook != nil {
+		tlsConfig = dialTLSConfigHook(tlsConfig)
+	}
+	tlsConn := tls.Client(conn, tlsConfig)
+	if err := tlsConn.HandshakeContext(probeCtx); err != nil {
+		return false, fmt.Errorf("TLS 握手失败（候选没有转发到 %s）：%v", verifyHost, shortErr(err))
+	}
+
+	request := strings.Join([]string{
+		"GET / HTTP/1.1",
+		"Host: " + verifyHost,
+		"Connection: close",
+		"User-Agent: cfpilot-relay-verify",
+		"",
+		"",
+	}, "\r\n")
+	if _, err := io.WriteString(tlsConn, request); err != nil {
+		return false, err
+	}
+	res, err := http.ReadResponse(bufio.NewReader(tlsConn), nil)
+	if err != nil {
+		return false, fmt.Errorf("读响应失败：%v", shortErr(err))
+	}
+	defer func() { _ = res.Body.Close() }()
+	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
+	// 收到任何 HTTP 状态行都算转发成功
+	return res.StatusCode > 0, nil
+}
+
 // shortErr 把 error 压成一行（去掉 dial 里冗长的包装）。
 func shortErr(err error) string {
 	msg := err.Error()

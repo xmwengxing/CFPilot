@@ -372,6 +372,151 @@ function percentile(values: number[], p: number): number {
   return sorted[idx]!
 }
 
+/* ------------------------------------------------------------------ */
+/* 校验网址终检（与 Go 版 internal/relay/verify_hosts.go 同口径）        */
+/* ------------------------------------------------------------------ */
+
+/** 内置校验网址：权威解析稳定落在 Cloudflare 网段的知名站点（内置豁免 DNS 剔除）。 */
+const BUILTIN_VERIFY_HOSTS = [
+  'cloudflare.com',
+  'chatgpt.com',
+  'canva.com',
+  'discord.com',
+  'x.com',
+]
+
+/** Cloudflare 自家网段（与 Go 版 cloudflareRanges 同源，按需同步）。 */
+const CF_RANGES: Array<{ base: [number, number, number, number]; bits: number }> = [
+  { base: [104, 16, 0, 0], bits: 13 },
+  { base: [104, 24, 0, 0], bits: 14 },
+  { base: [172, 64, 0, 0], bits: 13 },
+  { base: [162, 158, 0, 0], bits: 15 },
+  { base: [188, 114, 96, 0], bits: 20 },
+  { base: [198, 41, 128, 0], bits: 17 },
+  { base: [103, 21, 244, 0], bits: 22 },
+  { base: [103, 22, 200, 0], bits: 22 },
+  { base: [103, 31, 4, 0], bits: 22 },
+  { base: [141, 101, 64, 0], bits: 18 },
+  { base: [108, 162, 192, 0], bits: 18 },
+  { base: [190, 93, 240, 0], bits: 20 },
+  { base: [197, 234, 240, 0], bits: 22 },
+  { base: [131, 0, 72, 0], bits: 22 },
+  { base: [1, 0, 0, 0], bits: 24 },
+  { base: [1, 1, 1, 0], bits: 24 },
+]
+
+function isCloudflareIPv4(ip: string): boolean {
+  const parts = ip.split('.').map(Number)
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false
+  const value = ((parts[0]! << 24) | (parts[1]! << 16) | (parts[2]! << 8) | parts[3]!) >>> 0
+  return CF_RANGES.some(({ base, bits }) => {
+    const mask = (0xffffffff << (32 - bits)) >>> 0
+    const baseValue =
+      (((base[0]! << 24) | (base[1]! << 16) | (base[2]! << 8) | base[3]!) >>> 0) & mask
+    return (value & mask) === baseValue
+  })
+}
+
+/** Node dns.resolve4 的 promisify 包装（模块级，测试可替换）。 */
+const resolve4Async = async (host: string): Promise<string[]> => {
+  const dns = await import('node:dns')
+  return new Promise((resolve, reject) => {
+    dns.resolve4(host, (err, addrs) => (err ? reject(err) : resolve(addrs)))
+  })
+}
+
+/**
+ * 合并「用户手填 + 内置」成实际用于终检的网址列表（上限 3 个）。
+ *
+ * 内置清单豁免 DNS 剔除（国内本地 DNS 会把 CF 站点解析到本地 CDN，
+ * 运行时剔除会误杀内置清单）；用户手填的按解析结果剔除非 CF 网段。
+ */
+async function resolveVerifyHosts(userRaw: string, quiet: boolean): Promise<string[]> {
+  const verifyHostLimit = 3
+  const userHosts = userRaw
+    .split(/[\r\n,]+/)
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean)
+  const out: string[] = []
+  const seen = new Set<string>()
+  const add = (host: string): void => {
+    if (!host || seen.has(host) || out.length >= verifyHostLimit) return
+    seen.add(host)
+    out.push(host)
+  }
+  for (const host of userHosts) {
+    if (BUILTIN_VERIFY_HOSTS.includes(host)) {
+      add(host) // 内置豁免
+      continue
+    }
+    try {
+      const addrs = await resolve4Async(host)
+      if (!addrs.some((ip) => isCloudflareIPv4(ip))) {
+        if (!quiet) process.stderr.write(`已剔除校验网址 ${host}（解析结果不在 Cloudflare 网段）\n`)
+        continue
+      }
+      add(host)
+    } catch {
+      if (!quiet) process.stderr.write(`已剔除校验网址 ${host}（解析失败）\n`)
+    }
+  }
+  for (const h of BUILTIN_VERIFY_HOSTS) {
+    if (out.length >= verifyHostLimit) break
+    add(h)
+  }
+  return out
+}
+
+/**
+ * 终检一个候选能否把流量转发到指定 CF 网段站点。
+ *
+ * 链路与 probeOne 一致，只是 TLS SNI 与 HTTP Host 换成校验网址；
+ * 收到任何 HTTP 状态行都算转发成功（403 也证明 SNI 转发到了 CF 边缘）。
+ */
+async function verifyOne(
+  opts: { wsUrl: string; uuid: string },
+  ip: string,
+  verifyHost: string,
+  timeoutMs: number
+): Promise<boolean> {
+  let ws: WebSocket | undefined
+  let socket: tls.TLSSocket | undefined
+  try {
+    const tunnel = await openTunnel(opts.wsUrl, opts.uuid, ip, 443, timeoutMs)
+    ws = tunnel.ws
+    socket = await new Promise<tls.TLSSocket>((resolve, reject) => {
+      const s = tls.connect(
+        {
+          socket: tunnel.duplex,
+          servername: verifyHost,
+          // 校验网址是公网站点：证书链 + 主机名照常校验
+          rejectUnauthorized: true,
+        },
+        () => resolve(s)
+      )
+      s.once('error', reject)
+    })
+    socket.write(
+      `GET / HTTP/1.1\r\nHost: ${verifyHost}\r\nUser-Agent: cfpilot-relay-verify\r\nConnection: close\r\n\r\n`
+    )
+    const res = await readHttp(socket, timeoutMs)
+    return res.status > 0
+  } catch {
+    return false
+  } finally {
+    try {
+      socket?.destroy()
+    } catch {
+      /* 已关闭 */
+    }
+    try {
+      ws?.close()
+    } catch {
+      /* 已关闭 */
+    }
+  }
+}
+
 export async function runRelayCommand(args: ParsedArgs): Promise<void> {
   if (flagBool(args, 'h') || flagBool(args, 'help')) {
     process.stdout.write(SCAN_RELAY_HELP)
@@ -399,6 +544,8 @@ export async function runRelayCommand(args: ParsedArgs): Promise<void> {
     pushRaw === 'append' ? 'incremental' : pushRaw === 'replace' ? 'overwrite' : pushRaw
   const panel = flagString(args, 'panel')
   const panelPassword = flagString(args, 'panel-password')
+  /** 校验网址（终检）：逗号分隔；空 = 内置清单 */
+  const verifyHostsRaw = flagString(args, 'verify-hosts')
 
   if (!host || !wsPath || !uuid) {
     process.stderr.write('缺少参数：--host、--ws-path、--uuid 都是必填\n')
@@ -522,10 +669,44 @@ export async function runRelayCommand(args: ParsedArgs): Promise<void> {
   const alwaysOk = aggregates.filter((a) => a.successPct === 100).length
   const neverOk = aggregates.filter((a) => a.successPct === 0).length
 
+  // ---- 校验网址终检（与 Go 版同口径）----
+  //
+  // 只对「全通」候选做：逐个建独立隧道，实测能否把流量转到 CF 网段站点。
+  // 任一网址转发成功即通过；全部失败 = 假入口，从 picked 里剔除。
+  const verifyHosts = await resolveVerifyHosts(verifyHostsRaw, quiet)
+  const verifyFailed = new Set<string>()
+  if (verifyHosts.length > 0 && !quiet) {
+    process.stderr.write(`校验网址终检：${verifyHosts.join(', ')}\n`)
+  }
+  if (verifyHosts.length > 0) {
+    const passList = aggregates.filter((a) => a.successPct === 100).map((a) => a.ip)
+    let vNext = 0
+    const vWorker = async (): Promise<void> => {
+      for (;;) {
+        const k = vNext
+        vNext += 1
+        if (k >= passList.length) return
+        const ip = passList[k]!
+        let passed = false
+        for (const host of verifyHosts) {
+          if (await verifyOne({ wsUrl, uuid }, ip, host, timeoutMs)) {
+            passed = true
+            break
+          }
+        }
+        if (!passed) verifyFailed.add(ip)
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(concurrency, passList.length) }, () => vWorker()))
+    if (verifyFailed.size > 0 && !quiet) {
+      process.stderr.write(`校验网址终检剔除 ${verifyFailed.size} 个假入口\n`)
+    }
+  }
+
   // 产出可直接粘贴的清单：只取**全通**的，按 TLS 中位排序，最多 topN 条。
   // 池子不是越大越好 —— 每条都要参与拨号竞速，塞几百条反而拖慢选路。
   const picked = aggregates
-    .filter((a) => a.successPct === 100)
+    .filter((a) => a.successPct === 100 && !verifyFailed.has(a.ip))
     .slice(0, topN)
     .map((a) => a.ip)
   if (outPath) {
@@ -600,7 +781,7 @@ export async function runRelayCommand(args: ParsedArgs): Promise<void> {
     String(a.tlsMs),
     String(a.tlsP95),
     String(a.httpMs),
-    a.errors[0] ?? '',
+    a.errors[0] ?? (verifyFailed.has(a.ip) ? '校验网址失败（假入口）' : ''),
   ])
   const widths = head.map((h, i) => Math.max(h.length, ...rows.map((r) => (r[i] ?? '').length)))
   const line = (cells: string[]): string => cells.map((c, i) => c.padEnd(widths[i]!)).join('  ')

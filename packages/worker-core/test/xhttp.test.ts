@@ -92,6 +92,7 @@ const baseConfig = {
   concurrentDial: true,
   resolvePreferred: true,
   relayPool: '',
+  pinnedHosts: '',
   useBuiltinRelay: true,
   subVariants: 'vless-ws',
   subName: 'CFPilot',

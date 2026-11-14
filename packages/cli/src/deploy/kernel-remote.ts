@@ -584,18 +584,155 @@ export function extractBuildVersion(source: string): string {
 }
 
 /* ------------------------------------------------------------------ */
+/* 内核热更新通道（固定滚动 Release，与包版本解耦）                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 固定滚动 tag：内核热更新通道。
+ *
+ * ## 为什么需要独立通道
+ *
+ * 包 Release 的内核资产以 **tag 的包版本号**参与「最新」判定 ——
+ * 只改内核时不发新包，这条通道就永远看不到新内核。
+ * 固定 tag `kernel-latest` 由内核发布工作流单独维护（覆盖上传），
+ * 内核序号只随内核变动递增，与包版本完全无关。
+ */
+export const KERNEL_CHANNEL_TAG = 'kernel-latest'
+/** 通道版本清单的资产名。 */
+export const KERNEL_VERSION_ASSET = 'cfpilot-kernel-VERSION'
+
+/** 通道基址（测试用环境变量可覆盖；空 = 官方 kernel-latest）。 */
+const KERNEL_CHANNEL_BASE_ENV = 'CFPILOT_KERNEL_CHANNEL_BASE'
+
+/** 通道资产下载地址（测试基址可覆盖；镜像代理由 downloadAsset 自理）。 */
+function channelAssetUrl(asset: string): string {
+  const base = process.env[KERNEL_CHANNEL_BASE_ENV]?.trim()
+  if (base) return `${base.replace(/\/+$/, '')}/${asset}`
+  return `${RELEASES_WEB}/download/${KERNEL_CHANNEL_TAG}/${asset}`
+}
+
+/** 内核版本清单。 */
+export interface KernelVersionManifest {
+  /**
+   * 内核序号（UTC `yyyymmddHHMM`，纯数字单调递增）。
+   *
+   * BUILD_VERSION 是内容哈希、比不了先后，通道必须另有一个能比大小的量。
+   * 序号只由内核发布工作流写入；包内置清单的序号取打包时的构建时间，
+   * 因此「包比内核后发布」时内置序号天然 ≥ 最新内核序号，不会误判有新版。
+   */
+  seq: number
+  /** 构建指纹（BUILD_VERSION）；同序号时用于识别内容变化。 */
+  build: string
+  /** 最低工具版本（空串 = 未声明）；旧工具不得部署比它新的协议内核。 */
+  minToolVersion: string
+}
+
+/** 解析通道版本清单；格式不对返回 null（调用方按「通道不可用」处理）。 */
+export function parseKernelVersionManifest(text: string): KernelVersionManifest | null {
+  try {
+    const raw = JSON.parse(text) as Record<string, unknown>
+    const seq = Number(raw.seq)
+    if (!Number.isFinite(seq) || !Number.isInteger(seq) || seq <= 0) return null
+    const build = typeof raw.build === 'string' ? raw.build.trim() : ''
+    const minToolVersion = typeof raw.minToolVersion === 'string' ? raw.minToolVersion.trim() : ''
+    return { seq, build, minToolVersion }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 通道内核是否比内置新：序号更高；同序号但构建指纹不同也算新
+ * （同序号重新覆盖发布时，内容哈希是唯一的内容变化证据）。
+ */
+export function isChannelNewer(
+  channel: KernelVersionManifest,
+  builtin: KernelVersionManifest
+): boolean {
+  if (channel.seq > builtin.seq) return true
+  return (
+    channel.seq === builtin.seq &&
+    channel.build !== '' &&
+    builtin.build !== '' &&
+    channel.build !== builtin.build
+  )
+}
+
+/** 查询通道最新内核清单；失败返回 null（离线 / 通道未发布都是正常情况）。 */
+async function fetchChannelVersion(timeoutMs: number): Promise<KernelVersionManifest | null> {
+  try {
+    // 只取 ~100 字节的清单就能决定要不要下载产物本体；
+    // 清单内容只影响「要不要拉新」，最终产物仍要过官方清单的摘要校验，
+    // 被篡改的清单最多引发一次注定失败的下载，不构成安全问题。
+    const text = await downloadAsset(channelAssetUrl(KERNEL_VERSION_ASSET), timeoutMs)
+    return parseKernelVersionManifest(text)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 读取包内置的内核版本清单（打包时的内核序号锚点）。
+ *
+ * 读不到时返回 seq=0 的兜底 —— 旧包没有这个文件，
+ * 此时任何通道内核都视为「更新」。
+ */
+export async function loadBuiltinKernelVersion(): Promise<KernelVersionManifest> {
+  const override = process.env[LOCAL_DIR_ENV]?.trim()
+  const candidates = override
+    ? [resolve(override, KERNEL_VERSION_ASSET)]
+    : [
+        resolve(moduleDir(), `../assets/${KERNEL_VERSION_ASSET}`),
+        resolve(moduleDir(), `../../assets/${KERNEL_VERSION_ASSET}`),
+        resolve(moduleDir(), `../../worker-core/dist/${KERNEL_VERSION_ASSET}`),
+        resolve(process.cwd(), `packages/worker-core/dist/${KERNEL_VERSION_ASSET}`),
+      ]
+  for (const candidate of candidates) {
+    try {
+      const text = await readFile(candidate, 'utf8')
+      const parsed = parseKernelVersionManifest(text)
+      if (parsed) return parsed
+    } catch {
+      /* 试下一个 */
+    }
+  }
+  return { seq: 0, build: '', minToolVersion: '' }
+}
+
+/**
+ * 取通道内核产物（清单官方直连校验 + 缓存复验，与包 Release 通道同口径）。
+ */
+async function fetchChannelKernel(
+  channel: KernelVersionManifest,
+  timeoutMs: number
+): Promise<{ control: string; data: string }> {
+  // seq 已由 parseKernelVersionManifest 校验为正整数，拼进缓存目录无路径穿越。
+  const info: RemoteKernelInfo = {
+    version: `k${channel.seq}`,
+    controlUrl: channelAssetUrl(CONTROL_ASSET_NAME),
+    dataUrl: channelAssetUrl(DATA_ASSET_NAME),
+    checksumsUrl: channelAssetUrl(CHECKSUMS_ASSET_NAME),
+  }
+  return await fetchRemoteKernel(info, timeoutMs)
+}
+
+
+/* ------------------------------------------------------------------ */
 /* 对外主入口                                                          */
 /* ------------------------------------------------------------------ */
 
 /**
  * 取「应该用于部署」的内核。
  *
- * 远程版本比 currentVersion 新 → 用远程；否则用本地内置。
+ * 三级选择：
+ *   1. 内核热更新通道（`kernel-latest` 固定 tag）：序号比内置新 → 用通道内核；
+ *   2. 包 Release 通道：tag 版本比 currentVersion 新 → 用 Release 内核；
+ *   3. 本地内置。
  *
  * 网络失败（离线 / 限流 / 下载中断）**不会抛错**，一律回退本地内置产物，
  * 并在 `source` 里标明来源是「内置」。
  *
- * @param currentVersion 当前应用版本（semver），用于和远程版本比大小
+ * @param currentVersion 当前应用版本（semver），用于兼容护栏与 Release 通道比较
  * @param options.log 日志回调（用于提示「远程不可用，已回退内置」）
  */
 export async function loadKernelBundle(
@@ -604,6 +741,42 @@ export async function loadKernelBundle(
 ): Promise<KernelBundle> {
   const log = options.log ?? (() => {})
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+
+  // ---- 1. 内核热更新通道（固定滚动 tag，与包版本解耦）----
+  //
+  // 只改内核、不发新包时，只有这条通道能看到新内核。
+  // 通道不可用（离线 / 尚未发布过）→ 静默走下一级，不打扰用户。
+  const channel = await fetchChannelVersion(timeoutMs)
+  if (channel) {
+    if (channel.minToolVersion && compareSemver(currentVersion, channel.minToolVersion) < 0) {
+      // 兼容护栏：旧工具不部署比它新的协议内核，明确要求先升级工具。
+      log(
+        `· 远程内核 k${channel.seq} 要求工具版本 ≥ ${channel.minToolVersion}，当前 ${currentVersion}` +
+          ' —— 请先升级 CLI / 桌面版，再更新内核'
+      )
+    } else {
+      const builtin = await loadBuiltinKernelVersion()
+      if (isChannelNewer(channel, builtin)) {
+        try {
+          const bundle = await fetchChannelKernel(channel, timeoutMs)
+          return {
+            control: bundle.control,
+            data: bundle.data,
+            version: currentVersion,
+            source: `远程内核 k${channel.seq}（${channel.build || 'build 未知'}，已校验）`,
+          }
+        } catch (err) {
+          log(
+            `· 远程内核 k${channel.seq} 获取失败，改用内置内核 ${currentVersion}（部署照常进行）：` +
+              (err instanceof Error ? err.message : String(err))
+          )
+          log(`  → 当前访问方式：${describeProxy()}`)
+        }
+      }
+    }
+  }
+
+  // ---- 2. 包 Release 通道（降级：tag 版本比较）----
   const remote = await fetchRemoteKernelInfo({ timeoutMs })
 
   if (remote && compareSemver(remote.version, currentVersion) > 0) {
@@ -629,6 +802,7 @@ export async function loadKernelBundle(
     }
   }
 
+  // ---- 3. 本地内置 ----
   const control = await loadBuiltinBundle('control.js')
   const data = await loadBuiltinBundle('dataplane.js')
   return {

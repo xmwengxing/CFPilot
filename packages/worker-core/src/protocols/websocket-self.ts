@@ -38,6 +38,7 @@ import {
   type DialFailure,
 } from '../outbound/route'
 import { collectRelayEndpoints, type RelayEndpoint } from '../outbound/relay'
+import { pinnedIpsFor, pinnedRelaysFor } from '../outbound/pinned'
 
 export type WsMode = 'vless' | 'trojan'
 
@@ -928,6 +929,14 @@ export async function handleWebSocket(
           userEntries: config.relayPool || undefined,
           useBuiltin: config.useBuiltinRelay,
         },
+        // 固定落地 IP 映射：命中则跳过 DNS 轮询，只连用户写明的地址
+        pinnedIps: config.pinnedHosts
+          ? pinnedIpsFor(config.pinnedHosts, parsed.hostname, parsed.port)
+          : undefined,
+        // 固定反代入口（`域名=r:IP`）：目标在 CF 网段时优先单拨写明的入口
+        pinnedRelays: config.pinnedHosts
+          ? pinnedRelaysFor(config.pinnedHosts, parsed.hostname, parsed.port)
+          : undefined,
         onFailure: (failure) => {
           failures.push(failure)
           diagnostics?.failures.push(failure)

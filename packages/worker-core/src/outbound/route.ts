@@ -286,7 +286,26 @@ export function buildRouteCandidates(input: RouteInput): RouteCandidate[] {
   // 反代第一批放进主竞速，大流量随后在反代入口（~64 KiB 转发上限）上断流。
   // 现在直连永远优先，反代只兜底；域名直连在 CF 前置域名上快速失败后，
   // 再走反代分批，失败回退语义不变。
-  const directDowngraded = targetIsCf || input.deprioritizeDirect === true
+  //
+  // 3) 优选 IP 落地：非 CF 网段的优先，CF 网段的降权
+  const optimized = input.optimizedIps ?? []
+  const normal = optimized.filter((o) => !isCloudflareIpv4(o.ip))
+  const cfOnly = optimized.filter((o) => isCloudflareIpv4(o.ip))
+
+  // ⚠️ 混合 CDN 域名：DoH 同时解析出「非 CF 段」与「CF 段」两类落地 IP 时，
+  // 「域名直连」不能再留在主竞速池。
+  //
+  // 原因（2026-11-14 真机定位）：把域名丢给 `connect()` 让运行时自己解析，
+  // 得到的 IP 由 DNS 轮询决定，可能落到两类 CDN 中的任意一类。有些站点
+  // 会按落地节点对出口做 Bot 判定：一类稳定放行，另一类直接 403。
+  // 于是同一会话的不同请求一会儿放行、一会儿被拒 —— 表现为
+  // 「有时能打开，刷新一下又不行」。
+  //
+  // 只要我们已经有了明确的、非 CF 段的落地 IP，就用它们建连（仍是直连，
+  // 不是反代，不受反代大上传上限影响），把不可控的域名直连降为兜底。
+  // 全是 CF 段解析结果时保持原行为（域名直连仍是唯一可用的主路径）。
+  const mixedCdn = normal.length > 0 && cfOnly.length > 0
+  const directDowngraded = targetIsCf || input.deprioritizeDirect === true || mixedCdn
   push({
     source: 'direct',
     host: input.targetHost,
@@ -294,11 +313,6 @@ export function buildRouteCandidates(input: RouteInput): RouteCandidate[] {
     label: `直连 ${input.targetHost}:${input.targetPort}`,
     deprioritized: directDowngraded,
   })
-
-  // 3) 优选 IP 落地：非 CF 网段的优先，CF 网段的降权
-  const optimized = input.optimizedIps ?? []
-  const normal = optimized.filter((o) => !isCloudflareIpv4(o.ip))
-  const cfOnly = optimized.filter((o) => isCloudflareIpv4(o.ip))
   for (const o of normal) {
     push({
       source: 'optimized',

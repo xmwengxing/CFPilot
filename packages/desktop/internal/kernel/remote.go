@@ -369,6 +369,26 @@ func verifyAsset(assetName string, content []byte, sums map[string]string) error
 func LoadPreferred(ctx context.Context, currentVersion string) (*Artifacts, *RemoteInfo, error) {
 	current := strings.TrimSpace(currentVersion)
 
+	// ---- 0. 内核热更新通道（固定滚动 tag，与包版本解耦）----
+	//
+	// 只改内核、不发新包时，只有这条通道能看到新内核。
+	// 通道不可用（离线 / 尚未发布）→ 静默走下一级，不打扰用户。
+	if channel := fetchChannelVersion(ctx); channel != nil {
+		if channel.MinToolVersion != "" && CompareSemver(current, channel.MinToolVersion) < 0 {
+			// 兼容护栏：旧工具不部署比它新的协议内核，明确要求先升级工具。
+			log.Printf("[cfpilot] 远程内核 k%d 要求工具版本 ≥ %s，当前 %s —— 请先升级桌面版，再更新内核",
+				channel.Seq, channel.MinToolVersion, current)
+		} else if isChannelNewer(channel, loadBuiltinKernelVersion()) {
+			info := channelRemoteInfo(channel)
+			remote, rErr := FetchRemoteKernel(ctx, info)
+			if rErr == nil {
+				return remote, info, nil
+			}
+			// 通道下载失败 → 降级到内嵌（继续走下面的常规路径）
+			log.Printf("[cfpilot] 远程内核 %s 获取失败，改用本地内核（部署照常进行）：%v", info.Version, rErr)
+		}
+	}
+
 	// ---- 1. 查远程版本 ----
 	//
 	// 离线 / GitHub 不可达是**正常情况**，不算错误：

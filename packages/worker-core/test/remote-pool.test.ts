@@ -46,6 +46,7 @@ function makeConfig(over: Partial<UserConfig> = {}): UserConfig {
     concurrentDial: true,
     dataBudgetMB: 0,
     relayPool: '',
+    pinnedHosts: '',
     useBuiltinRelay: false,
     resolvePreferred: false,
     aggressiveRedial: false,

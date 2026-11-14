@@ -242,6 +242,53 @@ async function queryAll(
 }
 
 /**
+ * A 记录**多源聚合**：并行问前两家境外 DoH，合并去重。
+ *
+ * ## 为什么 A 不能「第一家即停」
+ *
+ * 有些站点把流量分散在多家 CDN 上，DNS 逐次轮询返回其中一批 IP
+ * （真机实测：同一个域名，A 家返回 Fastly 段、B 家返回 Cloudflare 段）。
+ * 而这两类落地节点的待遇可能完全不同：一类稳定放行，另一类会被站点自己的
+ * Bot 管理按出口判定并直接 403。**只取第一家，就等于把「这次能不能打开」
+ * 押在 DNS 轮询结果上** —— 表现为「有时能打开，刷新一下又不行」。
+ * 并行问两家、把两类 IP 都拿到，后面的选路才能稳定地挑可用的一类。
+ *
+ * ## 语义边界（与 queryAll 的短路优化不冲突）
+ *
+ * - TXT 仍走 `queryAll` 的「第一家权威应答即停」—— TXT 是优选 IP 库，
+ *   绝大多数域名没有这一项，串行跨回国查询是真机首包延迟的主因，必须保留短路。
+ * - 这里**并行**问前两家（不串行累加延迟），且只多一次子请求。
+ * - 任一家给出权威应答（哪怕为空）就以聚合结果为准：
+ *   NXDOMAIN / 空应答不会被误判成「查询失败」而继续轮询国内 DoH。
+ * - 只有**两家都网络失败**（null）才回落到原有的串行兜底链路。
+ */
+async function queryAllA(name: string, opts: ResolveEndpointOptions): Promise<string[]> {
+  // 与 queryAll 一致：预算耗尽时一次查询都不发起（已在飞的不受控，但至少不新增）
+  if (opts.deadline !== undefined && Date.now() >= opts.deadline) return []
+  const providers = DOH_PROVIDERS.slice(0, 2)
+  const perQuery = opts.timeoutMs ?? DOH_TIMEOUT_MS
+  const remaining = opts.deadline !== undefined ? opts.deadline - Date.now() : Number.POSITIVE_INFINITY
+  const budget = Math.max(50, Math.min(perQuery, remaining))
+  const results = await Promise.all(providers.map((p) => dohQuery(p, name, 'A', budget)))
+
+  const merged: string[] = []
+  const seen = new Set<string>()
+  let authoritative = false
+  for (const answers of results) {
+    if (answers === null) continue
+    authoritative = true
+    for (const ip of answers) {
+      if (seen.has(ip)) continue
+      seen.add(ip)
+      merged.push(ip)
+    }
+  }
+  if (authoritative) return merged
+  // 两家境外 DoH 都网络失败 → 回落原有串行链路（后续国内 DoH 兜底）
+  return await queryAll(name, 'A', opts)
+}
+
+/**
  * 从一条 TXT 记录里提取 IP 列表。
  *
  * 记录形如 `"1.2.3.4,5.6.7.8"`，可能带转义逗号（`\010`）与转义引号。
@@ -356,7 +403,7 @@ async function resolveUncached(
   // 并行后总耗时取决于更快的一支，语义仍是「TXT 优先、A 兑底」。
   const [txt, aRecords] = await Promise.all([
     opts.skipTxt ? Promise.resolve([] as string[]) : queryAll(target, 'TXT', opts),
-    queryAll(target, 'A', opts),
+    queryAllA(target, opts),
   ])
 
   if (!opts.skipTxt) {

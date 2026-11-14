@@ -425,7 +425,8 @@ func BuildQualityReport(list []Session, sessionID, ip string, port int, now time
 	add("purity.risk", purityStatus, r.Purity.Risk, purityReason)
 	add("purity.flags", purityStatus, strings.Join(r.Purity.Flags, "、"), purityReason)
 	add("purity.blacklists", purityStatus, strings.Join(r.Purity.Blacklists, "、"), purityReason)
-	add("purity.scenarios", purityStatus, formatPurityScenarios(r.Purity.Scenarios), purityReason)
+	// ⚠️ 「purity.scenarios」不再生成 —— 场景适配在界面有独立的单列展示块
+	// （逐场景结论 + 理由），挤成一行的那份是重复信息，2026-11-14 去重。
 	add("purity.attribution", purityStatus, formatPurityAttribution(r.Purity), purityReason)
 	compatibilityStatus := "not_run"
 	if r.Compatibility.Status == "available" || r.Compatibility.Status == "failed" || r.Compatibility.Status == "stale" {
@@ -445,29 +446,6 @@ func purityScoreValue(p QualityPurity) any {
 		return nil
 	}
 	return *p.Score
-}
-
-// formatPurityScenarios 把场景适配结论压成一行可读文本。
-func formatPurityScenarios(list []PurityScenario) string {
-	if len(list) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(list))
-	for _, s := range list {
-		label := s.Verdict
-		switch s.Verdict {
-		case "good":
-			label = "适合"
-		case "caution":
-			label = "谨慎"
-		case "bad":
-			label = "不适合"
-		default:
-			label = "未知"
-		}
-		parts = append(parts, s.Label+"："+label)
-	}
-	return strings.Join(parts, "；")
 }
 
 // formatPurityAttribution 把归属信息压成一行可读文本。

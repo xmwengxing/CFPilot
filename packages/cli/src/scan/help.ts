@@ -241,6 +241,9 @@ ${NAME} scan relay —— 反代入口（ProxyIP 池）候选的出站体检
   --top <n>              与 --out / --push 配合：最多取几条，默认 10
   --push <mode>          直接写入面板 ProxyIP 池：incremental 增量 / overwrite 覆盖
                          需要同时给 --panel 与 --panel-password
+  --verify-hosts <列表>  校验网址（逗号分隔，Cloudflare 网段站点）：
+                         终检候选能否把流量转发到 CF 边缘，转发不了的假入口剔除；
+                         留空 = 内置清单（cloudflare.com / chatgpt.com 等，上限 3 个）
   --panel <domain>       控制面域名（--push 时必填）
   --panel-password <pw>  面板登录密码（--push 时必填）
   --json                 输出机器可读 JSON

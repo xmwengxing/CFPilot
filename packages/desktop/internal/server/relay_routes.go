@@ -67,6 +67,10 @@ type relayRunRequest struct {
 	Concurrency int    `json:"concurrency"`
 	// Candidates 是原始候选文本（换行 / CSV / 带备注都支持）
 	Candidates string `json:"candidates"`
+	// VerifyHosts 是校验网址（Cloudflare 网段站点）：
+	// 终检阶段实测「候选能否把流量转发到 CF 边缘」，转发不了的剔除。
+	// 留空 = 用内置清单；填写后会先按解析结果剔除非 CF 网段网址。
+	VerifyHosts []string `json:"verifyHosts"`
 }
 
 // relayCandidateOK 放宽反代入口候选：IPv4 字面量或合法域名都收。
@@ -149,6 +153,14 @@ func (s *Server) handleRelayRun(w http.ResponseWriter, r *http.Request) {
 
 	s.logf(fmt.Sprintf("开始反代体检：%s，候选 %d 个", host, len(candidates)))
 
+	// 校验网址：服务端先剔除非 CF 网段的网址（解析结果完全不在 CF 段 /
+	// 解析失败的剔除，内置清单豁免 —— 国内本地 DNS 会把 CF 站点解析到本地
+	// CDN，运行时剔除会误杀内置清单），再交给终检阶段。
+	verifyHosts := relay.ResolveVerifyHosts(req.VerifyHosts, func(msg string) { s.logf(msg) })
+	if len(verifyHosts) > 0 {
+		s.logf(fmt.Sprintf("反代终检启用校验网址：%s", strings.Join(verifyHosts, ", ")))
+	}
+
 	go func() {
 		defer func() {
 			cancel()
@@ -159,13 +171,14 @@ func (s *Server) handleRelayRun(w http.ResponseWriter, r *http.Request) {
 		}()
 
 		summary, err := relay.Run(ctx, relay.RunOptions{
-			Host:       host,
-			WSPath:     wsPath,
-			UUID:       uuid,
-			Rounds:     rounds,
-			Top:        top,
-			Timeout:    timeout,
-			Candidates: candidates,
+			Host:        host,
+			WSPath:      wsPath,
+			UUID:        uuid,
+			Rounds:      rounds,
+			Top:         top,
+			Timeout:     timeout,
+			Candidates:  candidates,
+			VerifyHosts: verifyHosts,
 			OnProgress: func(done, total int, ip string, ok bool) {
 				s.events.publish("relay-progress", map[string]any{
 					"done":  done,
@@ -189,6 +202,7 @@ func (s *Server) handleRelayRun(w http.ResponseWriter, r *http.Request) {
 			"flaky":         summary.Flaky,
 			"picked":        summary.Picked(top),
 			"entries":       summary.Aggregates,
+			"verifyHosts":   verifyHosts,
 			"at":            summary.GeneratedAt.UTC().Format(time.RFC3339),
 		}
 		s.events.publish("relay-result", payload)

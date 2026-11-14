@@ -123,12 +123,13 @@ for (const artifact of ARTIFACTS) {
 
   // 5) 体积预算
   //
-  // 与 worker-core/scripts/build.mjs 的 SIZE_BUDGET_KB 保持一致（2026-10-30 由 80 调到 96）。
+  // 与 worker-core/scripts/build.mjs 的 sizeBudgetKb 保持一致（2026-10-30 由 80 调到 96）。
   // 80KB 是早期自定的数，没有平台依据；而静态脱敏会把含中文的字面量整段 base64
   // （产物里 260 个，体积 ×1.33），80KB 时控制面只剩 26 字节余量。
-  const SIZE_BUDGET_KB = 96
-  if (kb > SIZE_BUDGET_KB) {
-    note(`${artifact.name}: ${kb.toFixed(1)} KB 超出 ${SIZE_BUDGET_KB}KB 预算（AGENTS.md §1.4）`)
+  // 2026-11-14 起分开预算：数据面（转发热路径）96KB，控制面（面板/配置话术多）108KB。
+  const sizeBudgetKb = artifact.name === 'dataplane.js' ? 96 : 108
+  if (kb > sizeBudgetKb) {
+    note(`${artifact.name}: ${kb.toFixed(1)} KB 超出 ${sizeBudgetKb}KB 预算（AGENTS.md §1.4）`)
   }
 }
 

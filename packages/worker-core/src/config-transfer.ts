@@ -40,6 +40,7 @@ const EXPORTABLE: ReadonlyArray<keyof UserConfig> = [
   'maxNodes',
   'proxyIp',
   'relayPool',
+  'pinnedHosts',
   'useBuiltinRelay',
   'proxyMode',
   'nat64',

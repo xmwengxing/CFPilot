@@ -16,6 +16,47 @@ import {
   type RouteCandidate,
 } from '../src/outbound/route'
 
+describe('混合 CDN 域名：排除不可控的域名直连', () => {
+  // 2026-11-14 真机：同一域名一批 A 记录里既有第三方 CDN、又有 CF 段节点，
+  // 站点按落地节点判 Bot —— 域名直连由运行时解析，落点随机 → 刷新时好时坏。
+  it('同时有非 CF 段与 CF 段落地 IP 时，域名直连降权', () => {
+    const list = buildRouteCandidates({
+      targetHost: 'x.com',
+      targetPort: 443,
+      optimizedIps: [
+        { ip: '151.101.194.146', port: 443 }, // Fastly，非 CF
+        { ip: '162.159.140.229', port: 443 }, // CF 段
+      ],
+    })
+    const direct = list.find((c) => c.source === 'direct' && c.host === 'x.com')!
+    expect(direct.deprioritized).toBe(true)
+    const groups = groupCandidates(list)
+    // 主竞速只剩明确的非 CF 段 IP
+    expect(groups.direct.map((c) => c.host)).toEqual(['151.101.194.146'])
+    expect(groups.fallback.some((c) => c.source === 'direct')).toBe(true)
+  })
+
+  it('只有非 CF 段落地 IP 时，域名直连仍优先（不改变既有行为）', () => {
+    const list = buildRouteCandidates({
+      targetHost: 'example.com',
+      targetPort: 443,
+      optimizedIps: [{ ip: '93.184.216.34', port: 443 }],
+    })
+    const direct = list.find((c) => c.source === 'direct')!
+    expect(direct.deprioritized).toBe(false)
+  })
+
+  it('只有 CF 段落地 IP 时，域名直连仍优先（CF 前置域名靠它兜底）', () => {
+    const list = buildRouteCandidates({
+      targetHost: 'example.com',
+      targetPort: 443,
+      optimizedIps: [{ ip: '172.66.0.227', port: 443 }],
+    })
+    const direct = list.find((c) => c.source === 'direct')!
+    expect(direct.deprioritized).toBe(false)
+  })
+})
+
 describe('Cloudflare 网段判定', () => {
   it('识别 CF 自家 IP', () => {
     for (const ip of [

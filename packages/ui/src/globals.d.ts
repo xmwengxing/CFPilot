@@ -770,6 +770,8 @@ interface Window {
       timeoutMs?: number
       /** 原始候选文本（换行 / CSV / 带备注都支持） */
       candidates: string
+      /** 校验网址（CF 网段站点）：终检候选能否转发到 CF 边缘；留空用内置清单 */
+      verifyHosts?: string[]
     }): Promise<{ ok?: boolean; started?: boolean; count?: number; error?: string }>
     cancelRelay(): Promise<{ ok: boolean; error?: string }>
     /** 候选预览（通用）：IP 与域名都识别，界面当前用这个 */

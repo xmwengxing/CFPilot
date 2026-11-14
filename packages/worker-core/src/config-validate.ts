@@ -23,6 +23,7 @@
  */
 
 import { cleanIpLine } from './sub-engine'
+import { validatePinnedHosts } from './outbound/pinned'
 
 /** 单字段校验结果 */
 export interface FieldError {
@@ -245,6 +246,15 @@ export function validateConfigPatch(patch: Record<string, unknown>): FieldError[
   if (has('httpProxy')) checkProxyPool(String(patch.httpProxy ?? ''), 'httpProxy', errors)
   if (has('relayPool')) {
     checkProxyPool(String(patch.relayPool ?? ''), 'relayPool', errors, MAX_RELAY_POOL)
+  }
+  if (has('pinnedHosts')) {
+    const bad = validatePinnedHosts(String(patch.pinnedHosts ?? ''))
+    if (bad.length > 0) {
+      errors.push({
+        field: 'pinnedHosts',
+        message: `固定落地 IP 第 ${bad.slice(0, 3).join('、')} 行无效`,
+      })
+    }
   }
 
   if (has('officialCount')) {

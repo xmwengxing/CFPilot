@@ -74,7 +74,19 @@ export const DEFAULT_CONFIG: UserConfig = {
   // 「电脑网页能开、手机 app 打不开」。实测 Fastly 落地对全部 x.com
   // 子域都服务（api 404 / upload 410 都是完整 TLS+HTTP 往返），
   // 且比默认链路快 3 倍。通配与裸域是两条独立条目（通配不匹配裸域）。
-  pinnedHosts: 'x.com=151.101.194.146\n*.x.com=151.101.194.146\ncloudflare.com=r:45.76.246.192',
+  //
+  // ⚠️ 下面 3 条 `r:` 通配（2026-11-15 二次修复，真正解决手机 app 打不开）：
+  // 手机 app 的 API / 图片域名（api.x.com、api.twitter.com、pbs.twimg.com
+  // 等）解析到 Cloudflare 网段 → 直连被 TCP Loop 拒绝 → 触发假活检测 +
+  // 反代重拨竞速（DOWNLINK_STALL_MS 2.5s × 最多 4 次），实测首请求
+  // 累积 10~18 秒，超过 app 的网络超时（约 10~15s），表现为一直转圈
+  // 加载不出内容 —— **不是被 WAF 拦，是被拖超时了**。
+  // `r:` 固定反代入口让这些域名第一条路径就直接按 SNI 转发，跳过整套
+  // 竞速；实测稳定延迟从 5~18s 降到 1~3s。固定入口失败时 dial 层会自动
+  // 回落到普通反代池，不会完全断。
+  // 注意这与「固定落地 IP 通配」完全不同：`r:` 是按 SNI 转发到 CF 边缘，
+  // API 服务能正确路由；固定落地 IP 会把 app 请求发给不服务 API 的 Fastly。
+  pinnedHosts: 'x.com=151.101.194.146\n*.x.com=r:155.248.181.189\n*.twitter.com=r:155.248.181.189\n*.twimg.com=r:155.248.181.189\ncloudflare.com=r:45.76.246.192',
   useBuiltinRelay: true,
   enableTrojan: true,
   enableXhttp: true,

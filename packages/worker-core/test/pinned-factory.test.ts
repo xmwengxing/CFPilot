@@ -19,14 +19,20 @@ describe('出厂 pinnedHosts 默认值', () => {
     ])
   })
 
-  it('*.x.com 通配覆盖手机 app 的子域（api.x.com 等），裸域由精确条目覆盖', () => {
-    // X 手机 app 走的是子域而不是 x.com 本身 —— 通配条目守护这条链路
-    expect(pinnedIpsFor(DEFAULT_CONFIG.pinnedHosts, 'api.x.com', 443)).toEqual([
+  it('app 子域走 r: 固定反代（跳过重拨竞速），裸域仍走 Fastly 固定落地', () => {
+    // ⚠️ 不能用「固定落地 IP 通配」覆盖 app 子域 —— Fastly 不服务 API，
+    // 会把 app 请求全打到 404（2026-11-15 实测事故）。必须是 r: 反代形态。
+    expect(pinnedRelaysFor(DEFAULT_CONFIG.pinnedHosts, 'api.x.com', 443)).toEqual([
+      { ip: '155.248.181.189', port: 443 },
+    ])
+    expect(pinnedRelaysFor(DEFAULT_CONFIG.pinnedHosts, 'pbs.twimg.com', 443)).toEqual([
+      { ip: '155.248.181.189', port: 443 },
+    ])
+    expect(pinnedIpsFor(DEFAULT_CONFIG.pinnedHosts, 'x.com', 443)).toEqual([
       { ip: '151.101.194.146', port: 443 },
     ])
-    expect(pinnedIpsFor(DEFAULT_CONFIG.pinnedHosts, 'upload.x.com', 443)).toEqual([
-      { ip: '151.101.194.146', port: 443 },
-    ])
+    // 出厂值里绝不能再出现「固定落地 IP 通配」那条有害配置
+    expect(DEFAULT_CONFIG.pinnedHosts).not.toContain('*.x.com=151.101.194.146')
   })
 
   it('configFromEnv 未设 PINNED_HOSTS 时保留出厂值', () => {

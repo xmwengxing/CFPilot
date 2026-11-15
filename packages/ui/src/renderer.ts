@@ -5380,6 +5380,8 @@ import {
   }
 
   let pendingUpdateUrl = ''
+  /** 下载完成的新版本文件路径（SSE update-done 带出）；「重启并更新应用」用。 */
+  let pendingUpdateFile = ''
 
   /**
    * 渲染发布说明（GitHub Release 正文，markdown 行格式）。
@@ -5421,6 +5423,26 @@ import {
    * 抽成函数是为了让「说明」页打开时能**自动跑一次** ——
    * 之前只有手点按钮才会检查，用户不点就永远不知道有新版。
    */
+    /**
+     * 自动下载新版本到缓存（检查到新版即触发，无需用户再点一次）。
+     * 下载完成由 SSE update-done 收尾（见下方订阅）—— 那时才出现
+     * 「重启并更新应用」按钮。
+     */
+    async function startUpdateDownload(url: string): Promise<void> {
+      const wrap = document.getElementById('updateProgressWrap')!
+      const bar = document.getElementById('updateBar')!
+      const text = document.getElementById('updateProgressText')
+      wrap.hidden = false
+      bar.style.width = '0%'
+      if (text) { text.hidden = false; text.textContent = '正在自动下载新版本…' }
+      log('发现新版本，开始自动下载…')
+      try {
+        await window.cfpilot.downloadUpdate(url)
+      } catch (err) {
+        log('下载启动失败：' + (err instanceof Error ? err.message : String(err)), 'err')
+        if (text) text.textContent = '下载启动失败（已显示在日志）'
+      }
+    }
   async function runUpdateCheck(quiet = false): Promise<void> {
     const badge = document.getElementById('updateBadge')
     const hint = document.getElementById('updateHint')
@@ -5452,10 +5474,16 @@ import {
       }
       badge.textContent = '有新版 ' + (result.latest ?? '')
       badge.className = 'badge warn'
-      hint.textContent = '发现新版本 ' + result.latest + '（当前 ' + result.current + '）。点击「下载并安装」。'
-      pendingUpdateUrl = result.downloadUrl ?? ''
-      ;(document.getElementById('btnUpdate') as HTMLButtonElement).disabled = !pendingUpdateUrl
+      // 发现新版 → **自动开始下载到缓存**（用户不需要再点一次下载按钮）；
+      // 下载完成（SSE update-done）后「重启并更新应用」按钮才会亮起。
+      hint.textContent = '发现新版本 ' + result.latest + '（当前 ' + result.current + '），正在自动下载…'
+      ;(document.getElementById('btnUpdate') as HTMLButtonElement).disabled = true
+      ;(document.getElementById('btnUpdate') as HTMLButtonElement).textContent = '重启并更新应用'
       renderUpdateNotes(result.latest, result.notes)
+      if (pendingUpdateUrl !== (result.downloadUrl ?? '')) {
+        pendingUpdateUrl = result.downloadUrl ?? ''
+        if (pendingUpdateUrl) void startUpdateDownload(pendingUpdateUrl)
+      }
     } catch (err) {
       badge.textContent = '检查失败'
       badge.className = 'badge err'
@@ -5476,28 +5504,63 @@ import {
       await runUpdateCheck(false)
     })
 
+
     document.getElementById('btnUpdate')!.addEventListener('click', async () => {
-      if (!pendingUpdateUrl) { log('请先检查更新', 'warn'); return }
-      if (!confirm('将下载新版本并在替换后重启程序，继续？')) return
+      if (!pendingUpdateFile) {
+        log('新版本还没下载完成，稍候再试', 'warn')
+        return
+      }
+      if (!confirm('将替换主程序并自动重启（下载的新版本已校验），继续？')) return
       const wrap = document.getElementById('updateProgressWrap')!
       const bar = document.getElementById('updateBar')!
       const text = document.getElementById('updateProgressText')
       wrap.hidden = false
-      bar.style.width = '0%'
-      if (text) { text.hidden = false; text.textContent = '准备下载…' }
-      log('开始下载新版本…')
+      bar.style.width = '100%'
+      if (text) { text.hidden = false; text.textContent = '正在替换主程序并重启…' }
+      log('正在替换主程序并重启…', 'ok')
+      const btn = document.getElementById('btnUpdate') as HTMLButtonElement | null
+      if (btn) btn.disabled = true
       try {
-        const res = await window.cfpilot.downloadUpdate(pendingUpdateUrl)
-        bar.style.width = '100%'
-        if (text) text.textContent = '下载完成，正在替换并重启…'
-        log('下载完成，正在替换并重启…', 'ok')
-        const applied = await window.cfpilot.applyUpdate(res.file)
-        if (!applied.ok) log('替换失败：' + (applied.error ?? ''), 'err')
+        const applied = await window.cfpilot.applyUpdate(pendingUpdateFile)
+        if (!applied.ok) {
+          log('应用更新失败：' + (applied.error ?? ''), 'err')
+          if (btn) btn.disabled = false
+          if (text) text.textContent = '更新失败（已显示在日志，当前程序未受影响）'
+        }
+        // 成功时进程即将退出：界面断开是正常现象，新进程会弹系统通知
       } catch (err) {
-        log('更新失败：' + (err instanceof Error ? err.message : String(err)), 'err')
-        if (text) text.textContent = '下载失败（已显示在日志）'
-        wrap.hidden = true
+        log('应用更新失败：' + (err instanceof Error ? err.message : String(err)), 'err')
+        if (btn) btn.disabled = false
+        if (text) text.textContent = '更新失败（已显示在日志，当前程序未受影响）'
       }
+    })
+
+    // 下载完成（SSE）：亮起「重启并更新应用」按钮
+    window.cfpilot.onUpdateDone?.((payload: { ok: boolean; file?: string; error?: string; note?: string; apply?: boolean }) => {
+      if (payload.apply) {
+        // apply 自己也会发一条 update-done：此时进程即将退出，只更新日志
+        log('已替换并重启，界面即将断开是正常现象', 'ok')
+        return
+      }
+      if (!payload.ok) {
+        log('下载失败：' + (payload.error ?? ''), 'err')
+        const text = document.getElementById('updateProgressText')
+        if (text) text.textContent = '下载失败（已显示在日志）'
+        document.getElementById('updateProgressWrap')!.hidden = true
+        return
+      }
+      pendingUpdateFile = payload.file ?? ''
+      const badge = document.getElementById('updateBadge')
+      const hint = document.getElementById('updateHint')
+      if (badge) { badge.textContent = '新版本已就绪'; badge.className = 'badge ok' }
+      if (hint) hint.textContent = '新版本已下载并校验，点击「重启并更新应用」即可完成更新。'
+      const bar = document.getElementById('updateBar')!
+      bar.style.width = '100%'
+      const text = document.getElementById('updateProgressText')
+      if (text) text.textContent = '下载完成并已校验，随时可以更新'
+      const btn = document.getElementById('btnUpdate') as HTMLButtonElement | null
+      if (btn) { btn.disabled = false; btn.classList.add('btn-primary') }
+      log('✓ 新版本已下载并校验，点「重启并更新应用」即可自动替换并重启', 'ok')
     })
   }
 

@@ -1147,9 +1147,10 @@
     },
 
     applyUpdate: function (file) {
-      // Go 版不做自动替换（单二进制无法覆盖自己，且自动替换未签名
-      // 的镜像文件风险更高）。改为在文件管理器里定位文件，让用户手动替换。
-      return post('/api/update/reveal', { file: file })
+      // 「重启并更新应用」：校验 sidecar 哈希 → rename-swap 主程序 →
+      // spawn 收尾进程（等旧进程退出后清理备份并以原参数重启）。
+      // 哈希校验 fail-closed：sidecar 缺失 / 不符一律拒绝（见 update/apply.go）。
+      return post('/api/update/apply', { file: file })
     },
 
     /* ---------------- 服务管理（Go 版新增） ---------------- */
@@ -1192,6 +1193,10 @@
 
     onUpdateProgress: function (cb) {
       return subscribe('update-progress', cb)
+    },
+
+    onUpdateDone: function (cb) {
+      return subscribe('update-done', cb)
     },
 
     /** 定时优选任务的状态变化（运行中 / 完成 / 失败） */

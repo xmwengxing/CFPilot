@@ -827,6 +827,17 @@ interface Window {
         attempt: number
       }) => void
     ): () => void
+    /** 下载完成（成功 / 失败 / 已替换重启）——见 SSE update-done */
+    onUpdateDone(
+      cb: (p: {
+        ok: boolean
+        file?: string
+        error?: string
+        note?: string
+        /** true = 本次是「替换并重启」的终态事件，进程即将退出 */
+        apply?: boolean
+      }) => void
+    ): () => void
     checkUpdate(): Promise<{
       current: string
       latest: string | null
@@ -836,7 +847,8 @@ interface Window {
       error?: string
     }>
     downloadUpdate(url: string): Promise<{ ok: boolean; file: string }>
-    applyUpdate(file: string): Promise<{ ok: boolean; error?: string }>
+    /** 「重启并更新应用」：校验 sidecar 哈希 → rename-swap 主程序 → spawn 收尾进程重启 */
+    applyUpdate(file: string): Promise<{ ok: boolean; error?: string; restarting?: boolean }>
   }
 }
 

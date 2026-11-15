@@ -52,6 +52,42 @@ import (
 // Version 由构建时通过 -ldflags 注入（见 scripts/build-desktop.mjs）。
 var Version = "dev"
 
+// runUpdateHelper 是「重启并更新应用」的收尾进程（--update-helper 模式）。
+//
+// 它由旧主进程 spawn（此时运行的是**新版 exe**，swap 已完成）：
+//
+//  1. 轮询删除 .old 备份 —— Windows 上旧进程还活着时删除会失败，
+//     删除成功即代表旧进程已退出（这是无需 pid 的跨平台退出信号）；
+//  2. 以正常模式（无参数）重启主程序 —— 用户显式给过的启动参数
+//     在旧进程的 apply 路由里已透传给本进程，这里再原样传下去；
+//  3. helper 自己退出。
+//
+// 30 秒内旧进程没退出就放弃清理（.old 留着，下次启动的更新流程会再清）。
+func runUpdateHelper(oldExe string) {
+	deadline := time.Now().Add(30 * time.Second)
+	removed := false
+	for time.Now().Before(deadline) {
+		if err := os.Remove(oldExe); err == nil {
+			removed = true
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	if !removed {
+		log.Printf("[cfpilot] 更新收尾：旧版备份 %s 暂无法删除（旧进程退出超时），下次启动时再清理", oldExe)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		log.Printf("[cfpilot] 更新收尾失败：定位新版本失败：%v（请手动启动）", err)
+		return
+	}
+	if err := exec.Command(self).Start(); err != nil {
+		log.Printf("[cfpilot] 更新收尾失败：重启主程序失败：%v（请手动启动）", err)
+		return
+	}
+	log.Printf("[cfpilot] 更新收尾完成：主程序已以新版本重启")
+}
+
 func main() {
 	var (
 		portFlag    = flag.Int("port", 0, "监听端口（覆盖配置，仅本次生效）")
@@ -63,8 +99,20 @@ func main() {
 		consoleFlag = flag.Bool("console", false, "把日志写到文件（便于排查）")
 		// --no-tray 不启托盘，前台只跑 HTTP 服务（无桌面会话时使用）
 		noTray = flag.Bool("no-tray", false, "不启托盘，只运行本地服务")
+		// --update-helper 是「重启并更新应用」的收尾进程（由更新流程 spawn 自身）：
+		// 等旧进程退出 → 删除 .old 备份 → 以正常模式重启主程序 → helper 退出。
+		// 详见 internal/update/apply.go 的注释。
+		updateHelperOld = flag.String("update-helper", "", "内部参数：等旧进程退出后清理备份并重启主程序")
 	)
 	flag.Parse()
+
+	// helper 模式必须在任何日志/托盘初始化之前处理：
+	// 它只是个几秒钟的收尾进程，正常模式的所有初始化对它都是浪费，
+	// 而且它会再 spawn 一个真正的主程序 —— 先处理完再走正常流程。
+	if strings.TrimSpace(*updateHelperOld) != "" {
+		runUpdateHelper(*updateHelperOld)
+		return
+	}
 
 	if *versionFlag {
 		fmt.Printf("CFPilot Desktop %s (%s/%s)\n", Version, runtime.GOOS, runtime.GOARCH)

@@ -19,6 +19,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { handleApi, type ApiContext } from '../src/api'
 import { DEFAULT_CONFIG, LOCAL_IPS_KEY, mergeConfig } from '../src/config'
+import { createSession, SESSION_COOKIE } from '../src/auth'
 import type { Store } from '../src/store'
 import type { UserConfig } from '../src/types'
 
@@ -90,6 +91,45 @@ async function savedConfig(): Promise<UserConfig> {
   const raw = await store.get(CONFIG_KEY)
   return JSON.parse(raw ?? '{}') as UserConfig
 }
+
+// GET /config 必须返回**用户层**（剥离出厂兜底行）——
+// 回归：面板显示合并值会让用户以为出厂兜底是「手填内容」，
+// 全删保存的顾虑由此而来；实际删了保存运行时也会自动补回。
+async function getConfigBody(): Promise<UserConfig> {
+  // 面板接口要求已登录会话：先签发一个（createSession 会同时登记
+  // isolate 级 recentSessions，verifySession 能直接认出）
+  const token = await createSession(store)
+  const res = await handleApi(
+    new Request('https://panel.example.com/api/v1/config', {
+      method: 'GET',
+      headers: { Cookie: `${SESSION_COOKIE}=${token}` },
+    }),
+    new URL('https://panel.example.com/api/v1/config'),
+    ctx()
+  )
+  expect(res).not.toBeNull()
+  const json = (await res!.json()) as { ok: boolean; config: UserConfig }
+  return json.config
+}
+
+describe('面板读到的配置是用户层（出厂兜底隐形）', () => {
+  it('GET /config 的 relayPool / pinnedHosts 不含出厂行', async () => {
+    const body = await getConfigBody()
+    const factoryLines = DEFAULT_CONFIG.relayPool.split('\n').filter(Boolean)
+    const pool = (body.relayPool ?? '').split('\n').filter(Boolean)
+    expect(pool.length).toBe(0) // KV 用户层为空 → 面板显示空
+    for (const line of factoryLines) expect(pool).not.toContain(line)
+    const pinned = (body.pinnedHosts ?? '').split('\n').filter(Boolean)
+    for (const line of DEFAULT_CONFIG.pinnedHosts.split('\n').filter(Boolean)) {
+      expect(pinned).not.toContain(line)
+    }
+  })
+
+  it('运行时（读时合并）兜底仍然生效 —— 面板删空不影响出站', () => {
+    // ctx.config 是运行时合并形态：出厂行必须在
+    expect(config.relayPool.split('\n').filter(Boolean).length).toBeGreaterThanOrEqual(5)
+  })
+})
 
 describe('回填到自定义反代入口池', () => {
   it('写进 config.relayPool，不碰本地优选池', async () => {

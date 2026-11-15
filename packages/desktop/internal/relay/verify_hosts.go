@@ -24,7 +24,12 @@ import (
 )
 
 // builtinVerifyHosts 是内置的校验网址（权威解析稳定落在 Cloudflare 网段）。
+//
+// ⚠️ api.x.com 必须在**前 3 个**（终检默认取前 3）：它是 X 手机 app 的
+// API 域名，实测对反代出口最敏感 —— 部分入口的 POST 会被 X 的 WAF
+// 拦截（403 body=IPv6），它是筛出「能真正到达后端的入口」的最强判据。
 var builtinVerifyHosts = []string{
+	"api.x.com",
 	"cloudflare.com",
 	"chatgpt.com",
 	"canva.com",

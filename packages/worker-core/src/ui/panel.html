@@ -780,7 +780,7 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
         <div class="field">
           <label>自定义反代入口池</label>
           <textarea id="cfgRelayPool" class="mono" rows="3" placeholder="1.2.3.4:443&#10;relay.example.com:443"></textarea>
-          <p class="tip">自配第三方反代入口，优先于内置反代；直连/优选失败、Cloudflare 网段目标时启用。</p>
+          <p class="tip">自配第三方反代入口，优先于内置反代；直连/优选失败、Cloudflare 网段目标时启用。此处留空时内核自带一批实测可用的出厂入口（与你写的条目按行合并），所以删空保存也不会失去兜底。</p>
         </div>
         <div class="field">
           <label>固定落地 IP / 固定反代入口</label>

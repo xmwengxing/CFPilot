@@ -44,24 +44,52 @@ export function collectProxies(config: UserConfig): ProxyEndpoint[] {
  * 用户最近访问的目标域名与失败原因（隐私数据）。
  * 现在只认完整 UUID（128 bit），并用 `timingSafeEqual` 比较。
  *
- * ## 为什么要限速
+ * ## 为什么要限速、且要按 IP 分桶（P2 #15）
  *
  * 完整 UUID 不可枚举，但限速能挡住「拿着泄露的前缀/近似值狂刷」
  * 与日志噪音。同样只用 isolate 内存（写 KV 会被攻击者当成耗尽配额的手段）。
+ *
+ * ⚠️ 旧实现是**单 isolate 全局计数**：任何一个未鉴权者刷 10 个错 token
+ * 就把整个 isolate 的诊断端点锁 60 秒，合法运维跟着遭殃（等于免费 DoS）。
+ * 现在照 `api.ts` 登录限流的范式改**按 CF-Connecting-IP 分桶**，
+ * 上限 500 桶 + FIFO 淘汰。
  */
 const DIAG_WINDOW_MS = 60_000
 const DIAG_MAX_FAILURES = 10
-let diagFailures = 0
-let diagWindowResetAt = 0
+const DIAG_MAX_BUCKETS = 500
+const diagFailuresByIp = new Map<string, number>()
+const diagBucketOrder: string[] = []
 
-/** 当前是否处于限速窗口 */
-function diagThrottled(now: number): boolean {
-  if (now >= diagWindowResetAt) {
-    diagFailures = 0
-    diagWindowResetAt = now + DIAG_WINDOW_MS
-    return false
+function diagBucket(ip: string, now: number): number {
+  // 窗口过期 → 全部清零
+  let windowResetAt = diagFailuresByIp.get('__window__') ?? 0
+  if (now >= windowResetAt) {
+    diagFailuresByIp.clear()
+    windowResetAt = now + DIAG_WINDOW_MS
+    diagFailuresByIp.set('__window__', windowResetAt)
   }
-  return diagFailures >= DIAG_MAX_FAILURES
+  let count = diagFailuresByIp.get(ip)
+  if (count === undefined) {
+    // FIFO 淘汰最旧桶，防内存无界
+    if (diagBucketOrder.length >= DIAG_MAX_BUCKETS) {
+      const oldest = diagBucketOrder.shift()
+      if (oldest) diagFailuresByIp.delete(oldest)
+    }
+    diagBucketOrder.push(ip)
+    count = 0
+    diagFailuresByIp.set(ip, count)
+  }
+  return count
+}
+
+function diagRecordFailure(ip: string, now: number): void {
+  const count = diagBucket(ip, now)
+  diagFailuresByIp.set(ip, count + 1)
+}
+
+function diagThrottledFor(ip: string, now: number): boolean {
+  const count = diagBucket(ip, now)
+  return count >= DIAG_MAX_FAILURES
 }
 
 /**
@@ -74,23 +102,15 @@ function diagThrottled(now: number): boolean {
  */
 function diagAuthorized(request: Request, uuid: string): boolean {
   if (!uuid) return false
-  // ⚠️ 只接受 `x-cfpilot-token` 请求头。
-  //
-  // 早前还兼容 `?token=` 查询参数，已删除 ——
-  // 令牌走 URL 会进浏览器历史、Referer 与边缘日志，比放在请求头里风险大得多。
-  // 排障命令改用 `-H "x-cfpilot-token: <UUID>"` 即可（README 示例本就是这个形式）。
   const token = (request.headers.get('x-cfpilot-token') ?? '').trim()
   if (!token) return false
   const now = Date.now()
+  const ip = (request.headers.get('CF-Connecting-IP') ?? 'unknown').trim()
   if (timingSafeEqual(token, uuid)) {
-    diagFailures = 0
+    diagFailuresByIp.set(ip, 0)
     return true
   }
-  if (now >= diagWindowResetAt) {
-    diagWindowResetAt = now + DIAG_WINDOW_MS
-    diagFailures = 0
-  }
-  diagFailures += 1
+  diagRecordFailure(ip, now)
   return false
 }
 
@@ -169,7 +189,7 @@ export async function routeDataPlane(
   // 是不可接受的 —— 该校验需要 `config.uuid`，因此只能放在配置加载之后
   // （`/region` 那种不碰 KV 的纯机房诊断才允许放在配置加载之前）。
   if (url.pathname === '/__diag') {
-    if (diagThrottled(Date.now())) {
+    if (diagThrottledFor((request.headers.get('CF-Connecting-IP') ?? 'unknown').trim(), Date.now())) {
       // 超出失败预算：明确回 429，而不是伪装成静态页 ——
       // 否则脚本调用方会把「被限速」误读成「端点不存在」。
       return new Response(JSON.stringify({ ok: false, error: 'token attempts throttled' }, null, 2), {
@@ -182,7 +202,7 @@ export async function routeDataPlane(
       })
     }
     if (!diagAuthorized(request, config.uuid)) return null
-    const { recentDiagnostics, diagnosticCounters, recentRoutes } = await import('../protocols/websocket-self')
+    const { recentDiagnostics, diagnosticCounters, recentRoutes, recentCloses, recentSessions } = await import('../protocols/websocket-self')
     const { recentXhttpDiagnostics } = await import('../protocols/xhttp')
     return new Response(
       JSON.stringify(
@@ -198,6 +218,13 @@ export async function routeDataPlane(
           counters: diagnosticCounters(),
           // 最近几次出站实际落在哪个出口，用于区分直连与反代
           routes: recentRoutes(),
+          // 每条会话的收尾快照（含错误关闭码、出口、上下行字节、重拨次数）。
+          // 与 recent 互补：recent 是详细失败链，closes 覆盖**所有** closeWith
+          // 路径（包括认证失败、握手超时、UDP 拒绝、内部异常等此前不留痕的）。
+          closes: recentCloses(),
+          // 结构化会话：把「协议类型 → 目标 → 出口 → 上下行字节 → 关闭原因」
+          // 串成一行，回答「刚才那条连接为什么 -1」（P2 #13）。
+          sessions: recentSessions(),
         },
         null,
         2
@@ -232,7 +259,7 @@ export async function routeDataPlane(
   // 扫描器会对结果里出现的每个机房各调一次，缓存把重复调用压成一次。
   if (url.pathname === '/__unlock_probe') {
     if (!config.unlockProbe) return null
-    if (diagThrottled(Date.now())) {
+    if (diagThrottledFor((request.headers.get('CF-Connecting-IP') ?? 'unknown').trim(), Date.now())) {
       return new Response(JSON.stringify({ ok: false, error: 'token attempts throttled' }, null, 2), {
         status: 429,
         headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },

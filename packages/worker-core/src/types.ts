@@ -65,6 +65,16 @@ export interface Env {
   TCP_CONCURRENT_DIAL?: string
   /** 数据面单连接流量上限（MB，0 或留空 = 不限制） */
   DATA_BUDGET_MB?: string
+  /** 出站单次连接超时（ms），默认 5000 */
+  DIAL_CONNECT_MS?: string
+  /** 单次拨号总预算（ms，覆盖 DoH + 连接竞速），默认 15000 */
+  DIAL_BUDGET_MS?: string
+  /** DoH 解析的独立短预算（ms），默认 1200 */
+  DOH_BUDGET_MS?: string
+  /** 下行静默判定窗口（ms），默认 2500 */
+  DIAL_STALL_MS?: string
+  /** 假活时最多依次尝试几个反代入口，默认 4 */
+  RELAY_REDIAL_MAX?: string
   /** 出站前是否自动 DoH 解析目标域名以获得优选 IP 候选 */
   RESOLVE_PREFERRED?: string
   /** 自定义反代入口池（每行一条） */
@@ -89,6 +99,12 @@ export interface Env {
  *   否则直连优先（省代理连接数），失败再走代理。
  */
 export type ProxyMode = 'only' | 'global' | 'fallback' | 'smart'
+
+/**
+ * 出站代理类型（单一来源，此前在 proxy-pool.ts 与 outbound/route.ts 各定义一份，
+ * 靠结构等价「恰好能赋值」—— 一方加成员就会静默不一致，P2 #19 收口）。
+ */
+export type ProxyKind = 'direct' | 'socks5' | 'http' | 'https'
 
 export interface UserConfig {
   /** VLESS UUID */
@@ -166,6 +182,27 @@ export interface UserConfig {
    * 客户端会重连：牺牲单条大流量会话，保住整个部署可用。
    */
   dataBudgetMB: number
+  /**
+   * 出站拨号时序参数（P1 #11，走 KV > env > default 三层）。
+   *
+   * 此前这些全是散落在各模块的硬编码常量：WS 主路径传 5s、重拨 3s、
+   * XHTTP 两处都不传（落到 8s 默认值），`budgetMs` 更是全项目没有调用方
+   * 传入。把它们集中到配置层后，晚高峰可以调大静默窗口、弱网可以调小
+   * 连接超时，不必改源码发版。
+   *
+   * 所有值在 `mergeConfig` 里都会 clamp 到安全区间 —— 防止填 0 把
+   * 代理握手超时关掉（铁律 15），或填超大值顶穿 §31 的 6 连接预算。
+   */
+  /** 单次出站连接超时（ms） */
+  dialConnectMs: number
+  /** 单次拨号总预算（ms，覆盖 DoH 解析 + 连接竞速） */
+  dialBudgetMs: number
+  /** DoH 解析的独立短预算（ms）：超时就放弃解析、直接用域名直连候选 */
+  dohBudgetMs: number
+  /** 下行静默判定窗口（ms）：建连后这么久没收到任何字节就判假活 */
+  dialStallMs: number
+  /** 假活时最多依次尝试几个反代入口 */
+  relayRedialMax: number
   /**
    * 自定义反代入口池（每行一条，支持 `IP` / `IP:端口` / `域名`）。
    *

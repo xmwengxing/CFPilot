@@ -22,13 +22,14 @@
  */
 import type { UserConfig } from '../types'
 import type { ProxyEndpoint } from '../outbound/proxy-pool'
-import { parseVlessBuffer, VLESS_COMMAND_UDP } from '../protocols/vless'
+import { parseVlessBuffer, validateVlessHeader, VLESS_COMMAND_UDP } from '../protocols/vless'
 import { parseTrojanBuffer, TROJAN_COMMAND_UDP } from '../protocols/trojan'
 import { DnsUdpSession } from './udp-dns'
-import { concatBytes, DownlinkPacer } from '../protocols/stream'
+import { concatBytes, DownlinkPacer, normalizeWsMessage } from '../protocols/stream'
 import { canSwitchToBuiltinRelay } from './relay-guard'
 import { UplinkQueue } from './uplink-queue'
 import { dial, type DialResult } from '../outbound/dial'
+import { buildDialOptions } from '../outbound/dial-options'
 import { TrafficMeter } from '../budget'
 import {
   classifyDialFailure,
@@ -38,52 +39,33 @@ import {
   type DialFailure,
 } from '../outbound/route'
 import { collectRelayEndpoints, type RelayEndpoint } from '../outbound/relay'
-import { pinnedIpsFor, pinnedRelaysFor } from '../outbound/pinned'
+import { hostPolicyFor, type HostPolicy } from '../outbound/pinned'
 
 export type WsMode = 'vless' | 'trojan'
 
-/** 单次拨号超时（ms） */
-const DIAL_TIMEOUT_MS = 5000
-
 /**
- * 下行静默检测窗口（ms）。
- *
- * ## 为什么需要
- *
- * Cloudflare Workers 的 `connect()` **只保证 TCP 能建连，不保证能收到数据**。
- * 真机实测（电信千兆，VLESS over WS 到 443 目标）：
- *
- * | 目标 | TCP | TLS | 实际收到字节 |
- * |------|-----|-----|-------------|
- * | `neverssl.com:80` | ✅ | — | 413B ✅ |
- * | `baidu.com:80` | ✅ | — | 241B ✅ |
- * | `github.com:443` | ✅ | ✅ | **0B** ❌ |
- * | `www.youtube.com:443` | ✅ | ✅ | **0B** ❌ |
- *
- * 即：TCP 握手成功、协议响应头 `[0,0]` 已回，但目标站一个字节都不回。
- * 客户端侧表现为「连着但永远等不到响应」，超时后 -1。
- *
- * 通用解法：**直连成功后若下行无数据，自动重拨到反代入口**
- * （第三方服务器按 SNI 转发，出口不是 Cloudflare，因而不受该限制）。
- * 用 NAT64 前缀可达到同样目的。
- *
- * 因此这里做同一件事：建连后 `DOWNLINK_STALL_MS` 内没收到任何下行字节，
- * 就关闭当前出站、改连反代入口重试一次。
+ * 时序参数已迁移到配置层（P1 #11：`config.dialStallMs` /
+ * `config.relayRedialMax` / `config.dialConnectMs`），由 `buildDialOptions`
+ * 与这里的使用点统一读取。模块级只保留「重拨单入口的拨号上限」这一个
+ * 与配置无关的安全帽：重拨不能比常规拨号更久。
  */
-const DOWNLINK_STALL_MS = 2500
-
-/**
- * 一次假活重拨最多依次尝试几个反代入口。
- *
- * 早期只试 2 个：Cloudflare 网段目标（如 x.com → 172.66.x）完全依赖反代，
- * 表头 2 个 IP 一旦对目标失效就直接放弃，表现为「大部分情况打不开、偶尔可以」。
- * 现在配合 `RELAY_DOMAIN_LIMIT` 取全表，重拨可覆盖 4 个不同入口
- * （`triedRelays` 去重，串行、不增加并发出站数）。
- */
-const MAX_RELAY_REDIAL = 4
-
-/** 重拨单入口的拨号超时；比常规拨号短，避免多个入口串行把总延迟拖爆。 */
 const REDIAL_DIAL_TIMEOUT_MS = 3000
+
+/**
+ * 下行静默检测窗口与假活换入口上限（P1 #11 起从配置层读取）。
+ *
+ * ## 背景（真机实测）
+ *
+ * Cloudflare Workers 的 `connect()` **只保证 TCP 能建连，不保证能收到数据**：
+ * `github.com:443` / `www.youtube.com:443` TCP+TLS 都成功但 0 字节下行，
+ * 客户端表现为「连着但永远等不到响应」，超时后 -1。通用解法是
+ * **直连成功后若下行无数据，自动重拨到反代入口**重试一次；用 NAT64 同理。
+ *
+ * 窗口值来自 `config.dialStallMs`（默认 2500ms），换入口上限来自
+ * `config.relayRedialMax`（默认 4）。重拨后的确认窗口取静默窗口的一半
+ * （下限 400ms）—— 那是「已知上一个入口假活」后的确认，不该再等满全程。
+ * 全部可在 KV / 环境变量里调整，无需改源码发版。
+ */
 
 /** 握手头最大长度 */
 const MAX_HEADER_BYTES = 64 * 1024
@@ -189,8 +171,87 @@ const DIAG_COUNTERS = {
   downlinkYields: 0,
 }
 
-export function diagnosticCounters(): Readonly<typeof DIAG_COUNTERS> {
-  return { ...DIAG_COUNTERS }
+/** 计数器起点（isolate 加载时刻）：没有它就无法判断数值是「1 分钟」还是「10 小时」的累积 */
+const DIAG_SINCE = Date.now()
+
+export function diagnosticCounters(): Readonly<typeof DIAG_COUNTERS> & { since: number; uptimeMs: number } {
+  return { ...DIAG_COUNTERS, since: DIAG_SINCE, uptimeMs: Date.now() - DIAG_SINCE }
+}
+
+/**
+ * 每条会话的**收尾快照**（纯内存，绝不写 KV）。
+ *
+ * ## 为什么单独一份缓冲，而不是往 RECENT_DIAGNOSTICS 里塞
+ *
+ * `closeWith()` 是会话结束的唯一收口，但此前有十几条错误路径
+ * （认证失败 / 握手超时 / UDP 拒绝 / 反代四终态 / 未预期内部异常）
+ * 在 `closeWith` 之前**没有** `recordDiagnostics`，`/__diag recent` 完全看不到。
+ * 若让 `closeWith` 统一往 `recent` 补记，又会挤占 20 条上限、把详细失败链顶掉。
+ *
+ * 因此这里独立记录**结构化收尾**：每条 close 一行、包含出口与计数，
+ * 与 `recent`（详细失败链）互补。全部复用现有变量，不新增依赖。
+ */
+const RECENT_CLOSES: Array<{
+  at: number
+  code: number
+  reason: string
+  via: string
+  endpoint: string
+  dl: number
+  ret: number
+  rd: number
+}> = []
+
+export function recentCloses(): typeof RECENT_CLOSES {
+  return RECENT_CLOSES
+}
+
+/**
+ * 每条会话的**结构化收尾**（P2 #13，纯内存，绝不写 KV）。
+ *
+ * `/__diag` 此前只有 `recent`（详细失败链）与 `routes`（出口），两者没有
+ * 关联 id，回答不了「刚才那条连接为什么 -1」。这里把协议类型、目标、
+ * 出口、上下行字节、重拨次数、关闭码串成一行，全部复用现有变量。
+ * 上限沿用 20 条环形缓冲。
+ */
+const RECENT_SESSIONS: Array<{
+  at: number
+  mode: string
+  transport: 'ws'
+  target: string
+  via: string
+  endpoint: string
+  ulBytes: number
+  dlBytes: number
+  redials: number
+  closeCode: number
+  reason: string
+}> = []
+
+export function recentSessions(): typeof RECENT_SESSIONS {
+  return RECENT_SESSIONS
+}
+
+function recordSession(entry: (typeof RECENT_SESSIONS)[number]): void {
+  RECENT_SESSIONS.unshift(entry)
+  if (RECENT_SESSIONS.length > RECENT_DIAGNOSTICS_LIMIT) {
+    RECENT_SESSIONS.length = RECENT_DIAGNOSTICS_LIMIT
+  }
+}
+
+function recordClose(
+  code: number,
+  reason: string,
+  via: string,
+  endpoint: string,
+  dl: number,
+  ret: number,
+  rd: number
+): void {
+  RECENT_CLOSES.unshift({ at: Date.now(), code, reason, via, endpoint, dl, ret, rd })
+  if (RECENT_CLOSES.length > RECENT_DIAGNOSTICS_LIMIT) {
+    RECENT_CLOSES.length = RECENT_DIAGNOSTICS_LIMIT
+  }
 }
 
 /**
@@ -215,6 +276,15 @@ export function recentRoutes(): typeof RECENT_ROUTES {
   return RECENT_ROUTES
 }
 
+/** 从「host:port」标签里取 IP 部分；IPv6 字面量是「[v6]:port」或裸 v6，不能用 split(':')[0] */
+function ipPartOf(targetLabel: string): string {
+  const trimmed = targetLabel.trim()
+  const bracket = trimmed.indexOf(']:')
+  if (bracket >= 0) return trimmed.slice(1, bracket)
+  const last = trimmed.lastIndexOf(':')
+  return last > 0 ? trimmed.slice(0, last) : trimmed
+}
+
 function recordRoute(
   targetLabel: string,
   result: DialResult,
@@ -225,8 +295,8 @@ function recordRoute(
     target: targetLabel,
     via: result.via,
     endpoint: result.endpoint,
-    cfTarget: isCloudflareIpv4(targetLabel.split(':')[0] ?? ''),
-    publicDns: isPublicDnsIpv4(targetLabel.split(':')[0] ?? ''),
+    cfTarget: isCloudflareIpv4(ipPartOf(targetLabel)),
+    publicDns: isPublicDnsIpv4(ipPartOf(targetLabel)),
     phase,
   })
   if (RECENT_ROUTES.length > 20) RECENT_ROUTES.length = 20
@@ -287,6 +357,8 @@ interface WsTarget {
   hostname: string
   /** 协议头占用的字节数，其后即为负载 */
   headerLength: number
+  /** 协议头明确不支持时的拒绝原因（version / command / flow），由 establish 立即关闭 */
+  reject?: string
 }
 
 /** 出站诊断信息（供上层记录到日志） */
@@ -361,6 +433,17 @@ export async function handleWebSocket(
   // 直接作为种子；忽略该头时行为与原来完全一致。
   let buffer = decodeEarlyData(request.headers.get('sec-websocket-protocol'))
   /**
+   * 0-RTT：early data 确实来自 `sec-websocket-protocol` 头时，101 响应
+   * 要**原样回显**该头（Xray 服务端 `hub.go` 的行为）。对严格校验子协议的
+   * 客户端/浏览器 dialer 是兼容性缺口（P2 #18）。普通客户端的非 early-data
+   * 子协议头（如 `graphql-ws`）不回显 —— decodeEarlyData 返回空。
+   */
+  let earlyProtocolEcho: string | undefined
+  {
+    const raw = (request.headers.get('sec-websocket-protocol') ?? '').trim()
+    if (raw && buffer.byteLength > 0) earlyProtocolEcho = raw || undefined
+  }
+  /**
    * 拨号 / 换出站期间暂存的上行**分块**（协议头之后、writer 就绪之前到达的帧）。
    *
    * ⚠️ 必须是分块数组，不能「每帧 concatBytes 到一块」：
@@ -393,7 +476,17 @@ export async function handleWebSocket(
       firstPacketTimer = null
     }
   }
-  /** 一条会话只允许一次重拨流程，避免静默定时器与 EOF 分支重复重放上行 */
+  /**
+   * 重拨流程是否**正在执行**（不是「这条会话是否已经重拨过」）。
+   *
+   * ⚠️ 语义修正（2026-11-15）：此前这是「一次性闩锁」——置 true 后从不复位，
+   * 于是第二个假活反代触发的 stall / EOF 会被入口直接 return，旧泵的
+   * reader.read() 挂在假活连接上、stallTimer 已置 null、首包/握手定时器早已清掉，
+   * 会话**永久静默挂起**直到客户端自己超时（真机表现为一直转圈）。
+   * 现在每轮重拨流程结束时都会复位（见 redialViaRelay 的 finally），
+   * 让「假活 → 换下一个入口」可以链式推进；入口的 `if (redialStarted) return`
+   * 仍负责挡住 stall 与 EOF 的并发重入。
+   */
   let redialStarted = false
   /** 下行主动让步节流器（不依赖运行时不存在的 bufferedAmount） */
   const downlinkPacer = new DownlinkPacer()
@@ -410,6 +503,17 @@ export async function handleWebSocket(
    * （反代重拨发生在 `establish()` 之后，那里有自己的局部 target）。
    */
   let target: WsTarget | null = null
+  /** 该目标域名命中的出站策略（P2 #12，与 pinnedHosts 共用字段） */
+  let hostPolicy: HostPolicy | undefined
+
+  /**
+   * 本次会话的下行静默判定窗口。
+   * 按域名策略 > 配置层默认值；重拨后的确认窗口取一半（下限 400ms）。
+   */
+  const effectiveStallMs = (confirm: boolean): number => {
+    const base = hostPolicy?.stallMs ?? config.dialStallMs
+    return confirm ? Math.max(400, Math.round(base / 2)) : base
+  }
 
   /**
    * DNS-over-DoH 会话（仅 `udpDns === 'doh'` 且命令为 UDP/53 时存在）。
@@ -449,9 +553,44 @@ export async function handleWebSocket(
    * 这个差异只在真机上暴露，很容易误判成「出站一直没结束」。
    */
   const closeWith = (code: number, reason: string): void => {
+    // 幂等：客户端断开 / 读错误 / 拨号超时 / 正常结束可能抢着收尾。
+    if (closed) return
     closed = true
+
+    // 错误关闭：把「失败时走了哪条出口」**前置**到 close reason 开头。
+    // truncateCloseReason 按字节从前往后截 123 字节，前缀必然存活；
+    // 客户端/抓包因此能区分「直连失败」与「反代失败」。
+    //
+    // ⚠️ 前缀只放 via / ep 两项（约 30 字节）—— dl/ret/rd 等计数放进
+    // RECENT_CLOSES 的结构化字段里。前缀若照搬正常收尾的完整格式串，
+    // 会把中文失败原因挤出 123 字节，反而丢掉最有用的信息。
+    // 正常收尾（code 1000）保持原有 `done via=...` 原文，不改客户端可见语义。
+    const used = dialed
+    const errorPrefix = code >= 1008 && used ? `via=${used.via} ep=${used.endpoint} ` : ''
+    recordClose(
+      code,
+      reason,
+      used?.via ?? '',
+      used?.endpoint ?? '',
+      downlinkBytes,
+      retainedBytes,
+      relayRedialCount
+    )
+    recordSession({
+      at: Date.now(),
+      mode,
+      transport: 'ws',
+      target: target ? `${target.hostname}:${target.port}` : '',
+      via: used?.via ?? '',
+      endpoint: used?.endpoint ?? '',
+      ulBytes: sessionUlBytes,
+      dlBytes: downlinkBytes,
+      redials: relayRedialCount,
+      closeCode: code,
+      reason,
+    })
     try {
-      server.close(code, truncateCloseReason(reason))
+      server.close(code, truncateCloseReason(errorPrefix + reason))
     } catch {
       /* 已关闭 */
     }
@@ -525,8 +664,18 @@ export async function handleWebSocket(
   /** 已尝试过的反代入口（避免同一入口反复重试） */
   const triedRelays = new Set<string>()
 
-  /** 反代重拨次数 */
+  /** 反代重拨**轮数**（stall/EOF 触发的次数；用于诊断的 rd 字段） */
   let relayRedialCount = 0
+
+  /**
+   * 本会话累计尝试过的**反代入口个数**。
+   *
+   * `config.relayRedialMax` 约束的是入口数，不是轮数：一轮里若前几个入口
+   * connect 直接失败会继续试下一个，而「connect 成功但零下行」的假活
+   * 入口会 return 启动新泵、由下一轮接着换。两种形态都在这里计数，
+   * 达到上限就明确 close 1011，绝不静默挂起。
+   */
+  let relayEndpointsTried = 0
 
   /**
    * 下行首字节确认前的上行留存（反代重拨重放用）。
@@ -591,8 +740,15 @@ export async function handleWebSocket(
     pumpGeneration += 1
   }
 
-  /** 下行：出站 → 客户端 */
-  const pumpDown = async (): Promise<void> => {
+  /**
+   * 下行：出站 → 客户端。
+   *
+   * @param stallMs 静默判定窗口。首次建连用 `config.dialStallMs`（默认 2.5s）；
+   *   假活重拨后换上的新入口用其一半（下限 400ms）——
+   *   那是「已知上一个入口假活」后的确认，没必要再等满 2.5s，
+   *   否则 4 轮换入口会累积到 10s+，超过多数客户端的网络超时。
+   */
+  const pumpDown = async (stallMs: number = effectiveStallMs(false)): Promise<void> => {
     if (!dialed) return
     const generation = ++pumpGeneration
     const reader = dialed.readable.getReader()
@@ -610,8 +766,14 @@ export async function handleWebSocket(
       if (retainedBytes === 0) return
       // 一个字节都没收到：交给统一重拨入口做护栏判定与诊断。
       // 静默定时器与秒级 EOF 两条触发路径必须共用同一套护栏，否则会漏。
+      //
+      // 重拨流程进行中（redialStarted=true）时这次事件会被入口挡下 ——
+      // 这是**预期**的：那一轮正在拨新入口，新入口成功后会启动带
+      // 短确认窗口的新泵，由新泵的下行确认决定是否继续换。
+      // redialStarted 现在会在每轮流程结束时复位（见 redialViaRelay 的 finally），
+      // 因此不会再出现「第二次假活永远挂在旧泵上、无任何定时器」的死锁。
       void redialViaRelay('stall')
-    }, DOWNLINK_STALL_MS)
+    }, stallMs)
     stallTimer = stall
 
     try {
@@ -650,13 +812,17 @@ export async function handleWebSocket(
       // 只有当前代的下行泵有权结束会话（旧泵在重拨后退出属于正常现象）；
       // 已经因流量熔断 / 客户端断开关闭过时也不再重复关。
       if (generation !== pumpGeneration || closed) return
-      // 上游秒级 EOF / Reset：已发过上行却一个字节都没回，2500ms 静默窗口
+      // 上游秒级 EOF / Reset：已发过上行却一个字节都没回，静默窗口
       // 根本没到就结束了。此时不能按正常结束收尸（close 1000 done），
       // 否则反代重拨永远没机会触发 —— 真机采样里 6 个目标有 2 个命中这条。
+      //
+      // `!redialStarted` 在这里是**防并发**而非一次性闩锁：重拨流程进行中
+      // 时旧泵的 finally 会走到这里，必须让位给那一轮；流程结束后
+      // redialStarted 已复位，新泵若再秒级 EOF 会在这里正常触发下一轮。
       if (
         downlinkBytes === 0 &&
         retainedBytes > 0 &&
-        relayRedialCount < MAX_RELAY_REDIAL &&
+        relayRedialCount < config.relayRedialMax &&
         !redialStarted
       ) {
         void redialViaRelay('eof')
@@ -682,6 +848,8 @@ export async function handleWebSocket(
 
   /** 已收到的下行字节数（用于静默检测） */
   let downlinkBytes = 0
+  /** 本会话累计上行字节（供 /__diag 的结构化会话快照；TrafficMeter 在无限额时不计数） */
+  let sessionUlBytes = 0
 
   /**
    * 单连接流量计量（上下行合计）。
@@ -768,11 +936,15 @@ export async function handleWebSocket(
     if (mode === 'vless') {
       const parsed = parseVlessBuffer(bytes, config.uuid)
       if (!parsed) return null
+      // 明确拒绝「版本 / Mux / flow 不支持」的客户端，而不是继续攒包到超时、
+      // 或把 smux 首字节当 addressType 解析出一个畸形目标。
+      const reject = validateVlessHeader(parsed.header)
       return {
         command: parsed.header.command,
         port: parsed.header.port,
         hostname: parsed.header.hostname,
         headerLength: parsed.consumed,
+        ...(reject ? { reject } : {}),
       }
     }
     const parsed = parseTrojanBuffer(bytes, config.trojanPassword)
@@ -852,6 +1024,16 @@ export async function handleWebSocket(
     established = true
     // 同步到外层作用域：反代重拨（redialViaRelay）需要它做诊断记录
     target = parsed
+    // 按目标域名的出站策略（stall 窗口 / 禁止假活重拨）与固定落地映射
+    // 共用 pinnedHosts 字段，解析器对两种值形态分池处理
+    hostPolicy = config.pinnedHosts ? hostPolicyFor(config.pinnedHosts, parsed.hostname) : undefined
+
+    if (parsed.reject) {
+      // 协议头校验不通过：立即明确关闭并留痕，不要拖到握手截止定时器。
+      recordDiagnostics(`${parsed.hostname}:${parsed.port}`, [], `协议头拒绝：${parsed.reject}`)
+      closeWith(1011, parsed.reject)
+      return
+    }
 
     // UDP：Workers 没有 UDP socket，只有 **DNS/53** 能靠 DoH 打通。
     //
@@ -861,6 +1043,8 @@ export async function handleWebSocket(
     //      客户端把它显示在日志里，比一句「暂不支持」有用得多
     const udpCommand = mode === 'vless' ? VLESS_COMMAND_UDP : TROJAN_COMMAND_UDP
     if (parsed.command === udpCommand) {
+      // Trojan 的 UDP 帧格式（ATYP+ADDR+PORT+LEN+DATA）与 VLESS 不同，
+      // DnsUdpSession 只有 VLESS 帧 framer —— 故 Trojan 仍不支持 UDP（P2 #17 评估后维持原状）。
       if (mode === 'vless' && config.udpDns === 'doh' && parsed.port === 53) {
         sendResponseHeader(new Uint8Array(0))
         udpSession = new DnsUdpSession({
@@ -900,48 +1084,21 @@ export async function handleWebSocket(
     const failures: DialFailure[] = []
     let dialError: unknown = null
     try {
-      dialed = await dial({
-        hostname: parsed.hostname,
-        port: parsed.port,
-        proxies,
-        timeoutMs: DIAL_TIMEOUT_MS,
-        concurrent: config.concurrentDial,
-        nat64: config.nat64 || undefined,
-        // 代理调度模式（only / global / fallback / smart）——
-        // 决定「配了代理之后按什么顺序尝试各条通道」。
-        proxyMode: config.proxyMode,
-        // ⚠️ 这里**不要**传 `config.add`（面板回填的优选 IP）。
-        //
-        // `optimizedIps` 的语义是「**目标站**的落地 IP 候选」——
-        // 访问 www.youtube.com 时用哪些 IP 去连 YouTube。
-        // 而面板里回填的 IP 是 **Cloudflare 边缘 IP**（客户端连 Worker 用的），
-        // 两者完全不同。把边缘 IP 当目标站 IP 会让出站全部连错地方。
-        //
-        // 目标站的落地候选由 `resolvePreferred`（DoH 解析）负责，
-        // 那才是「优选」在出站侧的正确含义。
-        //
-        // 自动 DoH 解析目标域名，取得可用的优选 IP 候选。
-        // 解析出的 Cloudflare 网段 IP 会被自动降权（连不回自家 Anycast）。
-        resolvePreferred: config.resolvePreferred,
-        // 反代入口池：打通 Cloudflare 网段目标的唯一手段。
-        // 目标解析结果全是 CF 网段时参与竞速，否则作兜底。
-        relayPool: {
-          userEntries: config.relayPool || undefined,
-          useBuiltin: config.useBuiltinRelay,
-        },
-        // 固定落地 IP 映射：命中则跳过 DNS 轮询，只连用户写明的地址
-        pinnedIps: config.pinnedHosts
-          ? pinnedIpsFor(config.pinnedHosts, parsed.hostname, parsed.port)
-          : undefined,
-        // 固定反代入口（`域名=r:IP`）：目标在 CF 网段时优先单拨写明的入口
-        pinnedRelays: config.pinnedHosts
-          ? pinnedRelaysFor(config.pinnedHosts, parsed.hostname, parsed.port)
-          : undefined,
-        onFailure: (failure) => {
-          failures.push(failure)
-          diagnostics?.failures.push(failure)
-        },
-      })
+      // DialOptions 统一由工厂装配（P1 #9）：时序参数来自配置层，
+      // 4 个入站调用点不再各写一套。onFailure 是本路径特有的诊断收集。
+      dialed = await dial(
+        buildDialOptions(
+          config,
+          { hostname: parsed.hostname, port: parsed.port },
+          proxies,
+          {
+            onFailure: (failure) => {
+              failures.push(failure)
+              diagnostics?.failures.push(failure)
+            },
+          }
+        )
+      )
     } catch (err) {
       dialError = err
     }
@@ -1030,7 +1187,10 @@ export async function handleWebSocket(
    * 重放恒为空 —— 是 2026-10-27 代码核实确认的致命缺陷。）
    */
   const redialViaRelay = async (trigger: 'stall' | 'eof'): Promise<void> => {
-    // 幂等：静默定时器与 EOF 分支可能几乎同时命中，只允许一次重放流程。
+    // 幂等：静默定时器与 EOF 分支可能几乎同时命中，只允许一个重放流程在跑。
+    // ⚠️ 这不是「一次性闩锁」：流程结束会在 finally 里复位，允许下一轮
+    // 在「新入口也假活」时接着换入口。旧实现置 true 后永不复位，
+    // 导致第二个假活反代永久静默挂起（本次修复的核心）。
     if (closed || redialStarted) return
     // target 理论上一定已解析（本函数只在 establish 成功后触发），
     // 这里仍做空判断，避免未来重构把调用点提前。
@@ -1039,12 +1199,26 @@ export async function handleWebSocket(
       closeWith(1011, '出站无数据：目标未解析')
       return
     }
-    if (relayRedialCount >= MAX_RELAY_REDIAL) {
-      // 反代也试过了，仍然假活 —— 明确告知客户端，不要静默挂起
+    // P2 #12：该域名显式禁止假活重拨（例如「只走用户指定出口」、
+    // 或重拨会重复提交非幂等请求）—— 直接明确失败，绝不静默切出口。
+    if (hostPolicy?.noRedial) {
+      recordDiagnostics(
+        `${targetInfo.hostname}:${targetInfo.port}`,
+        [],
+        '按域名策略禁止假活重拨（noredial）'
+      )
+      closeWith(1011, '出站无数据：该域名已禁止自动切换反代入口')
+      return
+    }
+    if (relayEndpointsTried >= config.relayRedialMax) {
+      // 反代入口也试够了，仍然假活 —— 明确告知客户端，不要静默挂起
       closeWith(1011, '出站无数据：直连与反代入口均无响应')
       return
     }
     redialStarted = true
+    // 下面的主体保持原有缩进（最小 diff）；try 只负责在**所有**退出路径
+    // 复位 redialStarted，避免漏掉任何一条 return。
+    try {
 
     // 统一护栏：读的是**旧连接**的出口类型（此时 dialed 还没被覆盖）。
     // 用户显式指定出口时，静默切到内置反代会绕过它且没有任何报错。
@@ -1072,7 +1246,7 @@ export async function handleWebSocket(
       `${targetInfo.hostname}:${targetInfo.port}`,
       [],
       trigger === 'stall'
-        ? `直连 ${DOWNLINK_STALL_MS}ms 无下行数据，改走反代入口`
+        ? '下行静默无数据，改走反代入口'
         : '出站零下行即 EOF/Reset，立即改走反代入口'
     )
 
@@ -1095,7 +1269,13 @@ export async function handleWebSocket(
       return
     }
 
-    for (const endpoint of fresh.slice(0, MAX_RELAY_REDIAL)) {
+    // 本轮最多再试到总上限。
+    // 「connect 成功但零下行」的假活入口会 return 启动新泵，由新泵的
+    // 短静默窗口触发下一轮（triedRelays 已去重，会挑下一个入口）；
+    // 「connect 直接失败」的入口则在本轮循环里继续试下一个。
+    const remaining = Math.max(1, config.relayRedialMax - relayEndpointsTried)
+    for (const endpoint of fresh.slice(0, remaining)) {
+      relayEndpointsTried++
       triedRelays.add(`${endpoint.ip}:${endpoint.port}`)
       // 关掉假活的旧出站（不动客户端 WS）。
       //
@@ -1121,19 +1301,24 @@ export async function handleWebSocket(
       downlinkBytes = 0
 
       try {
-        const socket = await dial({
-          hostname: endpoint.ip,
-          port: endpoint.port,
-          timeoutMs: REDIAL_DIAL_TIMEOUT_MS,
-          // 反代路径不做 DoH 解析（入口已是解析好的 IP）
-          resolvePreferred: false,
-          // 反代入口不是用户目标，不走目标地址策略（见 outbound/guard.ts）
-          skipTargetPolicy: true,
-          // 激进模式下用户可能配了落地代理：连反代入口也要从同一出口出去，
-          // 不能借「重拨」之名静默绕开用户指定的代理。
-          proxies: config.aggressiveRedial ? proxies : undefined,
-          proxyMode: config.aggressiveRedial ? config.proxyMode : undefined,
-        })
+        // 重拨连的是**反代入口 IP**，不是目标域名：关掉 DoH / 目标地址策略 /
+        // 固定映射 / 反代池，避免把入口 IP 当成目标站再解析一遍。
+        const socket = await dial(
+          buildDialOptions(
+            config,
+            { hostname: endpoint.ip, port: endpoint.port },
+            config.aggressiveRedial ? proxies : [],
+            {
+              timeoutMs: Math.min(config.dialConnectMs, REDIAL_DIAL_TIMEOUT_MS),
+              resolvePreferred: false,
+              skipTargetPolicy: true,
+              proxyMode: config.aggressiveRedial ? config.proxyMode : undefined,
+              relayPool: undefined,
+              pinnedIps: undefined,
+              pinnedRelays: undefined,
+            }
+          )
+        )
         if (!socket) continue
 
         dialed = socket
@@ -1176,8 +1361,11 @@ export async function handleWebSocket(
           [],
           `已切换反代入口 ${endpoint.ip}:${endpoint.port}`
         )
-        // 重新启动下行泵（含新的静默检测）
-        ctx?.waitUntil(pumpDown())
+        // 重新启动下行泵：重拨后的入口用**更短的确认窗口**。
+        // 若这个入口也假活，1.2s 后的 stall 会再次进入本函数
+        // （redialStarted 已由 finally 复位），由 triedRelays 挑下一个未试入口，
+        // 形成「假活 → 换入口」的链式推进，最多 config.relayRedialMax 个入口。
+        ctx?.waitUntil(pumpDown(effectiveStallMs(true)))
         return
       } catch (err) {
         recordDiagnostics(
@@ -1189,20 +1377,34 @@ export async function handleWebSocket(
       }
     }
 
-    // 所有入口都失败
+    // 本轮所有可试入口都 connect 失败（没有一条能启动新泵）——
+    // 明确关闭，绝不留一个没有定时器的会话在那里静默挂起。
     closeWith(1011, '出站无数据：所有反代入口均失败')
+    } finally {
+      // ⚠️ 核心修复：复位「重拨进行中」标志。
+      // 旧实现置 true 后永不复位，第二个假活反代的 stall/EOF 会在入口被
+      // return；旧泵的 reader.read() 挂在假活连接上，stallTimer 已 null、
+      // 首包/握手定时器早已清掉 —— 会话永久静默挂起（真机一直转圈）。
+      // 复位后，新泵自己的 stall 能正常驱动下一轮换入口。
+      redialStarted = false
+    }
   }
 
   server.addEventListener('message', (event: MessageEvent) => {
     void (async () => {
-      const data = event.data
-      const bytes =
-        typeof data === 'string' ? new TextEncoder().encode(data) : new Uint8Array(data as ArrayBuffer)
-      if (bytes.byteLength === 0) return
+      // ⚠️ 不能再直接 `new Uint8Array(data as ArrayBuffer)`：CF 运行时下
+      // event.data 也可能是 Blob，那样会得到长度 0 的视图、每条消息被
+      // 静默丢弃（101 成功但隧道全 -1）。复用 stream.ts 的四分支归一化。
+      // Blob 的 arrayBuffer() 必须先 await 完成，再做任何拼接/入队，
+      // 否则字节顺序会乱（TLS 分片换序 = bad_record_mac）。
+      const normalized = normalizeWsMessage(event.data)
+      const bytes = normalized instanceof Promise ? await normalized : normalized
+      if (!bytes || bytes.byteLength === 0) return
       // 收到任意首字节即解除首包等待；established 之后不再重启这个定时器
       clearFirstPacketTimer()
 
       // 数据面流量熔断：上下行都计量，超限即断（0 = 不限制）
+      sessionUlBytes += bytes.byteLength
       if (traffic.add(bytes.byteLength)) {
         cutByTraffic()
         return
@@ -1278,7 +1480,11 @@ export async function handleWebSocket(
   // 因此这里用 200 + webSocket 选项，在 workerd 下同样完成升级。
   // 若运行时不支持 webSocket 选项，则退化为普通 200 响应。
   try {
-    return new Response(null, { status: 101, webSocket: client } as ResponseInit)
+    const init: ResponseInit = { status: 101, webSocket: client } as ResponseInit
+    if (earlyProtocolEcho) {
+      init.headers = { 'Sec-WebSocket-Protocol': earlyProtocolEcho }
+    }
+    return new Response(null, init)
   } catch (err) {
     // 记录原因，便于排查（否则只会看到一个没有信息量的 200）
     console.error('[自研数据面] 101 响应构造失败：', err)

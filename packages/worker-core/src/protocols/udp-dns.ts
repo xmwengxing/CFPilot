@@ -193,12 +193,91 @@ export class DnsUdpSession {
         this.reply(servfail(packet))
         return
       }
-      this.reply(body)
+      this.reply(this.filterAaaa(body))
     } catch {
       this.reply(servfail(packet))
     } finally {
       clearTimeout(timer)
     }
+  }
+
+  /**
+   * 过滤 DoH 响应里的 AAAA 记录（type 28）。
+   *
+   * `outbound/doh.ts` 已停查 AAAA（铁律 20：Workers 的 connect() 出站不支持
+   * IPv6，查了只会产出不可用候选）；但这里走的是 **DNS 二进制报文**直通，
+   * 客户端问 AAAA 时上游会正常返回 AAAA —— 不滤的话客户端拿到 IPv6 地址
+   * 去连，而连接仍走本隧道出站，必然失败。与 doh.ts 同口径（P2 #17）。
+   *
+   * DNS 报文解析：跳过 12 字节头 + Question 段，逐条遍历 RR，
+   * 丢弃 type=28 的并重算 ANCOUNT/NSCOUNT/ARCOUNT。
+   */
+  private filterAaaa(packet: Uint8Array): Uint8Array {
+    if (packet.byteLength < 12) return packet
+    const qd = (packet[4]! << 8) | packet[5]!
+    const an = (packet[6]! << 8) | packet[7]!
+    const ns = (packet[8]! << 8) | packet[9]!
+    const ar = (packet[10]! << 8) | packet[11]!
+    if (qd === 0 && an === 0 && ns === 0 && ar === 0) return packet
+    let i = 12
+    // 跳过 Question 段（QNAME 变长 + QTYPE 2 + QCLASS 2）
+    for (let q = 0; q < qd && i < packet.byteLength; ) {
+      const l = packet[i++]!
+      if (l === 0) { i += 4; q++; continue }
+      i += l
+    }
+    // 逐条 RR 过滤：每条 = NAME + TYPE2 + CLASS2 + TTL4 + RDLEN2 + RDATA
+    const out = packet.slice(0, i)
+    let removed = 0
+    let pos = i
+    for (const total of [an, ns, ar]) {
+      for (let r = 0; r < total && pos < packet.byteLength; r++) {
+        const rrStart = pos
+        // NAME：优先 0xc0 压缩指针；非指针则按标签跳
+        if ((packet[pos]! & 0xc0) === 0xc0) { pos += 2 } else {
+          while (pos < packet.byteLength) {
+            const l = packet[pos++]!
+            if (l === 0) break
+            pos += l
+          }
+          pos += 4
+        }
+        if (pos + 10 > packet.byteLength) return packet
+        const type = (packet[pos]! << 8) | packet[pos + 1]!
+        const rdlen = (packet[pos + 8]! << 8) | packet[pos + 9]!
+        const rrEnd = pos + 10 + rdlen
+        if (rrEnd > packet.byteLength) return packet
+        if (type !== 28) {
+          out.set(packet.subarray(rrStart, rrEnd), out.byteLength)
+        } else {
+          removed += 1
+        }
+        pos = rrEnd
+      }
+    }
+    if (removed === 0) return packet
+    // 重算 ANCOUNT / NSCOUNT / ARCOUNT：AAAA 只出现在 Answer 段（NS/AR 是权威
+    // 与附加信息，无 AAAA），保守做法是按实际重扫出的段计数回填。
+    let scan = i
+    let nan = 0, nns = 0, nar = 0
+    for (const total of [an, ns, ar]) {
+      for (let r = 0; r < total && scan < out.byteLength; r++) {
+        if ((out[scan]! & 0xc0) === 0xc0) { scan += 2 } else {
+          while (scan < out.byteLength) { const l = out[scan++]!; if (l === 0) break; scan += l }
+          scan += 4
+        }
+        if (scan + 10 > out.byteLength) break
+        const rdlen = (out[scan + 8]! << 8) | out[scan + 9]!
+        scan += 10 + rdlen
+        if (total === an) nan++
+        else if (total === ns) nns++
+        else nar++
+      }
+    }
+    out[6] = (nan >> 8) & 0xff; out[7] = nan & 0xff
+    out[8] = (nns >> 8) & 0xff; out[9] = nns & 0xff
+    out[10] = (nar >> 8) & 0xff; out[11] = nar & 0xff
+    return out.subarray(0, out.byteLength)
   }
 
   /** 加 2 字节长度前缀后回写 */

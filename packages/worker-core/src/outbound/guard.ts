@@ -107,7 +107,7 @@ export function isTargetBlockedError(err: unknown): boolean {
 }
 
 /** IPv4 → 32 位无符号整数 */
-function ipv4ToInt(ip: string): number | null {
+export function ipv4ToInt(ip: string): number | null {
   const parts = ip.split('.')
   if (parts.length !== 4) return null
   let value = 0

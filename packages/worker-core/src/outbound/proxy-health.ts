@@ -33,7 +33,7 @@
  * 刻意**不写 KV**：写配额是硬约束（每天 1000 次），
  * 而代理健康是秒级变化的状态，写 KV 既慢又会把配额打光。
  */
-import type { ProxyKind } from './proxy-pool'
+import type { ProxyKind } from '../types'
 
 /**
  * 代理节点的标识（够用来认人就行）。

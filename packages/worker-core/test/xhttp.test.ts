@@ -36,7 +36,7 @@ vi.mock('../src/budget', async () => {
   }
 })
 
-const { handleXhttp } = await import('../src/protocols/xhttp')
+const { handleXhttp, recentXhttpDiagnostics } = await import('../src/protocols/xhttp')
 const { ByteStream } = await import('../src/protocols/stream')
 const { uuidToBytes } = await import('../src/protocols/vless')
 
@@ -123,7 +123,7 @@ function setupDial() {
 }
 
 describe('XHTTP 生命周期', () => {
-  it('请求体停在半截协议头 → 到截止时间返回 400（不再挂到运行时超时）', async () => {
+  it('请求体停在半截协议头 → 到截止时间返回中性页 null（不再挂到运行时超时）', async () => {
     setupDial()
     vi.useFakeTimers()
     try {
@@ -136,9 +136,10 @@ describe('XHTTP 生命周期', () => {
 
       const pending = handleXhttp(request, baseConfig, [])
       await vi.advanceTimersByTimeAsync(2500)
-      const response = (await pending)!
+      const response = await pending
 
-      expect(response.status).toBe(400)
+      // 铁律 33：认证/解析失败一律交给外层中性页，不回显 400 + VLESS 关键字
+      expect(response).toBeNull()
       // 半截头不应该建立任何出站连接
       expect(dialMock).not.toHaveBeenCalled()
     } finally {
@@ -174,15 +175,15 @@ describe('XHTTP 生命周期', () => {
     try {
       const pending = handleXhttp(request, baseConfig, [])
       await vi.advanceTimersByTimeAsync(2500)
-      const response = (await pending)!
-      expect(response.status).toBe(400)
+      const response = await pending
+      expect(response).toBeNull()
       expect(cancelled).toBe(true)
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it('出站全部失败 → 502 受控响应，而不是抛给外层 500', async () => {
+  it('出站全部失败 → 响应头先回，诊断留痕，流正常收尾（不回显 502 明文）', async () => {
     dialMock.mockReset()
     dialMock.mockRejectedValue(new Error('所有候选都失败'))
     const request = new Request('https://worker.test/xhttp', {
@@ -191,8 +192,13 @@ describe('XHTTP 生命周期', () => {
     })
 
     const response = (await handleXhttp(request, baseConfig, []))!
-    expect(response.status).toBe(502)
-    expect(await response.text()).toContain('出站不可用')
+    // 铁律 10：响应头先于出站建连，客户端能立刻判定入站已建立
+    expect(response.status).toBe(200)
+    const body = await readAll(response.body!)
+    // 固定空 Addons 响应头 [0,0]，之后没有下行数据
+    expect(Array.from(body)).toEqual([0, 0])
+    // 失败原因进 /__diag 的 xhttp 记录，绝不回显给未鉴权者
+    expect(recentXhttpDiagnostics().some((d) => d.kind === 'dial')).toBe(true)
   })
 
   it('客户端取消请求 → 关闭底层出站 Socket', async () => {
@@ -236,7 +242,7 @@ describe('XHTTP stream-one', () => {
     expect(Array.from(body.subarray(2))).toEqual([9, 9])
   })
 
-  it('回显请求里的 Addons', async () => {
+  it('响应头固定为空 Addons（绝不回显客户端 Addons）', async () => {
     setupDial()
     const request = new Request('https://worker.test/xhttp', {
       method: 'POST',
@@ -246,10 +252,12 @@ describe('XHTTP stream-one', () => {
     const response = (await handleXhttp(request, baseConfig, []))!
     const body = await readAll(response.body!)
 
+    // Xray 上游除 XTLS-RPRX-Vision 外一律写长度 0；本数据面不支持 XTLS，
+    // 回显会让客户端误判已协商 vision（协议直接错乱）。
     expect(body[0]).toBe(0x00)
-    expect(body[1]).toBe(0x02)
-    expect(Array.from(body.subarray(2, 4))).toEqual([0xde, 0xad])
-    expect(Array.from(body.subarray(4))).toEqual([9, 9])
+    expect(body[1]).toBe(0x00)
+    // 响应头之后直接是下行数据
+    expect(Array.from(body.subarray(2))).toEqual([9, 9])
   })
 
   it('响应头包含流式所需的无缓冲标记', async () => {

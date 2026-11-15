@@ -271,6 +271,14 @@ export function validateConfigPatch(patch: Record<string, unknown>): FieldError[
     checkRange(Number(patch.subTokenTtlDays), 'subTokenTtlDays', 0, 3650, errors)
   }
 
+  // 出站拨号时序（P1 #11）：区间与 config.ts 的 clampNum 保持一致。
+  // 后端必须拒绝 0 / 超大值，不能靠运行时 clamp 兜底还返回「保存成功」。
+  if (has('dialConnectMs')) checkRange(Number(patch.dialConnectMs), 'dialConnectMs', 1000, 20000, errors)
+  if (has('dialBudgetMs')) checkRange(Number(patch.dialBudgetMs), 'dialBudgetMs', 3000, 60000, errors)
+  if (has('dohBudgetMs')) checkRange(Number(patch.dohBudgetMs), 'dohBudgetMs', 200, 5000, errors)
+  if (has('dialStallMs')) checkRange(Number(patch.dialStallMs), 'dialStallMs', 500, 15000, errors)
+  if (has('relayRedialMax')) checkRange(Number(patch.relayRedialMax), 'relayRedialMax', 1, 8, errors)
+
   if (has('subPorts')) {
     const raw = String(patch.subPorts ?? '').trim()
     if (raw) {

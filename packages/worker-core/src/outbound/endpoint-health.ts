@@ -1,0 +1,120 @@
+/**
+ * 全类型出站端点的健康记忆（P2 #14，isolate 级、绝不写 KV）。
+ *
+ * ## 从「只管代理」泛化到所有候选
+ *
+ * `proxy-health.ts` 已经解决了「落地代理组里混进一个宕机节点，每个请求
+ * 都要先白等一次完整超时」的问题，但 `recordProxySuccess/Failure` 只在
+ * **代理候选**上调用 —— 反代入口、优选 IP、直连全都没有健康记忆。
+ *
+ * 而静态反代入口池会随时间失效（真机实测：入口 IP 被目标站 WAF 拉黑、
+ * 或第三方服务下线），失效入口仍会被 `stableRelayIndex` 一次次选中，
+ * 每次请求都重复付一次连接超时。
+ *
+ * 这里把同一套「连续失败 → 指数冷却 → 全冷却回退」范式泛化到
+ * `source|host:port` 键上，供 `dial.ts` 的 `attemptOf` 统一记账。
+ *
+ * ## 两条必须守住的边界
+ *
+ * 1. **目标站拒绝 ≠ 节点坏**（`TargetRejectedError`）：代理回了拒绝应答
+ *    说明它是活的，只是这个出口不被目标站接受。记成坏节点会误伤。
+ * 2. **不写 KV**（§1.30）：健康状态秒级变化，KV 写配额 1000/天，
+ *    写它既慢又会把配额打光。isolate 级内存 + 条数上限即可。
+ *
+ * ## 能力边界
+ *
+ * 只在同一个 isolate 内有效（热 isolate 会复用）；换 isolate 需重新付
+ * 一次超时，属可接受的冷启动代价。**假活**（connect 成功但 0 下行）
+ * 在 `attemptOf` 里是「成功」，这份记忆管不到 —— 那是 WS 下行泵的
+ * 假活重拨链路负责的，两者不重叠。
+ */
+import { TargetRejectedError } from './proxy-health'
+
+/** 连续失败多少次后进入冷却 */
+const FAIL_THRESHOLD = 2
+/** 首次冷却时长；连续失败越多，冷却越久（翻倍） */
+const BASE_COOLDOWN_MS = 30_000
+/** 冷却上限 */
+const MAX_COOLDOWN_MS = 5 * 60_000
+/** 表大小上限：防止长生命周期 isolate 无限累积（§2.2.G 内存纪律） */
+const MAX_ENTRIES = 256
+
+interface HealthState {
+  fails: number
+  cooldownUntil: number
+}
+
+const HEALTH = new Map<string, HealthState>()
+
+/** 端点唯一标识：来源 + 地址。与 proxyHealthKey 的口径一致（不含凭据）。 */
+export function endpointKey(source: string, host: string, port: number): string {
+  return `${source}|${host}:${port}`
+}
+
+/** 当前是否在冷却期内 */
+export function isEndpointCooled(key: string, now: number): boolean {
+  const state = HEALTH.get(key)
+  return state !== undefined && state.cooldownUntil > now
+}
+
+/** 清掉过期条目；仍超上限就按插入顺序淘汰最旧的 */
+function prune(now: number): void {
+  for (const [key, state] of HEALTH) {
+    if (state.cooldownUntil <= now) HEALTH.delete(key)
+  }
+  while (HEALTH.size >= MAX_ENTRIES) {
+    const oldest = HEALTH.keys().next().value
+    if (oldest === undefined) break
+    HEALTH.delete(oldest)
+  }
+}
+
+/**
+ * 记一次失败。`targetRejected` 为 true 时**不计入**（目标站拒绝 ≠ 节点坏）。
+ */
+export function recordEndpointFailure(key: string, now: number, targetRejected: boolean): void {
+  if (targetRejected) return
+  prune(now)
+  const state = HEALTH.get(key) ?? { fails: 0, cooldownUntil: 0 }
+  state.fails += 1
+  if (state.fails >= FAIL_THRESHOLD) {
+    const over = state.fails - FAIL_THRESHOLD
+    state.cooldownUntil = now + Math.min(MAX_COOLDOWN_MS, BASE_COOLDOWN_MS * 2 ** over)
+  }
+  HEALTH.set(key, state)
+}
+
+/** 记一次成功 —— 之前的失败与冷却全部清掉 */
+export function recordEndpointSuccess(key: string): void {
+  HEALTH.delete(key)
+}
+
+/**
+ * 把候选按健康记忆做**稳定排序**：冷却中的排到后面，其余保持原顺序。
+ *
+ * ⚠️ 不删除任何候选（窗口化 ≠ 截断，§1.31）：全部仍在冷却时顺序不变，
+ * 宁可多付几次超时也不能把链路锁死。
+ */
+export function sortByEndpointHealth<T>(
+  candidates: readonly T[],
+  keyOf: (candidate: T) => string,
+  now: number
+): T[] {
+  const out = [...candidates]
+  // 稳定排序（ES2019 起 Array#sort 保证稳定）
+  out.sort((a, b) => {
+    const aCool = isEndpointCooled(keyOf(a), now) ? 1 : 0
+    const bCool = isEndpointCooled(keyOf(b), now) ? 1 : 0
+    return aCool - bCool
+  })
+  return out
+}
+
+/** 只给测试用 */
+export function clearEndpointHealth(): void {
+  HEALTH.clear()
+}
+
+export function endpointHealthSize(): number {
+  return HEALTH.size
+}

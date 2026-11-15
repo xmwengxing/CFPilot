@@ -35,7 +35,8 @@ export async function httpConnect(
   writable: WritableStream<Uint8Array>,
   hostname: string,
   port: number,
-  auth: HttpProxyAuth = {}
+  auth: HttpProxyAuth = {},
+  handshakeTimeoutMs: number = HANDSHAKE_TIMEOUT_MS
 ): Promise<ReadableStream<Uint8Array>> {
   // 目标主机名来自客户端请求头，是任意字节。必须在拿 writable 锁之前校验：
   // 含 \r\n 的 host 能往 CONNECT 请求里注入额外头、甚至伪造第二个请求。
@@ -80,7 +81,7 @@ export async function httpConnect(
     // （免费版单请求仅 10ms 预算，性能方案 三.1 定位）。
     // 现改为「按块 fill + peek 整体扫描 + skip 精确消费」，典型 1~2 次读取；
     // 终止符之后同块到达的隧道数据留在 ByteStream 缓冲，由 `release()` 带出。
-    const deadline = Date.now() + HANDSHAKE_TIMEOUT_MS
+    const deadline = Date.now() + handshakeTimeoutMs
     let headText = ''
     for (;;) {
       const view = stream.peek()
@@ -93,7 +94,7 @@ export async function httpConnect(
       if (view.byteLength > 8192) throw new Error('HTTP 代理响应头超过 8192 字节')
       const remaining = deadline - Date.now()
       if (remaining <= 0) {
-        throw new Error(`HTTP 代理握手超时（${HANDSHAKE_TIMEOUT_MS}ms 无响应）`)
+        throw new Error(`HTTP 代理握手超时（${handshakeTimeoutMs}ms 无响应）`)
       }
       let timer: ReturnType<typeof setTimeout> | null = null
       let filled: number | null | 'timeout'
@@ -110,7 +111,7 @@ export async function httpConnect(
         if (timer) clearTimeout(timer)
       }
       if (filled === 'timeout') {
-        throw new Error(`HTTP 代理握手超时（${HANDSHAKE_TIMEOUT_MS}ms 无响应）`)
+        throw new Error(`HTTP 代理握手超时（${handshakeTimeoutMs}ms 无响应）`)
       }
       if (filled === null) {
         // 流结束且未见终止符（终止符扫描已在本轮开头做过）

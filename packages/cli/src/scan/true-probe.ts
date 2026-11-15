@@ -870,6 +870,21 @@ export function measureThroughput(options: ThroughputOptions): Promise<Throughpu
             finish()
             return
           }
+          // P2 #16：头存在还要校验**值** —— 内核回的是本次请求的钳制字节数
+          // （≥1MiB）；`x-probe-bytes: 0` 或某个中间层注入的假值都不可信。
+          if (requiredHeader) {
+            const headerLine = head
+              .split('\r\n')
+              .find((l) => l.toLowerCase().startsWith(`${requiredHeader.toLowerCase()}:`))
+            const declared = Number.parseInt(headerLine?.split(':')[1]?.trim() ?? '', 10)
+            if (!Number.isFinite(declared) || declared < 1024 * 1024) {
+              headerMismatch = true
+              lastError = `目标探针响应头异常（${requiredHeader}=${headerLine?.split(':')[1]?.trim() ?? '空'}），可改用 --speed-mode url`
+              socket.destroy()
+              finish()
+              return
+            }
+          }
           headerDone = true
           const body = headerBuffer.subarray(idx + 4)
           meter.add(body.byteLength)

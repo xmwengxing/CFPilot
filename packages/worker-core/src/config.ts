@@ -52,6 +52,13 @@ export const DEFAULT_CONFIG: UserConfig = {
   nat64: '',
   concurrentDial: true,
   dataBudgetMB: 0,
+  // 出站拨号时序（P1 #11）：此前散落在 4 个调用点的硬编码常量，
+  // 统一到这里，经 configFromEnv / mergeConfig 走 KV > env > default 三层。
+  dialConnectMs: 5000,
+  dialBudgetMs: 15_000,
+  dohBudgetMs: 1200,
+  dialStallMs: 2500,
+  relayRedialMax: 4,
   resolvePreferred: true,
   // 默认保守：只修「直连假活」，不替用户在代理出口上擅自换路
   aggressiveRedial: false,
@@ -130,6 +137,19 @@ function bool(value: unknown, fallback: boolean): boolean {
   return fallback
 }
 
+/**
+ * 数值夹取：时序参数必须落在安全区间。
+ *
+ * 填 0 会把代理握手超时关掉（铁律 15）、让会话永久挂起；
+ * 填超大值会顶穿 §31 的 6 连接预算与 CPU 配额。
+ * 非法/缺失一律回落默认值，绝不把用户脏数据带进运行时。
+ */
+function clampNum(value: unknown, fallback: number, min: number, max: number): number {
+  const n = num(value, fallback)
+  if (!Number.isFinite(n)) return fallback
+  return Math.max(min, Math.min(max, Math.round(n)))
+}
+
 /** 合法的代理调度模式 */
 export const PROXY_MODES: ProxyMode[] = ['only', 'global', 'fallback', 'smart']
 
@@ -196,6 +216,11 @@ export function configFromEnv(env: Env): UserConfig {
     nat64: text(env.NAT64, ''),
     concurrentDial: bool(env.TCP_CONCURRENT_DIAL, true),
     dataBudgetMB: num(env.DATA_BUDGET_MB, DEFAULT_CONFIG.dataBudgetMB),
+    dialConnectMs: num(env.DIAL_CONNECT_MS, DEFAULT_CONFIG.dialConnectMs),
+    dialBudgetMs: num(env.DIAL_BUDGET_MS, DEFAULT_CONFIG.dialBudgetMs),
+    dohBudgetMs: num(env.DOH_BUDGET_MS, DEFAULT_CONFIG.dohBudgetMs),
+    dialStallMs: num(env.DIAL_STALL_MS, DEFAULT_CONFIG.dialStallMs),
+    relayRedialMax: num(env.RELAY_REDIAL_MAX, DEFAULT_CONFIG.relayRedialMax),
     resolvePreferred: bool(env.RESOLVE_PREFERRED, DEFAULT_CONFIG.resolvePreferred),
     aggressiveRedial: bool(env.AGGRESSIVE_REDIAL, DEFAULT_CONFIG.aggressiveRedial),
     relayPool: text(env.RELAY_POOL, ''),
@@ -284,6 +309,24 @@ export function mergeConfig(base: UserConfig, override: Partial<UserConfig>): Us
       key === 'subTokenTtlDays'
     ) {
       ;(merged as unknown as Record<string, number>)[key] = num(value, 0)
+    } else if (
+      key === 'dialConnectMs' ||
+      key === 'dialBudgetMs' ||
+      key === 'dohBudgetMs' ||
+      key === 'dialStallMs' ||
+      key === 'relayRedialMax'
+    ) {
+      // 时序参数单独 clamp（见 clampNum 注释），不能走上面的 num(value, 0)：
+      // 那会把「0」当成合法值，等于关掉超时。
+      const bounds: Record<string, readonly [number, number, number]> = {
+        dialConnectMs: [1000, 20000, DEFAULT_CONFIG.dialConnectMs],
+        dialBudgetMs: [3000, 60000, DEFAULT_CONFIG.dialBudgetMs],
+        dohBudgetMs: [200, 5000, DEFAULT_CONFIG.dohBudgetMs],
+        dialStallMs: [500, 15000, DEFAULT_CONFIG.dialStallMs],
+        relayRedialMax: [1, 8, DEFAULT_CONFIG.relayRedialMax],
+      }
+      const [min, max, fb] = bounds[key]!
+      ;(merged as unknown as Record<string, number>)[key] = clampNum(value, fb, min, max)
     } else if (
       key === 'concurrentDial' ||
       key === 'resolvePreferred' ||

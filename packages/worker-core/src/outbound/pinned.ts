@@ -180,13 +180,93 @@ export function pinnedRelaysFor(
   return chosen.endpoints.map((e) => ({ ip: e.ip, port: e.port ?? defaultPort }))
 }
 
-/** 面板校验：返回非法行号（1 起），空数组表示全部合法。判据与解析层同源。 */
+/**
+ * 按目标域名的**出站策略**（P2 #12，与固定落地 IP 共用 `pinnedHosts` 字段）。
+ *
+ * 复用同一份文本的 host 匹配（精确优先 + `*.` 通配最长匹配），但值的形态不同：
+ *   `域名=stall:6000`      → 该域名的下行静默判定窗口改为 6000ms
+ *   `域名=noredial`        → 该域名假活时不切换反代入口（直接明确失败）
+ *   `域名=stall:6000,noredial` → 组合
+ *
+ * 为什么复用同一字段：用户已经有一个「按域名写策略」的框，再开一个
+ * 配置项/输入框只会让「删不掉 / 保存后复活」的困惑重演；解析器对不认识的
+ * 值形态一律跳过，策略行不会污染固定落地 / 固定反代两种条目。
+ */
+export interface HostPolicy {
+  /** 该域名的静默判定窗口（ms），未指定则用配置层的 dialStallMs */
+  stallMs?: number
+  /** 假活时禁止切换反代入口 */
+  noRedial?: boolean
+}
+
+/** 解析一行策略值；不是策略行返回 undefined */
+function parseHostPolicyValue(line: string): { host: string; policy: HostPolicy } | undefined {
+  const eq = line.indexOf('=')
+  if (eq <= 0) return undefined
+  const host = line.slice(0, eq).trim().toLowerCase()
+  if (!HOST.test(host)) return undefined
+  const raw = line.slice(eq + 1).trim().toLowerCase()
+  if (!raw) return undefined
+  // 至少含一个策略关键字才算策略行（IP 行由 parsePinnedHosts 处理）
+  let hasPolicy = false
+  const policy: HostPolicy = {}
+  for (const piece of raw.split(',')) {
+    const item = piece.trim()
+    if (item === 'noredial') {
+      policy.noRedial = true
+      hasPolicy = true
+      continue
+    }
+    const m = /^stall:(\d{1,6})$/.exec(item)
+    if (m) {
+      // clamp：避免 0 把静默检测关掉、或超大值让会话挂死
+      policy.stallMs = Math.max(200, Math.min(15000, Number(m[1])))
+      hasPolicy = true
+    }
+  }
+  return hasPolicy ? { host, policy } : undefined
+}
+
+/**
+ * 取某个目标域名命中的出站策略（精确优先，其次 `*.` 通配最长匹配）。
+ * 与 pinnedIpsFor / pinnedRelaysFor 的匹配口径完全一致。
+ */
+export function hostPolicyFor(text: string, hostname: string): HostPolicy | undefined {
+  const host = String(hostname ?? '').trim().toLowerCase()
+  if (!host) return undefined
+  let picked: HostPolicy | undefined
+  let wildcard: HostPolicy | undefined
+  let wildcardLen = -1
+  for (const raw of String(text ?? '').split(/\r?\n/)) {
+    const line = raw.trim()
+    if (!line || line.startsWith('#')) continue
+    const parsed = parseHostPolicyValue(line)
+    if (!parsed) continue
+    if (parsed.host === host) {
+      picked = parsed.policy
+      break
+    }
+    if (parsed.host.startsWith('*.')) {
+      const suffix = parsed.host.slice(1)
+      if (host.endsWith(suffix) && suffix.length > wildcardLen) {
+        wildcard = parsed.policy
+        wildcardLen = suffix.length
+      }
+    }
+  }
+  return picked ?? wildcard
+}
+
+/** 面板校验：返回非法行号（1 起）。判据 = 「IP 条目」或「策略条目」二选一。 */
 export function validatePinnedHosts(text: string): number[] {
   const bad: number[] = []
   String(text ?? '').split(/\r?\n/).forEach((raw, index) => {
     const line = raw.trim()
     if (!line || line.startsWith('#')) return
-    if (parsePinnedHosts(line).length === 0) bad.push(index + 1)
+    // ⚠️ 策略行（stall: / noredial）不产生 IP 条目，但它是合法配置
+    if (parsePinnedHosts(line).length === 0 && parseHostPolicyValue(line) === undefined) {
+      bad.push(index + 1)
+    }
   })
   return bad
 }

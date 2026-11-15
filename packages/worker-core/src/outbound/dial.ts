@@ -26,7 +26,7 @@
  * 极难定位。
  */
 import { socks5Connect } from './socks5'
-import { httpConnect } from './http-proxy'
+import { httpConnect, HANDSHAKE_TIMEOUT_MS } from './http-proxy'
 import { blockedTarget, TargetBlockedError, IPV6_DIRECT_UNSUPPORTED } from './guard'
 import {
   filterHealthy,
@@ -38,6 +38,13 @@ import { isIpv4 } from '../protocols/address'
 import { resolveEndpointIps } from './doh'
 import { collectRelayEndpoints, RELAY_BATCH_SIZE, stableRelayIndex, type RelayPoolOptions } from './relay'
 import {
+  endpointKey,
+  isEndpointCooled,
+  recordEndpointFailure,
+  recordEndpointSuccess,
+  sortByEndpointHealth,
+} from './endpoint-health'
+import {
   buildRouteCandidates,
   classifyDialFailure,
   groupCandidates,
@@ -46,6 +53,7 @@ import {
   type RouteCandidate,
 } from './route'
 import type { ProxyEndpoint } from './proxy-pool'
+import type { ProxyKind } from '../types'
 import type { ProxyMode } from '../types'
 
 export type ConnectFn = (
@@ -73,7 +81,7 @@ let connectPromise: Promise<ConnectFn> | null = null
  * 用运行时拼接而非字面量：esbuild 的常量折叠会把相邻字面量
  * 还原成明文 `cloudflare:sockets`（已实测），这里必须让它无法被折叠。
  *
- * 导出给**出站体检**（`relay-probe.ts`）复用：它同样需要「先 TCP、
+ * 导出给**出站体检**（已废弃，由配置层时序参数取代）复用：它同样需要「先 TCP、
  * 再 startTls」这条链路，另写一份必然与这里的坑（惰性加载、startTls 换 socket）漂移。
  */
 async function getConnect(): Promise<ConnectFn> {
@@ -90,7 +98,8 @@ async function getConnect(): Promise<ConnectFn> {
 }
 export { getConnect }
 
-export type { ProxyKind, ProxyEndpoint } from './proxy-pool'
+export type { ProxyEndpoint } from './proxy-pool'
+export type { ProxyKind } from '../types'
 export { parseProxyEntry, parseProxyPool } from './proxy-pool'
 
 export interface DialOptions {
@@ -133,6 +142,13 @@ export interface DialOptions {
    * 第三方 IP 的排在前面（这正是「优选」的意义）。
    */
   resolvePreferred?: boolean
+  /**
+   * 是否跳过 TXT 优选库查询（默认 true）。
+   *
+   * TXT 优选库是 opt-in 的高级功能；主路径默认跳过，避免串行遍历多家
+   * 境外 DoH 把首包拖到 9~10 秒。显式传 false 时仍会查（解析能力在 doh.ts）。
+   */
+  skipTxt?: boolean
   /** NAT64 前缀，例如 64:ff9b:: */
   nat64?: string
   /** 并发竞速拨号 */
@@ -146,6 +162,14 @@ export interface DialOptions {
   proxyMode?: ProxyMode
   /** 单次连接超时（ms） */
   timeoutMs?: number
+  /**
+   * DoH 解析的独立短预算（ms）。
+   *
+   * 由 `buildDialOptions` 从 `config.dohBudgetMs` 注入；未传时回落到
+   * `DOH_FAST_BUDGET_MS`(1200)。超时就放弃解析、直接用域名直连候选，
+   * 不让整条请求陪着境外 DoH 等 4~10 秒。
+   */
+  dohBudgetMs?: number
   /**
    * 整个拨号的总预算（ms）—— 覆盖 **DoH 解析 + 连接竞速全程**。
    *
@@ -207,6 +231,26 @@ const DEFAULT_TIMEOUT_MS = 8000
  * 这个预算只约束 CF 网段目标这类必须走反代解析的慢路径。
  */
 const DEFAULT_DIAL_BUDGET_MS = 15_000
+
+/**
+ * DoH 解析的**独立**短预算（ms）。
+ *
+ * ## 为什么需要比总预算更紧
+ *
+ * 真机量化（2026-11-15）：首次访问一个未缓存的域名，TLS 握手完成要
+ * 8.8~10.3 秒；同一域名第二次（DoH 缓存命中）只要 0.8~1.9 秒；
+ * 而配了固定落地 IP（`pinnedHosts`，跳过 DoH）的域名首次仅 1.6 秒。
+ * 差异只可能来自 DoH —— `resolveEndpointIps()` 串行阻塞在候选构建之前，
+ * 其中 TXT 分支串行遍历多家境外 DoH（每家最多 4s），域名直连候选
+ * 明明可以立刻开跑却要陪着等。
+ *
+ * 给 DoH 单独 1.2s 预算：超时就放弃解析、直接用域名直连候选
+ * （它本来就在 `buildRouteCandidates` 里）。`doh.ts` 的 queryAll /
+ * queryAllA 都按 deadline 夹 perQuery 预算，已在飞的查询也会被 AbortSignal
+ * 超时，不会拖到 4s。缓存命中时（50~300ms）仍能拿到多源 A 聚合结果，
+ * mixedCdn 防漂移语义不受影响。
+ */
+const DOH_FAST_BUDGET_MS = 1200
 
 /** IPv4 → NAT64 合成地址 */
 export function nat64Address(ipv4: string, prefix: string): string | null {
@@ -386,6 +430,11 @@ async function dialViaProxy(
   proxy: ProxyEndpoint
 ): Promise<DialResult> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  // ⚠️ 代理握手不能再用固定的 6s：`attemptOf` 已把 timeoutMs 夹到
+  // 「本次拨号总预算的剩余时间」，握手若仍各自等满 6s，单候选最坏
+  // 5s(connect) + 6s(handshake) = 11s，多候选顺序累加可直接顶穿预算。
+  // 这里让握手超时跟随剩余预算（下限 200ms，绝不移除超时 —— 铁律 15）。
+  const handshakeMs = Math.min(HANDSHAKE_TIMEOUT_MS, Math.max(200, timeoutMs))
 
   // ProxyIP 语义：连到指定地址，但请求的目标仍是原始 hostname:port。
   // 这是同类实现的通用做法，用于让出站流量落在指定的 Cloudflare 网段。
@@ -441,7 +490,8 @@ async function dialViaProxy(
         socket.writable,
         options.hostname,
         options.port,
-        { username: proxy.username, password: proxy.password }
+        { username: proxy.username, password: proxy.password },
+        handshakeMs
       )
       return {
         readable,
@@ -460,6 +510,7 @@ async function dialViaProxy(
     const readable = await socks5Connect(socket.readable, socket.writable, options.hostname, options.port, {
       username: proxy.username,
       password: proxy.password,
+      handshakeTimeoutMs: handshakeMs,
     })
     return {
       readable,
@@ -583,59 +634,91 @@ function summarizeErrors(errors: readonly unknown[]): string {
  *
  * ⇒ 现状（迟到成功的立刻关掉、在途的等它自己超时）已经是这个平台上的最优解。
  */
-function raceBatch(attempts: ReadonlyArray<() => Promise<DialResult>>): Promise<DialResult> {
+/**
+ * 滑动窗口竞速：任时候选 settle 就**立即补发**下一个未试候选，
+ * 全程在飞数 ≤ `width`；有人成功即整体 resolve。
+ *
+ * ## 与旧「屏障批次」的区别（P1 #7）
+ *
+ * 旧 `raceBatch` 要等本批 6 个**全部** settle 才允许开下一批：批内只要
+ * 1 个慢候选（默认 8s 超时），其余 5 个即使 50ms 内全失败也得陪着等满
+ * 这个超时窗口；24 个反代入口时尾延迟被逐个 batch 的最慢成员累加。
+ * 滑动窗口消除这个队头阻塞，且守住全部既有约束：
+ *   - 不增加连接数（全程 ≤6，§1.31）；
+ *   - 不截断候选（窗口化 ≠ 截断，全部候选都会被尝试）；
+ *   - 不主动取消在途候选（§31.1 平台边界：无 socket.abort()，close()
+ *     对未建连 socket 要等约 20s 且仍占连接数）；
+ *   - 迟到的成功整条 `DialResult.close()` 关掉，不泄漏 socket（§1.31）。
+ *
+ * 成功后不再补发新候选（与旧实现「任一批成功即返回」语义一致）；
+ * 已在飞的会各自跑完并被关掉。
+ */
+function raceWindow(
+  attempts: ReadonlyArray<() => Promise<DialResult>>,
+  width: number
+): Promise<DialResult> {
   if (attempts.length === 0) return Promise.reject(new Error('没有可用的出站拨号方式'))
 
   return new Promise<DialResult>((resolve, reject) => {
-    let pending = attempts.length
+    let next = 0
+    let inFlight = 0
     let settled = false
     const errors: unknown[] = []
 
-    for (const attempt of attempts) {
-      attempt().then(
-        (result) => {
-          if (settled) {
-            // 本批已经有别的候选赢了：整条 Socket 一起关掉。
-            //
-            // ⚠️ 只关 writable 不够：`writable.close()` 不会中断另一头已经挂起的
-            // `reader.read()`，读任务要等运行时超时才回收；而且此刻 writer 可能
-            // 已被 `getWriter()` 锁住，`getWriter()` 会直接抛错并被吞掉 ——
-            // 这条落败连接实际上根本没关，白占单请求 6 条并发槽位之一。
-            // `DialResult.close()` 对应底层 `socket.close()`，同时关读写两端。
-            // 测试桩可能没有真实 Socket，才退回 `writable.close()`。
-            try {
-              const close = result.close
-              void Promise.resolve(close ? close() : result.writable.close()).catch(() => {})
-            } catch {
-              /* 已关闭 */
-            }
-            return
-          }
-          settled = true
-          resolve(result)
-        },
-        (err) => {
-          errors.push(err)
-          pending -= 1
-          if (pending === 0 && !settled) {
-            settled = true
-            reject(
-              new Error(`本批 ${attempts.length} 个候选全部失败：${summarizeErrors(errors)}`)
-            )
-          }
-        }
-      )
+    /** 落败/迟到的连接整条关掉（只关 writable 不够，见 §1.31 注释） */
+    const closeLoser = (result: DialResult): void => {
+      try {
+        const close = result.close
+        void Promise.resolve(close ? close() : result.writable.close()).catch(() => {})
+      } catch {
+        /* 已关闭 */
+      }
     }
+
+    const launch = (): void => {
+      if (settled) return
+      while (inFlight < width && next < attempts.length) {
+        const attempt = attempts[next++]!
+        inFlight++
+        attempt().then(
+          (result) => {
+            inFlight--
+            if (settled) {
+              closeLoser(result)
+              return
+            }
+            settled = true
+            resolve(result)
+          },
+          (err) => {
+            inFlight--
+            errors.push(err)
+            if (settled) return
+            // 失败即补发，不用等整批的其它候选
+            launch()
+            if (next >= attempts.length && inFlight === 0) {
+              settled = true
+              reject(
+                new Error(`全部 ${attempts.length} 个候选均失败：${summarizeErrors(errors)}`)
+              )
+            }
+          }
+        )
+      }
+    }
+    launch()
   })
 }
 
 /**
- * 并发竞速：多个候选按**窗口**分批拨号，取最先成功者。
+ * 并发竞速：多个候选按**滑动窗口**拨号，取最先成功者。
  *
  * ## 窗口语义（不是截断候选）
  *
- * `concurrent` 为 true 且候选多于一个时，按 `MAX_SIMULTANEOUS_CONNECTS`
- * 分批发起：**一批全部失败后**才发下一批；任一批有人成功就立刻返回。
+ * `concurrent` 为 true 且候选多于一个时，用 `raceWindow` 保持最多
+ * `MAX_SIMULTANEOUS_CONNECTS`(6) 个候选在飞：任一候选失败就立即补发下一个
+ * 未试候选；任一批有人成功就立刻返回。旧实现是「屏障批次」——本批 6 个
+ * 全部 settle 才发下一批，批内 1 个慢候选就能拖住整批（见 raceWindow 注释）。
  *
  * ⚠️ 语义上**所有候选都会被尝试**，只是同时在飞的宽度受限。
  * 绝不能改成「只取前 6 个」—— 那会直接丢掉候选与失败证据：
@@ -648,9 +731,8 @@ function raceBatch(attempts: ReadonlyArray<() => Promise<DialResult>>): Promise<
  *
  * ## 全部失败时的错误
  *
- * 聚合**每一批**的失败原因（至少保留最后一条 + 总数），
- * 不能只丢一个空错误：这个错误会进 `/__diag` 与 close reason，
- * 是排查「为什么连不上」的唯一线索。
+ * 聚合全部失败原因（会进 `/__diag` 与 close reason），
+ * 不能只丢一个空错误：这是排查「为什么连不上」的唯一线索。
  */
 async function raceDial(
   attempts: Array<() => Promise<DialResult>>,
@@ -671,30 +753,18 @@ async function raceDial(
     throw lastError
   }
 
-  /** 每一批的失败摘要（全部批次失败时聚合，诊断不丢） */
-  const batchFailures: string[] = []
-  let lastError: unknown = new Error('拨号失败')
-
-  // 窗口化：一批全失败才发下一批，任一批成功立刻返回
-  for (let start = 0; start < attempts.length; start += MAX_SIMULTANEOUS_CONNECTS) {
-    const batch = attempts.slice(start, start + MAX_SIMULTANEOUS_CONNECTS)
-    try {
-      return await raceBatch(batch)
-    } catch (err) {
-      lastError = err
-      batchFailures.push(errorMessage(err))
-      // 本批全失败 → 继续下一批（**不丢候选**）
-    }
+  // 滑动窗口：任时候选 settle 立即补发下一个，全程 ≤6 在飞。
+  // 旧实现按固定步长切片、一批全失败才发下一批，队头阻塞见 raceWindow 注释。
+  try {
+    return await raceWindow(attempts, MAX_SIMULTANEOUS_CONNECTS)
+  } catch (err) {
+    // 聚合失败原因（会进 /__diag 与 close reason，排查「为什么连不上」的唯一线索）
+    throw new Error(
+      `全部 ${attempts.length} 个候选均失败（滑动窗口，最多 ${MAX_SIMULTANEOUS_CONNECTS} 个并发）：\n` +
+        errorMessage(err),
+      { cause: err }
+    )
   }
-
-  const error = new Error(
-    `全部 ${attempts.length} 个候选均失败（分 ${batchFailures.length} 批，` +
-      `每批最多 ${MAX_SIMULTANEOUS_CONNECTS} 个并发）：\n` +
-      batchFailures.join('\n'),
-    // 保留最后一次的原始异常作为 cause，方便上层按错误类型做判断
-    { cause: lastError }
-  )
-  throw error
 }
 
 /**
@@ -724,37 +794,35 @@ async function collectRelay(
 }
 
 /**
- * 分批尝试反代入口。
+ * 滑动窗口尝试全部反代入口。
  *
  * 反代入口质量参差（同一域名下有的通有的不通），所以不能只取少数几个：
  * 实测 53 个候选一次性并发 → 70%；只取前 8 个 → 40%。
  *
- * 分批能兼顾两头：**批内并发**（快）、**批间串行**（前一批全失败才发下一批），
- * 既覆盖全部入口，又不会一次性几十个连接同时打出去。
+ * 旧实现自己按 RELAY_BATCH_SIZE 切片、批间串行（前一批全失败才发下一批），
+ * 与 raceDial 的内部窗口形成双层屏障。现在一次把全部候选交给 raceDial，
+ * 由 raceWindow 统一维持「≤6 在飞、失败即补发」，既覆盖全部入口、
+ * 又不会被某个慢入口卡住整批。
  */
-async function tryRelayInBatches(
+async function tryRelayWithWindow(
   relay: Array<{ ip: string; port: number; label: string }>,
   attemptOf: (candidate: RouteCandidate) => () => Promise<DialResult>,
   concurrent: boolean
 ): Promise<DialResult | null> {
   if (relay.length === 0) return null
-  for (let i = 0; i < relay.length; i += RELAY_BATCH_SIZE) {
-    const batch = relay.slice(i, i + RELAY_BATCH_SIZE)
-    const attempts = batch.map((item) =>
-      attemptOf({
-        source: 'relay',
-        host: item.ip,
-        port: item.port,
-        label: `反代 ${item.label}`,
-      })
-    )
-    try {
-      return await raceDial(attempts, concurrent)
-    } catch {
-      /* 本批全失败 → 试下一批 */
-    }
+  const attempts = relay.map((item) =>
+    attemptOf({
+      source: 'relay',
+      host: item.ip,
+      port: item.port,
+      label: `反代 ${item.label}`,
+    })
+  )
+  try {
+    return await raceDial(attempts, concurrent)
+  } catch {
+    return null
   }
-  return null
 }
 
 /** 统一拨号入口 */
@@ -790,7 +858,21 @@ export async function dial(options: DialOptions): Promise<DialResult> {
   let resolvedTarget = pinnedActive
   if (options.resolvePreferred && !pinnedActive) {
     try {
-      const resolved = await resolveEndpointIps(options.hostname, options.port, { deadline })
+      // ⚠️ 两个关键约束（首包延迟治理，见 DOH_FAST_BUDGET_MS 注释）：
+      //  1. 独立短预算：超时就放弃解析，直接用域名直连候选，不让整条
+      //     请求陪着境外 DoH 等到 4~10s。
+      //  2. 主路径跳过 TXT：TXT 优选库是 opt-in 的高级功能，绝大多数
+      //     域名的 TXT 是 SPF / 域名验证记录；`queryAll('TXT')` 串行遍历
+      //     多家 provider 是实测首包延迟的最大来源。需要它的调用方可显式
+      //     传 skipTxt:false（解析能力本身仍保留在 doh.ts）。
+      const dohDeadline = Math.min(
+        deadline,
+        Date.now() + (options.dohBudgetMs ?? DOH_FAST_BUDGET_MS)
+      )
+      const resolved = await resolveEndpointIps(options.hostname, options.port, {
+        deadline: dohDeadline,
+        skipTxt: options.skipTxt ?? true,
+      })
       if (resolved.length > 0) {
         resolvedTarget = true
         for (const item of resolved) {
@@ -876,6 +958,8 @@ export async function dial(options: DialOptions): Promise<DialResult> {
 
   /** 执行单个候选 */
   const attemptOf = (candidate: RouteCandidate) => async (): Promise<DialResult> => {
+    // P2 #14：所有类型的候选统一记健康（不只是代理）。
+    const healthKey = endpointKey(candidate.source, candidate.host, candidate.port)
     // 总预算约束：剩余时间不足时不再发起连接，超了则截断本次连接超时
     const remaining = deadline - Date.now()
     if (remaining <= 0) {
@@ -921,6 +1005,7 @@ export async function dial(options: DialOptions): Promise<DialResult> {
             serverName: candidate.via.serverName,
           })
           recordProxySuccess(candidate.via)
+          recordEndpointSuccess(healthKey)
           return result
         } catch (err) {
           // ⚠️ 「目标站拒绝」不计入失败统计 —— 那说明代理是活的
@@ -932,8 +1017,12 @@ export async function dial(options: DialOptions): Promise<DialResult> {
         }
       }
       // 直连 / 优选 IP：换入口地址，但目标（TLS SNI 等）仍是原目标
-      return await dialDirect({ ...attemptOptions, hostname: candidate.host, port: candidate.port })
+      const result = await dialDirect({ ...attemptOptions, hostname: candidate.host, port: candidate.port })
+      recordEndpointSuccess(healthKey)
+      return result
     } catch (err) {
+      // 目标站拒绝（TargetRejectedError）说明节点是活的，不计入健康统计
+      recordEndpointFailure(healthKey, Date.now(), err instanceof TargetRejectedError)
       const failure = classifyDialFailure(err, candidate.label)
       options.onFailure?.(failure)
       throw err
@@ -1084,8 +1173,19 @@ export async function dial(options: DialOptions): Promise<DialResult> {
 
     // 粘性首选：同一目标在全球任意 isolate 都落到同一个反代入口，
     // 避免「竞速挑最快」让同一会话的请求从不同出口 IP 出去被目标站风控。
-    // 先单拨这一个；它失效才回退到全表分批竞速（不丢冗余）。
-    const sticky = restRelay[stableRelayIndex(options.hostname, restRelay.length)]!
+    // 先单拨这一个；它失效才回退到全表滑动窗口（不丢冗余）。
+    const stickyIndex = stableRelayIndex(options.hostname, restRelay.length)
+    let sticky = restRelay[stickyIndex]!
+    const now = Date.now()
+    // P2 #14： sticky 若在本 isolate 已连续失败并处于冷却，顺延到第一个
+    // 未冷却的入口。冷却是 isolate 级内存，**只有确认失败过才偏置** ——
+    // 正常请求仍走确定性的 sticky，不会额外引入出口漂移。
+    if (isEndpointCooled(endpointKey('relay', sticky.ip, sticky.port), now)) {
+      const alt = restRelay.find(
+        (r) => !isEndpointCooled(endpointKey('relay', r.ip, r.port), now)
+      )
+      if (alt) sticky = alt
+    }
     try {
       return await attemptOf({
         source: 'relay',
@@ -1094,8 +1194,14 @@ export async function dial(options: DialOptions): Promise<DialResult> {
         label: `反代 ${sticky.label}`,
       })()
     } catch {
-      const rest = restRelay.filter((r) => r !== sticky)
-      return await tryRelayInBatches(rest, attemptOf, concurrent)
+      // 兜底列表按健康做**稳定排序**：冷却中的排后，但不删任何候选
+      // （窗口化 ≠ 截断，§1.31）。
+      const rest = sortByEndpointHealth(
+        restRelay.filter((r) => r !== sticky),
+        (r) => endpointKey('relay', r.ip, r.port),
+        Date.now()
+      )
+      return await tryRelayWithWindow(rest, attemptOf, concurrent)
     }
   }
 

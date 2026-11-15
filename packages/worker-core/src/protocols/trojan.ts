@@ -57,6 +57,10 @@ function isCrLf(bytes: Uint8Array): boolean {
 }
 
 /** 解析 Trojan 请求头 */
+/** ⚠️ 已废弃（P2 #19）：生产路径用的是下方 parseTrojanBuffer（WS 消息同步解析），
+ * 本函数仅被测试引用，且其「明文口令容错」行为与 parseTrojanBuffer 不一致 ——
+ * 保持导出只为测试兼容，不要在新代码里使用。
+ */
 export async function parseTrojan(
   stream: ByteStream,
   expectedPassword: string

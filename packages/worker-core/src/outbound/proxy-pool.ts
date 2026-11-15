@@ -10,8 +10,7 @@
  * 四种形态已经写对、有单测覆盖 —— 在这里再抄一遍必然漂移。
  */
 import { splitHostPort } from './doh'
-
-export type ProxyKind = 'direct' | 'socks5' | 'http' | 'https'
+import type { ProxyKind } from '../types'
 
 export interface ProxyEndpoint {
   host: string

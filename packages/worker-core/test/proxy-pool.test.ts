@@ -105,7 +105,7 @@ describe('数据面出站池汇总（逻辑与 routes/data.ts 的 collectProxies
     proxyMode: 'only',
     nat64: '',
     concurrentDial: true,
-    dataBudgetMB: 0,
+    dataBudgetMB: 0, dialConnectMs: 5000, dialBudgetMs: 15000, dohBudgetMs: 1200, dialStallMs: 2500, relayRedialMax: 4,
     resolvePreferred: true,
     aggressiveRedial: false,
     relayPool: '',

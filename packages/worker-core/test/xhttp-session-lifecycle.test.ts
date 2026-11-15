@@ -124,8 +124,8 @@ describe('XHTTP 会话容量管理', () => {
       body: Buffer.from(buildSeq0()),
     })
     const res = await handleXhttp(post, baseConfig, [])
-    expect(res).not.toBeNull()
-    expect(res!.status).toBe(503)
+    // 铁律 33：容量满也走中性页，不回显 503 + 中文报错（运行期指纹）
+    expect(res).toBeNull()
 
     // ⚠️ 关键断言：被拒的**不是**「踢掉一条」——
     // 第 1 条会话必须仍然可用（再发一个分包应成功）。
@@ -265,7 +265,7 @@ describe('XHTTP 暂存预算记账', () => {
       )
       expect(res!.status).toBe(200)
     }
-    // 第 31 个 ⇒ 503（缓存已满）
+    // 第 31 个 ⇒ 中性页 null（缓存已满；旧实现回 503 明文）
     const overflow = await handleXhttp(
       new Request('https://worker.test/xhttp/budget/31', {
         method: 'POST',
@@ -274,7 +274,7 @@ describe('XHTTP 暂存预算记账', () => {
       baseConfig,
       []
     )
-    expect(overflow!.status).toBe(503)
+    expect(overflow).toBeNull()
 
     // ⚠️ 判据：新会话必须能**用满整个 32 MiB 预算**。
     //

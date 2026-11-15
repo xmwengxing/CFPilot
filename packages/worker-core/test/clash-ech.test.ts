@@ -25,7 +25,7 @@ function makeConfig(over: Partial<UserConfig> = {}): UserConfig {
     proxyMode: 'only',
     poolOfficial: true, officialCount: 20, poolDomain: true, domainCount: 10,
     poolManual: false, poolCountries: '', dls: 0, maxLatency: 0, maxNodes: 0,
-    proxyIp: '', socks5: '', httpProxy: '', nat64: '', concurrentDial: true, dataBudgetMB: 0,
+    proxyIp: '', socks5: '', httpProxy: '', nat64: '', concurrentDial: true, dataBudgetMB: 0, dialConnectMs: 5000, dialBudgetMs: 15000, dohBudgetMs: 1200, dialStallMs: 2500, relayRedialMax: 4,
     resolvePreferred: true,
     aggressiveRedial: false,
     relayPool: '',

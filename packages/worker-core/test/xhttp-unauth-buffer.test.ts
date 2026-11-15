@@ -36,7 +36,8 @@ describe('XHTTP packet-up 的 isolate 级暂存预算', () => {
     }
     // 第四个必然超 32MB 总预算
     const over = await handleXhttp(postChunk('s4', 1, chunk), baseConfig, [])
-    expect(over!.status).toBe(503)
+    // 中性页：超预算也不回显 503 明文（铁律 33）
+    expect(over).toBeNull()
   })
 
   it('会话关闭后额度归还，新会话不会被永久拒绝', async () => {
@@ -46,7 +47,7 @@ describe('XHTTP packet-up 的 isolate 级暂存预算', () => {
     }
     // 第四个被拒（超预算）
     const rejected = await handleXhttp(postChunk('d', 1, chunk), baseConfig, [])
-    expect(rejected!.status).toBe(503)
+    expect(rejected).toBeNull()
     // 清掉会话（额度归还）后再来一次就能过
     clearXhttpSessions()
     const ok = await handleXhttp(postChunk('e', 1, chunk), baseConfig, [])
@@ -60,12 +61,13 @@ describe('XHTTP packet-up 的 isolate 级暂存预算', () => {
       headers: { 'content-length': String(50 * 1024 * 1024) },
     })
     const res = await handleXhttp(req, baseConfig, [])
-    expect(res!.status).toBe(413)
+    // 认证前长度闸门：中性页，且 body 根本没被读
+    expect(res).toBeNull()
   })
 
   it('seq=0 的分包在 VLESS 头非法时被拒绝（这条路径有鉴权）', async () => {
     const res = await handleXhttp(postChunk('randomsession2', 0, new Uint8Array([1, 2, 3])), baseConfig, [])
-    expect(res).not.toBeNull()
-    expect(res!.status).toBe(400)
+    // 非法 VLESS 头：中性页，不回显 400 + 协议关键字
+    expect(res).toBeNull()
   })
 })

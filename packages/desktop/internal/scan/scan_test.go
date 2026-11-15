@@ -277,7 +277,7 @@ func TestMeasureDownload(t *testing.T) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
 		// 探针端点独有标记（新口径必校验）：少了它会被判成 Pages 欢迎页。
-		w.Header().Set("X-Probe-Bytes", strconv.Itoa(len(payload)))
+		w.Header().Set("X-Probe-Bytes", strconv.Itoa(2*1024*1024))
 		_, _ = w.Write([]byte(payload))
 	}))
 	defer srv.stop()
@@ -310,7 +310,7 @@ func TestMeasureDownload(t *testing.T) {
 func TestMeasureDownloadEmptyBody(t *testing.T) {
 	srv := newTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 带探针标记，确保失败原因是「没有载荷」而不是「响应头不匹配」。
-		w.Header().Set("X-Probe-Bytes", "16384")
+		w.Header().Set("X-Probe-Bytes", "2097152")
 		w.WriteHeader(http.StatusOK)
 		// 不写任何 body
 	}))
@@ -352,7 +352,7 @@ func TestRunEndToEnd(t *testing.T) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
 		// 新口径会校验探针标记，缺了它测速必失败（阶段三会跳过这个候选）。
-		w.Header().Set("X-Probe-Bytes", strconv.Itoa(len(payload)))
+		w.Header().Set("X-Probe-Bytes", strconv.Itoa(2*1024*1024))
 		_, _ = w.Write([]byte(payload))
 	}))
 	defer srv.stop()
@@ -474,7 +474,7 @@ func TestRunCountryFilter(t *testing.T) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
 		// 新口径会校验探针标记，缺了它测速必失败（阶段三会跳过这个候选）。
-		w.Header().Set("X-Probe-Bytes", strconv.Itoa(len(payload)))
+		w.Header().Set("X-Probe-Bytes", strconv.Itoa(2*1024*1024))
 		_, _ = w.Write([]byte(payload))
 	}))
 	defer srv.stop()

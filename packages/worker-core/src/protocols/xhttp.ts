@@ -17,11 +17,12 @@
  */
 import type { UserConfig } from '../types'
 import { ByteStream } from './stream'
-import { parseVless, parseVlessBuffer, VLESS_COMMAND_TCP, type VlessHeader } from './vless'
+import { parseVless, parseVlessBuffer, validateVlessHeader, VLESS_COMMAND_TCP, type VlessHeader } from './vless'
 import type { DialResult, ProxyEndpoint } from '../outbound/dial'
 import { relay, TrafficMeter } from '../budget'
 
 import { dial } from '../outbound/dial'
+import { buildDialOptions } from '../outbound/dial-options'
 import { pinnedIpsFor, pinnedRelaysFor } from '../outbound/pinned'
 
 /**
@@ -214,6 +215,19 @@ const SESSION_MAX_PENDING_ASSOC = 20
 const SESSION_IDLE_MS = 10 * 60_000
 /** packet-up 单 POST 上限（官方默认 1MB，这里放宽到 10MB 防误杀） */
 const PACKET_MAX_BYTES = 10 * 1024 * 1024
+
+/**
+ * seq=0（自带 VLESS 头、但**尚未校验 UUID**）的认证前 body 上限。
+ *
+ * ⚠️ 未持 UUID 的人可以 `POST /xhttp/<任意 id>/0` 反复建会话；旧实现
+ * 在读 body 之前就把会话当成已鉴权，随后 `await request.arrayBuffer()`
+ * 最多读 10MB 且不进任何 isolate 预算 —— 并发即可放大内存（1101）。
+ *
+ * 正常 XHTTP packet-up 的 seq=0 只是「VLESS 头 + TLS ClientHello」，
+ * 远小于 16KB；大数据本就该拆到 seq>=1 分包（那里才有完整的 10MB 预算）。
+ * 取 256KiB 留足余量，把「认证前 20 个并发」的最坏占用压到 5MB。
+ */
+const UNAUTH_FIRST_CHUNK_MAX_BYTES = 256 * 1024
 /** 服务端最多缓存未泵出的分包数（官方默认 30） */
 const PACKET_MAX_BUFFERED = 30
 
@@ -522,13 +536,16 @@ function xhttpHeaders(extra?: Record<string, string>): Record<string, string> {
   }
 }
 
-function buildVlessResponseHeader(header: VlessHeader): Uint8Array {
-  const addons = header.addons
-  const out = new Uint8Array(2 + addons.byteLength)
-  out[0] = header.version
-  out[1] = addons.byteLength
-  out.set(addons, 2)
-  return out
+/**
+ * VLESS 响应头固定为 `[version, 0]`（**空 Addons**）。
+ *
+ * Xray 上游 `EncodeHeaderAddons` 除 XTLS-RPRX-Vision 外一律写长度 0；
+ * 本数据面不支持 XTLS（铁律 12 + 需裸 TCP 内省），因此绝不回显客户端
+ * Addons —— 否则客户端会误判服务端已协商 vision，协议直接错乱。
+ * 与 WS 入站路径（`sendResponseHeader(new Uint8Array(0))`）保持同一口径。
+ */
+function buildVlessResponseHeader(): Uint8Array {
+  return new Uint8Array([0, 0])
 }
 
 async function ensureDial(
@@ -541,28 +558,13 @@ async function ensureDial(
     const header = session.header
     if (!header) throw new Error('VLESS 头未到达')
     session.targetLabel = `${header.hostname}:${header.port}`
-    session.dialPromise = dial({
-      hostname: header.hostname,
-      port: header.port,
-      proxies,
-      nat64: config.nat64,
-      concurrent: config.concurrentDial,
-      proxyMode: config.proxyMode,
-      resolvePreferred: config.resolvePreferred,
-      relayPool: {
-        userEntries: config.relayPool || undefined,
-        useBuiltin: config.useBuiltinRelay,
-      },
-      pinnedIps: config.pinnedHosts
-        ? pinnedIpsFor(config.pinnedHosts, header.hostname, header.port)
-        : undefined,
-      pinnedRelays: config.pinnedHosts
-        ? pinnedRelaysFor(config.pinnedHosts, header.hostname, header.port)
-        : undefined,
-      onFailure: (failure) => {
-        recordXhttpDiagnostics(session.targetLabel, failure, `XHTTP 出站失败（${failure.candidate}）：${failure.message}`)
-      },
-    })
+    session.dialPromise = dial(
+      buildDialOptions(config, { hostname: header.hostname, port: header.port }, proxies, {
+        onFailure: (failure) => {
+          recordXhttpDiagnostics(session.targetLabel, failure, `XHTTP 出站失败（${failure.candidate}）：${failure.message}`)
+        },
+      })
+    )
       .then((result) => {
         session.dialResult = result
         return result
@@ -640,23 +642,32 @@ async function handlePacketUpChunk(
 ): Promise<Response | null> {
   void proxies
   const trafficLimit = (config.dataBudgetMB || 0) * 1024 * 1024
-  // seq === 0 自带 VLESS 协议头 —— 这一次请求就是「已鉴权」的。
+  // seq === 0 自带 VLESS 协议头，不占「未鉴权会话」的 20 槽闸门 ——
+  // 否则 25 个随机 GET 就能把真实客户端的 seq=0 也一起挡在门外。
+  //
+  // ⚠️ 但「不占闸门」不等于「已鉴权」：下面用 UNAUTH_FIRST_CHUNK_MAX_BYTES
+  // 给认证前的 body 设了硬上限（旧实现无上限，arrayBuffer() 最多读 10MB
+  // 且不进任何 isolate 预算，并发即可放大内存）。协议头解析成功后
+  // session.header 被设置，会话才真正转为已鉴权。
   const session = getOrCreateSession(sessionId, trafficLimit, 'upload', seq === 0)
   if (!session) {
-    // 容量已满且无可回收的会话 ⇒ 拒绝新建。
-    // ⚠️ 不能改成「踢掉一条正在工作的隧道」—— 那会让别人的连接凭空断掉。
-    return new Response('会话数已达上限，请稍后重试', { status: 503, headers: xhttpHeaders() })
+    recordXhttpDiagnostics(sessionId, { kind: 'session-limit', message: '会话数已达上限', candidate: '' }, '会话数已达上限')
+    // 中性页：不回显任何协议特征（铁律 33）
+    return null
   }
   if (session.closed) return null
 
-  // ⚠️ 先按 Content-Length 拒掉超限的包，**再**读 body。
-  //
-  // 顺序反了的话，一个 100MB 的包会先被 arrayBuffer() **完整读进内存**
-  // 才判超限 —— 那一刻内存已经分配出去了，拒绝也来不及
-  // （Workers isolate 上限 128MB，一次就能把它顶爆）。
+  const isFirstChunk = seq === 0 && !session.header
+
+  // ⚠️ 先按 Content-Length 拒超限，**再**读 body（顺序不能反：
+  // 100MB 的包若先被 arrayBuffer() 完整读入，拒绝时内存已分配出去了）。
+  // 认证前的首包另用更紧的上限，见 UNAUTH_FIRST_CHUNK_MAX_BYTES 注释。
   const declared = Number(request.headers.get('content-length') ?? '')
-  if (Number.isFinite(declared) && declared > PACKET_MAX_BYTES) {
-    return new Response('分包超出上限', { status: 413, headers: xhttpHeaders() })
+  const limit = isFirstChunk ? UNAUTH_FIRST_CHUNK_MAX_BYTES : PACKET_MAX_BYTES
+  if (Number.isFinite(declared) && declared > limit) {
+    if (isFirstChunk) closeSession(sessionId, session)
+    recordXhttpDiagnostics(sessionId, { kind: 'packet-too-large', message: '分包超出上限', candidate: '' }, '分包超出上限')
+    return null
   }
 
   let body: Uint8Array
@@ -664,21 +675,34 @@ async function handlePacketUpChunk(
     const buffer = await request.arrayBuffer()
     body = new Uint8Array(buffer)
   } catch {
-    return new Response('请求体读取失败', { status: 400, headers: xhttpHeaders() })
+    if (isFirstChunk) closeSession(sessionId, session)
+    recordXhttpDiagnostics(sessionId, { kind: 'body-read-error', message: '请求体读取失败', candidate: '' }, '请求体读取失败')
+    return null
   }
-  if (body.byteLength > PACKET_MAX_BYTES) {
-    return new Response('分包超出上限', { status: 413, headers: xhttpHeaders() })
+  if (body.byteLength > limit) {
+    if (isFirstChunk) closeSession(sessionId, session)
+    recordXhttpDiagnostics(sessionId, { kind: 'packet-too-large', message: '分包超出上限', candidate: '' }, '分包超出上限')
+    return null
   }
 
-  if (seq === 0 && !session.header) {
+  if (isFirstChunk) {
     const parsed = parseVlessBuffer(body, config.uuid)
     if (!parsed) {
       closeSession(sessionId, session)
-      return new Response('VLESS 头解析失败', { status: 400, headers: xhttpHeaders() })
+      recordXhttpDiagnostics(sessionId, { kind: 'header-invalid', message: '协议头解析失败或认证未通过', candidate: '' }, '协议头解析失败（含错误 UUID）')
+      // 中性页：认证失败绝不回显 VLESS 关键字（铁律 33，静态脱敏管不到运行期响应体）
+      return null
+    }
+    const reject = validateVlessHeader(parsed.header)
+    if (reject) {
+      closeSession(sessionId, session)
+      recordXhttpDiagnostics(sessionId, { kind: 'header-unsupported', message: reject, candidate: '' }, '协议头不支持：' + reject)
+      return null
     }
     if (parsed.header.command !== VLESS_COMMAND_TCP) {
       closeSession(sessionId, session)
-      return new Response('XHTTP 暂不支持 UDP', { status: 400, headers: xhttpHeaders() })
+      recordXhttpDiagnostics(sessionId, { kind: 'udp-unsupported', message: 'XHTTP 暂不支持 UDP', candidate: '' }, 'UDP 命令不受支持')
+      return null
     }
     publishHeader(session, parsed.header)
     session.targetLabel = `${parsed.header.hostname}:${parsed.header.port}`
@@ -694,11 +718,13 @@ async function handlePacketUpChunk(
       // 预算**永久**打满，之后所有会话（含合法会话）一律 503（假死）。
       if (session.pending.size >= PACKET_MAX_BUFFERED) {
         closeSession(sessionId, session)
-        return new Response('分包缓存已满', { status: 503, headers: xhttpHeaders() })
+        recordXhttpDiagnostics(sessionId, { kind: 'pending-full', message: '分包缓存已满', candidate: '' }, '分包缓存已满')
+        return null
       }
       if (!reserveRetained(session, rest.byteLength)) {
         closeSession(sessionId, session)
-        return new Response('暂存超限', { status: 503, headers: xhttpHeaders() })
+        recordXhttpDiagnostics(sessionId, { kind: 'retain-full', message: '暂存超限', candidate: '' }, '暂存超限')
+        return null
       }
       session.pending.set(seq, rest.slice())
     }
@@ -716,11 +742,13 @@ async function handlePacketUpChunk(
     // 刚预留的那一段不会被归还 ⇒ 额度净泄漏（详见 reserveRetained 注释）。
     if (session.pending.size >= PACKET_MAX_BUFFERED) {
       closeSession(sessionId, session)
-      return new Response('分包缓存已满', { status: 503, headers: xhttpHeaders() })
+      recordXhttpDiagnostics(sessionId, { kind: 'pending-full', message: '分包缓存已满', candidate: '' }, '分包缓存已满')
+      return null
     }
     if (!reserveRetained(session, body.byteLength)) {
       closeSession(sessionId, session)
-      return new Response('暂存超限', { status: 503, headers: xhttpHeaders() })
+      recordXhttpDiagnostics(sessionId, { kind: 'retain-full', message: '暂存超限', candidate: '' }, '暂存超限')
+      return null
     }
     session.pending.set(seq, body.slice())
   }
@@ -739,7 +767,8 @@ async function handleSessionDownlink(
   const trafficLimit = (config.dataBudgetMB || 0) * 1024 * 1024
   const session = getOrCreateSession(sessionId, trafficLimit, 'downlink', false)
   if (!session) {
-    return new Response('会话数已达上限，请稍后重试', { status: 503, headers: xhttpHeaders() })
+    recordXhttpDiagnostics(sessionId, { kind: 'session-limit', message: '会话数已达上限', candidate: '' }, '会话数已达上限')
+    return null
   }
   if (session.closed || session.downlinkStarted) return null
   session.downlinkStarted = true
@@ -750,6 +779,7 @@ async function handleSessionDownlink(
   let bodyController: ReadableStreamDefaultController<Uint8Array> | null = null
   let headerSent = false
   let dialResult: DialResult | null = null
+  let dialPromise: Promise<DialResult> | null = null
 
   const cleanup = (): void => {
     closeSession(sessionId, session)
@@ -770,31 +800,49 @@ async function handleSessionDownlink(
             controller.close()
             return
           }
+          // ⚠️ 铁律 10：协议响应头必须在**出站建连之前**回。
+          // 旧实现先 `await ensureDial(...)` 再 enqueue 响应头，出站稍慢
+          // Xray 客户端就一直等不到 [version, addonsLen]（workerd 判 hung / -1）。
+          // 现在立即回空 Addons 响应头，拨号放到后台，后续 pull 按需等待。
           try {
-            dialResult = await ensureDial(session, config, proxies)
-          } catch {
-            cleanup()
-            controller.close()
-            return
-          }
-          if (cancelled) return
-          // 上行泵随下行一起起（泵的生命周期与下行流绑定）
-          if (!session.pumpStarted) {
-            session.pumpStarted = true
-            void pumpUplink(session, dialResult).catch(() => {
-              /* 泵内已记录 */
-            })
-          }
-          try {
-            controller.enqueue(buildVlessResponseHeader(header))
+            controller.enqueue(buildVlessResponseHeader())
           } catch {
             /* 已关闭 */
           }
           headerSent = true
+          dialPromise = ensureDial(session, config, proxies)
+          void dialPromise
+            .then((dr) => {
+              dialResult = dr
+              // 上行泵随下行一起起（泵的生命周期与下行流绑定）
+              if (session.pumpStarted) return
+              session.pumpStarted = true
+              void pumpUplink(session, dr).catch(() => {
+                /* 泵内已记录 */
+              })
+            })
+            .catch(() => {
+              /* 拨号失败由下方 pull 的 await 统一收尾，这里只消费 rejection */
+            })
           return
         }
-        if (!dialResult) return
-        if (!downReader) downReader = dialResult.readable.getReader()
+        if (!dialResult) {
+          if (!dialPromise) return
+          try {
+            dialResult = await dialPromise
+          } catch {
+            recordXhttpDiagnostics(
+              session.targetLabel || sessionId,
+              { kind: 'dial', message: 'ensureDial 失败', candidate: 'all' },
+              'XHTTP 出站不可用'
+            )
+            cleanup()
+            controller.close()
+            return
+          }
+        }
+        const dr = dialResult
+        if (!downReader) downReader = dr.readable.getReader()
         const { done, value } = await downReader.read()
         if (cancelled) return
         if (done) {
@@ -886,10 +934,12 @@ async function handleStreamOne(
   request: Request,
   config: UserConfig,
   proxies: ProxyEndpoint[]
-): Promise<Response> {
+): Promise<Response | null> {
   const body = request.body
   if (!body) {
-    return new Response('缺少请求体', { status: 400 })
+    recordXhttpDiagnostics('', { kind: 'no-body', message: '缺少请求体', candidate: '' }, '缺少请求体')
+    // 中性页：不回显协议关键字（铁律 33）
+    return null
   }
 
   const stream = new ByteStream(body)
@@ -901,7 +951,14 @@ async function handleStreamOne(
     // cancel 会抛错（被吞掉），解析任务里的 `reader.read()` 仍然挂着，
     // 直到客户端断开或运行时超时。扫描器发半截 VLESS 头即可持续占用资源。
     await stream.cancel('header timeout')
-    return new Response('VLESS 头解析失败', { status: 400 })
+    recordXhttpDiagnostics('', { kind: 'header-invalid', message: '协议头解析失败或认证未通过', candidate: '' }, '协议头解析失败（含错误 UUID）')
+    return null
+  }
+  const reject = validateVlessHeader(parsed.header)
+  if (reject) {
+    await parsed.payload.cancel('unsupported header')
+    recordXhttpDiagnostics(`${parsed.header.hostname}:${parsed.header.port}`, { kind: 'header-unsupported', message: reject, candidate: '' }, '协议头不支持：' + reject)
+    return null
   }
   if (parsed.header.command !== VLESS_COMMAND_TCP) {
     // 必须显式取消剩余请求体。
@@ -909,68 +966,48 @@ async function handleStreamOne(
     // `parseVless()` 结尾调用了 `stream.release()`，把 body 的 reader 交到了
     // `parsed.payload` 手上。直接 return 响应的话，没有任何一方去取消它：
     // 客户端还在继续发字节，服务端不读，这条读取任务会一直挂到运行时超时。
-    // 扫描器发一个 UDP 命令 + 半截 body 就能持续占用资源。
-    //
-    // ⚠️ 不能写成 `body.cancel()` —— 原始流已被 getReader() 锁定，cancel 会抛错
-    // 并被吞掉（见 protocols/stream.ts 的注释）。必须取消 release() 出来的那个流：
-    // 它的 cancel 会转发给底层 reader。
+    // ⚠️ 不能写成 `body.cancel()`（reader 已锁定），必须取消 release() 出来的流。
     await parsed.payload.cancel('unsupported UDP')
-    return new Response('XHTTP 暂不支持 UDP', { status: 400 })
+    recordXhttpDiagnostics(`${parsed.header.hostname}:${parsed.header.port}`, { kind: 'udp-unsupported', message: 'XHTTP 暂不支持 UDP', candidate: '' }, 'UDP 命令不受支持')
+    return null
   }
 
-  let dialResult: DialResult
-  try {
-    dialResult = await dial({
-    hostname: parsed.header.hostname,
-    port: parsed.header.port,
-    proxies,
-    nat64: config.nat64,
-    concurrent: config.concurrentDial,
-    // 代理调度模式（与 WS 入站路径保持一致）
-    proxyMode: config.proxyMode,
-    // ⚠️ 这两项必须与 WS 入站路径保持一致：
-    // 少了它们，XHTTP 会**用运行时自己的 DNS 解析**目标域名 ——
-    // 而运行时的解析结果可能落在 Cloudflare 网段（Worker 不能连回自家 Anycast），
-    // 表现为「XHTTP 节点延迟全是 -1」，但服务端看不出任何错误。
-    resolvePreferred: config.resolvePreferred,
-    relayPool: {
-      userEntries: config.relayPool || undefined,
-      useBuiltin: config.useBuiltinRelay,
-    },
-    // 固定落地 IP 映射（与 WS 入站路径保持一致）
-    pinnedIps: config.pinnedHosts
-      ? pinnedIpsFor(config.pinnedHosts, parsed.header.hostname, parsed.header.port)
-      : undefined,
-    // 固定反代入口（`域名=r:IP`，与 WS 入站路径保持一致）
-    pinnedRelays: config.pinnedHosts
-      ? pinnedRelaysFor(config.pinnedHosts, parsed.header.hostname, parsed.header.port)
-      : undefined,
-    // 失败分级上报：XHTTP 出站失败此前**完全不可诊断**（表现就是客户端延迟 -1），
-    // 排查时看不到任何线索。现在记录到诊断端点。
-    onFailure: (failure) => {
-      recordXhttpDiagnostics(
-        `${parsed.header.hostname}:${parsed.header.port}`,
-        failure,
-        `XHTTP 出站失败（${failure.candidate}）：${failure.message}`
-      )
-    },
+  // ⚠️ 铁律 10：协议响应头必须在**出站建连之前**回。
+  // 旧实现在这里 `await dial(...)` 之后才构造响应流，出站稍慢 Xray 客户端
+  // 就一直等不到 [version, addonsLen]（workerd 判 hung / 客户端 -1）。
+  // 现在先构造固定的空 Addons 响应头，拨号放到后台，由响应流的 pull 按需等待。
+  const header = new Uint8Array([0, 0])
+
+  let dialResult: DialResult | null = null
+  const dialPromise: Promise<DialResult> = dial(
+    buildDialOptions(config, { hostname: parsed.header.hostname, port: parsed.header.port }, proxies, {
+      onFailure: (failure) => {
+        recordXhttpDiagnostics(
+          `${parsed.header.hostname}:${parsed.header.port}`,
+          failure,
+          `XHTTP 出站失败（${failure.candidate}）：${failure.message}`
+        )
+      },
     })
-  } catch (err) {
-    // 出站失败此前会抛到最外层、变成无信息的 500。
-    // 这里转成受控响应（不暴露目标地址），并记进诊断端点。
+  ).catch((err) => {
+    // 出站失败：留痕 + 取消上行，绝不把内部错误回显给未鉴权者（铁律 33）。
+    // 真正的失败处理在响应流的 pull 里（关闭流），这里只做清理。
     recordXhttpDiagnostics(
       `${parsed.header.hostname}:${parsed.header.port}`,
       { kind: 'dial', message: String(err), candidate: 'all' },
       `XHTTP 出站全部失败：${String(err)}`
     )
-    // 同理：上行流是从 ByteStream 释放出来的包装流，取消它才会真正取消底层 reader
     try {
       void parsed.payload.cancel('dial failed').catch(() => {})
     } catch {
       /* 已关闭 */
     }
-    return new Response('出站不可用', { status: 502 })
-  }
+    throw err
+  })
+
+  // 即便客户端在 pull 触发前就断开，也不要让后台拨号变成未处理异常；
+  // 上行中继在 dialPromise 就绪后启动（见下方 startUplinkRelay 之后）。
+  void dialPromise.catch(() => {})
 
   // 上行：请求体剩余部分 → 出站
   //
@@ -978,20 +1015,10 @@ async function handleStreamOne(
   // 目标站会收到 RST 而来不及把响应发回来。
   // 对比：WebSocket 入站路径只 releaseLock 不 close，是正常的。
   //
-  // 实际发起放在下方（响应流建完之后）—— 上行计量器需要那里的作用域。
+  // 实际发起放在 dialPromise 就绪之后（响应流建完、且客户端已读到响应头）——
+  // 上行计量器需要那里的作用域。
   // 下行：出站 → 响应体，由下方 combined 流**直接**从 dialResult.readable 拉取。
   // 中间不再套一层 TransformStream：同一份下行少一次拷贝与一对流控制器。
-
-  // VLESS 响应头：版本(1) + Addons 长度(1) + Addons（原样回显请求里的 Addons）。
-  // Xray 客户端要求先读到这个头才认为入站已建立，缺失时会把后续下行数据当作协议错误丢弃。
-  const addons = parsed.header.addons
-  if (addons.byteLength > 255) {
-    return new Response('Addons 长度超出 VLESS 协议上限', { status: 400 })
-  }
-  const header = new Uint8Array(2 + addons.byteLength)
-  header[0] = parsed.header.version
-  header[1] = addons.byteLength
-  header.set(addons, 2)
 
   // 把响应头与下行流拼接：头部先行，下行数据随后。
   // ⚠️ **不能用 async start 承载整个下行**：
@@ -1040,9 +1067,10 @@ async function handleStreamOne(
       { kind: 'budget', message: reason, candidate: 'traffic' },
       reason
     )
-    if (dialResult.close) {
+    const dr = dialResult
+    if (dr?.close) {
       try {
-        void dialResult.close()
+        void dr.close()
       } catch {
         /* 已关闭 */
       }
@@ -1061,40 +1089,87 @@ async function handleStreamOne(
     return true
   }
 
-  void relay(
-    parsed.payload,
-    dialResult.writable,
-    undefined,
-    false,
-    onUpstreamChunk,
-    (err, phase) => {
-      // 原先所有中继异常都被吞成一句「忽略传输错误」，
-      // 客户端取消、上游重置、写入失败在诊断里长得一模一样。
-      // 这里按「读/写阶段 + 错误形态」分类，写进 /__diag 的 xhttp 记录。
-      const message = err instanceof Error ? err.message : String(err)
-      let kind = `relay-${phase}`
-      if (/cancel|abort|closed/i.test(message)) kind = `relay-${phase}-client-cancel`
-      else if (/reset|broken pipe/i.test(message)) kind = `relay-${phase}-upstream-reset`
-      recordXhttpDiagnostics(
-        `${parsed.header.hostname}:${parsed.header.port}`,
-        { kind, message: message.slice(0, 200), candidate: dialResult.endpoint },
-        `XHTTP 中继${phase === 'read' ? '读上游' : '写目标'}失败（${kind}）：${message.slice(0, 120)}`
-      )
-    }
-  ).catch(() => {
-    /* 客户端取消 / 出站已关闭：写入失败属预期，不构成未处理异常 */
-  })
+  /** 出站就绪后才启动上行中继（此时响应头已经先回给客户端了） */
+  const startUplinkRelay = (dr: DialResult): void => {
+    void relay(
+      parsed.payload,
+      dr.writable,
+      undefined,
+      false,
+      onUpstreamChunk,
+      (err, phase) => {
+        // 原先所有中继异常都被吞成一句「忽略传输错误」，
+        // 客户端取消、上游重置、写入失败在诊断里长得一模一样。
+        // 这里按「读/写阶段 + 错误形态」分类，写进 /__diag 的 xhttp 记录。
+        const message = err instanceof Error ? err.message : String(err)
+        let kind = `relay-${phase}`
+        if (/cancel|abort|closed/i.test(message)) kind = `relay-${phase}-client-cancel`
+        else if (/reset|broken pipe/i.test(message)) kind = `relay-${phase}-upstream-reset`
+        recordXhttpDiagnostics(
+          `${parsed.header.hostname}:${parsed.header.port}`,
+          { kind, message: message.slice(0, 200), candidate: dr.endpoint },
+          `XHTTP 中继${phase === 'read' ? '读上游' : '写目标'}失败（${kind}）：${message.slice(0, 120)}`
+        )
+      }
+    ).catch(() => {
+      /* 客户端取消 / 出站已关闭：写入失败属预期，不构成未处理异常 */
+    })
+  }
+
+  // 出站就绪即启动上行中继（与旧实现一致：不必等响应流被消费）。
+  // 响应头已经先回，所以这里晚一点启动不会影响客户端握手判定。
+  void dialPromise
+    .then((dr) => {
+      // 无论客户端是否已取消，都把结果记下来：cancel() 需要它来关 socket
+      dialResult = dr
+      if (cancelled) {
+        // 客户端在拨号途中就取消了：别让刚建好的 socket 泄漏到超时
+        try {
+          void dr.readable.cancel('client cancelled')
+        } catch {
+          /* 已取消 */
+        }
+        if (dr.close) {
+          try {
+            void dr.close()
+          } catch {
+            /* 已关闭 */
+          }
+        }
+        return
+      }
+      startUplinkRelay(dr)
+    })
+    .catch(() => {})
 
   const combined = new ReadableStream<Uint8Array>({
     start(controller) {
       bodyController = controller
-      // 只入队响应头（2 字节），立即结束 start
+      // 只入队响应头（2 字节），立即结束 start —— 铁律 10 + 铁律 18
       controller.enqueue(header)
       headerSent = true
     },
     async pull(controller) {
       if (cancelled || !headerSent) return
-      if (!downReader) downReader = dialResult.readable.getReader()
+      // 出站建连在后台进行，这里按需等待。客户端此刻**已经读到响应头**，
+      // 因此不会出现「等出站时连响应头都拿不到」的死锁（旧实现的病灶）。
+      if (!dialResult) {
+        try {
+          dialResult = await dialPromise
+        } catch {
+          // dialPromise 的 catch 已留痕并取消上行，这里正常收尾即可
+          try {
+            controller.close()
+          } catch {
+            /* 已关闭 */
+          }
+          return
+        }
+        // dialPromise 的 .then 已负责启动上行中继，这里只等出站就绪
+      }
+      // 上面的分支确保 dialResult 已赋值（否则已 return）
+      const dr = dialResult!
+      if (!downReader) downReader = dr.readable.getReader()
       try {
         const { done, value } = await downReader.read()
         if (cancelled) return
@@ -1102,9 +1177,9 @@ async function handleStreamOne(
           // 下行结束 = 连接结束：必须关闭出站 Socket。
           // 只 close 响应流的话 TCP 连接仍然开着，一直占着
           // 「单请求 6 条并发出站」里的一个槽位（同 isolate 的其它请求更容易撞上限）。
-          if (dialResult.close) {
+          if (dr.close) {
             try {
-              void dialResult.close()
+              void dr.close()
             } catch {
               /* 已关闭 */
             }
@@ -1124,9 +1199,10 @@ async function handleStreamOne(
         if (cancelled) return
         // 之前这里 controller.close() —— 客户端会把「异常截断」当成正常 EOF，
         // 既不能重试也无法区分。现在把错误传给流，同时保留 Socket 关闭。
-        if (dialResult.close) {
+        const dr = dialResult
+        if (dr?.close) {
           try {
-            void dialResult.close()
+            void dr.close()
           } catch {
             /* 已关闭 */
           }
@@ -1144,14 +1220,17 @@ async function handleStreamOne(
       //
       // 只 cancel readable 的话，TCP 连接仍然开着 —— 在 Workers 上它会一直占着
       // 「单请求 6 条并发出站」里的一个槽位，同 isolate 的其它请求更容易撞上限。
+      // ⚠️ 客户端可能在出站拨号完成前就取消，此时 dialResult 仍为 null ——
+      // 那种情况由上面 dialPromise.then 的 cancelled 分支兜底关闭。
+      const dr = dialResult
       try {
-        void dialResult.readable.cancel(reason)
+        void dr?.readable.cancel(reason)
       } catch {
         /* 已取消 */
       }
-      if (dialResult.close) {
+      if (dr?.close) {
         try {
-          void dialResult.close()
+          void dr.close()
         } catch {
           /* 已关闭 */
         }

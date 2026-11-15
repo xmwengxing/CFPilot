@@ -40,12 +40,15 @@ const PROBE_WINDOW_MS = 10 * 60 * 1000
 const PROBE_WINDOW_BYTES = 6 * 1024 * 1024 * 1024
 let probeWindowStart = Date.now()
 let probeWindowServed = 0
+/** 本窗口内已接受的 WS 探针连接数（P2 #16，与 GET 流共享 10 分钟窗口） */
+let probeWindowWsAccepts = 0
 
 /** 窗口过期就清零；返回当前窗口开始时刻 */
 function rollProbeWindow(now: number): void {
   if (now - probeWindowStart >= PROBE_WINDOW_MS) {
     probeWindowStart = now
     probeWindowServed = 0
+    probeWindowWsAccepts = 0
   }
 }
 
@@ -149,6 +152,21 @@ export async function handleEdgeProbe(request: Request): Promise<Response> {
   // 1) WebSocket 101 真连接握手校验
   const upgrade = request.headers.get('Upgrade')?.toLowerCase()
   if (upgrade === 'websocket') {
+    // P2 #16：WS 分支此前完全绕过 6GiB 预算（预算只在 GET 流分支的 pull 里累加）。
+    // 加 isolate 级软限流：每窗口最多 60 次 accept，超限直接拒绝 101 ——
+    // 防「完成握手后一字节不发占 5s」的零成本资源占用。仍不加鉴权（铁律 5）。
+    const now2 = Date.now()
+    rollProbeWindow(now2)
+    if (++probeWindowWsAccepts > 60) {
+      return new Response(JSON.stringify({ ok: false, error: 'probe budget exhausted' }), {
+        status: 429,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'Retry-After': String(Math.ceil((probeWindowStart + PROBE_WINDOW_MS - now2) / 1000)),
+        },
+      })
+    }
     const pair = new WebSocketPair()
     const [client, server] = Object.values(pair) as unknown as [WebSocket, WebSocket]
     server.accept()
@@ -163,6 +181,9 @@ export async function handleEdgeProbe(request: Request): Promise<Response> {
         server.send(
           JSON.stringify({
             pong: true,
+            // 服务端时间戳（P2 #16）：客户端用同一条真实 101 信道即可算 RTT，
+            // 不需要另起 TCP 探测。运行期响应体，无脱敏与指纹顾虑。
+            serverTime: Date.now(),
             colo: (request as unknown as { cf?: { colo?: string } }).cf?.colo ?? 'UNK',
             clientIp: request.headers.get('CF-Connecting-IP') ?? '',
           })
@@ -254,19 +275,6 @@ export async function handleEdgeProbe(request: Request): Promise<Response> {
       'Access-Control-Allow-Origin': '*',
       'X-Probe-Bytes': String(bytes),
       'X-Probe-Nonce': randomHex(4),
-    },
-  })
-}
-
-/** 处理探针相关的 CORS 预检 */
-export function handleProbeOptions(): Response {
-  return new Response(null, {
-    status: 204,
-    headers: {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-      'Access-Control-Max-Age': '86400',
     },
   })
 }

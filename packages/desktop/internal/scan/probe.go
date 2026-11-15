@@ -36,6 +36,7 @@ import (
 	"math"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -795,6 +796,8 @@ func MeasureThroughput(ctx context.Context, opt MeasureOptions) DownloadResult {
 					}
 					// 探针端点独有标记：没有这个头的 200 是别的项目的欢迎页，
 					// 把它的 HTML 当成「测速数据」会产出假阳性节点。
+					// P2 #16（与 CLI true-probe.ts 同口径）：头存在还要校验**值** ——
+					// 内核回的是请求钳制字节数（≥1MiB），假值 / 0 / 注入的中间层头都不可信。
 					if !strings.Contains(strings.ToLower(head), "x-probe-bytes:") {
 						stateMu.Lock()
 						headerMismatch = true
@@ -802,6 +805,22 @@ func MeasureThroughput(ctx context.Context, opt MeasureOptions) DownloadResult {
 						setError("目标不支持探针测速（响应头缺少 x-probe-bytes，不是 CFPilot 探针端点）")
 						finish()
 						return
+					}
+					for _, line := range strings.Split(head, "\r\n") {
+						if !strings.HasPrefix(strings.ToLower(line), "x-probe-bytes:") {
+							continue
+						}
+						value := strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
+						declared, parseErr := strconv.Atoi(value)
+						if parseErr != nil || declared < 1024*1024 {
+							stateMu.Lock()
+							headerMismatch = true
+							stateMu.Unlock()
+							setError(fmt.Sprintf("目标探针响应头异常（x-probe-bytes=%s），不是可信 CFPilot 探针端点", value))
+							finish()
+							return
+						}
+						break
 					}
 					headerDone = true
 					// 响应头之后的字节才算负载（可能和响应头在同一个 chunk 里）。

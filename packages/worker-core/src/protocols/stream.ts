@@ -199,6 +199,36 @@ export class ByteStream {
   }
 }
 
+/**
+ * 把任意形态的 WebSocket 消息体归一成 Uint8Array。
+ *
+ * 真机实测：Cloudflare 运行时下 `event.data` **不一定是 ArrayBuffer**，
+ * 也可能是 Blob（只有 `.arrayBuffer()`）。早期实现只处理了 ArrayBuffer，
+ * 结果每条消息都被静默丢弃，表现为「101 成功但永远收不到数据」，客户端全部 -1。
+ *
+ * 导出给 `websocket-self.ts` 的 message 处理器共用 —— 那边的生产路径
+ * 曾直接 `new Uint8Array(data as ArrayBuffer)`，等于把这里修好的工具晾着没接上。
+ *
+ * 返回 Promise 时（Blob）调用方**必须 await**，且在入任何队列之前完成，
+ * 否则多条消息的字节顺序会乱（TLS 分片换序 = bad_record_mac）。
+ */
+export function normalizeWsMessage(data: unknown): Uint8Array | Promise<Uint8Array> | null {
+  if (data === null || data === undefined) return null
+  if (typeof data === 'string') return new TextEncoder().encode(data)
+  if (data instanceof ArrayBuffer) return new Uint8Array(data)
+  if (ArrayBuffer.isView(data)) {
+    const view = data as ArrayBufferView
+    return new Uint8Array(view.buffer, view.byteOffset, view.byteLength)
+  }
+  const maybeBlob = data as { arrayBuffer?: () => Promise<ArrayBuffer> }
+  if (typeof maybeBlob.arrayBuffer === 'function') {
+    return maybeBlob.arrayBuffer().then((buf) => new Uint8Array(buf))
+  }
+  return null
+}
+
+/** ⚠️ 已废弃（P2 #19）：生产路径用的是 websocket-self.ts 的 message 处理器（P2 #4 已接入 
+ormalizeWsMessage）。本函数仅测试引用，保留仅为兼容。 */
 /** 将 WebSocket 消息转换为字节流 */
 export function wsToByteStream(ws: WebSocket): ReadableStream<Uint8Array> {
   let controller: ReadableStreamDefaultController<Uint8Array> | null = null
@@ -215,30 +245,8 @@ export function wsToByteStream(ws: WebSocket): ReadableStream<Uint8Array> {
     }
   }
 
-  /**
-   * 把任意形态的消息体归一成 Uint8Array。
-   *
-   * 真机实测：Cloudflare 运行时下 `event.data` **不一定是 ArrayBuffer**，
-   * 也可能是 Blob（只有 `.arrayBuffer()`）。早期实现只处理了 ArrayBuffer，
-   * 结果每条消息都被静默丢弃，表现为「101 成功但永远收不到数据」，客户端全部 -1。
-   */
-  const normalize = (data: unknown): Uint8Array | Promise<Uint8Array> | null => {
-    if (data === null || data === undefined) return null
-    if (typeof data === 'string') return new TextEncoder().encode(data)
-    if (data instanceof ArrayBuffer) return new Uint8Array(data)
-    if (ArrayBuffer.isView(data)) {
-      const view = data as ArrayBufferView
-      return new Uint8Array(view.buffer, view.byteOffset, view.byteLength)
-    }
-    const maybeBlob = data as { arrayBuffer?: () => Promise<ArrayBuffer> }
-    if (typeof maybeBlob.arrayBuffer === 'function') {
-      return maybeBlob.arrayBuffer().then((buf) => new Uint8Array(buf))
-    }
-    return null
-  }
-
   const flush = (data: unknown): void => {
-    const result = normalize(data)
+    const result = normalizeWsMessage(data)
     if (result === null) return
     chain = chain
       .then(() => (result instanceof Promise ? result : result))

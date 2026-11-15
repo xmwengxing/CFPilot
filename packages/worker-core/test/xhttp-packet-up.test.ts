@@ -158,14 +158,15 @@ describe('XHTTP packet-up 端到端（mock 出站）', () => {
     await vi.waitFor(() => expect(written.length).toBeGreaterThan(0))
   })
 
-  it('非法 VLESS 头返回 400', async () => {
+  it('非法 VLESS 头返回中性页（不回显协议关键字）', async () => {
     setupDial()
     const post = new Request('https://worker.test/xhttp/sess-bad/0', {
       method: 'POST',
       body: Buffer.from(new Uint8Array([0, 1, 2, 3])),
     })
-    const res = (await handleXhttp(post, baseConfig, []))!
-    expect(res.status).toBe(400)
+    const res = await handleXhttp(post, baseConfig, [])
+    // 铁律 33：认证/解析失败一律中性页，绝不回显 400 + VLESS 关键字
+    expect(res).toBeNull()
     expect(dialMock).not.toHaveBeenCalled()
   })
 })
@@ -240,6 +241,7 @@ describe('XHTTP 暂存逐块记账（审计 B1）', () => {
     // 会话 B：首块 10MiB（20+10=30≤32）应过；第二块（30+10=40>32）必须被拒。
     // 旧实现 A 全额归还后预算为 0，B 两块都会通过 —— 据此区分。
     expect((await post('b1b', 1, big))!.status).toBe(200)
-    expect((await post('b1b', 2, big))!.status).toBe(503)
+    // 暂存超限：中性页（不回显 503 明文），额度仍被正确占用
+    expect(await post('b1b', 2, big)).toBeNull()
   })
 })

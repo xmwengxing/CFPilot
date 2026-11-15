@@ -15,8 +15,13 @@
 import type { ByteStream } from './stream'
 import { readAddressFromStream } from './address'
 
+export const VLESS_VERSION = 0x00
 export const VLESS_COMMAND_TCP = 0x01
 export const VLESS_COMMAND_UDP = 0x02
+/** Mux（smux 多流）—— 需要多路复用状态机，本数据面不支持 */
+export const VLESS_COMMAND_MUX = 0x03
+/** 反向代理命令 */
+export const VLESS_COMMAND_RVS = 0x04
 
 export interface VlessHeader {
   version: number
@@ -116,6 +121,71 @@ export interface VlessBufferResult {
   header: VlessHeader
   /** 协议头占用的字节数，其后即为负载 */
   consumed: number
+}
+
+/**
+ * 从 Addons protobuf 里取 `flow` 字符串（field 1, wire type 2）。
+ *
+ * 只需要判「有没有 flow」：XTLS-RPRX-Vision 需要裸 TCP 与 TLS 记录内省，
+ * Workers 的 WS 是消息帧且铁律 12 禁止终结出站 TLS，物理上无法实现。
+ * 这里不做完整 protobuf 解析，只按 tag 跳过不认识的字段。
+ */
+export function vlessFlow(addons: Uint8Array): string {
+  let i = 0
+  while (i < addons.byteLength) {
+    const tag = addons[i++]!
+    const field = tag >> 3
+    const wire = tag & 0x07
+    if (wire === 2) {
+      let len = 0
+      let shift = 0
+      let b = 0
+      do {
+        if (i >= addons.byteLength) return ''
+        b = addons[i++]!
+        len |= (b & 0x7f) << shift
+        shift += 7
+      } while (b & 0x80)
+      if (i + len > addons.byteLength) return ''
+      if (field === 1 && len > 0) {
+        return TEXT_DECODER.decode(addons.subarray(i, i + len))
+      }
+      i += len
+    } else if (wire === 0) {
+      while (i < addons.byteLength && (addons[i++]! & 0x80) !== 0) {
+        /* 跳过 varint */
+      }
+    } else {
+      // 不认识的 wire type：没必要继续冒险解析
+      return ''
+    }
+  }
+  return ''
+}
+
+/**
+ * 校验 VLESS 协议头，返回**明确拒绝原因**（null = 合法）。
+ *
+ * 此前 `parseVlessBuffer` 只读不校验：客户端开 Mux(0x03) 会把 smux 首字节
+ * 当 addressType 解析，表现为「挂且诊断看不出原因」；非 0 version 也被接受；
+ * `flow=xtls-rprx-vision` 被静默当成普通 TCP，客户端误判已协商 vision。
+ * 集中在这里，让 WS 与 XHTTP 两条入站路径共用同一套判定。
+ */
+export function validateVlessHeader(header: VlessHeader): string | null {
+  if (header.version !== VLESS_VERSION) {
+    return `VLESS 版本不支持：${header.version}`
+  }
+  if (header.command === VLESS_COMMAND_MUX || header.command === VLESS_COMMAND_RVS) {
+    return 'VLESS Mux/反向命令不支持：请关闭客户端多路复用'
+  }
+  if (header.command !== VLESS_COMMAND_TCP && header.command !== VLESS_COMMAND_UDP) {
+    return `VLESS 命令不支持：${header.command}`
+  }
+  const flow = vlessFlow(header.addons)
+  if (flow) {
+    return `VLESS flow(${flow}) 不支持：请关闭客户端 flow`
+  }
+  return null
 }
 
 /**

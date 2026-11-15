@@ -50,7 +50,7 @@ function endlessBody(first: Uint8Array): { body: ReadableStream<Uint8Array>; sta
 }
 
 describe('XHTTP + UDP 命令', () => {
-  it('返回 400 且取消剩余请求体', async () => {
+  it('返回中性页且取消剩余请求体', async () => {
     const { body, state } = endlessBody(vlessHeader(0x02))
     const request = new Request('https://data.example.com/xhttp', {
       method: 'POST',
@@ -59,8 +59,9 @@ describe('XHTTP + UDP 命令', () => {
       duplex: 'half',
     } as RequestInit)
 
-    const response = (await handleXhttp(request, config(), []))!
-    expect(response.status).toBe(400)
+    const response = await handleXhttp(request, config(), [])
+    // 铁律 33：不支持的命令走中性页，不回显 400 + XHTTP 关键字
+    expect(response).toBeNull()
     expect(state.cancelled).toBe('unsupported UDP')
   })
 

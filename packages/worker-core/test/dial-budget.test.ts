@@ -86,6 +86,52 @@ describe('DoH 截止时间（deadline）', () => {
     const result = await resolveEndpointIps('1.2.3.4', 443, { deadline: Date.now() - 1000 })
     expect(result).toEqual([{ hostname: '1.2.3.4', port: 443 }])
   })
+
+  it('skipTxt=true 时只查 A 记录，不发 TXT 子请求（首包延迟治理）', async () => {
+    // 真机量化：主路径无条件查 TXT 时，串行遍历多家境外 DoH 会把首次
+    // TLS 首包拖到 9~10 秒；跳过 TXT + 1.2s 短预算后降到 1.2~2.6 秒。
+    clearDnsCache()
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ Status: 0, Answer: [{ type: 1, data: '93.184.216.34' }] }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const result = await resolveEndpointIps('txt-skip.example', 443, {
+        skipTxt: true,
+        deadline: Date.now() + 1200,
+      })
+      expect(result).toEqual([{ hostname: '93.184.216.34', port: 443 }])
+      const urls = fetchMock.mock.calls.map((c) => String(c[0]))
+      expect(urls.length).toBeGreaterThan(0)
+      expect(urls.every((u) => !u.includes('type=TXT'))).toBe(true)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('短 deadline 会夹住每次 DoH 查询的超时（不会各自等满 4s）', async () => {
+    clearDnsCache()
+    const fetchMock = vi.fn().mockImplementation((_url: string, init: { signal?: AbortSignal }) => {
+      // 模拟一家 provider 一直不返回：AbortSignal.timeout 应把它掐断
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const started = Date.now()
+    try {
+      const result = await resolveEndpointIps('slow-doh.example', 443, {
+        skipTxt: true,
+        deadline: Date.now() + 300,
+      })
+      expect(result).toEqual([])
+      // 两家 provider 并行 + 短预算，总耗时应远小于 DOH_TIMEOUT_MS(4s)
+      expect(Date.now() - started).toBeLessThan(1500)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
 })
 
 describe('拨号总预算（budgetMs）', () => {

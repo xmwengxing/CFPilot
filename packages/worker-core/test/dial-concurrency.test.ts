@@ -39,10 +39,15 @@ interface ConnectRecord {
   host: string
   /** 该次 connect() 发起时，已在飞的连接数（含自己） */
   inflight: number
+  /** 发起时刻（ms），用于验证滑动窗口「失败即补发」 */
+  at: number
 }
 
 /** 每次连接建立的模拟耗时（ms）—— 让并发窗口可观察 */
 const CONNECT_DELAY_MS = 5
+/** 故意拖慢的候选：验证它不会卡住整批（滑动窗口 vs 屏障批次） */
+const SLOW_DELAY_MS = 120
+let slowHost = ''
 
 /** 这些地址的 connect() 会失败 */
 let failHosts: Set<string> = new Set()
@@ -59,7 +64,7 @@ vi.mock('cloudflare:sockets', () => ({
   connect: (address: { hostname: string; port: number }) => {
     inflight++
     peak = Math.max(peak, inflight)
-    records.push({ host: address.hostname, inflight })
+    records.push({ host: address.hostname, inflight, at: Date.now() })
 
     // 释放并发名额：建连成功 / 失败 / 被 close 都只释放一次
     let released = false
@@ -74,7 +79,9 @@ vi.mock('cloudflare:sockets', () => ({
       // Workers 语义：`connect()` 同步返回 socket，建连结果在 `opened` 上；
       // 建连期间这条连接**占着**并发名额
       opened: (async () => {
-        await new Promise((resolve) => setTimeout(resolve, CONNECT_DELAY_MS))
+        await new Promise((resolve) =>
+          setTimeout(resolve, host === slowHost ? SLOW_DELAY_MS : CONNECT_DELAY_MS)
+        )
         release()
         if (failAll || failHosts.has(host)) throw new Error(`连接失败：${host}`)
       })(),
@@ -94,6 +101,7 @@ vi.mock('cloudflare:sockets', () => ({
 beforeEach(() => {
   failHosts = new Set()
   failAll = false
+  slowHost = ''
   records = []
   inflight = 0
   peak = 0
@@ -225,11 +233,43 @@ describe('拨号并发宽度收敛到平台上限（6 条）', () => {
     expect(caught).toBeInstanceOf(Error)
     const message = (caught as Error).message
     expect(message.length).toBeGreaterThan(0)
-    // 总候选数 / 批次数 / 具体失败原因都要保留（诊断不能丢）
+    // 总候选数 / 并发宽度 / 具体失败原因都要保留（诊断不能丢）。
+    // P1 #7 后改为滑动窗口，错误文案里的「分 N 批」变成「最多 6 个并发」。
     expect(message).toContain('均失败')
-    expect(message).toMatch(/分 \d+ 批/)
+    expect(message).toContain('滑动窗口')
+    expect(message).toContain('最多 6 个并发')
     expect(message).toContain('连接失败')
     expect(message).toContain(OPTIMIZED_HOSTS[0]!)
+  })
+
+  it('批内一个慢候选不会阻塞后续候选补发（滑动窗口的核心收益）', async () => {
+    // 第 1 个候选故意慢 120ms，其余 5ms 失败。
+    // 屏障批次：要等第 1 批 6 个**全部** settle 才发第 2 批 —— 第 7 个
+    // 候选必须等到慢候选失败后才能发起。
+    // 滑动窗口：5 个快速失败的候选各自立即补发，第 7 个在 5ms 级就发起。
+    slowHost = OPTIMIZED_HOSTS[0]!
+    failAll = true
+    const hosts = OPTIMIZED_HOSTS.slice(0, 8)
+    await expect(
+      dial({
+        hostname: TARGET,
+        port: 443,
+        optimizedIps: hosts.map((ip) => ({ ip, port: 443 })),
+        concurrent: true,
+        timeoutMs: 2000,
+      })
+    ).rejects.toThrow()
+
+    const slow = records.find((r) => r.host === slowHost)!
+    const seventh = records.find((r) => r.host === hosts[6]!)!
+    expect(slow).toBeDefined()
+    expect(seventh).toBeDefined()
+    // 第 7 个候选在慢候选失败之前就已发起（差值明显小于 SLOW_DELAY_MS）
+    expect(seventh.at - slow.at).toBeLessThan(SLOW_DELAY_MS / 2)
+    // 全部 8 个候选都被尝试，窗口化 ≠ 截断
+    expect(new Set(records.map((r) => r.host)).size).toBeGreaterThanOrEqual(8)
+    // 并发宽度仍守住平台上限
+    expect(peak).toBeLessThanOrEqual(MAX_SIMULTANEOUS_CONNECTS)
   })
 
   it('反代只在主竞速全失败后分批兜底，且每批 ≤ 6 并发', async () => {

@@ -27,7 +27,8 @@
  * 完整实验记录见 docs/self-developed-dataplane-design.md §1。
  */
 
-import { isTargetBlockedError } from './guard'
+import { isTargetBlockedError, ipv4ToInt } from './guard'
+import type { ProxyKind } from '../types'
 
 /**
  * Cloudflare 官方公告的 IPv4 网段（15 条）。
@@ -84,19 +85,7 @@ const CF_IPV4_RANGES: ReadonlyArray<readonly [string, number]> = [
   ...CF_IPV4_SUPPLEMENT,
 ]
 
-/** IPv4 → 32 位无符号整数 */
-function ipv4ToInt(ip: string): number | null {
-  const parts = ip.split('.')
-  if (parts.length !== 4) return null
-  let value = 0
-  for (const part of parts) {
-    if (!/^\d{1,3}$/.test(part)) return null
-    const n = Number(part)
-    if (n > 255) return null
-    value = value * 256 + n
-  }
-  return value >>> 0
-}
+// ipv4ToInt 已收归 guard.ts 并导出（P2 #19：此前两个文件各有一份逐字重复的实现）
 
 /** 把一组 CIDR 表编译成 `[网络号, 掩码]` 整数对，判定降到纯位运算 */
 function compileCidrs(
@@ -221,7 +210,8 @@ export interface RouteInput {
  * 与 HTTP 代理的「明文 CONNECT 到代理、再由代理做 CONNECT」不同。
  * 这是本项目相对通用实现的增强。
  */
-export type ProxyKind = 'direct' | 'socks5' | 'http' | 'https'
+// ProxyKind 已收归 types.ts（P2 #19 单一来源），此处保留注释防止误删
+// export type ProxyKind = ... → see types.ts
 
 /**
  * 生成出站候选列表（按优先级排列）。

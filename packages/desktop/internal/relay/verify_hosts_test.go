@@ -38,8 +38,8 @@ func TestResolveVerifyHostsDefaults(t *testing.T) {
 	if len(got) > 3 {
 		t.Errorf("终检网址上限 3 个，实际 %d", len(got))
 	}
-	if got[0] != "cloudflare.com" {
-		t.Errorf("内置清单第一个应是 cloudflare.com，实际 %q", got[0])
+	if got[0] != "api.x.com" {
+		t.Errorf("内置清单第一个应是 api.x.com（WAF 判据最强），实际 %q", got[0])
 	}
 }
 

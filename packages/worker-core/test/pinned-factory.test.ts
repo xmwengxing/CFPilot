@@ -126,3 +126,20 @@ describe('出厂 relayPool（反代入口池）', () => {
     expect(hits.length).toBe(1)
   })
 })
+
+describe('用户删除的条目不得复活（jable.tv 回归）', () => {
+  it('用户删掉自己的条目保存后，出厂兜底补充但它不会回来', () => {
+    // KV 用户层原为「jable.tv + x.com」（用户先填过），现在面板删掉 jable.tv 只剩 x.com
+    const merged = mergeConfig(DEFAULT_CONFIG, { pinnedHosts: 'x.com=151.101.194.146' })
+    expect(merged.pinnedHosts).not.toContain('jable.tv')
+    expect(merged.pinnedHosts).toContain('x.com=151.101.194.146')
+    // 出厂兜底仍在
+    expect(merged.pinnedHosts).toContain('cloudflare.com=r:45.76.246.192')
+  })
+
+  it('relayPool 同理：删掉的旧条目不复活', () => {
+    const merged = mergeConfig(DEFAULT_CONFIG, { relayPool: 'my-relay.example.com:443' })
+    expect(merged.relayPool).toContain('my-relay.example.com:443')
+    expect(merged.relayPool).toContain('155.248.181.189')
+  })
+})

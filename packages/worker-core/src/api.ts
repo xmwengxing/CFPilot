@@ -165,6 +165,8 @@ export interface ApiContext {
   onConfigChanged: () => void
 }
 
+let kernelCheckCache: { at: number; body: Record<string, unknown> } | null = null
+
 /**
  * 处理面板 API 请求。
  * 非 API 路由返回 null。
@@ -430,6 +432,52 @@ export async function handleApi(
   // ---- 以下接口需要面板会话 ----
   const authenticated = await verifySession(store, request)
   if (!authenticated) return error('未登录或会话已过期', 401)
+
+  // ---- 内核通道检查（面板顶部横幅按钮）----
+  //
+  // 控制面自己没有「内置内核锚点」的概念（那是桌面版 exe 里的东西），
+  // 判定口径是：**官方 kernel-latest 通道的 build ≠ 本实例部署清单里的
+  // build** —— 通道永远只放最新发布，build 不同即「通道上有可部署的新内核」。
+  // 查询结果按 isolate 缓存 15 秒：横幅按钮反复点不会反复打 GitHub。
+  if (path === '/kernel-check' && method === 'GET') {
+    if (kernelCheckCache && Date.now() - kernelCheckCache.at < 15_000) {
+      return json(kernelCheckCache.body)
+    }
+    let manifestBuild = ''
+    try {
+      const raw = await store.get('CFP_DEPLOY_MANIFEST')
+      if (raw) manifestBuild = (JSON.parse(raw) as { build?: string }).build ?? ''
+    } catch {
+      /* 清单读不到：currentBuild 留空 */
+    }
+    let latestSeq = 0
+    let latestBuild = ''
+    let checkError = ''
+    try {
+      const res = await fetch(
+        'https://github.com/xmwengxing/CFPilot/releases/download/kernel-latest/cfpilot-kernel-VERSION',
+        { signal: AbortSignal.timeout(6000) }
+      )
+      const manifest = (await res.json()) as { seq?: number; build?: string }
+      latestSeq = manifest.seq ?? 0
+      latestBuild = manifest.build ?? ''
+    } catch (e) {
+      checkError = e instanceof Error ? e.message : String(e)
+    }
+    const hasUpdate = !checkError && latestBuild !== '' && latestBuild !== manifestBuild
+    const body: Record<string, unknown> = {
+      ok: checkError === '',
+      currentBuild: manifestBuild,
+      latestSeq,
+      latestBuild,
+      hasUpdate,
+      error: checkError,
+      assetBase: 'https://github.com/xmwengxing/CFPilot/releases/download/kernel-latest',
+      toolRelease: 'https://github.com/xmwengxing/CFPilot/releases/latest',
+    }
+    if (checkError === '') kernelCheckCache = { at: Date.now(), body }
+    return json(body)
+  }
 
   if (path === '/status' && method === 'GET') {
     const localIps = await loadLocalIps(store)

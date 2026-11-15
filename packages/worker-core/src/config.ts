@@ -299,16 +299,17 @@ export function mergeConfig(base: UserConfig, override: Partial<UserConfig>): Us
       ;(merged as unknown as Record<string, string>)[key] = normalizeSubTokenMode(String(value))
     } else if (key === 'pinnedHosts') {
       // 固定落地映射**按域名合并**（2026-11-14）：
-      // base 侧含出厂修复（x.com / cloudflare.com），override 侧是用户在面板
-      // 写的映射。若整体覆盖，用户只为 jable.tv 配一条就会把出厂修复顶掉 ——
-      // x.com 的漂移与 cloudflare.com 的 TCP Loop 会随之复发。
-      // 语义：用户条目优先；base 里用户没写的域名条目原样保留在后面。
-      merged.pinnedHosts = mergePinnedHosts(base.pinnedHosts ?? '', String(value ?? ''))
+      // 用户条目优先；出厂修复（x.com / cloudflare.com 等）永远保留 ——
+      // 用户只为 jable.tv 配一条时，出厂修复不会被顶掉。
+      //
+      // ⚠️ 兜底来源必须是 **DEFAULT_CONFIG（纯出厂清单）**，不能是 base：
+      // base 是运行时合并值（出厂 + 用户历史条目混在一起），拿它当兜底
+      // 会让用户**删除的旧条目在下一次保存时复活** —— jable.tv 删不掉
+      // 就是这个 bug（2026-11-15 用户实测）。
+      merged.pinnedHosts = mergePinnedHosts(DEFAULT_CONFIG.pinnedHosts, String(value ?? ''))
     } else if (key === 'relayPool') {
-      // 反代入口池**按行合并**（2026-11-15）：与 pinnedHosts 同理，
-      // 出厂入口池是逐个实测过的可用入口，用户只补几条自己的入口时
-      // 不应把出厂可用入口整体顶掉。
-      merged.relayPool = mergeLineList(base.relayPool ?? '', String(value ?? ''))
+      // 反代入口池**按行合并**（2026-11-15）：同上，兜底只认纯出厂清单。
+      merged.relayPool = mergeLineList(DEFAULT_CONFIG.relayPool, String(value ?? ''))
     } else if (key === 'udpDns') {
       ;(merged as unknown as Record<string, string>)[key] = normalizeUdpDns(String(value))
     } else {

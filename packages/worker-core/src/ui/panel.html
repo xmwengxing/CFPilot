@@ -125,6 +125,8 @@
   }
   button.primary:hover:not(:disabled) { filter: brightness(1.08); }
   button.ghost { background: rgba(255,255,255,0.03); border-color: var(--border); color: var(--text-main); }
+  /* 内核通道有更新时的横幅按钮（橙色提示态） */
+  button.warn-btn { color: var(--warn); border-color: var(--warn); font-weight: 600; }
   button.ghost:hover:not(:disabled) { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.18); }
   button.danger { background: var(--err-bg); border-color: rgba(239,68,68,0.3); color: #fca5a5; }
   button.danger:hover:not(:disabled) { background: rgba(239,68,68,0.2); }
@@ -309,10 +311,12 @@
       <p>Cloudflare 边缘网络数据面 · 节点池编排与真连接优选中心</p>
     </div>
     <div class="spacer"></div>
+    <button class="ghost" id="btnKernelCheck" title="检查官方内核通道是否有新内核">内核检查</button>
     <button class="ghost" id="btnRefresh">↻ 刷新状态</button>
     <button class="ghost" id="btnLogout">退出登录</button>
     <button class="ghost" id="btnTheme" title="切换亮色 / 暗色主题" aria-label="切换主题" style="padding:8px 12px">🎨</button>
   </header>
+  <div id="kernelHint" class="hint" hidden style="margin:-6px 0 10px"></div>
 
   <nav class="tabs" id="tabs">
     <button data-tab="overview" class="active">📊 运行概览</button>
@@ -1551,6 +1555,58 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
     $('btnLogout').addEventListener('click', function () {
       api('/api/v1/logout', { method: 'POST' }).finally(function () { showLogin(); });
     });
+
+    // ---- 顶部横幅：内核通道检查 ----
+    //
+    // 进面板 2 秒后静默查一次；按钮文字随结论变化，有更新时点击展开
+    // 两种更新方法的说明（部署维护工具 / 手动替换内核文件）。
+    var kernelCheckBusy = false;
+    function runKernelCheck(expand) {
+      if (kernelCheckBusy) return;
+      kernelCheckBusy = true;
+      var btn = $('btnKernelCheck'), hint = $('kernelHint');
+      btn.textContent = '检查中…';
+      api('/api/v1/kernel-check', { method: 'GET' }).then(function (r) {
+        kernelCheckBusy = false;
+        if (!r.ok) {
+          btn.textContent = '内核检查';
+          btn.title = '检查失败：' + (r.error || '网络问题');
+          if (expand) { hint.hidden = false; hint.textContent = '内核检查失败：' + (r.error || '网络问题，稍后再试'); }
+          return;
+        }
+        if (r.hasUpdate) {
+          btn.textContent = '⬆ 有新内核';
+          btn.classList.add('warn-btn');
+          btn.title = '官方内核通道有新内核 ' + r.latestBuild;
+          if (expand) {
+            hint.hidden = false;
+            hint.innerHTML = '检测到官方内核通道有新内核 <b>' + (r.latestBuild || 'k' + r.latestSeq) +
+              '</b>（当前部署 ' + (r.currentBuild || '未知') + '）。两种更新方式：<br>' +
+              '1. <b>下载部署维护工具</b>：用最新桌面版一键更新内核 —— ' +
+              '<a href="' + r.toolRelease + '" target="_blank" rel="noopener">' + r.toolRelease + '</a><br>' +
+              '2. <b>手动更新内核文件</b>：下载下面两个文件，在 Cloudflare Pages 控制台替换部署 ——<br>' +
+              '&nbsp;&nbsp;&nbsp;控制面 <a href="' + r.assetBase + '/cfpilot-kernel-control.js" target="_blank" rel="noopener">cfpilot-kernel-control.js</a>' +
+              ' · 数据面 <a href="' + r.assetBase + '/cfpilot-kernel-dataplane.js" target="_blank" rel="noopener">cfpilot-kernel-dataplane.js</a>';
+          }
+        } else {
+          btn.textContent = '内核已最新';
+          btn.title = '当前部署的内核与官方通道一致（' + (r.currentBuild || '') + '）';
+          if (expand) { hint.hidden = false; hint.textContent = '✓ 当前部署的内核与官方通道一致，无需更新。'; }
+        }
+      }).catch(function (e) {
+        kernelCheckBusy = false;
+        btn.textContent = '内核检查';
+        if (expand) { hint.hidden = false; hint.textContent = '内核检查失败：' + (e && e.message ? e.message : e); }
+      });
+    }
+    $('btnKernelCheck').addEventListener('click', function () {
+      var hint = $('kernelHint');
+      if (hint.hidden === false && $('btnKernelCheck').textContent.indexOf('⬆') === -1) { hint.hidden = true; return; }
+      runKernelCheck(true);
+    });
+    // 进面板 2 秒后静默查一次（不打扰，按钮文字静默变化）
+    setTimeout(function () { runKernelCheck(false); }, 2000);
+
 
     ['poolOfficial', 'poolDomain', 'poolManual'].forEach(function (id) {
       $(id).addEventListener('change', syncSourceCards);

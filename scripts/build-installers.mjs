@@ -34,6 +34,17 @@ function findMakensis() {
   return null
 }
 
+/** 编译提权守护进程 meshd（如果 dist 里没有）。 */
+function ensureMeshd(name) {
+  const out = join(dist, name)
+  if (existsSync(out)) return
+  const isWin = name.endsWith('.exe')
+  const env = { ...process.env, CGO_ENABLED: isWin ? '0' : '0', GOOS: isWin ? 'windows' : 'linux', GOARCH: 'amd64' }
+  console.log(`[installers] 编译 meshd → ${name} …`)
+  execFileSync('go', ['build', '-trimpath', '-tags=mesh', '-ldflags=-s -w', '-o', out, './cmd/cfpilot-meshd'],
+    { cwd: join(repoRoot, 'packages', 'desktop'), stdio: 'inherit', env })
+}
+
 // ---------- Windows 安装包（NSIS 安装器 exe，双击即装）----------
 const winExeName = `cfpilot-${version}+mesh-windows-amd64.exe`
 const winExe = join(dist, winExeName)
@@ -42,6 +53,15 @@ if (existsSync(winExe) && makensis) {
   rmSync(stage, { recursive: true, force: true })
   mkdirSync(stage, { recursive: true })
   copyFileSync(winExe, join(stage, winExeName))
+  // 提权守护进程 meshd.exe（注册为 Windows 服务，面板/托盘通过本地 API 控制它）
+  const meshdName = 'cfpilot-meshd.exe'
+  const meshdSrc = join(dist, meshdName)
+  ensureMeshd(meshdName)
+  if (!existsSync(meshdSrc)) {
+    console.error('[installers] 缺少 cfpilot-meshd.exe，请先编译 go build -tags=mesh -o ... ./cmd/cfpilot-meshd')
+    process.exit(1)
+  }
+  copyFileSync(meshdSrc, join(stage, meshdName))
   const tpl = readFileSync(join(here, 'install-mesh.nsi.template'), 'utf8')
   const setupName = `cfpilot-${version}+mesh-windows-amd64-setup.exe`
   const setupOut = join(dist, setupName)
@@ -49,6 +69,8 @@ if (existsSync(winExe) && makensis) {
     .replace('APP_VERSION_PLACEHOLDER', version)
     .replace('EXE_NAME_PLACEHOLDER', winExeName)
     .replace('EXE_SOURCE_PLACEHOLDER', join(stage, winExeName))
+    .replace('MESHD_SOURCE_PLACEHOLDER', join(stage, meshdName))
+    .replace('MESHD_NAME_PLACEHOLDER', meshdName)
     .replace('SETUP_OUT_PLACEHOLDER', setupOut)
   // 内置中文语言文件复制到 stage（模板用 !addincludedir 引用，
   // 避免依赖系统 NSIS 是否带 Contrib/Language files —— CI/本机行为一致）
@@ -83,6 +105,47 @@ if (existsSync(linBin) && has('dpkg-deb')) {
   mkdirSync(join(debRoot, 'usr', 'bin'), { recursive: true })
   mkdirSync(join(debRoot, 'usr', 'share', 'applications'), { recursive: true })
   copyFileSync(linBin, join(debRoot, 'usr', 'bin', 'cfpilot-mesh'))
+  // 提权守护进程 meshd（systemd 以 root 运行，面板/托盘通过本地 API 控制）
+  const linMeshd = join(dist, 'cfpilot-meshd')
+  ensureMeshd('cfpilot-meshd')
+  if (!existsSync(linMeshd)) {
+    console.error('[installers] 缺少 cfpilot-meshd，请先编译 go build -tags=mesh -o ... ./cmd/cfpilot-meshd')
+    process.exit(1)
+  }
+  copyFileSync(linMeshd, join(debRoot, 'usr', 'bin', 'cfpilot-meshd'))
+  mkdirSync(join(debRoot, 'lib', 'systemd', 'system'), { recursive: true })
+  writeFileSync(join(debRoot, 'lib', 'systemd', 'system', 'cfpilot-mesh.service'), [
+    '[Unit]',
+    'Description=CFPilot Mesh Daemon',
+    'After=network-online.target',
+    'Wants=network-online.target',
+    '',
+    '[Service]',
+    'Type=simple',
+    'ExecStart=/usr/bin/cfpilot-meshd',
+    'Restart=on-failure',
+    'RestartSec=3',
+    'NoNewPrivileges=false',
+    '',
+    '[Install]',
+    'WantedBy=multi-user.target',
+    '',
+  ].join('\n'), 'utf8')
+  writeFileSync(join(debRoot, 'DEBIAN', 'postinst'), [
+    '#!/bin/sh',
+    'set -e',
+    'systemctl daemon-reload',
+    'systemctl enable cfpilot-mesh.service',
+    'systemctl start cfpilot-mesh.service',
+    'exit 0',
+  ].join('\n'), 'utf8')
+  writeFileSync(join(debRoot, 'DEBIAN', 'prerm'), [
+    '#!/bin/sh',
+    'set -e',
+    'systemctl stop cfpilot-mesh.service || true',
+    'systemctl disable cfpilot-mesh.service || true',
+    'exit 0',
+  ].join('\n'), 'utf8')
   writeFileSync(join(debRoot, 'DEBIAN', 'control'), [
     'Package: cfpilot-mesh',
     `Version: ${version}`,
@@ -106,6 +169,9 @@ if (existsSync(linBin) && has('dpkg-deb')) {
     'Categories=Network;',
     '',
   ].join('\n'), 'utf8')
+  const { chmodSync } = await import('node:fs')
+  chmodSync(join(debRoot, 'DEBIAN', 'postinst'), 0o755)
+  chmodSync(join(debRoot, 'DEBIAN', 'prerm'), 0o755)
   const debOut = join(dist, `cfpilot-${version}+mesh-linux-amd64.deb`)
   execFileSync('dpkg-deb', ['--build', debRoot, debOut], { stdio: 'inherit' })
   console.log(`[installers] ✅ ${debOut.split(/[\\/]/).pop()} (${(statSync(debOut).size/1024/1024).toFixed(2)} MB)`)

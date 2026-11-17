@@ -15,6 +15,7 @@ RequestExecutionLevel admin
 !define APP_VERSION "APP_VERSION_PLACEHOLDER"
 !define EXE_NAME "EXE_NAME_PLACEHOLDER"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\CFPilotMesh"
+!define MESHD_NAME "MESHD_NAME_PLACEHOLDER"
 
 Name "${APP_NAME} ${APP_VERSION}"
 OutFile "SETUP_OUT_PLACEHOLDER"
@@ -47,6 +48,11 @@ ShowInstDetails show
 Section "主程序" Main
   SetOutPath "$INSTDIR"
   File "EXE_SOURCE_PLACEHOLDER"
+  File "MESHD_SOURCE_PLACEHOLDER"
+
+  ; 注册提权守护进程为 Windows 服务（LocalSystem 权限，面板/托盘通过本地 API 控制）
+  ExecWait '"$INSTDIR\${MESHD_NAME}" --install'
+  ExecWait 'net start CFPilotMesh'
 
   ; 提权下载并校验 wintun.dll（calling cfpilot 内置命令）
   DetailPrint "正在下载并校验 wintun.dll（官方源 + SHA256）…"
@@ -78,7 +84,11 @@ Section "Uninstall"
   ExecWait 'taskkill /F /IM "${EXE_NAME}" /T'
   Sleep 800
   skip_kill:
+  ; 停止并卸载提权守护服务
+  ExecWait 'net stop CFPilotMesh'
+  ExecWait '"$INSTDIR\${MESHD_NAME}" --uninstall'
   Delete "$INSTDIR\${EXE_NAME}"
+  Delete "$INSTDIR\${MESHD_NAME}"
   Delete "$INSTDIR\wintun.dll"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"

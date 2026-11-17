@@ -57,6 +57,9 @@ type App struct {
 	mPortItems []*systray.MenuItem
 	// mCheckAppUpdate 是「检查应用更新」菜单项
 	mCheckAppUpdate *systray.MenuItem
+	// +mesh 专属：组网服务启停 + 节点列表二级菜单（tray_mesh.go 初始化）
+	mMeshToggle *systray.MenuItem
+	mMeshPeers  []*systray.MenuItem
 	// mCheckDeployUpdate 是「检查部署更新」菜单项
 	mCheckDeployUpdate *systray.MenuItem
 	// mQuickScan 是「一键优选 IP」父项。
@@ -364,6 +367,10 @@ func (a *App) onReady() {
 
 	// ---- 局域网访问（复选菜单项）----
 	a.mLAN = systray.AddMenuItemCheckbox("允许局域网访问", "同一网络的其它设备可访问", false)
+
+	// ---- +mesh 专属菜单：组网服务启停 + 节点列表（二级菜单）----
+	// 普通版为空实现（tray_mesh_stub.go），+mesh 版在 tray_mesh.go 实现。
+	a.addMeshMenu()
 
 	systray.AddSeparator()
 	a.mQuit = systray.AddMenuItem("退出 CFPilot", "停止服务并退出")

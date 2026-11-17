@@ -414,6 +414,9 @@ func (s *Server) routes() http.Handler {
 	// 构建变体查询（普通版 / +mesh 版）：界面据此显示或隐藏组网入口
 	mux.HandleFunc("/api/mesh/enabled", s.guard(s.handleMeshEnabled))
 
+	// +mesh 控制 API（start/stop/status/peers）：面板与托盘通过它控制提权守护进程 meshd
+	s.registerMeshControlRoutes(mux)
+
 	// 定时优选任务 API（任务清单 + 本地 IP 池）
 	// 安卓上没有这个功能（见 allowScheduledTasks），路由也不注册。
 	if allowScheduledTasks {

@@ -4942,15 +4942,52 @@ import { MeshTopology, type TopoNode } from './mesh-topology'
       }
     })
 
-    // 导出启动命令
-    $('btnMeshExport')?.addEventListener('click', () => {
+    // 启动组网：把配置直接交给提权服务（无需命令行/JSON 文件）
+    $('btnMeshStart')?.addEventListener('click', async () => {
       const cfg = collectMeshConfig()
-      const json = JSON.stringify(cfg, null, 2)
-      const out = $('meshCmdOut')
-      const cmd = `将以下内容保存为 mesh.json，然后以管理员/root 运行：\n` +
-        `cfpilot-desktop --mesh-config mesh.json\n\n${json}`
-      if (out) { out.textContent = cmd; out.hidden = false }
-      log('已生成启动命令与配置', 'ok')
+      const btn = $('btnMeshStart') as HTMLButtonElement
+      if (btn) btn.disabled = true
+      try {
+        const resp = await fetch('/api/mesh/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify(cfg),
+        })
+        const data = await resp.json().catch(() => ({}))
+        if (resp.ok && data.ok !== false) {
+          log('组网已启动（提权服务已创建虚拟网卡）', 'ok')
+          const stop = $('btnMeshStop') as HTMLButtonElement
+          if (stop) stop.disabled = false
+        } else {
+          log('启动失败：' + (data.error || data.message || `HTTP ${resp.status}`), 'err')
+        }
+      } catch (err) {
+        log('启动失败：' + (err instanceof Error ? err.message : String(err)), 'err')
+      } finally {
+        if (btn) btn.disabled = false
+      }
+    })
+
+    // 停止组网
+    $('btnMeshStop')?.addEventListener('click', async () => {
+      const btn = $('btnMeshStop') as HTMLButtonElement
+      if (btn) btn.disabled = true
+      try {
+        const resp = await fetch('/api/mesh/stop', {
+          method: 'POST', credentials: 'same-origin',
+        })
+        if (resp.ok) {
+          log('组网已停止', 'ok')
+        } else {
+          const data = await resp.json().catch(() => ({}))
+          log('停止失败：' + (data.error || `HTTP ${resp.status}`), 'err')
+        }
+      } catch (err) {
+        log('停止失败：' + (err instanceof Error ? err.message : String(err)), 'err')
+      } finally {
+        if (btn) btn.disabled = true // 停止后保持禁用，直到再次启动
+      }
     })
 
     // 恢复本地配置

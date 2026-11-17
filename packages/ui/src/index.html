@@ -1855,13 +1855,14 @@
                 </div>
               </details>
               <div class="btn-row" style="margin-top:12px">
-                <button class="btn btn-primary" id="btnMeshSave">保存配置</button>
-                <button class="btn btn-ghost" id="btnMeshExport">导出启动命令</button>
+                <button class="btn btn-ghost" id="btnMeshSave">保存配置</button>
+                <button class="btn btn-primary" id="btnMeshStart">启动组网</button>
+                <button class="btn btn-ghost" id="btnMeshStop" disabled>停止组网</button>
               </div>
-              <pre id="meshCmdOut" class="chain-out" hidden></pre>
               <p class="tip" style="margin-top:8px">
-                当前 +mesh 版通过命令行启动组网（<code>cfpilot-desktop --mesh-config &lt;配置.json&gt;</code>，
-                需管理员/root 创建 TUN）。「保存配置」写入本地，「导出启动命令」生成可直接执行的命令。
+                点「启动组网」后，软件会把配置交给已安装的提权服务自动创建虚拟网卡并运行，
+                <b>无需命令行、无需手动保存 JSON 文件</b>。首次启动若弹出系统授权框，点「允许」即可。
+                托盘图标右键也能启停服务、查看节点列表。
               </p>
             </div>
           </div>
@@ -2497,10 +2498,12 @@
                   <b>网络名 / PSK 两端完全一致</b>、<b>节点 ID 与虚拟 IP 两端不同</b>。<br>
                   <b>3. 添加对端</b>：展开「对端节点」，填对方的信息后点「添加」。
                   <b>两端要互相添加对方</b>（A 里加 B、B 里加 A）。<br>
-                  <b>4. 保存并启动</b>：点「保存配置」，再点「导出启动命令」，把 JSON 存为
-                  <code>mesh.json</code>，按提示以管理员/root 运行
-                  <code>cfpilot-desktop --mesh-config mesh.json</code>（建 TUN 需提权）。
-                  Windows 用安装器、Linux 用 sudo、Android 用独立 Mesh App（VpnService 授权，免 root）。<br>
+                  <b>4. 启动</b>：点「启动组网」，软件把配置交给已安装的提权服务自动创建虚拟网卡并运行，
+                  <b>无需命令行、无需手动存 JSON</b>。首次弹出系统授权框点「允许」即可。
+                  停止点「停止组网」；托盘图标右键也能启停、查看节点列表。<br>
+                  <b>三平台安装</b>：Windows 双击 setup.exe（自动注册提权服务）；
+                  Linux 用 <code>sudo dpkg -i cfpilot-mesh*.deb</code>（自动配置 systemd 服务）；
+                  Android 装独立的「CFPilot Mesh」App（VPN 授权，免 root）。<br>
                   <b>5. 验证</b>：互 ping 虚拟 IP（如 A 上 <code>ping 10.98.0.2</code>），
                   通了就成功；「网络拓扑」实时显示节点与流量。<br>
                   <b>连不上先查</b>：网络名 / PSK 是否两端一致 → 对端地址是否可达 →

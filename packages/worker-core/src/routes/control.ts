@@ -181,8 +181,8 @@ async function handleSubscription(
       //   Profile-Title  Clash / mihomo 读它做卡片标题，非 ASCII 时按 RFC 2047 编码
       'Content-Disposition': subContentDisposition(config.subName),
       'Profile-Title': subProfileTitle(config.subName),
-      // 客户端靠它算剩余流量/到期；空值会让部分客户端弹出解析警告，明确给 0 更干净
-      'Subscription-Userinfo': 'upload=0; download=0; total=0; expire=0',
+      // 不返回 Subscription-Userinfo：Karing/圈X 等客户端读到 0 值会在节点下方
+      // 显示「0 B / 0 B 1970/1/1」，观感差；不返回则客户端不显示流量/到期信息。
     },
   })
 }

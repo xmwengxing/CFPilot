@@ -1,0 +1,7 @@
+# Gradle / Android 构建产物
+.gradle/
+local.properties
+app/build/
+build/
+app/libs/*.aar
+*.apk

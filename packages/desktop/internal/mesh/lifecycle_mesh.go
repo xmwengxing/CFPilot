@@ -28,11 +28,14 @@ type meshLifecycle struct {
 	running   bool
 	startedAt time.Time
 
-	hub      *UdpHub
-	tun      TunDevice
-	fsm      *HandshakeFSM
-	links    map[NodeID]PeerLink // peer -> PeerLink
-	vipTable *VirtualIPTable
+	hub *UdpHub
+	tun TunDevice
+	// tunOverride 是外部注入的 TUN（Android VpnService 创建后传 fd）。
+	// 非 nil 时 Start 直接用它，不再调平台 CreateTunDevice。
+	tunOverride TunDevice
+	fsm         *HandshakeFSM
+	links       map[NodeID]PeerLink // peer -> PeerLink
+	vipTable    *VirtualIPTable
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -67,6 +70,11 @@ func NewLifecycle() Lifecycle { return &meshLifecycle{} }
 
 // NewLifecycleWithConfig 用配置构造（桌面版/CLI 用）。
 func NewLifecycleWithConfig(cfg Config) Lifecycle { return &meshLifecycle{cfg: cfg} }
+
+// NewLifecycleWithTun 用配置 + 外部注入的 TUN 构造（Android VpnService 用）。
+func NewLifecycleWithTun(cfg Config, tun TunDevice) Lifecycle {
+	return &meshLifecycle{cfg: cfg, tunOverride: tun}
+}
 
 // SetConfig 注入配置（供 NewLifecycle 后用）。
 func (m *meshLifecycle) SetConfig(cfg Config) { m.cfg = cfg }
@@ -103,14 +111,20 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 	}
 
 	// 3. TUN（失败时关 hub）
-	tunName := m.cfg.TunName
-	if tunName == "" {
-		tunName = "cfpilot0"
-	}
-	m.tun, err = CreateTunDevice(tunName, m.cfg.VirtualIP, m.cfg.MTU)
-	if err != nil {
-		_ = m.hub.Close()
-		return err
+	// Android VpnService 已在 Java 侧建好 TUN 并传 fd：用注入的 TunDevice，
+	// 不再走平台 CreateTunDevice（它需要 root / 管理员，Android 上由 VpnService 授权）。
+	if m.tunOverride != nil {
+		m.tun = m.tunOverride
+	} else {
+		tunName := m.cfg.TunName
+		if tunName == "" {
+			tunName = "cfpilot0"
+		}
+		m.tun, err = CreateTunDevice(tunName, m.cfg.VirtualIP, m.cfg.MTU)
+		if err != nil {
+			_ = m.hub.Close()
+			return err
+		}
 	}
 
 	// 4. FSM（sendFn 经 peer 的 PeerLink 发帧）

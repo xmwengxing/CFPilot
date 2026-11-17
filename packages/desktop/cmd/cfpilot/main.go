@@ -43,6 +43,7 @@ import (
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/config"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/kernel"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/logfile"
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/mesh"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/notify"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/server"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/tray"
@@ -105,8 +106,20 @@ func main() {
 		updateHelperOld = flag.String("update-helper", "", "内部参数：等旧进程退出后清理备份并重启主程序")
 		// +mesh 变体专用：从 JSON 配置启动组网（最小集真机测试入口）
 		meshConfig = flag.String("mesh-config", "", "+mesh 变体：从 JSON 配置启动组网节点")
+		// +mesh Windows 安装包调用：提权下载 wintun.dll 到指定目录（双重 SHA256 校验）
+		fetchWintun = flag.String("fetch-wintun", "", "+mesh 变体：下载 wintun.dll 到指定目录（安装/提权时用）")
 	)
 	flag.Parse()
+
+	// 下载 wintun.dll（安装包提权调用）。普通版/非 Windows 由 stub 明确报错。
+	if *fetchWintun != "" {
+		path, err := mesh.FetchWintun(*fetchWintun)
+		if err != nil {
+			fatal(fmt.Errorf("下载 wintun.dll 失败：%w", err))
+		}
+		fmt.Printf("wintun.dll 已就绪: %s\n", path)
+		return
+	}
 
 	// +mesh 模式：读取配置 → 启动 Lifecycle → 前台运行（不启托盘/HTTP 服务）
 	// 普通版（无 mesh tag）该文件返回 false，零影响。

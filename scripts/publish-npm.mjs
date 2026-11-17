@@ -43,6 +43,7 @@ if (!pkgName) {
 // 所以用一个显式映射表，而不是猜。
 const DIR_MAP = {
   cfpilot: 'cli',
+  'cfpilot-mesh': 'cli-mesh',
 }
 const dirName = DIR_MAP[pkgName]
 if (!dirName) {

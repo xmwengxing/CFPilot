@@ -23,6 +23,7 @@
   "workspaces": [
     "packages/worker-core",
     "packages/cli",
+    "packages/cli-mesh",
     "packages/ui"
   ],
   "engines": {
@@ -51,7 +52,7 @@
     "clean": "node scripts/clean.mjs",
     "check:build-version": "node scripts/check-build-version.mjs",
     "check:release-notes": "node scripts/check-release-notes.mjs",
-    "publish:npm": "node scripts/publish-npm.mjs cfpilot-scanner && node scripts/publish-npm.mjs cfpilot-deploy",
+    "publish:npm": "node scripts/publish-npm.mjs cfpilot && node scripts/publish-npm.mjs cfpilot-mesh",
     "verify:npm": "node scripts/verify-npm-publish.mjs"
   },
   "devDependencies": {

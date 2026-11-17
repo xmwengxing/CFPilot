@@ -1,0 +1,5 @@
+# cfpilot-mesh 与 cfpilot 共用同一份 CLI 源码/产物。
+# 以下是发布前由 scripts/sync-from-cli.mjs 从 packages/cli 复制进来的构建产物，不入库。
+dist/
+assets/
+README.md

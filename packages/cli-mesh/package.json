@@ -1,0 +1,28 @@
+{
+  "name": "cfpilot-mesh",
+  "version": "0.50.0",
+  "description": "CFPilot +mesh —— 带异地组网能力的 Cloudflare 代理部署与优选工具（npx cfpilot-mesh mesh ...）",
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "bin": {
+    "cfpilot-mesh": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "assets",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "node ../cli/scripts/build.mjs && npm run sync",
+    "sync": "node scripts/sync-from-cli.mjs",
+    "typecheck": "node -e \"process.exit(0)\"",
+    "prepublishOnly": "node ../../scripts/sync-version.mjs packages/cli-mesh && npm run build"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  }
+}

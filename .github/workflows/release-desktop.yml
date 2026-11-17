@@ -212,6 +212,17 @@ jobs:
           "$BIN" --version
           "$BIN" --check
 
+      - name: 构建 +mesh 变体与安装包
+        # +mesh 是同 tag 多 asset（不增版本号通道）。产物名带 +mesh 后缀，
+        # 与普通版共存。安装包解决 wintun.dll 不捆绑问题（ADR-0002）：
+        # Windows setup zip 含 install.ps1，安装时提权调 --fetch-wintun 下载 DLL。
+        run: |
+          set -e
+          node scripts/build-desktop.mjs --mesh
+          node scripts/build-installers.mjs
+          echo '== +mesh 产物 =='
+          ls -la packages/desktop/dist/*+mesh* || true
+
       - name: 生成桌面版摘要清单
         # 应用内更新会从**官方地址**取这份清单，逐个校验下载到的安装包。
         # 镜像只用于搬运文件，清单不经镜像 —— 否则镜像可以同时替换两者。

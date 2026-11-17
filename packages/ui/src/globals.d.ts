@@ -151,6 +151,8 @@ interface QuickScanResult {
 
 interface Window {
   cfpilot: {
+    /** 当前构建是否启用 +mesh 组网变体（普通版 false，+mesh 版 true） */
+    meshEnabled(): Promise<boolean>
     /** 列出所有账户配置（不含 Token 明文） */
     listProfiles(): Promise<CFPilotProfileView[]>
     /** 新建账户配置并激活 */

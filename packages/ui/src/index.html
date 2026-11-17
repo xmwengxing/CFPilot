@@ -1278,6 +1278,7 @@
     <nav id="nav" class="tabs">
       <button type="button" data-page="cred" class="active">🔑 凭据</button>
       <button type="button" data-page="deploy">🚀 部署</button>
+      <button type="button" data-page="mesh">🕸️ 组网</button>
       <button type="button" data-page="scan">⚡ 优选</button>
       <button type="button" data-page="sources">🌐 数据源</button>
       <button type="button" data-page="about">📘 说明</button>
@@ -1500,6 +1501,7 @@
 
               <div class="btn-row" style="margin-top:12px">
                 <button class="btn btn-primary" id="btnEdgeDeploy">部署盲中继 / 云监测台</button>
+                <button class="btn btn-ghost" id="btnFillMeshConfig" disabled title="部署成功后解锁：把 WSS 地址与房间名填入「组网」页">填入组网配置</button>
                 <button class="btn btn-ghost" id="btnEdgeRefreshZones">刷新域名列表</button>
               </div>
               <pre id="edgeResult" class="chain-out" hidden></pre>
@@ -1766,6 +1768,88 @@
             </p>
           </div>
           </div><!-- /proxyPanel -->
+        </section>
+
+        <!-- ============ 组网（+mesh 变体） ============ -->
+        <section class="page" id="page-mesh">
+          <div class="card" id="meshNotice" hidden>
+            <h2><span class="dot"></span>当前版本未启用组网模块</h2>
+            <p class="desc">异地组网是 <b>+mesh 变体</b> 的专属能力。普通版（控制面 + 数据面代理）不含此模块。
+            如需使用，请下载 +mesh 版，或在桌面版设置中查看当前构建版本。</p>
+          </div>
+
+          <div id="meshContent">
+            <div class="card">
+              <h2><span class="dot"></span>🕸️ 网络拓扑</h2>
+              <p class="desc">实时展示当前 mesh 网络的节点连接与流量。节点未连接时显示本地节点与待发现状态。</p>
+              <div id="topoWrap" style="position:relative;width:100%;height:360px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
+                <canvas id="topoCanvas" style="width:100%;height:100%;display:block"></canvas>
+                <div id="topoEmpty" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:13px;pointer-events:none">
+                  暂无节点数据（启动组网后将自动显示）
+                </div>
+              </div>
+              <div class="btn-row" style="margin-top:10px">
+                <span class="tag" style="display:inline-flex;align-items:center;gap:6px"><i style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></i> 直连</span>
+                <span class="tag" style="display:inline-flex;align-items:center;gap:6px"><i style="width:8px;height:8px;border-radius:50%;background:#f59e0b;display:inline-block"></i> 中继</span>
+                <span class="tag" style="display:inline-flex;align-items:center;gap:6px"><i style="width:8px;height:8px;border-radius:50%;background:#475569;display:inline-block"></i> 离线</span>
+              </div>
+            </div>
+
+            <div class="card">
+              <h2><span class="dot"></span>⚙️ 组网配置</h2>
+              <p class="desc">
+                配置会由 <code>+mesh</code> 版读取。部署盲中继后，可在「部署」页点
+                <b>「填入组网配置」</b> 自动带入 WSS 地址与房间名；其余字段需手动填写。
+              </p>
+              <div class="pair-grid">
+                <div class="pair"><label for="meshNodeId">本节点 ID（16 hex）</label><input type="text" id="meshNodeId" placeholder="如 0100000000000001" /></div>
+                <div class="pair"><label for="meshNetwork">网络名</label><input type="text" id="meshNetwork" placeholder="如 my-network" /></div>
+                <div class="pair"><label for="meshPsk">网络密钥 PSK</label><input type="text" id="meshPsk" placeholder="网络共享密钥" /></div>
+                <div class="pair"><label for="meshVirtualIp">本节点虚拟 IP</label><input type="text" id="meshVirtualIp" placeholder="如 10.97.0.1" /></div>
+                <div class="pair"><label for="meshListen">UDP 监听</label><input type="text" id="meshListen" placeholder="如 0.0.0.0:51820" /></div>
+                <div class="pair"><label for="meshTunName">TUN 网卡名</label><input type="text" id="meshTunName" placeholder="留空 = cfpilot0" /></div>
+              </div>
+              <details class="fold">
+                <summary>盲中继（WSS 降级目标，可选）</summary>
+                <div class="fold-body">
+                  <div class="pair-grid">
+                    <div class="pair"><label for="meshRelayDomain">盲中继域名</label><input type="text" id="meshRelayDomain" placeholder="部署盲中继后自动填入" /></div>
+                    <div class="pair"><label for="meshRelayRoom">房间名（8-64 hex）</label><input type="text" id="meshRelayRoom" placeholder="部署盲中继后自动填入" /></div>
+                  </div>
+                  <label class="switch-box">
+                    <span class="sw-info">
+                      <span class="sw-title">启用 UDP→WSS 自动降级</span>
+                      <span class="sw-desc">链路劣化时自动切到盲中继，恢复后回切</span>
+                    </span>
+                    <input type="checkbox" id="meshEnableDegrade" checked />
+                    <span class="switch"></span>
+                  </label>
+                </div>
+              </details>
+              <details class="fold">
+                <summary>对端节点（seed，手动添加）</summary>
+                <div class="fold-body">
+                  <div class="pair-grid">
+                    <div class="pair"><label for="peerNodeId">对端 ID（16 hex）</label><input type="text" id="peerNodeId" placeholder="如 0200000000000002" /></div>
+                    <div class="pair"><label for="peerAddr">对端地址（IP:端口）</label><input type="text" id="peerAddr" placeholder="如 10.0.0.2:51820" /></div>
+                    <div class="pair"><label for="peerPub">对端静态公钥（64 hex）</label><input type="text" id="peerPub" placeholder="X25519 公钥" /></div>
+                    <div class="pair"><label for="peerVip">对端虚拟 IP</label><input type="text" id="peerVip" placeholder="如 10.98.0.2" /></div>
+                  </div>
+                  <div class="btn-row"><button class="btn btn-ghost" id="btnAddPeer">添加对端</button></div>
+                  <div id="peerList" class="dim" style="margin-top:8px;font-size:12.5px">暂无对端</div>
+                </div>
+              </details>
+              <div class="btn-row" style="margin-top:12px">
+                <button class="btn btn-primary" id="btnMeshSave">保存配置</button>
+                <button class="btn btn-ghost" id="btnMeshExport">导出启动命令</button>
+              </div>
+              <pre id="meshCmdOut" class="chain-out" hidden></pre>
+              <p class="tip" style="margin-top:8px">
+                当前 +mesh 版通过命令行启动组网（<code>cfpilot-desktop --mesh-config &lt;配置.json&gt;</code>，
+                需管理员/root 创建 TUN）。「保存配置」写入本地，「导出启动命令」生成可直接执行的命令。
+              </p>
+            </div>
+          </div>
         </section>
 
         <!-- ============ 优选 ============ -->
@@ -2354,6 +2438,56 @@
               <b>本项目已支持数据面 Workers 形式部署（新手建议使用默认 Pages）</b>
             </div>
           </div>
+          <!-- 三套教程：默认折叠，避免说明页过长 -->
+          <div class="card">
+            <h2><span class="dot"></span>📖 使用教程（点击展开）</h2>
+
+            <details class="fold" id="tutorialEdge">
+              <summary>① 盲中继 / 云监测台部署（所有版本）</summary>
+              <div class="fold-body">
+                <p class="desc">盲中继让无公网 IP 的设备经 Cloudflare 边缘完成首次发现与保底连通；云监测台查看节点心跳。与代理实例完全独立。</p>
+                <div class="links">
+                  <b>1. 准备令牌</b><br>
+                  · 「凭据」页保存 Cloudflare Token。额外权限：Workers Scripts / Edit、Durable Objects / Edit、D1 / Edit、Pages / Edit；绑自定义域还需 Zone &amp; DNS / Edit。<br>
+                  <b>2. 部署</b><br>
+                  · 「部署」页 →「盲中继 / 云监测台」标签 → 填域名（必填，workers.dev 国内被污染）、Worker 名、监测台密码。<br>
+                  · +mesh 版可点「填入组网配置」把结果自动带入「组网」页。<br>
+                  <b>3. 使用</b><br>
+                  · 日志给出 WSS 端点与监测面板地址；监测面板只读，查看节点在线状态与心跳。
+                </div>
+              </div>
+            </details>
+
+            <details class="fold" id="tutorialMesh">
+              <summary>② 异地组网（仅 +mesh 版）</summary>
+              <div class="fold-body">
+                <p class="desc">多设备加入同一网络，无需公网 IP；直连优先、劣化自动降级 WSS。</p>
+                <div class="links">
+                  <b>1. 配置本节点</b><br>
+                  · 「组网」页填节点 ID（16 hex）、网络名、PSK（各节点一致）、虚拟 IP（不同网段）、UDP 监听。<br>
+                  · 需 WSS 兜底时，从「部署」页部署盲中继并点「填入组网配置」自动带入域名与房间。<br>
+                  <b>2. 添加对端</b><br>
+                  · 展开「对端节点」填 ID / 地址 / 64 hex 静态公钥 / 虚拟 IP → 添加；每个节点互相添加。<br>
+                  <b>3. 启动</b><br>
+                  · 「保存配置」或「导出启动命令」→ 以管理员/root 运行 <code>cfpilot-desktop --mesh-config mesh.json</code>（建 TUN 需提权）。<br>
+                  · Win 为安装包形态（安装时下载 wintun.dll）；Linux 需 sudo；Android 用 VpnService。<br>
+                  <b>4. 验证</b><br>
+                  · 互 ping 虚拟 IP；「网络拓扑」显示节点与流量；制造丢包可观察降级/回切。
+                </div>
+              </div>
+            </details>
+
+            <details class="fold" id="tutorialProxy">
+              <summary>③ CFPilot 代理实例部署（所有版本）</summary>
+              <div class="fold-body">
+                <div class="links">
+                  <b>首次部署</b>：「凭据」填 Token 选账号 →「部署」自动判断 → 面板密码（不填随机）→ 开始部署；保存日志里的地址 / 密码 / UUID / WS 路径。<br>
+                  <b>优选回填</b>：「优选」开始优选 →「增量回填」补新 IP（保留旧的）；「覆盖回填」会清空手动指定 IP。<br>
+                  <b>升级内核</b>：「部署」检查状态 → 有新版时更新；订阅地址 / 密码 / 路径不变。
+                </div>
+              </div>
+            </details>
+          </div>
 
           <div class="card">
             <h2><span class="dot"></span>🔒 安全说明</h2>
@@ -2819,3 +2953,4 @@
   <script src="./renderer.js"></script>
 </body>
 </html>
+

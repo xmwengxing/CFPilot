@@ -411,6 +411,9 @@ func (s *Server) routes() http.Handler {
 	// 盲中继 / 云监测台部署 API（基础功能，独立资源，不碰代理内核）
 	s.registerEdgeRoutes(mux)
 
+	// 构建变体查询（普通版 / +mesh 版）：界面据此显示或隐藏组网入口
+	mux.HandleFunc("/api/mesh/enabled", s.guard(s.handleMeshEnabled))
+
 	// 定时优选任务 API（任务清单 + 本地 IP 池）
 	// 安卓上没有这个功能（见 allowScheduledTasks），路由也不注册。
 	if allowScheduledTasks {

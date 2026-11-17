@@ -363,6 +363,12 @@
   }
 
   const api = {
+    /* ---------------- 构建变体 ---------------- */
+
+    meshEnabled: function () {
+      return get('/api/mesh/enabled').then(function (r) { return !!(r && r.enabled) })
+    },
+
     /* ---------------- 部署 ---------------- */
 
     runDeploy: function (params, kvNamespaceId) {

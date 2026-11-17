@@ -11,6 +11,7 @@ import {
   taskRowHtml,
   taskStatusText,
 } from './task-rows'
+import { MeshTopology, type TopoNode } from './mesh-topology'
 
 (function () {
   'use strict'
@@ -54,6 +55,8 @@ import {
 
   /** 切到「数据源」页时首次自动加载（切回来不重拉，避免冲掉用户勾选）。 */
   let autoLoadSources: (() => void) | null = null
+  /** 切到「组网」页时重算拓扑尺寸（隐藏页画布宽高为 0）。 */
+  let onMeshPageShow: (() => void) | null = null
 
   function switchPage(name: string): void {
     document.querySelectorAll('#nav button').forEach((b) => {
@@ -82,6 +85,10 @@ import {
     // 于是滚动没被启用 —— 用户切到这一页看到的仍然是一截被截断的文本。
     if (name === 'deploy') {
       refreshMarquees()
+    }
+    // 组网页：切回时重算拓扑画布尺寸
+    if (name === 'mesh' && onMeshPageShow) {
+      onMeshPageShow()
     }
   }
 
@@ -4766,6 +4773,13 @@ import {
   /** 反代体检「全通可取」的 IP（回填按钮用） */
   let relayPicked: string[] = []
 
+  /** 最近一次盲中继部署结果（供「填入组网配置」跨页回填） */
+  let lastEdgeDeploy: { workerUrl?: string; wssEndpoint?: string; monitorToken?: string } | null = null
+  /** 组网页对端列表（本地编辑，导出配置时用） */
+  let meshPeers: Array<{ nodeId: string; addr: string; pub: string; vip: string }> = []
+  /** 拓扑动画引擎 */
+  let meshTopo: MeshTopology | null = null
+
   /** 部署页二级页签：代理实例 / 盲中继云监测台 */
   function bindDeploySubtabs(): void {
     const nav = document.getElementById('deployTabs')
@@ -4840,12 +4854,149 @@ import {
           `监测台密码：${result.monitorPassword || ''}`,
         ].join('\n')
         if (out) { out.textContent = text; out.hidden = false }
+        // 缓存部署结果，解锁「填入组网配置」按钮（跨页回填）
+        lastEdgeDeploy = {
+          workerUrl: result.workerUrl,
+          wssEndpoint: result.wssEndpoint,
+          monitorToken: result.monitorToken,
+        }
+        const fillBtn = $('btnFillMeshConfig') as HTMLButtonElement | null
+        if (fillBtn) fillBtn.disabled = false
         log('盲中继 / 云监测台部署完成（结果见下方框，请立即保存令牌与密码）', 'ok')
       } catch (err) {
         log('盲中继部署失败：' + (err instanceof Error ? err.message : String(err)), 'err')
       } finally {
         btn.removeAttribute('disabled')
       }
+    })
+  }
+
+  /** 组网页：拓扑动画 + 配置管理 + 从部署结果回填。 */
+  function bindMesh(): void {
+    const canvas = document.getElementById('topoCanvas') as HTMLCanvasElement | null
+    if (canvas) {
+      try {
+        meshTopo = new MeshTopology(canvas)
+        // 先放一个本地节点占位（未启动时也能看到拓扑引擎在工作）
+        const selfId = ($('meshNodeId')?.value || '').trim() || 'local'
+        const nodes: TopoNode[] = [{
+          id: selfId, label: ($('meshVirtualIp')?.value || '本机').trim(),
+          vip: ($('meshVirtualIp')?.value || '').trim(),
+          connType: 'self', up: true,
+        }]
+        meshTopo.setData(nodes)
+        const empty = document.getElementById('topoEmpty')
+        if (empty) empty.hidden = true
+        onMeshPageShow = () => meshTopo?.refresh()
+      } catch (err) {
+        log('拓扑动画初始化失败：' + (err instanceof Error ? err.message : String(err)), 'warn')
+      }
+    }
+
+    // 填入组网配置（来自盲中继部署结果）
+    $('btnFillMeshConfig')?.addEventListener('click', () => {
+      if (!lastEdgeDeploy) {
+        log('请先部署盲中继，再填入组网配置', 'warn')
+        return
+      }
+      const url = (lastEdgeDeploy.wssEndpoint || lastEdgeDeploy.workerUrl || '').trim()
+      // wss://<domain>/mesh/<hash>?peer_id=... → 域名 + 房间名
+      try {
+        const u = new URL(url.replace(/^wss:/, 'https:'))
+        const domain = u.hostname
+        const room = (u.pathname.split('/').filter(Boolean)[1] || '').slice(0, 64)
+        if (domain) { const el = $('meshRelayDomain'); if (el) el.value = domain }
+        if (room) { const el = $('meshRelayRoom'); if (el) el.value = room }
+        const pw = lastEdgeDeploy.monitorToken
+        if (pw) { const el = $('meshPsk'); if (el && !el.value) el.value = pw }
+        log(`已填入组网配置：盲中继 ${domain}，房间 ${room}`, 'ok')
+      } catch {
+        log('解析 WSS 地址失败，请手动填写', 'warn')
+      }
+    })
+
+    // 添加对端
+    $('btnAddPeer')?.addEventListener('click', () => {
+      const nodeId = ($('peerNodeId')?.value || '').trim()
+      const addr = ($('peerAddr')?.value || '').trim()
+      const pub = ($('peerPub')?.value || '').trim()
+      const vip = ($('peerVip')?.value || '').trim()
+      if (!nodeId || !addr || pub.length !== 64) {
+        log('对端需填写 ID、地址与 64 hex 静态公钥', 'warn')
+        return
+      }
+      meshPeers.push({ nodeId, addr, pub, vip })
+      renderMeshPeers()
+      $('peerNodeId')!.value = ''; $('peerAddr')!.value = ''; $('peerPub')!.value = ''; $('peerVip')!.value = ''
+      log('已添加对端', 'ok')
+    })
+
+    // 保存配置到本地（localStorage）
+    $('btnMeshSave')?.addEventListener('click', () => {
+      const cfg = collectMeshConfig()
+      try {
+        localStorage.setItem('cfpilot-mesh-config', JSON.stringify(cfg))
+        log('组网配置已保存到本地浏览器', 'ok')
+      } catch {
+        log('保存失败（浏览器存储不可用）', 'warn')
+      }
+    })
+
+    // 导出启动命令
+    $('btnMeshExport')?.addEventListener('click', () => {
+      const cfg = collectMeshConfig()
+      const json = JSON.stringify(cfg, null, 2)
+      const out = $('meshCmdOut')
+      const cmd = `将以下内容保存为 mesh.json，然后以管理员/root 运行：\n` +
+        `cfpilot-desktop --mesh-config mesh.json\n\n${json}`
+      if (out) { out.textContent = cmd; out.hidden = false }
+      log('已生成启动命令与配置', 'ok')
+    })
+
+    // 恢复本地配置
+    try {
+      const saved = localStorage.getItem('cfpilot-mesh-config')
+      if (saved) {
+        const cfg = JSON.parse(saved) as Record<string, string>
+        for (const [k, v] of Object.entries(cfg)) {
+          const el = document.getElementById('mesh' + k.charAt(0).toUpperCase() + k.slice(1))
+          if (el && typeof v === 'string') (el as HTMLInputElement).value = v
+        }
+      }
+    } catch { /* 忽略损坏的本地配置 */ }
+  }
+
+  function collectMeshConfig(): Record<string, unknown> {
+    return {
+      nodeId: ($('meshNodeId')?.value || '').trim(),
+      network: ($('meshNetwork')?.value || '').trim(),
+      psk: ($('meshPsk')?.value || '').trim(),
+      virtualIp: ($('meshVirtualIp')?.value || '').trim(),
+      listen: ($('meshListen')?.value || '').trim(),
+      tunName: ($('meshTunName')?.value || '').trim(),
+      relayDomain: ($('meshRelayDomain')?.value || '').trim(),
+      relayRoom: ($('meshRelayRoom')?.value || '').trim(),
+      enableDegrade: ($('meshEnableDegrade') as HTMLInputElement | null)?.checked !== false,
+      peers: meshPeers,
+    }
+  }
+
+  function renderMeshPeers(): void {
+    const el = document.getElementById('peerList')
+    if (!el) return
+    if (meshPeers.length === 0) { el.textContent = '暂无对端'; return }
+    el.innerHTML = meshPeers.map((p, i) =>
+      `<div style="padding:4px 0;border-bottom:1px solid var(--border)">` +
+      `<code>${escapeHtml(p.nodeId)}</code> ${escapeHtml(p.addr)} ${escapeHtml(p.vip)} ` +
+      `<a href="#" data-peer-del="${i}" style="color:var(--err)">删除</a></div>`
+    ).join('')
+    el.querySelectorAll('[data-peer-del]').forEach((a) => {
+      a.addEventListener('click', (ev) => {
+        ev.preventDefault()
+        const idx = Number((a as HTMLElement).dataset.peerDel)
+        meshPeers.splice(idx, 1)
+        renderMeshPeers()
+      })
     })
   }
 
@@ -6913,6 +7064,7 @@ import {
     safeBind('部署', bindDeploy)
     safeBind('部署页签', bindDeploySubtabs)
     safeBind('盲中继/云监测台', bindEdge)
+    safeBind('组网', bindMesh)
     safeBind('链式代理', bindChain)
     safeBind('优选', bindScan)
     safeBind('优选页签', bindScanSubtabs)
@@ -6977,6 +7129,28 @@ import {
         if (hasActiveToken()) await detectAccountAndGuide()
       } catch {
         /* 启动期检测失败不影响其它功能，用户可手点「检测账号」重试 */
+      }
+    })()
+
+    // 按构建变体显示组网入口：普通版隐藏「组网」页签与 mesh 教程，+mesh 版显示。
+    void (async () => {
+      try {
+        const enabled = await (window.cfpilot.meshEnabled?.() ?? Promise.resolve(false))
+        const navBtn = document.querySelector('#nav button[data-page="mesh"]') as HTMLElement | null
+        if (navBtn) navBtn.hidden = !enabled
+        const notice = document.getElementById('meshNotice')
+        const content = document.getElementById('meshContent')
+        if (notice) notice.hidden = enabled
+        if (content) content.hidden = !enabled
+        const meshTutorial = document.getElementById('tutorialMesh')
+        if (meshTutorial) meshTutorial.hidden = !enabled
+        const fillBtn = $('btnFillMeshConfig')
+        // 「填入组网配置」仅 +mesh 版有意义（普通版部署盲中继也不组网）
+        if (fillBtn && !enabled) fillBtn.hidden = true
+      } catch {
+        /* 端点不可用时（旧版外壳）保守隐藏组网入口 */
+        const navBtn = document.querySelector('#nav button[data-page="mesh"]') as HTMLElement | null
+        if (navBtn) navBtn.hidden = true
       }
     })()
   })

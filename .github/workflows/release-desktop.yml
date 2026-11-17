@@ -215,9 +215,12 @@ jobs:
       - name: 构建 +mesh 变体与安装包
         # +mesh 是同 tag 多 asset（不增版本号通道）。产物名带 +mesh 后缀，
         # 与普通版共存。安装包解决 wintun.dll 不捆绑问题（ADR-0002）：
-        # Windows setup zip 含 install.ps1，安装时提权调 --fetch-wintun 下载 DLL。
+        # Windows 用 NSIS 打真正的 setup.exe（双击即装，安装时提权调 --fetch-wintun
+        # 下载 DLL）；Linux 用 dpkg-deb 生成 .deb。两者都是 Ubuntu runner 自带/可装的工具。
         run: |
           set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nsis dpkg >/dev/null
           node scripts/build-desktop.mjs --mesh
           node scripts/build-installers.mjs
           echo '== +mesh 产物 =='

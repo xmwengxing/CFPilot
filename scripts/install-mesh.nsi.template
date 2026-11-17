@@ -1,0 +1,53 @@
+; CFPilot +mesh Windows 安装器（NSIS）。
+; 由 scripts/build-installers.mjs 填入版本号后调用 makensis 编译。
+; 关键：安装时**提权**调用 cfpilot 的 --fetch-wintun 下载 wintun.dll
+;（ADR-0002：DLL 不捆绑，官方下载 + 双重 SHA256 校验）。
+
+Unicode true
+RequestExecutionLevel admin
+
+!define APP_NAME "CFPilot Mesh"
+!define APP_VERSION "APP_VERSION_PLACEHOLDER"
+!define EXE_NAME "EXE_NAME_PLACEHOLDER"
+!define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\CFPilotMesh"
+
+Name "${APP_NAME} ${APP_VERSION}"
+OutFile "SETUP_OUT_PLACEHOLDER"
+InstallDir "$LOCALAPPDATA\CFPilot-Mesh"
+InstallDirRegKey HKCU "${UNINST_KEY}" "InstallDir"
+ShowInstDetails show
+
+Section "主程序" Main
+  SetOutPath "$INSTDIR"
+  File "EXE_SOURCE_PLACEHOLDER"
+
+  ; 提权下载并校验 wintun.dll（calling cfpilot 内置命令）
+  DetailPrint "正在下载并校验 wintun.dll（官方源 + SHA256）…"
+  ExecWait '"$INSTDIR\${EXE_NAME}" --fetch-wintun "$INSTDIR"' $0
+  IntCmp $0 0 dllok
+    MessageBox MB_ICONSTOP "wintun.dll 下载/校验失败，安装中止。请检查网络后重试。"
+    Abort
+  dllok:
+
+  ; 开始菜单 + 桌面快捷方式
+  CreateDirectory "$SMPROGRAMS\${APP_NAME}"
+  CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${EXE_NAME}"
+  CreateShortcut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${EXE_NAME}"
+
+  ; 卸载信息
+  WriteRegStr HKCU "${UNINST_KEY}" "DisplayName" "${APP_NAME} ${APP_VERSION}"
+  WriteRegStr HKCU "${UNINST_KEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'
+  WriteRegStr HKCU "${UNINST_KEY}" "InstallDir" "$INSTDIR"
+  WriteUninstaller "$INSTDIR\uninstall.exe"
+SectionEnd
+
+Section "Uninstall"
+  Delete "$INSTDIR\${EXE_NAME}"
+  Delete "$INSTDIR\wintun.dll"
+  Delete "$INSTDIR\uninstall.exe"
+  RMDir "$INSTDIR"
+  Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"
+  RMDir "$SMPROGRAMS\${APP_NAME}"
+  Delete "$DESKTOP\${APP_NAME}.lnk"
+  DeleteRegKey HKCU "${UNINST_KEY}"
+SectionEnd

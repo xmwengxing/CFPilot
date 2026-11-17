@@ -22,26 +22,46 @@ function has(cmd) {
   try { execFileSync(cmd, ['--version'], { stdio: 'ignore' }); return true } catch { return false }
 }
 
-// ---------- Windows 安装包（zip + install.ps1）----------
-const winExe = join(dist, `cfpilot-${version}+mesh-windows-amd64.exe`)
-if (existsSync(winExe)) {
+/** 找 makensis：PATH → 常见安装路径（Windows）。找不到返回 null。 */
+function findMakensis() {
+  if (has('makensis')) return 'makensis'
+  for (const p of [
+    'C:\\Program Files (x86)\\NSIS\\makensis.exe',
+    'C:\\Program Files\\NSIS\\makensis.exe',
+  ]) {
+    if (existsSync(p)) return p
+  }
+  return null
+}
+
+// ---------- Windows 安装包（NSIS 安装器 exe，双击即装）----------
+const winExeName = `cfpilot-${version}+mesh-windows-amd64.exe`
+const winExe = join(dist, winExeName)
+const makensis = findMakensis()
+if (existsSync(winExe) && makensis) {
   rmSync(stage, { recursive: true, force: true })
   mkdirSync(stage, { recursive: true })
-  copyFileSync(winExe, join(stage, `cfpilot-${version}+mesh-windows-amd64.exe`))
-  const tpl = readFileSync(join(here, 'install-mesh.ps1.template'), 'utf8')
-  writeFileSync(join(stage, 'install-mesh.ps1'),
-    tpl.replace('EXE_NAME_PLACEHOLDER', `cfpilot-${version}+mesh-windows-amd64.exe`), 'utf8')
-  const zipOut = join(dist, `cfpilot-${version}+mesh-windows-amd64-setup.zip`)
-  if (has('zip')) {
-    execFileSync('zip', ['-q', '-r', zipOut, '.'], { cwd: stage })
-  } else {
-    // Windows 本机无 zip 命令时用 PowerShell Compress-Archive
-    execFileSync('powershell', ['-NoProfile', '-Command',
-      `Compress-Archive -Path '${stage}\\*' -DestinationPath '${zipOut}' -Force`], { stdio: 'inherit' })
-  }
-  console.log(`[installers] ✅ ${zipOut.split(/[\\/]/).pop()} (${(statSync(zipOut).size/1024/1024).toFixed(2)} MB)`)
+  copyFileSync(winExe, join(stage, winExeName))
+  const tpl = readFileSync(join(here, 'install-mesh.nsi.template'), 'utf8')
+  const setupName = `cfpilot-${version}+mesh-windows-amd64-setup.exe`
+  const setupOut = join(dist, setupName)
+  const nsi = tpl
+    .replace('APP_VERSION_PLACEHOLDER', version)
+    .replace('EXE_NAME_PLACEHOLDER', winExeName)
+    .replace('EXE_SOURCE_PLACEHOLDER', join(stage, winExeName))
+    .replace('SETUP_OUT_PLACEHOLDER', setupOut)
+  const nsiPath = join(stage, 'install.nsi')
+  // NSIS 按 ACP 读脚本；含中文的 Unicode 脚本必须带 UTF-8 BOM，
+  // 否则报 "Bad text encoding"（真机踩到）。
+  writeFileSync(nsiPath, '\uFEFF' + nsi, 'utf8')
+  execFileSync(makensis, [nsiPath], { cwd: stage, stdio: 'inherit' })
+  console.log(`[installers] ✅ ${setupName} (${(statSync(setupOut).size/1024/1024).toFixed(2)} MB)`)
+  // 裸 exe 仅作中间产物：安装包已内嵌它，发版时不单独上传（避免用户下错）
+  rmSync(winExe, { force: true })
+} else if (!existsSync(winExe)) {
+  console.log(`[installers] 跳过 Windows（未找到 ${winExeName}，需先 --mesh 构建）`)
 } else {
-  console.log(`[installers] 跳过 Windows（未找到 ${winExe.split(/[\\/]/).pop()}，需先 --mesh 构建）`)
+  console.log('[installers] 跳过 Windows 安装器（未找到 makensis；CI 需在 Windows runner 或有 NSIS 的环境）')
 }
 
 // ---------- Linux deb ----------

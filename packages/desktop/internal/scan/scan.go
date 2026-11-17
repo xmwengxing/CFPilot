@@ -771,14 +771,21 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 				keep = append(keep, r)
 			}
 		}
-		// 筛完为空时**忽略该筛选**（不阻断），否则用户会以为扫描失败
 		if len(keep) > 0 {
 			wsFiltered = keep
 			stats["countryFiltered"] = len(wsOK) - len(keep)
 		} else {
-			stats["countryFilterIgnored"] = 1
+			// 严格不放宽：0 命中时**不再返回其它地区的节点**。
+			//
+			// 旧行为是「忽略筛选、把全量 wsOK 当结果」，于是选日本却出现
+			// 法兰克福（FRA）—— 用户以为筛选没生效，实际是放宽逻辑偷偷
+			// 换了地区。现在明确报错并说清命中数，让它一眼可见。
+			stats["countryFilterNoMatch"] = 1
 			report(Progress{Stage: "probe",
-				Message: "所选地区没有匹配的 IP，已忽略地区筛选（可调大采样数再试）"})
+				Message: fmt.Sprintf("所选地区 0 命中（%d 个可用节点均不在所选机房），未放宽为其它地区", len(wsOK))})
+			return &Summary{Entries: []Entry{}, Stats: stats}, fmt.Errorf(
+				"所选地区本轮 0 命中：%d 个可用节点均落在其它机房，未放宽为其它地区。"+
+					"可加大采样数或换一个地区重试", len(wsOK))
 		}
 	}
 

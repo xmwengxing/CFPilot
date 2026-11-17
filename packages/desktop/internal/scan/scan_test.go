@@ -479,7 +479,10 @@ func TestRunCountryFilter(t *testing.T) {
 	}))
 	defer srv.stop()
 
-	// 要求 SIN，但实际是 NRT → 筛完为空 → 应**忽略筛选**而不是返回空结果
+	// 要求 SIN，但实际是 NRT → 筛完 0 命中 → 严格模式应报错、不放宽为其它地区。
+	//
+	// 旧行为是「忽略筛选、把 NRT 节点当结果返回」—— 用户选 SIN 却拿到 NRT，
+	// 与「选日本却出法兰克福」同源。现在必须明确报错，防止跨地区节点混入。
 	sum, err := Run(context.Background(), Options{
 		Host:           "test.example.com",
 		Port:           srv.Port,
@@ -489,14 +492,56 @@ func TestRunCountryFilter(t *testing.T) {
 		SpeedBytes:     64 * 1024,
 		SpeedTimeoutMs: 2000,
 	})
+	if err == nil {
+		t.Fatal("所选地区 0 命中时应报错（严格不放宽），实际 err=nil")
+	}
+	if !strings.Contains(err.Error(), "0 命中") {
+		t.Errorf("错误信息应说明「0 命中」，实际：%v", err)
+	}
+	if sum == nil || len(sum.Entries) != 0 {
+		t.Errorf("0 命中时应返回空结果，实际：%+v", sum)
+	}
+	if sum.Stats["countryFilterNoMatch"] != 1 {
+		t.Errorf("应记录「地区筛选 0 命中」，实际 stats=%v", sum.Stats)
+	}
+}
+
+// 地区筛选命中时只保留该地区（严格模式不影响正常命中路径）。
+func TestRunCountryFilterMatch(t *testing.T) {
+	payload := strings.Repeat("z", 64*1024)
+	srv := newTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("bytes") == "" && strings.HasPrefix(r.URL.Path, "/__edge") {
+			w.Header().Set("Cf-Ray", "abc123-NRT")
+			w.WriteHeader(http.StatusSwitchingProtocols)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		w.Header().Set("X-Probe-Bytes", strconv.Itoa(2*1024*1024))
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer srv.stop()
+
+	sum, err := Run(context.Background(), Options{
+		Host:           "test.example.com",
+		Port:           srv.Port,
+		Candidates:     []string{srv.Addr},
+		Countries:      []string{"JP"}, // NRT 属于日本 → 命中
+		Top:            10,
+		SpeedBytes:     64 * 1024,
+		SpeedTimeoutMs: 2000,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sum.Stats["countryFilterIgnored"] != 1 {
-		t.Errorf("应记录「忽略地区筛选」，实际 stats=%v", sum.Stats)
+	if sum.Stats["countryFilterNoMatch"] == 1 {
+		t.Error("命中时不应标记为 0 命中")
 	}
 	if len(sum.Entries) != 1 {
-		t.Errorf("筛完为空时应忽略筛选并保留结果，实际 %d 个", len(sum.Entries))
+		t.Errorf("命中时应保留结果，实际 %d 个", len(sum.Entries))
+	}
+	if sum.Entries[0].Colo != "NRT" {
+		t.Errorf("结果机房应为 NRT，实际 %s", sum.Entries[0].Colo)
 	}
 }
 

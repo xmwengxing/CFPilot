@@ -130,6 +130,46 @@ export function countryOfColo(colo: string): string {
   return coloToCountry.get(colo.toUpperCase()) ?? ''
 }
 
+/**
+ * IPv6 活跃段表（ip-ranges.ts 的 IPV6_PREFIX_WEIGHTS）里权重 > 0 的段
+ * **实测能落到的机房**。截至 2026-11-16 只有 AMS / FRA / SIN / SJC 四个，
+ * 一个东亚机房都没有。与 Go 版 `scan/ipv6ActiveColos` 保持同源，改表必须同步。
+ *
+ * 这是「选了 TW/JP 却扫出 FRA」的根因之一：选东亚机房时 v6 候选 100% 不可能
+ * 命中筛选，只会挤占阶段二名额，并在放宽时借机混入结果。
+ */
+export const IPV6_ACTIVE_COLOS: ReadonlySet<string> = new Set(['AMS', 'FRA', 'SIN', 'SJC'])
+
+/**
+ * 一组机房码是否**可能**落在某个 IPv6 活跃段上。
+ *
+ * 与 Go 版 `scan.ColosCanUseIPv6` 逐字节对齐：空集合（未筛选）返回 true；
+ * 与活跃机房无交集（如只选 TPE/NRT/ICN/HKG）返回 false，调用方据此跳过 v6。
+ */
+export function colosCanUseIPv6(want: ReadonlySet<string>): boolean {
+  if (want.size === 0) return true
+  for (const colo of want) {
+    if (IPV6_ACTIVE_COLOS.has(colo.toUpperCase())) return true
+  }
+  return false
+}
+
+/** 把国家筛选展开成机房码集合（供 colosCanUseIPv6 使用） */
+export function colosOfCountryFilter(countries: readonly string[]): Set<string> {
+  const out = new Set<string>()
+  for (const code of normalizeCountryFilter(countries)) {
+    for (const colo of COUNTRY_COLOS[code] ?? []) out.add(colo)
+  }
+  // 直接传进来的机房码（normalizeCountryFilter 会归一成国家码，这里再兜底收一次）
+  for (const raw of countries) {
+    const code = String(raw ?? '').trim().toUpperCase()
+    if (!isKnownCountry(code) && !isRegionGroup(code) && code.length === 3 && countryOfColo(code) === '') {
+      out.add(code)
+    }
+  }
+  return out
+}
+
 /** 国家代码是否受支持 */
 export function isKnownCountry(code: string): boolean {
   return Object.prototype.hasOwnProperty.call(COUNTRY_COLOS, code.toUpperCase())

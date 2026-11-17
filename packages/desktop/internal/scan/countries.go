@@ -218,6 +218,55 @@ func CountryNameOf(country string) string {
 	return countryNames[strings.ToUpper(strings.TrimSpace(country))]
 }
 
+// ipv6ActiveColos 是 IPv6 活跃段表（ipranges.go 的 ipv6PrefixWeights）里权重 > 0 的段
+// **实测能落到的机房**。截至 2026-11-16，这份表只有：
+//
+//	2606:4700:3035/3037/3030 → AMS
+//	2606:4700:10 / 20        → FRA
+//	2a06:98c1:3100           → SIN
+//	2606:4700:: / 1          → SJC
+//
+// 即 IPv6 候选只会落在 AMS / FRA / SIN / SJC 四个机房 —— 一个东亚机房都没有。
+//
+// ⚠️ 这是「选了 TW/JP 却扫出一堆 FRA」的根因之一：选东亚国家时，IPv6 段
+// 从物理上就不可能命中 TPE/NRT，却被当成候选送进阶段二；一旦东亚 v4 候选
+// 一个都没通过，放宽逻辑就会把这些 FRA/AMS 的 IPv6 节点当成结果返回。
+//
+// 维护约定：改 ipv6PrefixWeights 的权重 > 0 段时，**必须同步这里**。
+// 判据宁可保守：多列一个机房只会少跳一次 v6，漏列一个才可能把噪音放进来。
+var ipv6ActiveColos = map[string]bool{
+	"AMS": true, "FRA": true, "SIN": true, "SJC": true,
+}
+
+// IPv6ActiveColos 返回 IPv6 活跃段的实测机房集合（副本，避免调用方改动全局表）。
+func IPv6ActiveColos() map[string]bool {
+	out := make(map[string]bool, len(ipv6ActiveColos))
+	for colo := range ipv6ActiveColos {
+		out[colo] = true
+	}
+	return out
+}
+
+// ColosCanUseIPv6 判断一组机房码是否**可能**落在某个 IPv6 活跃段上。
+//
+// 只要所选机房与 ipv6ActiveColos 有交集，就保留 IPv6 采样（用户可能真的
+// 要 AMS/FRA/SIN/SJC 的节点）；完全没有交集（如只选 TPE/NRT/ICN/HKG），
+// IPv6 就是纯噪音 —— 它永远不可能命中筛选，只会在放宽时混进来。
+//
+// 入参是**机房码集合**（来自 ExpandCountryFilter），空集合视为「未筛选」，
+// 返回 true（不过滤，保持默认行为）。
+func ColosCanUseIPv6(want map[string]bool) bool {
+	if len(want) == 0 {
+		return true
+	}
+	for colo := range want {
+		if ipv6ActiveColos[strings.ToUpper(colo)] {
+			return true
+		}
+	}
+	return false
+}
+
 // countryContinent 国家代码 → 大洲分组（界面国家弹窗的分节标题）。
 //
 // 与 regionGroups 的分工：

@@ -21,7 +21,7 @@ import {
   type ScanEvent,
   type ScanObservation,
 } from './scan'
-import { coloCity, normalizeCountryFilter } from './countries'
+import { coloCity, normalizeCountryFilter, colosCanUseIPv6, colosOfCountryFilter } from './countries'
 import { formatEntries } from './scan'
 import { postResults, fetchScannerToken, type PushMode } from './callback'
 import { resolveCandidatePlan, type CandidatePlan, type FamilyChoice } from './candidates'
@@ -250,16 +250,30 @@ async function resolveCandidatesFromArgs(
     }
   }
 
+  const countryFlags = flagList(args, 'countries')
+  const baseFamily = familyFromArgs(args)
+  // 选了机房地区时，若所选机房不可能落在任何 IPv6 活跃段上，就强制 v4 采样。
+  //
+  // IPv6 活跃段表实测只覆盖 AMS/FRA/SIN/SJC（见 countries.ts 的 IPV6_ACTIVE_COLOS），
+  // 选 TW/JP/KR/HK 这类东亚机房时 v6 候选 100% 不可能命中筛选 —— 只会挤占
+  // 阶段二名额，并在「东亚 v4 全失败」时借放宽逻辑混进结果（选日本却出法兰克福）。
+  // 判据用机房交集而非硬编码「东亚」，权重表将来加了 NRT 段会自动重新启用 v6。
+  let family = baseFamily
+  if (countryFlags.length > 0 && family !== 'v4' && !colosCanUseIPv6(colosOfCountryFilter(countryFlags))) {
+    process.stderr.write('※ 所选地区在 IPv6 活跃段没有对应机房，已跳过 IPv6 采样（避免其它地区节点混入）\n')
+    family = 'v4'
+  }
+
   const base = {
     // 选国家时**自动中性采样**：采样发生在阶段一之前、那时还不知道机房，
     // 若某国家的 IP 集中在低权重网段，候选会被压少 → 可能「扫了几千个还是找不到 HKG/NRT」。
-    neutral: args.flags['neutral-sampling'] !== undefined || flagList(args, 'countries').length > 0,
+    neutral: args.flags['neutral-sampling'] !== undefined || countryFlags.length > 0,
     sample: flagNumber(args, 'sample', 6556),
     cidr: flagList(args, 'cidr'),
     // ⚠️ 不传 seed = 每次随机（默认）。只有用户显式给了 --seed 才固定，
     // 否则「每次跑都测同一批 IP」——那批落在劣质路由段上时永远测不出好 IP。
     seed: seedFromArgs(args),
-    family: familyFromArgs(args),
+    family,
     extraHosts,
   }
 

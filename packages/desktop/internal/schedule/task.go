@@ -37,7 +37,8 @@ const (
 	StatusFailed = "failed"
 	// StatusSkipped 表示上一轮因故没跑（与其它扫描冲突、错过时间窗）。
 	StatusSkipped = "skipped"
-	// StatusRelaxed 表示跑完了，但国家筛选没命中、结果被放宽为全量。
+	// StatusRelaxed 表示跑完了，但国家筛选没命中（严格模式下本轮会以失败结束，
+	// 此状态仅为兼容历史记录保留，不再代表「结果被放宽为全量」）。
 	StatusRelaxed = "relaxed"
 )
 

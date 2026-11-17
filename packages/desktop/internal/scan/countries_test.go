@@ -114,6 +114,55 @@ func TestExpandCountryFilterRegionGroup(t *testing.T) {
 	}
 }
 
+// TestColosCanUseIPv6 验证「选东亚机房跳过 IPv6」的判据。
+//
+// IPv6 活跃段实测只覆盖 AMS/FRA/SIN/SJC，选 TW/JP/KR/HK 时 v6 候选
+// 100% 不可能命中筛选 —— 它们只会挤占阶段二名额，并在放宽时借机混入
+// FRA/AMS 节点（用户看到「选日本却出法兰克福」）。判据用机房交集，
+// 权重表新增机房段后自动生效，无需硬编码「东亚」地理概念。
+func TestColosCanUseIPv6(t *testing.T) {
+	// 活跃段只有四个机房，且没有东亚机房
+	active := IPv6ActiveColos()
+	for _, colo := range []string{"AMS", "FRA", "SIN", "SJC"} {
+		if !active[colo] {
+			t.Errorf("IPv6 活跃段应含 %s", colo)
+		}
+	}
+	for _, colo := range []string{"TPE", "NRT", "ICN", "HKG"} {
+		if active[colo] {
+			t.Errorf("IPv6 活跃段不应含东亚机房 %s", colo)
+		}
+	}
+
+	// 东亚国家 → 无交集 → 跳过 v6
+	for _, country := range []string{"TW", "JP", "KR", "HK"} {
+		if ColosCanUseIPv6(ExpandCountryFilter([]string{country})) {
+			t.Errorf("%s 机房与 v6 活跃段无交集，应跳过 v6", country)
+		}
+	}
+	// 德/美/新 → 有交集 → 保留 v6
+	for _, country := range []string{"DE", "US", "SG", "NL"} {
+		if !ColosCanUseIPv6(ExpandCountryFilter([]string{country})) {
+			t.Errorf("%s 机房与 v6 活跃段有交集，应保留 v6", country)
+		}
+	}
+	// 未筛选（空集合）→ 不过滤
+	if !ColosCanUseIPv6(map[string]bool{}) {
+		t.Error("未筛选时应保留 v6")
+	}
+	// 机房码直选
+	if ColosCanUseIPv6(ExpandCountryFilter([]string{"NRT"})) {
+		t.Error("直选 NRT 应跳过 v6")
+	}
+	if !ColosCanUseIPv6(ExpandCountryFilter([]string{"FRA"})) {
+		t.Error("直选 FRA 应保留 v6")
+	}
+	// 亚洲组含 SIN，仍可与 v6 相交，不能误杀整组
+	if !ColosCanUseIPv6(ExpandCountryFilter([]string{"ASIA"})) {
+		t.Error("亚洲组含 SIN，应保留 v6")
+	}
+}
+
 // TestSupportedCountriesStable 验证国家列表稳定且非空。
 func TestSupportedCountriesStable(t *testing.T) {
 	a := SupportedCountries()

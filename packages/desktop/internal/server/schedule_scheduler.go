@@ -175,14 +175,14 @@ func (s *Server) runScheduledTask(ctx context.Context, task schedule.Task) {
 		return
 	}
 	status, message := schedule.StatusOK, ""
-	// ⚠️ 必须识别「国家筛选被放宽」。
-	//
-	// 国家筛选发生在阶段二之后（机房码只有 101 响应里才有），
-	// 筛不到时两端都会**放宽为全量**而不是报错 ——
-	// 不识别的话，用户以为这一轮筛的是亚洲组，实际拿到的是全量结果。
-	if summary.Stats["countryFilterIgnored"] == 1 {
+	// 国家筛选 0 命中现在会直接报错（scan.Run 返回 error），走上面的
+	// StatusFailed 分支，不会再静默放宽为全量 —— 于是用户以为筛了亚洲组、
+	// 实际拿到全球节点的隐患从根上消除。这里保留 StatusRelaxed 的识别
+	// 只为兼容历史任务记录：若某轮 stats 里仍带 noMatch 标记（理论上不会
+	// 走到这里），明确标注，不把它当成功。
+	if summary.Stats["countryFilterNoMatch"] == 1 {
 		status = schedule.StatusRelaxed
-		message = "国家筛选未命中，本轮结果已放宽为全量"
+		message = "国家筛选未命中，本轮未放宽（结果不含其它地区节点）"
 	}
 	if len(entries) == 0 {
 		if message == "" {

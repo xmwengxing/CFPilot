@@ -192,6 +192,23 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 	// ⚠️ 预检**只读**：失败时既不生成 v6 候选，也不写任何负向观测。
 	family, ipv6Env, extraIPv6 := s.resolveFamily(req.Family, host)
 
+	// 选了机房地区时，若所选机房不可能落在任何 IPv6 活跃段上，就跳过 v6。
+	//
+	// 根因：IPv6 活跃段表实测只覆盖 AMS/FRA/SIN/SJC（见 scan.ipv6ActiveColos），
+	// 选 TW/JP/KR/HK 这类东亚机房时，v6 候选 100% 不可能命中筛选 —— 它们
+	// 只会挤占阶段二名额，并在「东亚 v4 全失败」时借放宽逻辑混进结果，
+	// 表现为「选了日本却出现法兰克福」。让它们从源头不进入采样即可。
+	//
+	// 判据用机房交集而非硬编码「东亚」，所以将来权重表加了 NRT 段会自动生效。
+	if len(req.Countries) > 0 && family != "v4" {
+		want := scan.ExpandCountryFilter(req.Countries)
+		if !scan.ColosCanUseIPv6(want) {
+			family = "v4"
+			extraIPv6 = nil
+			s.logLevel("所选地区在 IPv6 活跃段没有对应机房，已跳过 IPv6 采样（避免其它地区节点混入）", "info")
+		}
+	}
+
 	if len(candidates) == 0 {
 		sample := req.Sample
 		if sample <= 0 {

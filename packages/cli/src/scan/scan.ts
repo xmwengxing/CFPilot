@@ -346,6 +346,8 @@ export interface ScanSummary {
     wsFiltered: number
     /** 国家筛选未命中任何候选、已放宽为全量（此时 countries 为空） */
     countryFilterRelaxed?: boolean
+    /** 国家筛选 0 命中、严格不放宽（本轮以错误结束，不放行其它地区节点） */
+    countryFilterNoMatch?: boolean
     /** 因已攒够目标国家节点而提前结束阶段二 */
     stoppedEarly?: boolean
     /**
@@ -881,7 +883,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   // 现在明确告知「已放宽为全量」，并在结果里标记筛选未生效。
   let wsFiltered = wsOk
   let appliedCountries: string[] = []
-  let countryFilterRelaxed = false
+  let countryFilterNoMatch = false
   if (hasCountryFilter && wsOk.length > 0) {
     const matched = wsOk.filter((r) => countryFilter.includes(countryOfColo(r.colo || r.probe?.colo || '')))
     if (matched.length > 0) {
@@ -895,14 +897,22 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
         message: `国家筛选 ${countryFilter.join('/')}：保留 ${matched.length}/${wsOk.length}，进入测速`,
       })
     } else {
-      countryFilterRelaxed = true
+      // 严格不放宽：0 命中时**不再返回其它地区的节点**。
+      // 旧行为是「放宽为全量」，于是选日本却拿到一堆法兰克福节点 ——
+      // 用户以为筛选没生效，实际是放宽逻辑偷偷换了地区。现在明确报错，
+      // 让「本轮该地区没有可用 IP」一眼可见，由用户决定加大采样还是换地区。
+      countryFilterNoMatch = true
       report({
         type: 'progress',
         stage: 2,
         done: wsOk.length,
         total: wsOk.length,
-        message: `⚠️ 国家筛选 ${countryFilter.join('/')} 后无候选 —— 已放宽为全量（${wsOk.length} 条）。可加大 --sample 或换地区重试`,
+        message: `国家筛选 ${countryFilter.join('/')} 后 0 命中（${wsOk.length} 个可用节点均不在所选机房），未放宽为其它地区`,
       })
+      throw new Error(
+        `所选地区本轮 0 命中：${wsOk.length} 个可用节点均落在其它机房，未放宽为其它地区。` +
+        `可加大 --sample 或换一个地区重试`
+      )
     }
   }
 
@@ -1168,8 +1178,10 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
       elapsedMs: Date.now() - started,
       countries: appliedCountries,
       wsFiltered: wsFiltered.length,
-      /** 国家筛选未命中任何候选、已放宽为全量 */
-      countryFilterRelaxed,
+      /** 国家筛选未命中任何候选、已放宽为全量（严格模式下恒为 false，会直接抛错） */
+      countryFilterRelaxed: false,
+      /** 国家筛选 0 命中、严格不放宽（保留字段供调用方兼容，实际本轮已抛错） */
+      countryFilterNoMatch,
       /** 因已攒够目标国家节点而提前结束阶段二 */
       stoppedEarly,
       /** 各阶段失败原因分布 */

@@ -13,6 +13,9 @@ import {
   REGION_GROUPS,
   REGION_GROUP_NAMES,
   SUPPORTED_COUNTRIES,
+  IPV6_ACTIVE_COLOS,
+  colosCanUseIPv6,
+  colosOfCountryFilter,
   countryOfColo,
   isRegionGroup,
   normalizeCountryFilter,
@@ -102,5 +105,39 @@ describe('normalizeCountryFilter 展开分组', () => {
         for (const colo of colos) expect(countryOfColo(colo)).toBe(country)
       }
     }
+  })
+})
+
+describe('IPv6 活跃段与所选机房的交集（选 TW/JP 跳过 v6）', () => {
+  it('IPv6 活跃段只覆盖 AMS/FRA/SIN/SJC，没有东亚机房', () => {
+    expect([...IPV6_ACTIVE_COLOS].sort()).toEqual(['AMS', 'FRA', 'SIN', 'SJC'])
+  })
+
+  it('东亚国家机房与 v6 活跃段无交集 → 跳过 v6', () => {
+    for (const country of ['TW', 'JP', 'KR', 'HK']) {
+      const colos = colosOfCountryFilter([country])
+      expect(colos.size).toBeGreaterThan(0)
+      expect(colosCanUseIPv6(colos)).toBe(false)
+    }
+  })
+
+  it('德/美/新的机房与 v6 活跃段有交集 → 保留 v6', () => {
+    for (const country of ['DE', 'US', 'SG', 'NL']) {
+      expect(colosCanUseIPv6(colosOfCountryFilter([country]))).toBe(true)
+    }
+  })
+
+  it('未筛选（空集合）时不跳过 v6', () => {
+    expect(colosCanUseIPv6(new Set())).toBe(true)
+    expect(colosOfCountryFilter([]).size).toBe(0)
+  })
+
+  it('机房码直选也正确判定', () => {
+    expect(colosCanUseIPv6(colosOfCountryFilter(['NRT']))).toBe(false)
+    expect(colosCanUseIPv6(colosOfCountryFilter(['FRA']))).toBe(true)
+  })
+
+  it('亚洲组含 SIN，仍可与 v6 相交（不会误杀整组）', () => {
+    expect(colosCanUseIPv6(colosOfCountryFilter(['ASIA']))).toBe(true)
   })
 })

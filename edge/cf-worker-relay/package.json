@@ -1,0 +1,17 @@
+{
+  "name": "mobihop-cf-worker-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MobiHop P4.2 edge blind relay: Cloudflare Workers + Durable Objects (room-isolated, zero-knowledge frame forwarding)",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "wrangler": "^4.0.0"
+  }
+}

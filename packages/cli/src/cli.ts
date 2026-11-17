@@ -16,7 +16,9 @@ Cloudflare Pages 代理部署与优选工具
 
 用法:
   ${NAME}                     交互菜单（推荐首次使用）
-  ${NAME} deploy [选项]       部署 Pages 双项目
+  ${NAME} deploy [选项]       部署 Pages 双项目（CFPilot 代理实例）
+  ${NAME} edge <动作> [选项]  部署盲中继 / 云监测台（MobiHop 边缘工程）
+  ${NAME} mesh <动作>         组网（+mesh 变体；当前骨架，协议待 3b）
   ${NAME} scan [选项]         本地真连接优选
   ${NAME} source <动作>       外部 IP 数据源与本地候选池管理
   ${NAME} test [选项]         测试单个 IP 的完整链路
@@ -73,6 +75,16 @@ async function main(): Promise<void> {
     case 'deploy': {
       const { runDeployCommand } = await import('./deploy/command')
       await runDeployCommand(args)
+      return
+    }
+    case 'edge': {
+      const { runEdgeCommand } = await import('./edge/command')
+      await runEdgeCommand(args)
+      return
+    }
+    case 'mesh': {
+      const { runMeshCommand } = await import('./mesh/command')
+      await runMeshCommand(args)
       return
     }
     case 'scan': {

@@ -203,9 +203,9 @@
   /**
    * 各事件的订阅者列表。
    *
-   * ⚠️ 这里必须与后端 `s.events.publish(...)` 的**全部 8 个事件**一一对应：
+   * ⚠️ 这里必须与后端 `s.events.publish(...)` 的**全部 9 个事件**一一对应：
    * deploy-status / log / relay-progress / relay-result / scan-result /
-   * task-status / update-done / update-progress。
+   * task-status / update-done / update-progress / edge-result。
    *
    * 漏一个键的后果（2026-11-05 真机）：relay-result / relay-progress 没声明，
    * 界面启动调 onRelayResult / onRelayProgress 时 subscribe() 里的
@@ -225,6 +225,7 @@
     'update-progress': [],
     'update-done': [],
     'task-status': [],
+    'edge-result': [],
   }
 
   let es = null
@@ -558,6 +559,49 @@
           clearTimeout(timer)
           reject(err)
         })
+      })
+    },
+
+    /* ---------------- 盲中继 / 云监测台 ---------------- */
+
+    /**
+     * 部署盲中继 + 云监测台。语义与 runScan 一致：等 edge-result 事件再 resolve。
+     * 与 CLI `cfpilot edge deploy` 同源（Go internal/edge.Deploy）。
+     */
+    deployEdgeRelay: function (params) {
+      return new Promise(function (resolve, reject) {
+        let settled = false
+        const unsub = subscribe('edge-result', function (payload) {
+          if (settled) return
+          settled = true
+          unsub()
+          clearTimeout(timer)
+          if (payload && payload.ok === false) {
+            reject(new Error((payload && payload.error) || '盲中继部署失败'))
+          } else {
+            resolve(payload && payload.result ? payload.result : payload)
+          }
+        })
+        const timer = setTimeout(function () {
+          if (settled) return
+          settled = true
+          unsub()
+          reject(new Error('盲中继部署超时（超过 10 分钟未返回结果）'))
+        }, 10 * 60 * 1000)
+        post('/api/edge/deploy', params || {}).catch(function (err) {
+          if (settled) return
+          settled = true
+          unsub()
+          clearTimeout(timer)
+          reject(err)
+        })
+      })
+    },
+
+    /** 列出账号下的 zone，供域名下拉选择 */
+    listEdgeZones: function () {
+      return get('/api/edge/zones').then(function (r) {
+        return { zones: (r && r.zones) || [] }
       })
     },
 

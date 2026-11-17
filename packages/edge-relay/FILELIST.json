@@ -1,0 +1,40 @@
+{
+  "$comment": "CFPilot edge-relay 权威文件清单（SHA256）。由 scripts/check-edge-relay.mjs --write 生成；校验时对比 CFPilot/edge 与 MobiHop/edge 是否与 packages/edge-relay 逐字节一致。禁止手改本文件的哈希值。",
+  "version": 1,
+  "files": [
+    "deploy-cf.ps1",
+    "deploy-cf-monitor-dashboard.ps1",
+    "deploy-cloud-console.ps1",
+    "cf-worker-relay/README.md",
+    "cf-worker-relay/dashboard.html",
+    "cf-worker-relay/package.json",
+    "cf-worker-relay/package-lock.json",
+    "cf-worker-relay/tsconfig.json",
+    "cf-worker-relay/wrangler.toml",
+    "cf-worker-relay/migrations/0001_init.sql",
+    "cf-worker-relay/migrations/0002_auth.sql",
+    "cf-worker-relay/src/cf.d.ts",
+    "cf-worker-relay/src/index.ts",
+    "cf-worker-relay/src/proto.ts",
+    "cf-worker-relay/test/do.test.mjs",
+    "cf-worker-relay/test/proto.test.mjs"
+  ],
+  "hashes": {
+    "deploy-cf.ps1": "D5CDFAE0D7AFCAAFB7EBF5F79FC51AB0EF02DB3E71E72A88C01BF04F8388F4EB",
+    "deploy-cf-monitor-dashboard.ps1": "556514C20173CA665621E87D441DDAC9081E7120B3D10276F2002A00947F90B1",
+    "deploy-cloud-console.ps1": "6795D690B11CB67C96BDED497E1F86D19058091B30CD4461B7F53F860F832C8F",
+    "cf-worker-relay/README.md": "C323BF985B8515DE059F1E54ED178DDFE7DA8DEB3EE837F4473F407DD9A96743",
+    "cf-worker-relay/dashboard.html": "7CCE9397DC66ADAF1C23EBDE4085CC1B49C165AC429444379BC0F037881CB1CD",
+    "cf-worker-relay/package.json": "B3AA3981EDDFE0BA8BB377BE0E3730416FDA26F1FC2BDE665EC5ABFC049B16F1",
+    "cf-worker-relay/package-lock.json": "2A611EE0BBDC997AA91710CB501894BC5120F04F73B56BC010B1CF3178CFA784",
+    "cf-worker-relay/tsconfig.json": "0FFC7C95C96DA55D4F783E298BD486405D912DAA41CBC3E251C8BE374BAE05FC",
+    "cf-worker-relay/wrangler.toml": "D1FDCAEFFFB48864E6597D092B7EC7EC0CAFB47132764FDBC3975B8BF00F643F",
+    "cf-worker-relay/migrations/0001_init.sql": "1DADB62034924F94B33B4E8E7794C3073A73ADD9324F7024CC82EA7723492C1A",
+    "cf-worker-relay/migrations/0002_auth.sql": "8500F7C245DDAABA708C785F56217391812F822283C625F4801C7608B4A18C96",
+    "cf-worker-relay/src/cf.d.ts": "4C34112C0DF1214871A2356F3E474FD2D8BE89E86812060F851F4016EF9199EA",
+    "cf-worker-relay/src/index.ts": "24B1766C441902F62B9172E2E331CBB6F5AB4D50A456A6ACA68F6BDB23E63E39",
+    "cf-worker-relay/src/proto.ts": "C0EB51A771B9CB78244A521EED11F321E395C8B3233E75CE2B692986E73B0C53",
+    "cf-worker-relay/test/do.test.mjs": "B2D2FF2720186E826C5E33BD73E2B0420EA4B93D2DD6571C11255E3780D48053",
+    "cf-worker-relay/test/proto.test.mjs": "F798D04D8C0228D3D1FA82EDCBFCC4E4AD4F73A38DC50F268BFCBE188E946C30"
+  }
+}

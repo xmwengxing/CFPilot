@@ -174,6 +174,35 @@ interface Window {
     /** 当前激活账户 */
     currentProfile(): Promise<CFPilotProfileView | null>
 
+    /** 盲中继 / 云监测台部署结果（Go internal/edge.Result，与 CLI 同源） */
+    deployEdgeRelay(params: {
+      domain: string
+      workerName?: string
+      monitorPassword: string
+      monitorToken?: string
+      dashboardProject?: string
+      withDashboard?: boolean
+      zoneId?: string
+      windowMs?: string
+      maxBytes?: string
+      maxPackets?: string
+      maxPeers?: string
+    }): Promise<{
+      ok?: boolean
+      error?: string
+      workerName?: string
+      workerUrl?: string
+      wssEndpoint?: string
+      d1Name?: string
+      d1Uuid?: string
+      doClass?: string
+      dashboardUrl?: string | null
+      monitorToken?: string
+      monitorPassword?: string
+    }>
+    /** 列出当前账号的 Cloudflare zone（供盲中继域名下拉） */
+    listEdgeZones(): Promise<{ zones: Array<{ id: string; name: string }> }>
+
     runDeploy(
       params: {
         mode: 'auto' | 'fresh' | 'update'

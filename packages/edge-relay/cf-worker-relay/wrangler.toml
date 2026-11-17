@@ -1,0 +1,35 @@
+# P4.2：MobiHop 零知识边缘盲中继（Cloudflare Workers + Durable Objects）
+#
+# 一个 network_hash = 一个 Durable Object 实例（房间隔离由 DO 单例语义保证）。
+# 部署：npx wrangler deploy
+# 本地联调：npx wrangler dev （需要 wrangler，且本机可联网安装；见 README）
+
+name = "mobihop-edge-relay"
+main = "src/index.ts"
+compatibility_date = "2026-01-01"
+
+# 房间 DO 绑定。Worker 用 idFromName(network_hash) 取同名实例。
+[durable_objects]
+bindings = [{ name = "MESH_ROOM", class_name = "MeshRoom" }]
+
+# SQLite 后端的 DO 迁移声明。本实现刻意**只用内存状态**（不落盘任何载荷）。
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["MeshRoom"]
+
+# 监测 D1 绑定（与 cf-monitor 共用 schema / 数据库）。
+[[d1_databases]]
+binding = "DB"
+database_name = "mobihop-monitor"
+database_id = "f18c66ff-fab0-4b30-b5e5-c2f0c0057906"
+
+# 默认限速 / 容量（可在 dashboard 或 `wrangler deploy --var` 覆盖）。
+# 与 P2.2 盲中继默认一致：每连接 1 MiB/s、2000 pkt/s。
+[vars]
+WINDOW_MS = "1000"
+MAX_BYTES_PER_WINDOW = "1048576"
+MAX_PACKETS_PER_WINDOW = "2000"
+MAX_PEERS_PER_ROOM = "512"
+
+# 生产建议：为 Worker 绑定自定义域（WSS URL 使用该域名；证书由 CF 自动签发）。
+# routes = [{ pattern = "edge.example.com", custom_domain = true }]

@@ -1,0 +1,165 @@
+package server
+
+// 本文件实现「盲中继 / 云监测台」部署 API。
+//
+//	POST /api/edge/deploy   → 立即返回 {started:true}，进度走 SSE log，完成推 edge-result
+//	GET  /api/edge/zones    → 列出账号下的 zone（供域名下拉）
+//
+// 与 CLI `cfpilot edge deploy` 同源（packages/cli/src/edge/deploy.ts），
+// 实际编排在 internal/edge.Deploy。
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/edge"
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/safe"
+)
+
+// edgeState 是盲中继部署的进程内互斥（与代理部署 deployState 独立）。
+type edgeState struct {
+	mu      sync.Mutex
+	running bool
+}
+
+func (s *Server) registerEdgeRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/edge/deploy", s.guard(s.handleEdgeDeploy))
+	mux.HandleFunc("/api/edge/zones", s.guard(s.handleEdgeZones))
+}
+
+type edgeDeployRequest struct {
+	Domain           string `json:"domain"`
+	WorkerName       string `json:"workerName"`
+	MonitorPassword  string `json:"monitorPassword"`
+	MonitorToken     string `json:"monitorToken"`
+	DashboardProject string `json:"dashboardProject"`
+	WithDashboard    *bool  `json:"withDashboard"`
+	ZoneID           string `json:"zoneId"`
+	WindowMs         string `json:"windowMs"`
+	MaxBytes         string `json:"maxBytes"`
+	MaxPackets       string `json:"maxPackets"`
+	MaxPeers         string `json:"maxPeers"`
+}
+
+// edgeActiveToken 从当前 profile 取 token + account（与 deploy 一致）。
+func (s *Server) edgeActiveToken() (token, accountID string, err error) {
+	profile, err := s.store.Active()
+	if err != nil || profile == nil {
+		return "", "", fmt.Errorf("尚未保存 Cloudflare 凭据")
+	}
+	if strings.TrimSpace(profile.CfToken) == "" {
+		return "", "", fmt.Errorf("缺少 API Token，请先在「账户配置」里填写")
+	}
+	if strings.TrimSpace(profile.AccountID) == "" {
+		return "", "", fmt.Errorf("缺少账号 ID，请先点「自动检测账号」")
+	}
+	return profile.CfToken, profile.AccountID, nil
+}
+
+func (s *Server) handleEdgeDeploy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "仅支持 POST"})
+		return
+	}
+	var req edgeDeployRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体不是合法 JSON"})
+		return
+	}
+	if strings.TrimSpace(req.Domain) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请填写盲中继域名"})
+		return
+	}
+	token, accountID, err := s.edgeActiveToken()
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 同一时刻一个 edge 部署（与代理部署独立，互不阻塞）
+	s.edge.mu.Lock()
+	if s.edge.running {
+		s.edge.mu.Unlock()
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "已有盲中继部署正在进行"})
+		return
+	}
+	s.edge.running = true
+	s.edge.mu.Unlock()
+
+	client := s.newCFClient(token)
+	withDash := true
+	if req.WithDashboard != nil {
+		withDash = *req.WithDashboard
+	}
+
+	go func() {
+		defer func() {
+			s.edge.mu.Lock()
+			s.edge.running = false
+			s.edge.mu.Unlock()
+			if rec := safe.Recover("盲中继部署"); rec != nil {
+				s.logLevel("盲中继部署发生内部错误，详情已记入日志", "err")
+				s.events.publish("edge-result", map[string]any{"ok": false, "error": "内部错误，详见日志"})
+			}
+		}()
+
+		report := func(msg string) { s.logf("[盲中继] " + msg) }
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+		defer cancel()
+
+		result, err := edge.Deploy(ctx, client, edge.Options{
+			AccountID:         accountID,
+			Domain:            strings.TrimSpace(req.Domain),
+			WorkerName:        strings.TrimSpace(req.WorkerName),
+			MonitorPassword:   req.MonitorPassword,
+			MonitorToken:      strings.TrimSpace(req.MonitorToken),
+			DashboardProject:  strings.TrimSpace(req.DashboardProject),
+			WithDashboard:     withDash,
+			ZoneID:            strings.TrimSpace(req.ZoneID),
+			WindowMs:          req.WindowMs,
+			MaxBytesPerWindow: req.MaxBytes,
+			MaxPackets:        req.MaxPackets,
+			MaxPeers:          req.MaxPeers,
+			Progress:          report,
+		})
+		if err != nil {
+			s.logLevel("盲中继部署失败："+err.Error(), "err")
+			s.events.publish("edge-result", map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		s.logLevel("盲中继 / 云监测台部署完成", "ok")
+		s.events.publish("edge-result", map[string]any{
+			"ok":     true,
+			"result": result,
+		})
+	}()
+
+	writeJSON(w, http.StatusOK, map[string]any{"started": true, "note": "部署已开始，进度通过 SSE 推送"})
+}
+
+func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "仅支持 GET"})
+		return
+	}
+	token, _, err := s.edgeActiveToken()
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	zones, err := s.newCFClient(token).ListZones(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "读取域名列表失败：" + err.Error()})
+		return
+	}
+	out := make([]map[string]any, 0, len(zones))
+	for _, z := range zones {
+		out = append(out, map[string]any{"id": z.ID, "name": z.Name})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"zones": out})
+}

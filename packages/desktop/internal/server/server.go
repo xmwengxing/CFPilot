@@ -91,6 +91,8 @@ type Server struct {
 	scan scanState
 	// relay 是反代体检任务状态（同一时刻只允许一个）
 	relay relayState
+	// edge 是盲中继部署任务状态（与代理部署独立，互不阻塞）
+	edge edgeState
 	// update 是更新下载状态
 	update updateState
 	// cfBase 覆盖 Cloudflare API 根地址（测试用；生产恒为空 → 走官方地址）
@@ -405,6 +407,9 @@ func (s *Server) routes() http.Handler {
 
 	// 优选 / 环境检测 API
 	s.registerScanRoutes(mux)
+
+	// 盲中继 / 云监测台部署 API（基础功能，独立资源，不碰代理内核）
+	s.registerEdgeRoutes(mux)
 
 	// 定时优选任务 API（任务清单 + 本地 IP 池）
 	// 安卓上没有这个功能（见 allowScheduledTasks），路由也不注册。

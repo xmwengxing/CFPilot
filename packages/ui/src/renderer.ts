@@ -4766,6 +4766,89 @@ import {
   /** 反代体检「全通可取」的 IP（回填按钮用） */
   let relayPicked: string[] = []
 
+  /** 部署页二级页签：代理实例 / 盲中继云监测台 */
+  function bindDeploySubtabs(): void {
+    const nav = document.getElementById('deployTabs')
+    if (!nav) return
+    nav.addEventListener('click', (ev) => {
+      const btn = (ev.target as HTMLElement | null)?.closest(
+        'button[data-deploy-tab]'
+      ) as HTMLButtonElement | null
+      if (!btn) return
+      const next = btn.dataset.deployTab === 'edge' ? 'edge' : 'proxy'
+      for (const b of nav.querySelectorAll('button[data-deploy-tab]')) {
+        b.classList.toggle('active', (b as HTMLElement).dataset.deployTab === next)
+      }
+      const proxy = document.getElementById('proxyPanel')
+      const edge = document.getElementById('edgePanel')
+      if (proxy) proxy.hidden = next !== 'proxy'
+      if (edge) edge.hidden = next !== 'edge'
+      // 切到 edge 时懒加载 zone 列表（只读，不写 KV）
+      if (next === 'edge') void refreshEdgeZones()
+    })
+  }
+
+  async function refreshEdgeZones(): Promise<void> {
+    const sel = document.getElementById('edgeZone') as HTMLSelectElement | null
+    if (!sel) return
+    try {
+      const res = await window.cfpilot.listEdgeZones()
+      const zones = (res && res.zones) || []
+      sel.innerHTML =
+        '<option value="">— 不自动绑定（手动）/ 加载失败 —</option>' +
+        zones.map((z) => `<option value="${z.id}">${z.name}</option>`).join('')
+    } catch {
+      sel.innerHTML = '<option value="">— 域名列表加载失败，可手动绑定 —</option>'
+    }
+  }
+
+  /** 盲中继 / 云监测台部署表单 */
+  function bindEdge(): void {
+    const btn = $('btnEdgeDeploy')
+    if (!btn) return
+    $('btnEdgeRefreshZones')?.addEventListener('click', () => void refreshEdgeZones())
+
+    btn.addEventListener('click', async () => {
+      const domain = ($('edgeDomain')?.value || '').trim()
+      if (!domain) {
+        log('请填写盲中继域名', 'warn')
+        return
+      }
+      btn.setAttribute('disabled', 'true')
+      const out = $('edgeResult')
+      try {
+        const result = await window.cfpilot.deployEdgeRelay({
+          domain,
+          workerName: ($('edgeWorkerName')?.value || '').trim(),
+          dashboardProject: ($('edgeDashboardProject')?.value || '').trim(),
+          monitorPassword: ($('edgePassword')?.value || '').trim(),
+          monitorToken: ($('edgeMonitorToken')?.value || '').trim(),
+          zoneId: (document.getElementById('edgeZone') as HTMLSelectElement | null)?.value || '',
+          withDashboard: ($('edgeWithDashboard') as HTMLInputElement | null)?.checked !== false,
+          windowMs: ($('edgeWindowMs')?.value || '').trim(),
+          maxBytes: ($('edgeMaxBytes')?.value || '').trim(),
+          maxPackets: ($('edgeMaxPackets')?.value || '').trim(),
+          maxPeers: ($('edgeMaxPeers')?.value || '').trim(),
+        })
+        const text = [
+          `Worker：${result.workerName || ''}`,
+          `监测 API：${result.workerUrl || ''}`,
+          `WSS 端点：${result.wssEndpoint || ''}`,
+          `D1：${result.d1Name || ''} (${result.d1Uuid || ''})`,
+          `监测面板：${result.dashboardUrl || '未部署'}`,
+          `上报令牌：${result.monitorToken || ''}`,
+          `监测台密码：${result.monitorPassword || ''}`,
+        ].join('\n')
+        if (out) { out.textContent = text; out.hidden = false }
+        log('盲中继 / 云监测台部署完成（结果见下方框，请立即保存令牌与密码）', 'ok')
+      } catch (err) {
+        log('盲中继部署失败：' + (err instanceof Error ? err.message : String(err)), 'err')
+      } finally {
+        btn.removeAttribute('disabled')
+      }
+    })
+  }
+
   function bindScanSubtabs(): void {
     const nav = document.getElementById('scanTabs')
     if (!nav) return
@@ -6828,6 +6911,8 @@ import {
     safeBind('运行时状态', bindRuntime)
     safeBind('凭据', bindCredentials)
     safeBind('部署', bindDeploy)
+    safeBind('部署页签', bindDeploySubtabs)
+    safeBind('盲中继/云监测台', bindEdge)
     safeBind('链式代理', bindChain)
     safeBind('优选', bindScan)
     safeBind('优选页签', bindScanSubtabs)

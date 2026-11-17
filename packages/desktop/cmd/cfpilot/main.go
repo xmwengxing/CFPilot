@@ -103,8 +103,18 @@ func main() {
 		// 等旧进程退出 → 删除 .old 备份 → 以正常模式重启主程序 → helper 退出。
 		// 详见 internal/update/apply.go 的注释。
 		updateHelperOld = flag.String("update-helper", "", "内部参数：等旧进程退出后清理备份并重启主程序")
+		// +mesh 变体专用：从 JSON 配置启动组网（最小集真机测试入口）
+		meshConfig = flag.String("mesh-config", "", "+mesh 变体：从 JSON 配置启动组网节点")
 	)
 	flag.Parse()
+
+	// +mesh 模式：读取配置 → 启动 Lifecycle → 前台运行（不启托盘/HTTP 服务）
+	// 普通版（无 mesh tag）该文件返回 false，零影响。
+	if *meshConfig != "" {
+		if handled := runMeshMode(*meshConfig); handled {
+			return
+		}
+	}
 
 	// helper 模式必须在任何日志/托盘初始化之前处理：
 	// 它只是个几秒钟的收尾进程，正常模式的所有初始化对它都是浪费，

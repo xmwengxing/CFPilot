@@ -162,6 +162,27 @@ if (existsSync(kernelVersionSrc)) {
   console.warn('[desktop] 未找到 cfpilot-kernel-VERSION（先跑 npm run build -w cfpilot）；通道将视内置序号为 0')
 }
 
+// ---- 1b-edge. 同步盲中继 / 云监测台资产（go:embed 打进 exe）----
+//
+// 权威源码在 packages/edge-relay/，由 scripts/build-edge-relay.mjs 编译到
+// packages/cli/assets/edge-relay/。桌面版复用同一份产物，避免两边漂移。
+const edgeSrcDir = join(repoRoot, 'packages', 'cli', 'assets', 'edge-relay')
+const edgeDstDir = join(desktopDir, 'internal', 'edge', 'assets')
+if (existsSync(edgeSrcDir)) {
+  mkdirSync(edgeDstDir, { recursive: true })
+  for (const f of ['worker.js', 'dashboard.html', 'dashboard-worker.js', 'schema.sql']) {
+    const src = join(edgeSrcDir, f)
+    if (!existsSync(src)) {
+      console.error(`[desktop] 未找到 edge 资产 ${f}，请先运行 node scripts/build-edge-relay.mjs`)
+      process.exit(1)
+    }
+    copyFileSync(src, join(edgeDstDir, f))
+  }
+  console.log('[desktop] edge-relay 资产 → internal/edge/assets/')
+} else {
+  console.warn('[desktop] 未找到 edge-relay 资产（先跑 npm run build -w cfpilot），盲中继部署将不可用')
+}
+
 // ---- 1c. 同步内置反代候选清单（go:embed 打进 exe）----
 //
 // 与 CLI 共用**同一份文件**（packages/cli/assets/relay-ip-builtin.txt）：
@@ -180,10 +201,17 @@ if (existsSync(builtinRelaySrc)) {
 }
 
 // 构建目标（图标生成阶段就要知道是否编 Windows，所以定义在最前面）
+//
+// --mesh：构建 +mesh 变体（内嵌 MobiHop 组网模块）。
+//   - 产物名加 `+mesh` 后缀，与普通版同批发布（同一 tag 多 asset，不增版本号通道）
+//   - go build 加 `-tags=mesh`，启用 internal/mesh 的真实入口（Phase 3b 填充协议）
+//   - 当前 Phase 3a：+mesh 变体只包含工程骨架，协议实现待 3b
+const meshVariant = process.argv.includes('--mesh')
+const meshSuffix = meshVariant ? '+mesh' : ''
 const targets = [
-  { goos: 'windows', goarch: 'amd64', out: `cfpilot-${version}-windows-amd64.exe`, extra: ['-H=windowsgui'] },
-  { goos: 'linux', goarch: 'amd64', out: `cfpilot-${version}-linux-amd64`, extra: [] },
-  { goos: 'linux', goarch: 'arm64', out: `cfpilot-${version}-linux-arm64`, extra: [] },
+  { goos: 'windows', goarch: 'amd64', out: `cfpilot-${version}${meshSuffix}-windows-amd64.exe`, extra: ['-H=windowsgui'] },
+  { goos: 'linux', goarch: 'amd64', out: `cfpilot-${version}${meshSuffix}-linux-amd64`, extra: [] },
+  { goos: 'linux', goarch: 'arm64', out: `cfpilot-${version}${meshSuffix}-linux-arm64`, extra: [] },
 ]
 
 // 允许限制构建目标（只编一部分平台时用）。
@@ -392,9 +420,10 @@ if (assetsOnly) {
 for (const t of picked) {
   const outPath = join(outDir, t.out)
   console.log(`[desktop] 编译 ${t.goos}/${t.goarch} …`)
+  const meshTags = meshVariant ? ['-tags=mesh'] : []
   execFileSync(
     'go',
-    ['build', '-trimpath', `-ldflags=${ldflags(t.extra)}`, '-o', outPath, './cmd/cfpilot'],
+    ['build', '-trimpath', ...meshTags, `-ldflags=${ldflags(t.extra)}`, '-o', outPath, './cmd/cfpilot'],
     {
       cwd: desktopDir,
       stdio: 'inherit',

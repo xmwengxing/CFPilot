@@ -29,11 +29,63 @@ export interface KvNamespace {
   title: string
 }
 
+/**
+ * Worker 脚本绑定（metadata.bindings 里的一项）。
+ *
+ * 字段形状来自 wrangler 权威源码（wrangler-dist/cli.js:171510-171642）：
+ *   - kv_namespace:            { name, type, namespace_id }
+ *   - plain_text:              { name, type, text }
+ *   - d1（⚠️ 字段是 id 不是 database_id）: { name, type:'d1', id }
+ *   - durable_object_namespace:{ name, type, class_name, script_name?, environment? }
+ *
+ * ⚠️ D1 绑定在 metadata 里的 type 是 "d1"、ID 字段是 "id"（不是 "d1_database"/"database_id"，
+ * 那是 wrangler.toml 配置层的写法）。照搬配置层写法会导致绑定被忽略或部署报错。
+ */
 export interface ScriptBinding {
-  type: 'kv_namespace' | 'plain_text'
+  type: 'kv_namespace' | 'plain_text' | 'd1' | 'durable_object_namespace'
   name: string
   namespace_id?: string
   text?: string
+  /** D1 绑定：D1 数据库 UUID（对应 metadata 的 id 字段） */
+  id?: string
+  /** Durable Object 绑定：DO 类名 */
+  class_name?: string
+  /** Durable Object 绑定：可选，类所在脚本名（跨 Worker 引用时） */
+  script_name?: string
+}
+
+/** DO migration（metadata.migrations 里的一项，见 wrangler.toml 的 [[migrations]]） */
+export interface DoMigration {
+  tag: string
+  /** 使用 SQLite 后端的 DO 类名（Hibernation / SQL 能力需要） */
+  new_sqlite_classes?: string[]
+  /** 旧式 new_classes（非 SQLite） */
+  new_classes?: string[]
+  renamed_classes?: Array<{ from: string; to: string }>
+  deleted_classes?: string[]
+}
+
+/** D1 数据库（建库返回值，字段来自 CF API result） */
+export interface D1Database {
+  uuid: string
+  name: string
+  created_at?: string
+  version?: string
+}
+
+/** DO 命名空间（建命名空间返回值 / 列表项） */
+export interface DoNamespace {
+  id: string
+  name?: string
+  class?: string
+  script?: string
+}
+
+/** D1 query 响应（result 是数组，[0].results 为行；DDL 无行但也不应报错） */
+export interface D1QueryResult {
+  results: unknown[]
+  success?: boolean
+  meta?: Record<string, unknown>
 }
 
 /** workers.dev 子域路由的开关状态 */
@@ -276,6 +328,76 @@ export class CloudflareClient {
     return await this.request('POST', `/accounts/${accountId}/storage/kv/namespaces`, { title })
   }
 
+  /* ---------------------------------------------------------------- */
+  /* D1（盲中继 / 云监测台）                                            */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * 创建 D1 数据库（POST /accounts/{id}/d1/database，权限 D1 Edit）。
+   *
+   * 盲中继/监测台的硬编码 D1 ID（别人账户的库）必须换成部署时动态建库。
+   * 返回 result.uuid 即 database_id，用于 Worker 的 d1 绑定与后续 query。
+   */
+  async createD1Database(accountId: string, name: string): Promise<D1Database> {
+    return await this.request('POST', `/accounts/${accountId}/d1/database`, { name })
+  }
+
+  /** 列出账号下的 D1 数据库（用于重名检测 / 复用） */
+  async listD1Databases(accountId: string, name?: string): Promise<D1Database[]> {
+    const query = name ? `?name=${encodeURIComponent(name)}` : ''
+    return await this.request('GET', `/accounts/${accountId}/d1/database${query}`)
+  }
+
+  /**
+   * 在 D1 上执行一条 SQL（POST .../d1/database/{id}/query，body {sql}）。
+   *
+   * 用于初始化 schema（CREATE TABLE IF NOT EXISTS 幂等）。DDL 无结果行，
+   * 但 Cloudflare 仍会返回 `{ results: [], success: true }`；非 2xx 会由
+   * readApiResponse 抛 CloudflareError，调用方据此判定初始化是否成功。
+   */
+  async queryD1(accountId: string, databaseId: string, sql: string): Promise<D1QueryResult[]> {
+    const result = await this.request<D1QueryResult[]>(
+      'POST',
+      `/accounts/${accountId}/d1/database/${encodeURIComponent(databaseId)}/query`,
+      { sql }
+    )
+    return Array.isArray(result) ? result : []
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Durable Objects（盲中继房间）                                      */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * ⚠️ 已废弃：不要调用本方法创建 DO 命名空间。
+   *
+   * 真机实测（2026-11-17，测试账号）：
+   *   - 只传 {name, class} → `10100: class cannot be set without script`
+   *   - 传 {name, script, class} → `10099: Creating new key-value backed Durable Object
+   *     namespaces is no longer supported on this account. Please create a namespace
+   *     using a `new_sqlite_classes` migration instead.`
+   *
+   * 正确做法：Worker 上传时带 `migrations: [{ tag, new_sqlite_classes: ['MeshRoom'] }]`，
+   * 平台会自动创建 SQLite 后端的 DO 命名空间。见 `uploadScript` 的 migrations 参数。
+   *
+   * 本方法仅为 API 完整性保留，调用即抛错，防止 Phase 2 误用走不通的路径。
+   */
+  async createDoNamespace(): Promise<DoNamespace> {
+    throw new Error(
+      '手动创建 DO 命名空间已不受平台支持（需 new_sqlite_classes migration）。' +
+      '请在 uploadScript 的 migrations 参数里声明 new_sqlite_classes，由平台自动创建。'
+    )
+  }
+
+  /** 列出账号下的 Durable Object 命名空间 */
+  async listDoNamespaces(accountId: string): Promise<DoNamespace[]> {
+    const result = await this.request<DoNamespace[]>(
+      'GET',
+      `/accounts/${accountId}/workers/durable_objects/namespaces`
+    )
+    return Array.isArray(result) ? result : []
+  }
+
   /**
    * 读取 KV 里的一个键值（不存在时返回 null）。
    *
@@ -356,7 +478,16 @@ export class CloudflareClient {
     return await this.request('GET', `/accounts/${accountId}/workers/scripts`)
   }
 
-  /** 上传 Worker 脚本（ES module，多段上传） */
+  /**
+   * 上传 Worker 脚本（ES module，多段上传）。
+   *
+   * ## Durable Objects 声明方式（真机 2026-11-17 验证）
+   * 新版平台用 `exports` 声明 DO 类（declarative DO exports）：
+   *   `{ MeshRoom: { type:'durable-object', state:'created', storage:'sqlite' } }`
+   * 这是 wrangler 4 的默认路径。旧 `migrations` 数组在新版解析器下会报
+   * `cannot unmarshal array into Metadata.migrations of type reader.ActorMigrations`，
+   * 因此优先用 exports；只有显式传 migrations 且无 exports 时才走旧路径（兼容旧账号）。
+   */
   async uploadScript(
     accountId: string,
     scriptName: string,
@@ -365,12 +496,20 @@ export class CloudflareClient {
       code: string
       compatibilityDate: string
       bindings: ScriptBinding[]
+      migrations?: DoMigration[]
+      /** 声明式 DO exports（新版平台推荐） */
+      doExports?: Record<string, { type: 'durable-object'; state: 'created'; storage: 'sqlite' | 'legacy-kv' }>
     }
   ): Promise<void> {
-    const metadata = {
+    const metadata: Record<string, unknown> = {
       main_module: options.mainModule,
       compatibility_date: options.compatibilityDate,
       bindings: options.bindings,
+    }
+    if (options.doExports && Object.keys(options.doExports).length > 0) {
+      metadata.exports = options.doExports
+    } else if (options.migrations && options.migrations.length > 0) {
+      metadata.migrations = options.migrations
     }
 
     const form = new FormData()
@@ -672,6 +811,31 @@ export class CloudflareClient {
       '_worker.bundle'
     )
 
+    return await this.request(
+      'POST',
+      `/accounts/${accountId}/pages/projects/${name}/deployments`,
+      form
+    )
+  }
+
+  /**
+   * 上传静态文件部署 Pages（监测面板 index.html 用）。
+   *
+   * 与 deployPagesWorker 的区别：这里直接把文件作为 multipart 段上传，
+   * 不带 _worker.bundle。字段名即文件名（如 index.html）。
+   * 表单结构参考 wrangler 的 pages deploy（branch + manifest + 文件段）。
+   */
+  async deployPagesStatic(
+    accountId: string,
+    name: string,
+    files: Record<string, string>
+  ): Promise<PagesDeployment> {
+    const form = new FormData()
+    form.set('branch', 'main')
+    form.set('manifest', '{}')
+    for (const [path, content] of Object.entries(files)) {
+      form.set(path, new Blob([content], { type: 'text/html' }), path)
+    }
     return await this.request(
       'POST',
       `/accounts/${accountId}/pages/projects/${name}/deployments`,

@@ -1120,3 +1120,140 @@ func (c *Client) DeleteDNSRecord(ctx context.Context, zoneID, recordID string) e
 	return c.doJSON(ctx, http.MethodDelete,
 		fmt.Sprintf("/zones/%s/dns_records/%s", url.PathEscape(zoneID), url.PathEscape(recordID)), nil, nil)
 }
+
+/* ---------------------------------------------------------------- */
+/* D1 / Durable Objects（盲中继 / 云监测台）                           */
+/* ---------------------------------------------------------------- */
+
+// D1Database 是 D1 建库返回值（result 里的关键字段）。
+type D1Database struct {
+	UUID      string `json:"uuid"`
+	Name      string `json:"name"`
+	CreatedAt string `json:"created_at,omitempty"`
+	Version   string `json:"version,omitempty"`
+}
+
+// DoMigration 是 Worker metadata.migrations 里的一项。
+// 盲中继用 new_sqlite_classes 声明 MeshRoom，由平台自动创建 DO 命名空间
+// （真机实测：手动建 DO 命名空间已被平台禁止，必须走 migration）。
+type DoMigration struct {
+	Tag              string   `json:"tag"`
+	NewSQLiteClasses []string `json:"new_sqlite_classes,omitempty"`
+	NewClasses       []string `json:"new_classes,omitempty"`
+	DeletedClasses   []string `json:"deleted_classes,omitempty"`
+}
+
+// CreateD1Database 动态创建 D1 数据库（POST /accounts/{id}/d1/database）。
+func (c *Client) CreateD1Database(ctx context.Context, accountID, name string) (*D1Database, error) {
+	var out D1Database
+	if err := c.doJSON(ctx, http.MethodPost,
+		fmt.Sprintf("/accounts/%s/d1/database", url.PathEscape(accountID)),
+		map[string]string{"name": name}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// QueryD1 在 D1 执行一条 SQL（POST .../d1/database/{id}/query，body {sql}）。
+// DDL 幂等（CREATE IF NOT EXISTS），无结果行也正常返回。
+func (c *Client) QueryD1(ctx context.Context, accountID, databaseID, sql string) error {
+	var out []map[string]any
+	path := fmt.Sprintf("/accounts/%s/d1/database/%s/query",
+		url.PathEscape(accountID), url.PathEscape(databaseID))
+	return c.doJSON(ctx, http.MethodPost, path, map[string]string{"sql": sql}, &out)
+}
+
+// DeleteD1Database 删除 D1（清理测试库用）。
+func (c *Client) DeleteD1Database(ctx context.Context, accountID, databaseID string) error {
+	return c.doJSON(ctx, http.MethodDelete,
+		fmt.Sprintf("/accounts/%s/d1/database/%s", url.PathEscape(accountID), url.PathEscape(databaseID)), nil, nil)
+}
+
+// UploadWorkerScriptWithExports 上传 Worker 脚本并附带 metadata 扩展字段。
+//
+// 真机 2026-11-17：新版平台用 exports 声明 DO（declarative DO exports），
+// 旧 migrations 数组会报 "cannot unmarshal array into Metadata.migrations
+// of type reader.ActorMigrations"。盲中继走 exports 路径：
+//
+//	extra = { "exports": { "MeshRoom": {type:"durable-object",state:"created",storage:"sqlite"} } }
+//
+// extra 里的键直接写进 metadata 顶层（也兼容旧 migrations 作为 fallback）。
+func (c *Client) UploadWorkerScriptWithExports(
+	ctx context.Context,
+	accountID, scriptName string,
+	code []byte,
+	bindings []WorkerBinding,
+	compatibilityDate string,
+	extra map[string]any,
+) error {
+	meta := map[string]any{
+		"main_module":        "worker.js",
+		"compatibility_date": compatibilityDate,
+		"bindings":           bindings,
+	}
+	for k, v := range extra {
+		meta[k] = v
+	}
+	metadata, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	metaHeader := make(textproto.MIMEHeader)
+	metaHeader.Set("Content-Disposition", `form-data; name="metadata"; filename="metadata.json"`)
+	metaHeader.Set("Content-Type", "application/json")
+	metaPart, err := w.CreatePart(metaHeader)
+	if err != nil {
+		return err
+	}
+	if _, err := metaPart.Write(metadata); err != nil {
+		return err
+	}
+	modHeader := make(textproto.MIMEHeader)
+	modHeader.Set("Content-Disposition", `form-data; name="worker.js"; filename="worker.js"`)
+	modHeader.Set("Content-Type", "application/javascript+module")
+	modPart, err := w.CreatePart(modHeader)
+	if err != nil {
+		return err
+	}
+	if _, err := modPart.Write(code); err != nil {
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut,
+		c.apiBase+fmt.Sprintf("/accounts/%s/workers/scripts/%s", accountID, url.PathEscape(scriptName)),
+		&buf)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	res, err := c.httpC.Do(req)
+	if err != nil {
+		return wrapNetErr(err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	raw, err := io.ReadAll(res.Body)
+	if err != nil {
+		return wrapNetErr(err)
+	}
+	_, err = readResponse(res.StatusCode, raw)
+	return err
+}
+
+// DeployPagesStatic 上传静态文件部署 Pages（监测面板 index.html）。
+func (c *Client) DeployPagesStatic(ctx context.Context, accountID, project string, files map[string]string) error {
+	formFiles := make(map[string]FormFile, len(files))
+	for path, content := range files {
+		formFiles[path] = FormFile{Filename: path, Content: []byte(content)}
+	}
+	var out PagesDeployment
+	return c.doForm(ctx, http.MethodPost,
+		fmt.Sprintf("/accounts/%s/pages/projects/%s/deployments", url.PathEscape(accountID), url.PathEscape(project)),
+		formFiles, map[string]string{"branch": "main", "manifest": "{}"}, &out)
+}

@@ -1,0 +1,100 @@
+package mesh
+
+import (
+	"fmt"
+	"net"
+
+	"github.com/flynn/noise"
+)
+
+// Config 是 +mesh 节点的启动配置（桌面版/CLI 构造后注入 Lifecycle）。
+//
+// 字段对齐 MobiHop 的 node.toml 最小集：
+//   - NodeID / NetworkName / PSK / TunnelKey → 身份与加密
+//   - Listen → UDP 监听地址（UdpHub 单 socket）
+//   - VirtualIP / MTU → TUN 设备
+//   - Peers → 静态对端（seed）：NodeID + UDP 地址 + X25519 静态公钥
+type Config struct {
+	NodeID      NodeID
+	NetworkName string
+	PSK         string
+	// TunnelPrivate 是 X25519 隧道静态私钥（32 字节原始字节）；留空则随机生成
+	TunnelPrivate []byte
+	Listen        string // UDP 监听，如 "0.0.0.0:51820"
+	VirtualIP     string // 本节点虚拟 IP，如 "10.93.0.1"
+	MTU           int    // TUN MTU，默认 1400
+	Peers         []PeerConfig
+	// Verbose 打开关键节点日志（通过 log.Printf 输出）。
+	Verbose bool
+	// RelayDomain / RelayRoom 是盲中继 WSS 地址（降级目标）；留空则禁用降级。
+	RelayDomain string // 如 relay.example.com
+	RelayRoom   string // 8-64 位小写 hex（房间名）
+	// EnableDegrade 打开 UDP→WSS 降级 / WSS→UDP 回切控制器。
+	EnableDegrade bool
+	// TunName 是 TUN 设备名（多节点同机时必须不同）；留空 = cfpilot0。
+	TunName string
+}
+
+// PeerConfig 是静态对端（seed）配置。
+type PeerConfig struct {
+	NodeID    NodeID
+	Addr      string // "host:port"
+	StaticPub []byte // X25519 静态公钥（32 字节）；IK 握手需预知
+	VirtualIP string // 对端虚拟 IP（如 "10.96.0.2"），用于 IP 包→NodeID 查表
+}
+
+// Validate 校验配置（fail-closed）。
+func (c *Config) Validate() error {
+	if c.NetworkName == "" {
+		return fmt.Errorf("mesh config: NetworkName 不能为空")
+	}
+	if len(c.PSK) == 0 {
+		return fmt.Errorf("mesh config: PSK 不能为空")
+	}
+	if c.Listen == "" {
+		c.Listen = "0.0.0.0:51820"
+	}
+	if c.VirtualIP == "" {
+		return fmt.Errorf("mesh config: VirtualIP 不能为空")
+	}
+	if net.ParseIP(c.VirtualIP) == nil {
+		return fmt.Errorf("mesh config: VirtualIP 非法: %s", c.VirtualIP)
+	}
+	if c.MTU <= 0 {
+		c.MTU = 1400
+	}
+	if len(c.TunnelPrivate) > 0 && len(c.TunnelPrivate) != 32 {
+		return fmt.Errorf("mesh config: TunnelPrivate 必须 32 字节，实际 %d", len(c.TunnelPrivate))
+	}
+	for i, p := range c.Peers {
+		if p.Addr == "" {
+			return fmt.Errorf("mesh config: Peers[%d].Addr 为空", i)
+		}
+		if _, _, err := net.SplitHostPort(p.Addr); err != nil {
+			return fmt.Errorf("mesh config: Peers[%d].Addr 非法: %w", i, err)
+		}
+		if len(p.StaticPub) != 32 {
+			return fmt.Errorf("mesh config: Peers[%d].StaticPub 必须 32 字节，实际 %d", i, len(p.StaticPub))
+		}
+		if net.ParseIP(p.VirtualIP) == nil {
+			return fmt.Errorf("mesh config: Peers[%d].VirtualIP 非法: %s", i, p.VirtualIP)
+		}
+	}
+	return nil
+}
+
+// tunnelKey 返回本节点的 X25519 静态密钥对。
+func (c *Config) tunnelKey() (noise.DHKey, error) {
+	cs := noise.NewCipherSuite(noise.DH25519, noise.CipherChaChaPoly, noise.HashBLAKE2s)
+	if len(c.TunnelPrivate) == 32 {
+		// 从私钥恢复公钥：用 x25519 标量乘（noise 不直接暴露，这里用 DHKey 的 Private
+		// 配合首次 WriteMessage 生成——但响应方需要 Public，故用 x/crypto/curve25519 计算）
+		pub, err := curve25519Public(c.TunnelPrivate)
+		if err != nil {
+			return noise.DHKey{}, err
+		}
+		return noise.DHKey{Private: append([]byte(nil), c.TunnelPrivate...), Public: pub}, nil
+	}
+	// 随机生成
+	return cs.GenerateKeypair(nil)
+}

@@ -63,6 +63,17 @@ for (const name of REQUIRED_ASSETS) {
   assetTotal += text.length
 }
 
+// edge-relay 资产守卫：盲中继部署依赖它们（与内核资产分开校验）
+for (const name of ['edge-relay/worker.js', 'edge-relay/dashboard.html', 'edge-relay/schema.sql']) {
+  const p = resolve(pkgRoot, 'assets', ...name.split('/'))
+  if (!existsSync(p)) {
+    throw new Error(
+      `[cfpilot] 缺少资产 assets/${name}\n` +
+        '  请执行：node scripts/build-edge-relay.mjs（或 npm run build -w cfpilot）'
+    )
+  }
+}
+
 chmodSync(outFile, 0o755)
 const size = readFileSync(outFile).length
 const assetKb = (assetTotal / 1024).toFixed(1)

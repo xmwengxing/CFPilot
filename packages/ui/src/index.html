@@ -1419,6 +1419,97 @@
 
         <!-- ============ 部署 ============ -->
         <section class="page" id="page-deploy">
+          <!-- 二级页签：代理实例（控制面/数据面）与盲中继/云监测台是两套独立资源 -->
+          <div class="subtabs" id="deployTabs">
+            <button type="button" class="active" data-deploy-tab="proxy">CFPilot 代理实例</button>
+            <button type="button" data-deploy-tab="edge">盲中继 / 云监测台</button>
+          </div>
+
+          <!-- ===== 盲中继 / 云监测台（基础功能，独立资源） ===== -->
+          <div id="edgePanel" hidden>
+            <div class="card">
+              <h2><span class="dot"></span>🛰️ 盲中继 / 云监测台（MobiHop 边缘工程）</h2>
+              <p class="desc">
+                部署独立的 WebSocket 盲中继 Worker（Durable Objects 房间隔离）+ 云监测台 Pages 面板。
+                用于无公网 IP 节点之间的首次发现与保底连通。与上方 CFPilot 代理实例完全独立，互不影响。
+              </p>
+              <div class="note" style="border-left-color: var(--primary); margin-bottom:14px">
+                <b>需要增加的 Token 权限（基础代理部署不需要）：</b><br>
+                · Developer Platform / <b>Workers Scripts / Edit</b> —— 建/删盲中继 Worker、上传脚本<br>
+                · Developer Platform / <b>Durable Objects / Edit</b> —— 房间隔离（由 migrations 自动创建）<br>
+                · Developer Platform / <b>D1 / Edit</b> —— 动态建监测库并初始化 schema<br>
+                · Developer Platform / <b>Pages / Edit</b> —— 部署监测面板<br>
+                · DNS &amp; Zone / <b>Zone / Edit</b> —— 绑定自定义域名时需要（WSS 域名必填）<br>
+                <span class="muted">令牌在当前账户下需具备以上权限，否则部署会明确报错缺哪一项。</span>
+              </div>
+
+              <div class="pair-grid">
+                <div class="pair">
+                  <label for="edgeDomain">盲中继域名 <span class="badge info">必填</span></label>
+                  <input type="text" id="edgeDomain" placeholder="如 relay.example.com" />
+                  <p class="tip">*.workers.dev 国内被污染，必须绑定自定义域名；可在下方选 zone 自动绑定，或部署后到控制台手动绑定。</p>
+                </div>
+                <div class="pair">
+                  <label for="edgeZone">Cloudflare Zone（自动绑定用）</label>
+                  <select id="edgeZone"><option value="">— 不自动绑定（手动）/ 加载失败 —</option></select>
+                  <p class="tip">选域名所在 zone 后，工具会尝试自动绑定；留空则只部署 Worker，域名需手动绑。</p>
+                </div>
+              </div>
+
+              <div class="pair-grid">
+                <div class="pair">
+                  <label for="edgeWorkerName">Worker 名</label>
+                  <input type="text" id="edgeWorkerName" placeholder="留空 = mobihop-edge-relay" />
+                </div>
+                <div class="pair">
+                  <label for="edgeDashboardProject">监测面板项目名</label>
+                  <input type="text" id="edgeDashboardProject" placeholder="留空 = <worker名>-dashboard" />
+                </div>
+              </div>
+
+              <div class="pair-grid">
+                <div class="pair">
+                  <label for="edgePassword">监测台初始密码 <span class="badge info">≥8 位</span></label>
+                  <input type="password" id="edgePassword" placeholder="留空则自动生成（日志显示）" />
+                </div>
+                <div class="pair">
+                  <label for="edgeMonitorToken">上报令牌（MONITOR_TOKEN）</label>
+                  <input type="text" id="edgeMonitorToken" placeholder="留空则自动生成" />
+                </div>
+              </div>
+
+              <details class="fold">
+                <summary>限速 / 容量与面板开关 — 一般无需调整</summary>
+                <div class="fold-body">
+                  <div class="pair-grid">
+                    <div class="pair"><label for="edgeWindowMs">窗口 ms</label><input type="text" id="edgeWindowMs" value="1000" /></div>
+                    <div class="pair"><label for="edgeMaxBytes">窗口字节上限</label><input type="text" id="edgeMaxBytes" value="1048576" /></div>
+                    <div class="pair"><label for="edgeMaxPackets">窗口包数上限</label><input type="text" id="edgeMaxPackets" value="2000" /></div>
+                    <div class="pair"><label for="edgeMaxPeers">单房间连接上限</label><input type="text" id="edgeMaxPeers" value="512" /></div>
+                  </div>
+                  <label class="switch-box">
+                    <span class="sw-info">
+                      <span class="sw-title">同时部署云监测台面板</span>
+                      <span class="sw-desc">关闭则只部署盲中继 Worker</span>
+                    </span>
+                    <input type="checkbox" id="edgeWithDashboard" checked />
+                    <span class="switch"></span>
+                  </label>
+                </div>
+              </details>
+
+              <div class="btn-row" style="margin-top:12px">
+                <button class="btn btn-primary" id="btnEdgeDeploy">部署盲中继 / 云监测台</button>
+                <button class="btn btn-ghost" id="btnEdgeRefreshZones">刷新域名列表</button>
+              </div>
+              <pre id="edgeResult" class="chain-out" hidden></pre>
+              <p class="tip" style="margin-top:8px">
+                部署结果（WSS 端点 / 上报令牌 / 面板密码）会显示在下方结果框与日志中，请妥善保存——事后无法再读取明文。
+              </p>
+            </div>
+          </div>
+
+          <div id="proxyPanel">
           <!--
             运行状态卡
 
@@ -1674,6 +1765,7 @@
               · 运行后输出 <code>socks5://用户:口令@IP:端口</code>，粘到面板「出站与高级」→ SOCKS5。
             </p>
           </div>
+          </div><!-- /proxyPanel -->
         </section>
 
         <!-- ============ 优选 ============ -->

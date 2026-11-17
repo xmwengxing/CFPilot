@@ -965,6 +965,21 @@
     .fold > summary:hover { background: var(--bg-hover); color: var(--text-main); }
     .fold-body { padding: 16px; border-top: 1px solid var(--border); }
 
+    /* 字段悬浮气泡（纯 CSS，WebView 里比原生 title 可靠） */
+    .has-tip { position: relative; cursor: help; border-bottom: 1px dotted var(--text-muted); }
+    .has-tip::after {
+      content: attr(data-tip);
+      position: absolute; left: 0; top: 130%; z-index: 50;
+      width: 300px; padding: 10px 12px;
+      background: #1e2430; color: #e2e8f0;
+      border: 1px solid #3a4455; border-radius: 8px;
+      font-size: 12px; font-weight: 400; line-height: 1.6;
+      white-space: pre-wrap; box-shadow: 0 8px 24px rgba(0,0,0,.4);
+      opacity: 0; visibility: hidden; transition: opacity .15s;
+      pointer-events: none;
+    }
+    .has-tip:hover::after { opacity: 1; visibility: visible; }
+
     /* 链接列表 */
     .links { font-size: 12.5px; line-height: 2.1; color: var(--text-secondary); }
     .links b { color: var(--text-main); font-weight: 500; }
@@ -1802,23 +1817,23 @@
                 <b>「填入组网配置」</b> 自动带入 WSS 地址与房间名；其余字段需手动填写。
               </p>
               <div class="pair-grid">
-                <div class="pair"><label for="meshNodeId" title="【必填】本机在本网络里的身份证，16 位十六进制。各节点必须不同；建议 A 用小值(0100000000000001)、B 用大值(0200000000000002)——字典序小的作为握手发起方。例：0100000000000001">本节点 ID（16 hex）ⓘ</label><input type="text" id="meshNodeId" placeholder="如 0100000000000001" /></div>
-                <div class="pair"><label for="meshNetwork" title="【必填】同一网络所有节点的网络名必须完全相同，用来派生网络密钥。写错就连不上。建议用简单英文如 my-home">网络名 ⓘ</label><input type="text" id="meshNetwork" placeholder="如 my-network" /></div>
-                <div class="pair"><label for="meshPsk" title="【必填】网络共享密钥，相当于进网密码，所有节点必须完全相同。建议 16 位以上随机字符串；泄漏则网络不再私密">网络密钥 PSK ⓘ</label><input type="text" id="meshPsk" placeholder="网络共享密钥" /></div>
-                <div class="pair"><label for="meshVirtualIp" title="【必填】本机在组网内的虚拟 IP，各节点互 ping 用。建议不同节点用不同网段，避免与真实局域网冲突：A 用 10.97.0.1，B 用 10.98.0.2">本节点虚拟 IP ⓘ</label><input type="text" id="meshVirtualIp" placeholder="如 10.97.0.1" /></div>
-                <div class="pair"><label for="meshListen" title="【可选】本机接收对端数据的 UDP 端口。默认 0.0.0.0:51820；同一台机器跑多个节点要改不同端口(如 51831/51832)；有防火墙时放行该 UDP 端口">UDP 监听 ⓘ</label><input type="text" id="meshListen" placeholder="如 0.0.0.0:51820" /></div>
-                <div class="pair"><label for="meshTunName" title="【可选】虚拟网卡名称，留空=cfpilot0。同一台机器跑多个节点时必须不同(如 cfpilotA / cfpilotB)，否则会冲突">TUN 网卡名 ⓘ</label><input type="text" id="meshTunName" placeholder="留空 = cfpilot0" /></div>
+                <div class="pair"><label for="meshNodeId" class="has-tip" data-tip="【必填】本机在网络里的身份证，16 位十六进制。各节点必须不同；建议 A 用小值、B 用大值（字典序小的作为握手发起方）。&#10;示例：0100000000000001">本节点 ID（16 hex）ⓘ</label><input type="text" id="meshNodeId" placeholder="如 0100000000000001" /></div>
+                <div class="pair"><label for="meshNetwork" class="has-tip" data-tip="【必填】同一网络所有节点的网络名必须完全相同，用来派生网络密钥，写错就连不上。&#10;示例：my-home（建议简单英文）">网络名 ⓘ</label><input type="text" id="meshNetwork" placeholder="如 my-network" /></div>
+                <div class="pair"><label for="meshPsk" class="has-tip" data-tip="【必填】网络共享密钥（进网密码），所有节点必须完全相同。&#10;建议：16 位以上随机字符串；泄漏则网络不再私密">网络密钥 PSK ⓘ</label><input type="text" id="meshPsk" placeholder="网络共享密钥" /></div>
+                <div class="pair"><label for="meshVirtualIp" class="has-tip" data-tip="【必填】本机在组网内的虚拟 IP，各节点互 ping 用。建议不同节点用不同网段，避免与真实局域网冲突。&#10;示例：A 用 10.97.0.1，B 用 10.98.0.2">本节点虚拟 IP ⓘ</label><input type="text" id="meshVirtualIp" placeholder="如 10.97.0.1" /></div>
+                <div class="pair"><label for="meshListen" class="has-tip" data-tip="【可选】本机接收对端数据的 UDP 端口，默认 0.0.0.0:51820。同机多节点要改不同端口；有防火墙时放行该 UDP 端口。&#10;示例：0.0.0.0:51831">UDP 监听 ⓘ</label><input type="text" id="meshListen" placeholder="如 0.0.0.0:51820" /></div>
+                <div class="pair"><label for="meshTunName" class="has-tip" data-tip="【可选】虚拟网卡名，留空=cfpilot0。同机多节点必须不同（如 cfpilotA / cfpilotB），否则冲突。&#10;示例：cfpilotA">TUN 网卡名 ⓘ</label><input type="text" id="meshTunName" placeholder="留空 = cfpilot0" /></div>
               </div>
               <details class="fold">
                 <summary>盲中继（WSS 降级目标，可选）</summary>
                 <div class="fold-body">
                   <div class="pair-grid">
-                    <div class="pair"><label for="meshRelayDomain" title="【可选】WSS 降级兜底用的盲中继域名。先在「部署」页部署盲中继，再点「填入组网配置」自动带入。不填也能用（仅 UDP 直连，无中继兜底）">盲中继域名 ⓘ</label><input type="text" id="meshRelayDomain" placeholder="部署盲中继后自动填入" /></div>
-                    <div class="pair"><label for="meshRelayRoom" title="【可选】盲中继房间名，8-64 位十六进制。同一网络所有节点必须填同一个房间才能互通。由「填入组网配置」自动带入">房间名（8-64 hex）ⓘ</label><input type="text" id="meshRelayRoom" placeholder="部署盲中继后自动填入" /></div>
+                    <div class="pair"><label for="meshRelayDomain" class="has-tip" data-tip="【可选】WSS 降级兜底的盲中继域名。先在「部署」页部署盲中继，再点「填入组网配置」自动带入。不填也能用（仅 UDP 直连，无中继兜底）。&#10;示例：relay.example.com">盲中继域名 ⓘ</label><input type="text" id="meshRelayDomain" placeholder="部署盲中继后自动填入" /></div>
+                    <div class="pair"><label for="meshRelayRoom" class="has-tip" data-tip="【可选】盲中继房间名，8-64 位十六进制，同一网络所有节点填同一个房间才能互通，由「填入组网配置」自动带入。&#10;示例：0123456789abcdef">房间名（8-64 hex）ⓘ</label><input type="text" id="meshRelayRoom" placeholder="部署盲中继后自动填入" /></div>
                   </div>
                   <label class="switch-box">
                     <span class="sw-info">
-                      <span class="sw-title" title="【可选】开启后，UDP 直连质量差时(连续 3 窗丢包>20% 或 RTT>300ms)自动切到 WSS 中继，恢复后自动回切。默认勾选；没部署盲中继时保持勾选也无害">启用 UDP→WSS 自动降级 ⓘ</span>
+                      <span class="sw-title has-tip" data-tip="【可选】开启后，UDP 直连质量差时（连续 3 窗丢包>20% 或 RTT>300ms）自动切到 WSS 中继，恢复后自动回切。默认勾选；没部署盲中继时保持勾选也无害。&#10;示例：保持默认勾选">启用 UDP→WSS 自动降级 ⓘ</span>
                       <span class="sw-desc">链路劣化时自动切到盲中继，恢复后回切</span>
                     </span>
                     <input type="checkbox" id="meshEnableDegrade" checked />
@@ -1830,10 +1845,10 @@
                 <summary>对端节点（seed，手动添加）</summary>
                 <div class="fold-body">
                   <div class="pair-grid">
-                    <div class="pair"><label for="peerNodeId" title="【添加对端时必填】对方节点的 ID，16 位 hex，就是对方「本节点 ID」的值。两端要互相添加对方">对端 ID（16 hex）ⓘ</label><input type="text" id="peerNodeId" placeholder="如 0200000000000002" /></div>
-                    <div class="pair"><label for="peerAddr" title="【添加对端时必填】对方可达的 IP:端口。同机测试用 127.0.0.1:端口；异地用对方公网 IP 或域名；端口是对方的「UDP 监听」端口">对端地址（IP:端口）ⓘ</label><input type="text" id="peerAddr" placeholder="如 10.0.0.2:51820" /></div>
-                    <div class="pair"><label for="peerPub" title="【添加对端时必填】对方的 X25519 静态公钥，64 位 hex，由对方节点生成后提供给你。用于端到端加密身份验证，填错会握手失败">对端静态公钥（64 hex）ⓘ</label><input type="text" id="peerPub" placeholder="X25519 公钥" /></div>
-                    <div class="pair"><label for="peerVip" title="【添加对端时必填】对方的虚拟 IP，就是对方「本节点虚拟 IP」的值。用于 IP 包→对端的路由查表">对端虚拟 IP ⓘ</label><input type="text" id="peerVip" placeholder="如 10.98.0.2" /></div>
+                    <div class="pair"><label for="peerNodeId" class="has-tip" data-tip="【添加对端时必填】对方节点 ID（16 位 hex），就是对方「本节点 ID」的值。两端要互相添加对方。&#10;示例：0200000000000002">对端 ID（16 hex）ⓘ</label><input type="text" id="peerNodeId" placeholder="如 0200000000000002" /></div>
+                    <div class="pair"><label for="peerAddr" class="has-tip" data-tip="【添加对端时必填】对方可达的 IP:端口。同机测试用 127.0.0.1:端口；异地用对方公网 IP/域名；端口是对方的「UDP 监听」端口。&#10;示例：10.0.0.2:51820">对端地址（IP:端口）ⓘ</label><input type="text" id="peerAddr" placeholder="如 10.0.0.2:51820" /></div>
+                    <div class="pair"><label for="peerPub" class="has-tip" data-tip="【添加对端时必填】对方的 X25519 静态公钥（64 位 hex），由对方节点生成后提供给你。用于端到端加密身份验证，填错会握手失败。&#10;示例：对方给出的 64 位公钥字符串">对端静态公钥（64 hex）ⓘ</label><input type="text" id="peerPub" placeholder="X25519 公钥" /></div>
+                    <div class="pair"><label for="peerVip" class="has-tip" data-tip="【添加对端时必填】对方的虚拟 IP，就是对方「本节点虚拟 IP」的值。用于 IP 包→对端的路由查表。&#10;示例：10.98.0.2">对端虚拟 IP ⓘ</label><input type="text" id="peerVip" placeholder="如 10.98.0.2" /></div>
                   </div>
                   <div class="btn-row"><button class="btn btn-ghost" id="btnAddPeer">添加对端</button></div>
                   <div id="peerList" class="dim" style="margin-top:8px;font-size:12.5px">暂无对端</div>
@@ -2467,6 +2482,15 @@
                   <b>每个填写项的含义把鼠标停在字段名的 ⓘ 上看气泡说明。</b>
                 </p>
                 <div class="links" style="line-height:1.9">
+                  <b>字段速查（★必填 / ○可选，示例值仅供参照）</b><br>
+                  ★ <b>本节点 ID</b> 例 <code>0100000000000001</code>（各节点不同，小的作发起方）；
+                  ★ <b>网络名</b> 例 <code>my-home</code>（两端完全一致）；
+                  ★ <b>PSK</b> 例 <code>mysecret123456</code>（两端完全一致，16位以上）；<br>
+                  ★ <b>本节点虚拟 IP</b> 例 <code>10.97.0.1</code>（A）/ <code>10.98.0.2</code>（B，不同网段）；
+                  ○ <b>UDP 监听</b> 例 <code>0.0.0.0:51820</code>（同机多节点用不同端口）；
+                  ○ <b>TUN 名</b> 例 <code>cfpilotA</code>（同机多节点不同名）；<br>
+                  ○ <b>盲中继域名 / 房间</b> 由「填入组网配置」自动带入，不填也能用；
+                  ○ <b>降级开关</b> 默认勾选。对端四项（ID / 地址 / 公钥 / 虚拟 IP）在「添加对端」时均需填，填对方的值。<br><br>
                   <b>1.（可选但推荐）部署盲中继</b>：见上方「① 盲中继部署」。部署后在「部署」页点
                   「填入组网配置」，WSS 域名与房间名自动带入本页；不部署也能用（仅直连）。<br>
                   <b>2. 配置本节点</b>：在每台设备的「组网」页填写，关键是

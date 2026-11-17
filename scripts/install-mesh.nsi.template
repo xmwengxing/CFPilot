@@ -69,6 +69,15 @@ Section "主程序" Main
 SectionEnd
 
 Section "Uninstall"
+  ; 进程占用防护：主程序运行时 Windows 会锁定 exe 与目录，导致卸载残留。
+  ; 始终询问是否强制结束进程——taskkill 对「未运行」的进程无副作用（静默返回），
+  ; 所以不必精确检测。选「否」则跳过强杀（若真在运行，删除会失败，用户已知晓）。
+  MessageBox MB_YESNO|MB_ICONQUESTION \
+    "卸载前是否强制结束可能正在运行的 ${APP_NAME} 进程？$\r$\n$\r$\n选「是」：结束后再卸载（推荐，避免文件残留）。$\r$\n选「否」：如果该程序正在运行，请退出后再卸载。" \
+    IDNO skip_kill
+  ExecWait 'taskkill /F /IM "${EXE_NAME}" /T'
+  Sleep 800
+  skip_kill:
   Delete "$INSTDIR\${EXE_NAME}"
   Delete "$INSTDIR\wintun.dll"
   Delete "$INSTDIR\uninstall.exe"

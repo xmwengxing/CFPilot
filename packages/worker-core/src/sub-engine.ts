@@ -1223,8 +1223,17 @@ export function resolveSubVariants(
   return fallback ? [fallback] : ['vless-ws']
 }
 
-/** Clash / sing-box 支持的形态（都不支持 XHTTP） */
+/**
+ * sing-box 支持的形态（暂不支持 XHTTP 传输）。
+ * mihomo/Clash 自 1.19+（PR #2645，2026-03）已支持 VLESS + XHTTP，故不再用本常量过滤 Clash。
+ */
 export const WS_ONLY_VARIANTS: readonly SubVariant[] = ['vless-ws', 'trojan']
+
+/**
+ * Clash / mihomo 支持的形态（含 XHTTP）。
+ * 注：老版本 mihomo 不认 network: xhttp，会跳过该节点，不影响其它节点，故可安全下发。
+ */
+export const CLASH_VARIANTS: readonly SubVariant[] = ['vless-ws', 'vless-xhttp', 'trojan']
 
 /** 把节点分组（若无分组信息则整体作为一组） */
 function resolveGroups(ctx: RenderContext): PoolGroup[] {
@@ -1496,10 +1505,11 @@ export function renderClash(ctx: RenderContext): string {
    * 用户手填的节点没有 `IPv4_` 前缀，但同样应该归对组。
    */
   const familyNames: { v4: string[]; v6: string[] } = { v4: [], v6: [] }
-  // ⚠️ Clash / mihomo **不支持 XHTTP**（XHTTP 是 Xray 专有传输），
-  // 所以 XHTTP 变体在这些格式里跳过 —— 否则客户端会把它当未知 network 而失败。
-  const variants = resolveSubVariants(ctx.config.subVariants, ctx.config, WS_ONLY_VARIANTS)
+  // mihomo/Clash 自 1.19+（PR #2645）支持 VLESS + XHTTP。
+  // 老版本不认该 network 会跳过节点、不影响其它节点，故可安全下发。
+  const variants = resolveSubVariants(ctx.config.subVariants, ctx.config, CLASH_VARIANTS)
   const wantVless = variants.some((v) => v === 'vless-ws')
+  const wantXhttp = variants.includes('vless-xhttp') && ctx.config.enableXhttp !== false
   const wantTrojan = variants.includes('trojan')
   const useEch = ctx.config.ech
   const echHost = ctx.config.echHost.trim() || 'cloudflare-ech.com'
@@ -1541,6 +1551,33 @@ export function renderClash(ctx: RenderContext): string {
               `      path: ${yamlQuote(ctx.config.wsPath)}`,
               `      headers:`,
               `        Host: ${ctx.domain}`,
+            ].join('\n')
+          )
+        }
+        if (wantXhttp) {
+          // VLESS + XHTTP（mihomo 1.19+）：network: xhttp + xhttp-opts。
+          // 参数与 vlessUri 的 XHTTP 分支保持一致：packet-up / h2 / noGRPCHeader。
+          const xhttpLabel = `${label} XHTTP`
+          allNames.push(xhttpLabel)
+          bucket.push(xhttpLabel)
+          proxies.push(
+            [
+              `  - name: ${yamlQuote(xhttpLabel)}`,
+              `    type: vless`,
+              `    uuid: ${ctx.config.uuid}`,
+              `    server: ${entry.ip}`,
+              `    port: ${port}`,
+              `    network: xhttp`,
+              `    tls: true`,
+              `    servername: ${ctx.domain}`,
+              `    alpn: [h2]`,
+              `    client-fingerprint: ${yamlFingerprint(ctx.config.clientFingerprint)}`,
+              ...echLines(),
+              `    xhttp-opts:`,
+              `      path: ${yamlQuote(ctx.config.xhttpPath)}`,
+              `      host: ${ctx.domain}`,
+              `      mode: packet-up`,
+              `      no-grpc-header: true`,
             ].join('\n')
           )
         }

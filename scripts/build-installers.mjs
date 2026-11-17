@@ -50,6 +50,16 @@ if (existsSync(winExe) && makensis) {
     .replace('EXE_NAME_PLACEHOLDER', winExeName)
     .replace('EXE_SOURCE_PLACEHOLDER', join(stage, winExeName))
     .replace('SETUP_OUT_PLACEHOLDER', setupOut)
+  // 内置中文语言文件复制到 stage（模板用 !addincludedir 引用，
+  // 避免依赖系统 NSIS 是否带 Contrib/Language files —— CI/本机行为一致）
+  const langSrc = join(here, 'nsis-lang')
+  const langDst = join(stage, 'nsis-lang')
+  if (existsSync(langSrc)) {
+    mkdirSync(langDst, { recursive: true })
+    for (const f of ['SimpChinese.nlf', 'SimpChinese.nsh']) {
+      copyFileSync(join(langSrc, f), join(langDst, f))
+    }
+  }
   const nsiPath = join(stage, 'install.nsi')
   // NSIS 按 ACP 读脚本；含中文的 Unicode 脚本必须带 UTF-8 BOM，
   // 否则报 "Bad text encoding"（真机踩到）。

@@ -1,10 +1,15 @@
-; CFPilot +mesh Windows 安装器（NSIS）。
+; CFPilot +mesh Windows 安装器（NSIS MUI2 现代向导界面）。
 ; 由 scripts/build-installers.mjs 填入版本号后调用 makensis 编译。
 ; 关键：安装时**提权**调用 cfpilot 的 --fetch-wintun 下载 wintun.dll
 ;（ADR-0002：DLL 不捆绑，官方下载 + 双重 SHA256 校验）。
 
 Unicode true
 RequestExecutionLevel admin
+
+; 内置简体中文语言文件（不依赖系统 NSIS 是否带 Contrib/Language files，
+; Ubuntu apt 的 nsis 包路径与 Windows 不同，内置后 CI/本机行为一致）。
+!addincludedir "${__FILEDIR__}\nsis-lang"
+!include "MUI2.nsh"
 
 !define APP_NAME "CFPilot Mesh"
 !define APP_VERSION "APP_VERSION_PLACEHOLDER"
@@ -13,9 +18,31 @@ RequestExecutionLevel admin
 
 Name "${APP_NAME} ${APP_VERSION}"
 OutFile "SETUP_OUT_PLACEHOLDER"
+; 默认安装路径（用户可在目录选择页改成任意路径）
 InstallDir "$LOCALAPPDATA\CFPilot-Mesh"
 InstallDirRegKey HKCU "${UNINST_KEY}" "InstallDir"
 ShowInstDetails show
+
+; ---------- MUI 界面设置 ----------
+!define MUI_ABORTWARNING
+!define MUI_WELCOMEPAGE_TITLE "欢迎安装 ${APP_NAME} ${APP_VERSION}"
+!define MUI_WELCOMEPAGE_TEXT "本安装程序将安装 CFPilot 异地组网节点。$\r$\n$\r$\n安装过程中会联网下载并校验 wintun.dll（官方源 + SHA256），请确保网络可用。$\r$\n$\r$\n点击「下一步」继续。"
+!define MUI_DIRECTORYPAGE_TEXT_TOP "选择安装目录。默认在 %LOCALAPPDATA%\CFPilot-Mesh，可点击「浏览」自定义路径。"
+!define MUI_FINISHPAGE_TITLE "安装完成"
+!define MUI_FINISHPAGE_TEXT "${APP_NAME} 已安装。$\r$\n$\r$\n请从开始菜单或桌面快捷方式启动，并用 CFPilot 面板「组网」页生成的配置运行节点。"
+
+; 安装向导页面：欢迎 → 目录选择（自定义路径）→ 安装 → 完成
+!insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_DIRECTORY
+!insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_PAGE_FINISH
+
+; 卸载向导页面
+!insertmacro MUI_UNPAGE_CONFIRM
+!insertmacro MUI_UNPAGE_INSTFILES
+
+; 简体中文界面
+!insertmacro MUI_LANGUAGE "SimpChinese"
 
 Section "主程序" Main
   SetOutPath "$INSTDIR"
@@ -29,7 +56,7 @@ Section "主程序" Main
     Abort
   dllok:
 
-  ; 开始菜单 + 桌面快捷方式
+  ; 开始菜单 + 桌面快捷方式（用用户选的 $INSTDIR，支持自定义路径）
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
   CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${EXE_NAME}"
   CreateShortcut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${EXE_NAME}"

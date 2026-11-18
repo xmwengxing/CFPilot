@@ -4,4 +4,5 @@ local.properties
 app/build/
 build/
 app/libs/*.aar
+app/libs/*.jar
 *.apk

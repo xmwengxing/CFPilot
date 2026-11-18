@@ -65,7 +65,8 @@ class MeshVpnService : VpnService() {
 
             // fd ownership 转给 Go（detachFd 后由 Go Close）
             val m = Mesh()
-            m.start(configJson, pfd.detachFd())
+            // gomobile 把 Go 的 int 映射为 Java long，detachFd() 返回 Int，需转 Long
+            m.start(configJson, pfd.detachFd().toLong())
             mesh = m
 
             startForeground(1, buildNotification())
@@ -103,7 +104,7 @@ class MeshVpnService : VpnService() {
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("CFPilot Mesh 运行中")
             .setContentIntent(pi)
-            .setSmallIcon(android.R.drawable.stat_sys_vpn_ic)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
             .build()
     }
 

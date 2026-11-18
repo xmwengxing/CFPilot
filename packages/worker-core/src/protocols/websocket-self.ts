@@ -915,7 +915,14 @@ export async function handleWebSocket(
    */
   const traffic = new TrafficMeter((config.dataBudgetMB || 0) * 1024 * 1024)
 
-  /** 流量超限：记诊断 + 关闭连接（1009 = 消息过大，客户端会重连） */
+  /**
+   * 流量超限：记诊断 + 关闭连接。
+   *
+   * 用 **1013（Try Again Later）** 而不是 1009：1009 的语义是「消息过大」，
+   * 客户端会当成协议错误、可能直接报错停用该节点；1013 明确表达
+   * 「现在不行，稍后重连」——支持断点续传的客户端据此续传，
+   * 而不是把节点判死。内存类熔断（缓冲/积压）仍用 1009，那是真的帧太大。
+   */
   const cutByTraffic = (): void => {
     const reason = `单连接流量超过 ${config.dataBudgetMB}MB 上限`
     recordDiagnostics(
@@ -923,7 +930,7 @@ export async function handleWebSocket(
       [],
       reason
     )
-    closeWith(1009, reason)
+    closeWith(1013, reason)
   }
 
   /** 上行：客户端 → 出站（经串行链，顺序 = 调用顺序） */

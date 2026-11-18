@@ -179,11 +179,33 @@ const DIAG_COUNTERS = {
   downlinkYields: 0,
 }
 
-/** 计数器起点（isolate 加载时刻）：没有它就无法判断数值是「1 分钟」还是「10 小时」的累积 */
-const DIAG_SINCE = Date.now()
+/**
+ * 计数器起点 —— **首次读取时惰性初始化**，不在模块顶层捕获。
+ *
+ * ⚠️ 真机实测（`/__diag`，2026-11-18）：workerd 在 isolate 初始化阶段
+ * （模块顶层执行）的 `Date.now()` 会返回 **0**。早前写的是
+ * `const DIAG_SINCE = Date.now()`，于是线上 `/__diag` 恒定显示
+ * `since: 0`、`uptimeMs: <当前 epoch>` —— 看起来像「从 1970 年跑到现在」，
+ * 完全失去「计数器是 1 分钟还是 10 小时累积」的诊断价值。
+ * （本地 Node 直接 import 产物时模块顶层 `Date.now()` 正常，所以单测
+ * 抓不到，只有真机能暴露 —— 与 close reason 那个坑同类。）
+ *
+ * 惰性初始化把取时机的动作挪到第一次 `/__diag` 请求里，此时一定处于
+ * 请求上下文中，`Date.now()` 返回真实时间。
+ *
+ * 用属性而不是模块级 `let`：本文件的连接级状态作用域护栏
+ * （`connection-state-scope.test.ts`）明确规定模块级 `let` 只允许 isolate
+ * 配额计数器；这里同样是 isolate 级状态，沿用 `pendingBudget` 的对象写法。
+ */
+const diagClock = { since: 0 }
 
 export function diagnosticCounters(): Readonly<typeof DIAG_COUNTERS> & { since: number; uptimeMs: number } {
-  return { ...DIAG_COUNTERS, since: DIAG_SINCE, uptimeMs: Date.now() - DIAG_SINCE }
+  if (diagClock.since <= 0) diagClock.since = Date.now()
+  return {
+    ...DIAG_COUNTERS,
+    since: diagClock.since,
+    uptimeMs: Math.max(0, Date.now() - diagClock.since),
+  }
 }
 
 /**

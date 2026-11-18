@@ -38,14 +38,22 @@ const DEFAULT_PROBE_BYTES = 2 * 1024 * 1024
  */
 const PROBE_WINDOW_MS = 10 * 60 * 1000
 const PROBE_WINDOW_BYTES = 6 * 1024 * 1024 * 1024
-let probeWindowStart = Date.now()
+/**
+ * 预算窗口起点 —— 0 表示尚未初始化。
+ *
+ * ⚠️ 同 `websocket-self.ts` 的 DIAG_SINCE：workerd 在模块顶层执行时
+ * `Date.now()` 会返回 0，不能在模块顶层捕获真实时间。改为首次窗口检查时
+ * 惰性取时（`rollProbeWindow`），否则首请求会因为 `now - 0 >= 10min`
+ * 误触发一次窗口重置 —— 当下无害，但语义不对，且与诊断计数器口径不一致。
+ */
+let probeWindowStart = 0
 let probeWindowServed = 0
 /** 本窗口内已接受的 WS 探针连接数（P2 #16，与 GET 流共享 10 分钟窗口） */
 let probeWindowWsAccepts = 0
 
 /** 窗口过期就清零；返回当前窗口开始时刻 */
 function rollProbeWindow(now: number): void {
-  if (now - probeWindowStart >= PROBE_WINDOW_MS) {
+  if (probeWindowStart <= 0 || now - probeWindowStart >= PROBE_WINDOW_MS) {
     probeWindowStart = now
     probeWindowServed = 0
     probeWindowWsAccepts = 0

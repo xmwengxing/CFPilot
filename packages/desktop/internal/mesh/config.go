@@ -36,6 +36,20 @@ type Config struct {
 	EnableDegrade bool
 	// TunName 是 TUN 设备名（多节点同机时必须不同）；留空 = cfpilot0。
 	TunName string
+
+	// ---- 云监测台上报（对齐 MobiHop node/monitor.rs）----
+	//
+	// 仅在 MonitoringEndpoint + MonitoringToken 都非空时启用；留空=完全不上报。
+	// 每 MonitoringIntervalMS 周期 POST <endpoint>/heartbeat（默认 30s，最低 5s），
+	// 失败只记日志、绝不阻断组网；令牌不进日志。
+	MonitoringEndpoint string
+	MonitoringToken    string
+	// MonitoringIntervalMS 上报间隔（毫秒）；<=0 用默认 30000，低于 5000 按 5000。
+	MonitoringIntervalMS int64
+	// MonitoringAlias 监测台显示名；留空用主机名。
+	MonitoringAlias string
+	// ClientVersion 上报给监测台的客户端版本；留空由 meshd/移动端填。
+	ClientVersion string
 }
 
 // PeerConfig 是静态对端（seed）配置。
@@ -65,6 +79,13 @@ func (c *Config) Validate() error {
 	}
 	if c.MTU <= 0 {
 		c.MTU = 1400
+	}
+	// 云监测台上报间隔归一化（对齐 MobiHop：默认 30s、最低 5s）
+	if c.MonitoringIntervalMS <= 0 {
+		c.MonitoringIntervalMS = DefaultMonitorIntervalMS
+	}
+	if c.MonitoringIntervalMS < MinMonitorIntervalMS {
+		c.MonitoringIntervalMS = MinMonitorIntervalMS
 	}
 	if len(c.TunnelPrivate) > 0 && len(c.TunnelPrivate) != 32 {
 		return fmt.Errorf("mesh config: TunnelPrivate 必须 32 字节，实际 %d", len(c.TunnelPrivate))
@@ -104,3 +125,4 @@ func (c *Config) tunnelKey() (noise.DHKey, error) {
 	// 随机生成
 	return cs.GenerateKeypair(nil)
 }
+

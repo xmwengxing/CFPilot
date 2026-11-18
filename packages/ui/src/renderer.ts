@@ -4967,6 +4967,11 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
         if (room) { const el = $('meshRelayRoom'); if (el) el.value = room }
         const pw = lastEdgeDeploy.monitorToken
         if (pw) { const el = $('meshPsk'); if (el && !el.value) el.value = pw }
+        // 云监测台上报：部署结果里就有 Worker 地址与 MONITOR_TOKEN，直接回填
+        if (lastEdgeDeploy.workerUrl) {
+          const el = $('meshMonitorEndpoint'); if (el && !el.value) el.value = lastEdgeDeploy.workerUrl
+        }
+        if (pw) { const el = $('meshMonitorToken'); if (el && !el.value) el.value = pw }
         log(`已填入组网配置：盲中继 ${domain}，房间 ${room}`, 'ok')
       } catch {
         log('解析 WSS 地址失败，请手动填写', 'warn')
@@ -5274,6 +5279,16 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
       relayDomain: ($('meshRelayDomain')?.value || '').trim(),
       relayRoom: ($('meshRelayRoom')?.value || '').trim(),
       enableDegrade: ($('meshEnableDegrade') as HTMLInputElement | null)?.checked !== false,
+      // 云监测台上报：*monitor* 键与输入框 id 对应（本地保存后能按命名约定恢复）；
+      // *monitoring* 是交给 Go mesh.Config 的字段名（默认关闭，留空即不上报）。
+      monitorEndpoint: ($('meshMonitorEndpoint')?.value || '').trim(),
+      monitorToken: ($('meshMonitorToken')?.value || '').trim(),
+      monitorInterval: ($('meshMonitorInterval')?.value || '').trim(),
+      monitorAlias: ($('meshMonitorAlias')?.value || '').trim(),
+      monitoringEndpoint: ($('meshMonitorEndpoint')?.value || '').trim(),
+      monitoringToken: ($('meshMonitorToken')?.value || '').trim(),
+      monitoringIntervalMs: Math.max(5, Number($('meshMonitorInterval')?.value || 30)) * 1000,
+      monitoringAlias: ($('meshMonitorAlias')?.value || '').trim(),
       peers: meshPeers,
     }
   }
@@ -7457,4 +7472,5 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
     })()
   })
 })()
+
 

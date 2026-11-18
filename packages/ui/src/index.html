@@ -1867,6 +1867,23 @@
                   </label>
                 </div>
               </details>
+
+              <details class="fold">
+                <summary>云监测台上报（可选，默认关闭）</summary>
+                <div class="fold-body">
+                  <p class="hint" style="line-height:1.8">
+                    部署「盲中继 / 云监测台」后，节点可定期把自身状态上报给 Worker，监测台据此展示设备列表。
+                    <b>默认关闭</b>：地址或令牌留空就完全不上报（虚拟 IP / 版本 / 在线状态都不会外发）。
+                    需要上报时，先部署监测台，再点上方「填入组网配置」自动带入地址与令牌。
+                  </p>
+                  <div class="pair-grid">
+                    <div class="pair"><label for="meshMonitorEndpoint" class="has-tip" data-tip="【可选】云监测台的上报地址（Worker 根地址）。留空=不上报。&#10;示例：https://cfpilot-relay.xxx.workers.dev">上报地址 ⓘ</label><input type="text" id="meshMonitorEndpoint" placeholder="部署监测台后自动填入" /></div>
+                    <div class="pair"><label for="meshMonitorToken" class="has-tip" data-tip="【可选】与 Worker 环境变量 MONITOR_TOKEN 相同的令牌，请求头 X-Monitor-Token 携带。&#10;部署监测台时生成，点「填入组网配置」自动带入；泄露后需在 Worker 端更换">上报令牌 ⓘ</label><input type="text" id="meshMonitorToken" placeholder="部署监测台后自动填入" /></div>
+                    <div class="pair"><label for="meshMonitorInterval" class="has-tip" data-tip="【可选】上报间隔（秒），范围 5–3600，默认 30。&#10;太短会增加 Worker 请求量与 D1 写入；太长监测台会显示离线（判定阈值约 90 秒）。&#10;示例：30">上报间隔（秒）ⓘ</label><input type="number" id="meshMonitorInterval" min="5" max="3600" placeholder="30" /></div>
+                    <div class="pair"><label for="meshMonitorAlias" class="has-tip" data-tip="【可选】监测台上显示的设备名，便于区分多台机器。留空则用主机名。&#10;示例：home-nas">设备名 ⓘ</label><input type="text" id="meshMonitorAlias" placeholder="留空=主机名" /></div>
+                  </div>
+                </div>
+              </details>
               <details class="fold">
                 <summary>对端节点（seed，手动添加）</summary>
                 <div class="fold-body">

@@ -46,6 +46,10 @@ func (m *Mesh) Start(configJSON string, tunFd int) error {
 	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
 		return fmt.Errorf("mesh: 配置 JSON 非法: %w", err)
 	}
+	// 云监测台上报的版本号由绑定库自报（Android 面板无需知道内核版本）
+	if cfg.ClientVersion == "" {
+		cfg.ClientVersion = m.Version()
+	}
 	tun, err := mesh.NewAndroidTun(tunFd, cfg.TunName)
 	if err != nil {
 		return err
@@ -94,3 +98,4 @@ func (m *Mesh) StatusJSON() string {
 
 // Version 返回绑定库版本（供 Android 侧展示）。
 func (m *Mesh) Version() string { return "0.50.0+mesh" }
+

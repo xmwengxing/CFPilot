@@ -186,3 +186,4 @@ func writeErr(w http.ResponseWriter, msg string) {
 // runAsService / installService / uninstallService 见 platform 专属文件。
 var _ = fmt.Sprintf
 var _ = os.Exit
+

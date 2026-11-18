@@ -33,6 +33,8 @@ class MainActivity : Activity() {
 {"nodeId":"0100000000000001","networkName":"my-network","psk":"secret",
  "virtualIp":"10.97.0.1","listen":"0.0.0.0:51820",
  "relayDomain":"","relayRoom":"","enableDegrade":false,
+ "monitoringEndpoint":"","monitoringToken":"",
+ "monitoringIntervalMs":30000,"monitoringAlias":"",
  "peers":[]}
         """.trimIndent())
 
@@ -76,3 +78,4 @@ class MainActivity : Activity() {
         }
     }
 }
+

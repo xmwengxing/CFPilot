@@ -1811,6 +1811,32 @@
             </div>
 
             <div class="card">
+              <h2><span class="dot"></span>📡 组网状态</h2>
+              <p class="desc">每 2 秒刷新。启动后如果这里一直显示「等待对端」，按下方提示逐项检查。</p>
+              <div class="pair-grid">
+                <div class="pair"><label>运行状态</label><div id="meshStatRunning" class="mono">未运行</div></div>
+                <div class="pair"><label>本节点 ID</label><div id="meshStatNode" class="mono">—</div></div>
+                <div class="pair"><label>虚拟 IP</label><div id="meshStatVip" class="mono">—</div></div>
+                <div class="pair"><label>UDP 监听</label><div id="meshStatListen" class="mono">—</div></div>
+                <div class="pair"><label>运行时长</label><div id="meshStatUptime" class="mono">—</div></div>
+                <div class="pair"><label>握手成功</label><div id="meshStatHs" class="mono">0</div></div>
+                <div class="pair"><label>出站 / 入站帧</label><div id="meshStatFrames" class="mono">0 / 0</div></div>
+                <div class="pair"><label>丢弃（出/入）</label><div id="meshStatDrop" class="mono">0 / 0</div></div>
+              </div>
+              <div id="meshStatNote" class="tip" style="margin-top:8px"></div>
+              <div style="margin-top:10px;overflow-x:auto">
+                <table class="tbl" style="width:100%;font-size:13px">
+                  <thead>
+                    <tr><th>节点</th><th>虚拟 IP</th><th>对端地址</th><th>状态</th><th>传输</th><th>RTT</th><th>丢包</th></tr>
+                  </thead>
+                  <tbody id="meshLivePeers">
+                    <tr><td colspan="7" style="color:var(--muted)">暂无对端（启动后自动刷新）</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="card">
               <h2><span class="dot"></span>⚙️ 组网配置</h2>
               <p class="desc">
                 配置会由 <code>+mesh</code> 版读取。部署盲中继后，可在「部署」页点

@@ -95,11 +95,32 @@ func (t *linuxTun) setMTU(mtu int) error {
 
 func (t *linuxTun) Recv(ctx context.Context) ([]byte, error) {
 	buf := make([]byte, MaxFrame)
-	n, err := t.file.Read(buf)
-	if err != nil {
-		return nil, err
+	// ⚠️ 不能用阻塞 Read：Linux 上 close(fd) **不会**唤醒阻塞中的 read，
+	// Stop() 会一直等这条读循环 ⇒ 「停止组网」要等到下一次流量到来才返回
+	// （真机实测 56 秒）。这里用 poll(100ms) 轮询 + ctx 检查，保证能及时退出。
+	pfd := []unix.PollFd{{Fd: int32(t.fd), Events: unix.POLLIN}}
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+		n, err := unix.Poll(pfd, 100)
+		if err != nil {
+			if err == unix.EINTR {
+				continue
+			}
+			return nil, err
+		}
+		if n == 0 {
+			continue // 超时：回上去检查 ctx
+		}
+		rn, rerr := t.file.Read(buf)
+		if rerr != nil {
+			return nil, rerr
+		}
+		return buf[:rn], nil
 	}
-	return buf[:n], nil
 }
 
 func (t *linuxTun) Send(ctx context.Context, packet []byte) error {

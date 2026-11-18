@@ -34,7 +34,9 @@ var (
 	wintunDLL        = syscall.NewLazyDLL("wintun.dll")
 	procCreate       = wintunDLL.NewProc("WintunCreateAdapter")
 	procOpen         = wintunDLL.NewProc("WintunOpenAdapter")
-	procDelete       = wintunDLL.NewProc("WintunDeleteAdapter")
+	// ⚠️ wintun 0.14.1 的导出名是 **WintunCloseAdapter**（不是 DeleteAdapter，
+	// 那个符号不存在，调用会让 syscall 直接 panic，且适配器永远不会被清理）。
+	procCloseAdapter = wintunDLL.NewProc("WintunCloseAdapter")
 	procStartSession = wintunDLL.NewProc("WintunStartSession")
 	procEndSession   = wintunDLL.NewProc("WintunEndSession")
 	procReceive      = wintunDLL.NewProc("WintunReceivePacket")
@@ -97,7 +99,7 @@ func CreateTunDevice(name string, ipv4 string, mtu int) (TunDevice, error) {
 	}
 	session, _, callErr := procStartSession.Call(adapter, wintunRingCap)
 	if session == 0 {
-		_, _, _ = procDelete.Call(adapter, 0)
+		_, _, _ = procCloseAdapter.Call(adapter)
 		return nil, fmt.Errorf("mesh wintun: WintunStartSession 失败: %v", callErr)
 	}
 	// 配置虚拟 IP + /24 掩码（对齐 MobiHop platform::configure，需管理员）。
@@ -107,7 +109,7 @@ func CreateTunDevice(name string, ipv4 string, mtu int) (TunDevice, error) {
 			fmt.Sprintf("name=%s", name), "static", ipv4, "255.255.255.0").CombinedOutput()
 		if err != nil {
 			_, _, _ = procEndSession.Call(session)
-			_, _, _ = procDelete.Call(adapter, 0)
+			_, _, _ = procCloseAdapter.Call(adapter)
 			return nil, fmt.Errorf("mesh wintun: 配置 IP %s 失败: %v (%s)", ipv4, err, string(out))
 		}
 	}
@@ -158,7 +160,8 @@ func (t *wintunTun) Close() error {
 		_, _, _ = procEndSession.Call(t.session)
 	}
 	if t.adapter != 0 {
-		_, _, _ = procDelete.Call(t.adapter, 0)
+		_, _, _ = procCloseAdapter.Call(t.adapter)
 	}
 	return nil
 }
+

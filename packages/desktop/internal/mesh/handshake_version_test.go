@@ -74,9 +74,24 @@ func TestHandshakeDowngradeRetry(t *testing.T) {
 		t.Errorf("降级后登记表应为 v1，实际 %#x", got)
 	}
 
-	// 只降一次（避免每 5s 反复抖动）
-	if n := fsmA.RetryPending(now.Add(5*time.Second), 5*time.Second); n != 0 {
-		t.Fatalf("已降级后不应再次重试，实际 %d", n)
+	// 之后仍需**周期性重发**（UDP 首个 Init 可能丢失；对端晚启动时必须能重连），
+	// 但版本保持 v1，不重复降级。
+	now = now.Add(5 * time.Second)
+	if n := fsmA.RetryPending(now, 5*time.Second); n != 1 {
+		t.Fatalf("5s 后应继续重发一次，实际 %d", n)
+	}
+	if len(sent) != 3 {
+		t.Fatalf("应共发 3 帧，实际 %d", len(sent))
+	}
+	again, err := Decode(sent[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Version != WireVersionV1 {
+		t.Errorf("已降级后应保持 v1，实际 %#x", again.Version)
+	}
+	if string(again.Payload) != string(retry.Payload) {
+		t.Error("重发必须使用同一份 Init 载荷")
 	}
 
 	// 降级后若对端回帧被学到，登记表回到真实版本
@@ -115,3 +130,4 @@ func sent2Bytes(t *testing.T, f *Frame) []byte {
 	}
 	return b
 }
+

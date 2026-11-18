@@ -139,6 +139,19 @@ func EncodeHandshakeFrame(src, dst NodeID, msg []byte, wireVersion ...byte) ([]b
 
 // StartOutbound 首个出站包触发握手（session.rs:679-703）。
 func (f *HandshakeFSM) StartOutbound(peer NodeID, peerStatic []byte) error {
+	return f.startOutbound(peer, peerStatic, false)
+}
+
+// StartOutboundForce 忽略「只有小 NodeId 才发起」的破对称规则，强制发起握手。
+//
+// 用途：一端重启后会话失效，但**发起方是另一端**且它仍持有旧会话，不会主动重来。
+// 此时由需要发数据的一方强制发 Init；对端若已有旧会话，会在 KeyMaterial 到达时
+// 用新会话替换（旧会话在新会话装好前保持可用，避免被伪造 Init 直接打掉）。
+func (f *HandshakeFSM) StartOutboundForce(peer NodeID, peerStatic []byte) error {
+	return f.startOutbound(peer, peerStatic, true)
+}
+
+func (f *HandshakeFSM) startOutbound(peer NodeID, peerStatic []byte, force bool) error {
 	f.mu.Lock()
 	if _, ok := f.sessions[peer]; ok {
 		f.mu.Unlock()
@@ -148,9 +161,9 @@ func (f *HandshakeFSM) StartOutbound(peer NodeID, peerStatic []byte) error {
 		f.mu.Unlock()
 		return nil
 	}
-	if !f.IsInitiator(peer) {
+	if !force && !f.IsInitiator(peer) {
 		f.mu.Unlock()
-		return nil // 非发起方：等对端 Init
+		return nil // 非发起方：等对端 Init（除非调用方要求强制重建）
 	}
 	hs, err := NewInitiatorHandshake(f.psk, f.network[:], f.static, noise.DHKey{Public: peerStatic})
 	if err != nil {
@@ -189,33 +202,44 @@ func (f *HandshakeFSM) StartOutbound(peer NodeID, peerStatic []byte) error {
 // v2 对端也接受 0x01，所以降级是安全的；学到 v1 后该对端的所有帧都按 v1 发。
 //
 // 返回本次真正重发的 peer 数（诊断/测试用）。
+// RetryPending 维护发起方的 Init：**周期性重发**，并在「从未收到该对端任何帧」时
+// 降级到 v1 重发（ADR-0016 / session.rs:1452）。
+//
+// 为什么必须周期重发：UDP 是无连接的，B 先启动、A 还没起来时首个 Init 直接丢失；
+// 早前只在失败后降级一次、之后再不重发，于是「谁先启动谁永远连不上」。
+//
+// 返回本次真正重发的 peer 数（诊断/测试用）。
 func (f *HandshakeFSM) RetryPending(now time.Time, after time.Duration) int {
-	f.mu.Lock()
 	type resend struct {
-		peer NodeID
-		msg  []byte
+		peer    NodeID
+		msg     []byte
+		version byte
 	}
 	var todo []resend
+
+	f.mu.Lock()
 	for peer, p := range f.pending {
-		if p.state != HSWaitMsg2 || p.downgraded || len(p.lastMsg) == 0 {
-			continue
-		}
-		if f.wireVersions.Known(peer) {
-			continue // 已学到版本（对端活着），不降级
+		if p.state != HSWaitMsg2 || len(p.lastMsg) == 0 {
+			continue // 只重发「发起方等 msg2」的 Init
 		}
 		if now.Sub(p.sentAt) < after {
 			continue
 		}
-		p.downgraded = true
+		version := f.wireVersions.VersionFor(peer)
+		// 从未学到该对端任何帧 ⇒ 首次降级到 v1（v1 节点才解得开）
+		if !p.downgraded && !f.wireVersions.Known(peer) {
+			p.downgraded = true
+			f.wireVersions.ForceVersion(peer, WireVersionV1)
+			version = WireVersionV1
+		}
 		p.sentAt = now
 		p.attempts++
-		f.wireVersions.ForceVersion(peer, WireVersionV1)
-		todo = append(todo, resend{peer: peer, msg: p.lastMsg})
+		todo = append(todo, resend{peer: peer, msg: p.lastMsg, version: version})
 	}
 	f.mu.Unlock()
 
 	for _, r := range todo {
-		frame, err := EncodeHandshakeFrame(f.selfID, r.peer, r.msg, WireVersionV1)
+		frame, err := EncodeHandshakeFrame(f.selfID, r.peer, r.msg, r.version)
 		if err != nil || f.sendFn == nil {
 			continue
 		}
@@ -257,10 +281,16 @@ func (f *HandshakeFSM) OnFrame(frame []byte) (bool, error) {
 
 // onInit 响应方收 msg1 → 发 msg2 → 等 KeyMaterial（session.rs:925-958）。
 func (f *HandshakeFSM) onInit(parsed *Frame) error {
-	// 破对称：若本端已作为发起方处理同一对端（极小概率），小 NodeId 让位
+	// 破对称：本端更小、且已有该对端的 pending ⇒ 忽略对端 Init（避免双向同时发起）。
+	// 但**没有 pending 时仍接受**：对端可能刚重启（会话失效），它主动发 Init 是唯一
+	// 的恢复通路；旧会话保持到 KeyMaterial 装好为止，伪造 Init 无法直接打掉它。
 	if f.IsInitiator(parsed.Src) {
-		// 本端更小，应保留发起方角色，忽略对端 Init
-		return nil
+		f.mu.Lock()
+		_, hasPending := f.pending[parsed.Src]
+		f.mu.Unlock()
+		if hasPending {
+			return nil
+		}
 	}
 	hs, err := NewResponderHandshake(f.psk, f.network[:], f.static)
 	if err != nil {
@@ -322,6 +352,26 @@ func (f *HandshakeFSM) sendFrame(dst NodeID, msg []byte) error {
 	return f.sendFn(dst, frame)
 }
 
+// Reset 丢弃某对端的会话与进行中的握手，允许重新握手。
+//
+// 真机场景：一端重启后，另一端仍持有**已失效的会话**（密钥是旧的），
+// 它会用旧密钥继续发帧，对方解不开、也不会主动重发 Init ⇒ 双方永远连不上。
+// 由生命周期按「长时间没有成功解密」判定后调用。
+func (f *HandshakeFSM) Reset(peer NodeID) {
+	f.mu.Lock()
+	delete(f.sessions, peer)
+	delete(f.pending, peer)
+	f.mu.Unlock()
+}
+
+// HasSession 报告是否已有会话（诊断用）。
+func (f *HandshakeFSM) HasSession(peer NodeID) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.sessions[peer]
+	return ok
+}
+
 func (f *HandshakeFSM) installSessionLocked(peer NodeID, sess *Session) {
 	f.sessions[peer] = &peerSession{current: sess}
 	delete(f.pending, peer)
@@ -362,3 +412,4 @@ func lessNodeID(a, b NodeID) bool {
 	}
 	return false
 }
+

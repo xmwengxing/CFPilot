@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,6 +38,12 @@ type meshLifecycle struct {
 	links       map[NodeID]PeerLink // peer -> PeerLink
 	vipTable    *VirtualIPTable
 	gossip      *Gossip // 描述符库：动态发现对端虚拟 IP（对齐 MobiHop Gossip）
+	// lastOKRx 记录「最近一次成功解密该对端帧」的时刻，用于判定会话是否已失效。
+	// 独立锁：Status 持有 m.mu 时会调 fsm.Session（拿 f.mu），
+	// 握手回调持有 f.mu 时若再拿 m.mu 就会死锁，所以单独一把锁。
+	rxMu     sync.Mutex
+	lastOKRx map[NodeID]time.Time
+
 	// wireVersions 记录每个对端的线速版本（ADR-0016）：控制帧与数据帧都按它编码。
 	// 只从能成功解码的入站帧学习，未知对端按 v2。
 	wireVersions *PeerWireVersions
@@ -75,6 +82,25 @@ func (m *meshLifecycle) wireVersionFor(id NodeID) byte {
 		return WireVersionDefault
 	}
 	return m.wireVersions.VersionFor(id)
+}
+
+// markOKRx 记录一次「成功解密」的时刻（会话活性判据）。
+func (m *meshLifecycle) markOKRx(id NodeID) {
+	m.rxMu.Lock()
+	if m.lastOKRx != nil {
+		m.lastOKRx[id] = time.Now()
+	}
+	m.rxMu.Unlock()
+}
+
+// sinceOKRx 返回距上次成功解密的时间；从未成功过返回极大值。
+func (m *meshLifecycle) sinceOKRx(id NodeID) time.Duration {
+	m.rxMu.Lock()
+	defer m.rxMu.Unlock()
+	if t, ok := m.lastOKRx[id]; ok {
+		return time.Since(t)
+	}
+	return 1 << 62
 }
 
 // learnWireVersion 从**解码成功**的入站帧学习对端版本（ADR-0016 协商纪律）。
@@ -172,10 +198,12 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 	m.recvLoops = make(map[NodeID]*recvLoop)
 	// 线速版本登记表：FSM / 探针 / 数据面共用一个实例，保证「学到 v1 后全部降级」。
 	m.wireVersions = NewPeerWireVersions()
+	m.lastOKRx = make(map[NodeID]time.Time)
 	m.fsm = NewHandshakeFSM(m.cfg.NodeID, network, psk, tunnel)
 	m.fsm.SetWireVersions(m.wireVersions)
 	m.fsm.SetOnEstablished(func(peer NodeID, sess *Session) {
 		m.hsOK.Add(1)
+		m.markOKRx(peer)
 		if m.cfg.Verbose {
 			log.Printf("[mesh] 握手建立 peer=%x vip=%s epoch=%x", peer[:4], m.cfg.VirtualIP, sess.EpochID())
 		}
@@ -199,17 +227,21 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 		m.vipTable.Add(net.ParseIP(p.VirtualIP), p.NodeID)
 	}
 
-	// 5b. 阶段 2：UDP 探针 + 降级控制器（仅 EnableDegrade 时）
+	// 5b. UDP 探针：**始终开启**（不只降级时）。
+	// 它同时承担三件事：给面板提供真实 RTT/丢包、给 NAT 打洞保活、让对端学到我们的地址。
+	// 早前只在 EnableDegrade 时创建，普通模式下界面上永远是 0ms/无数据。
+	m.probes = NewProbeTracker(m.hub, m.cfg.NodeID)
+	m.probes.SetWireVersionProvider(m.wireVersionFor)
+	for _, p := range m.cfg.Peers {
+		addr, _ := net.ResolveUDPAddr("udp", p.Addr)
+		m.probes.SetPeer(p.NodeID, addr)
+	}
+
+	// 阶段 2：降级控制器（仅 EnableDegrade 时）
 	if m.cfg.EnableDegrade {
 		m.udpLinks = make(map[NodeID]PeerLink, len(m.links))
 		for id, link := range m.links {
 			m.udpLinks[id] = link
-		}
-		m.probes = NewProbeTracker(m.hub, m.cfg.NodeID)
-		m.probes.SetWireVersionProvider(m.wireVersionFor)
-		for _, p := range m.cfg.Peers {
-			addr, _ := net.ResolveUDPAddr("udp", p.Addr)
-			m.probes.SetPeer(p.NodeID, addr)
 		}
 		m.degrade = NewDegradeController(m.cfg.NodeID, m.probes, m.cfg.RelayDomain, m.cfg.RelayRoom, nil, m.cfg.Verbose)
 		for _, p := range m.cfg.Peers {
@@ -275,18 +307,60 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 	m.wg.Add(2)
 	go m.tunToPeersLoop(runCtx)
 	go m.peersToTunLoop(runCtx)
-	if m.degrade != nil {
-		// UdpProbe (0x08) 由 UdpHub.demux 直接交探针跟踪器（对齐 observe_probes），
-		// 不进普通 peer 队列 —— 降级后 active=WSS 时 UDP 探针仍能被接收。
-		m.hub.SetProbeHandler(func(frame []byte) {
-			if m.probes != nil {
-				// 探针帧同样要学习版本：它不进普通队列，否则 v1 对端永远学不到。
-				if parsed, derr := Decode(frame); derr == nil {
-					m.learnWireVersion(parsed.Src, parsed.Version)
+
+	// UdpProbe (0x08) 由 UdpHub.demux 直接交探针跟踪器（对齐 observe_probes），
+	// 不进普通 peer 队列 —— 降级后 active=WSS 时 UDP 探针仍能被接收。
+	// **始终注册**：普通模式也要靠它算 RTT / 打洞保活。
+	m.hub.SetProbeHandler(func(frame []byte) {
+		if m.probes == nil {
+			return
+		}
+		if parsed, derr := Decode(frame); derr == nil {
+			m.learnWireVersion(parsed.Src, parsed.Version)
+		}
+		_, _ = m.probes.OnProbeFrame(runCtx, frame)
+	})
+
+	// 6a. 启动即主动握手：UDP 无连接，双方都只「等对方先发包」就会永远无事发生。
+	// 小 NodeId 一方作为发起方直接发 Init（对齐 FSM 的破对称角色），
+	// 非发起方等对端 Init；对端没起来时由 RetryPending 周期重发。
+	for _, p := range m.cfg.Peers {
+		if !m.fsm.IsInitiator(p.NodeID) {
+			continue
+		}
+		if err := m.fsm.StartOutbound(p.NodeID, p.StaticPub); err != nil && m.cfg.Verbose {
+			log.Printf("[mesh] 主动握手失败 peer=%x: %v", p.NodeID[:4], err)
+		}
+	}
+
+	// 6b. 探针循环（1s）：给面板 RTT、给 NAT 保活、让对端从首帧学地址。
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-ticker.C:
+				m.mu.Lock()
+				pairs := make(map[NodeID]*net.UDPAddr, len(m.links))
+				for id, link := range m.links {
+					if addr := link.PeerAddr(); addr != nil {
+						pairs[id] = addr
+					}
 				}
-				_, _ = m.probes.OnProbeFrame(runCtx, frame)
+				m.mu.Unlock()
+				for id, addr := range pairs {
+					m.probes.SetPeer(id, addr)
+					_, _ = m.probes.SendProbe(runCtx, id)
+				}
 			}
-		})
+		}
+	}()
+
+	if m.degrade != nil {
 		m.degrade.Start(runCtx)
 		if m.cfg.Verbose {
 			log.Printf("[mesh] 降级控制器已启动 relay=%s room=%s", m.cfg.RelayDomain, m.cfg.RelayRoom)
@@ -423,7 +497,13 @@ func (m *meshLifecycle) tunToPeersLoop(ctx context.Context) {
 			m.txDropped.Add(1)
 			continue
 		}
-		peerID, _, ok := m.vipTable.Lookup(dst)
+		peerID, isBroadcast, ok := m.vipTable.Lookup(dst)
+		if ok && isBroadcast {
+			// 虚拟网段广播（Windows 上会周期性出现 10.97.0.255）暂不支持转发：
+			// 静默忽略、不计数 —— 否则状态面板长期显示「丢弃 12」，
+			// 用户会误以为链路有问题。
+			continue
+		}
 		if !ok {
 			m.txDropped.Add(1)
 			if m.cfg.Verbose && m.txDropped.Load()%20 == 1 {
@@ -449,7 +529,9 @@ func (m *meshLifecycle) tunToPeersLoop(ctx context.Context) {
 			if len(peerStatic) != 32 {
 				continue
 			}
-			if err := m.fsm.StartOutbound(peerID, peerStatic); err != nil {
+			// 需要发数据但还没有会话 ⇒ 强制发起（忽略破对称角色）：
+			// 对端可能持有我们重启前的旧会话，它不会主动重来，只能由我们发 Init 触发重建。
+			if err := m.fsm.StartOutboundForce(peerID, peerStatic); err != nil {
 				continue
 			}
 			// 握手异步进行；首个包丢弃（对齐 MobiHop：queued 可缓存，最小集简化为丢弃）
@@ -592,6 +674,7 @@ func (m *meshLifecycle) startRecvLoop(ctx context.Context, id NodeID, link PeerL
 			if err != nil {
 				continue
 			}
+			m.markOKRx(parsed.Src)
 			_ = m.tun.Send(loopCtx, packet)
 		}
 	}()
@@ -624,19 +707,39 @@ func (m *meshLifecycle) stopAllRecvLoops() {
 }
 
 func (m *meshLifecycle) Stop() error {
+	// ⚠️ 不能持 m.mu 等待：退出路径（peersToTunLoop 的 stopAllRecvLoops、
+	// stopRecvLoop）都要拿同一把锁 ⇒ 持锁 wg.Wait() 必然死锁
+	// （真机实测：面板点「停止组网」后 /api/mesh/stop 永久挂起）。
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if !m.running {
+		m.mu.Unlock()
 		return nil
 	}
-	if m.cancel != nil {
-		m.cancel()
+	tun, hub, cancel, degrade := m.tun, m.hub, m.cancel, m.degrade
+	m.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
 	}
-	if m.degrade != nil {
-		m.degrade.Stop()
+	if degrade != nil {
+		degrade.Stop()
+	}
+	// 先关设备再 Wait：读循环阻塞在 TUN 读上，只有 Close 才能让它返回。
+	if tun != nil {
+		_ = tun.Close()
+	}
+	if hub != nil {
+		_ = hub.Close()
 	}
 	m.wg.Wait()
-	return m.cleanupLocked()
+
+	m.mu.Lock()
+	m.running = false
+	m.tun = nil
+	m.hub = nil
+	m.links = nil
+	m.mu.Unlock()
+	return nil
 }
 
 func (m *meshLifecycle) cleanupLocked() error {
@@ -656,19 +759,84 @@ func (m *meshLifecycle) cleanupLocked() error {
 func (m *meshLifecycle) Status() Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	st := Status{Running: m.running, Network: m.cfg.NetworkName, VirtualIP: m.cfg.VirtualIP, NodeID: fmt.Sprintf("%x", m.cfg.NodeID[:])}
+	st := Status{
+		Running:     m.running,
+		Network:     m.cfg.NetworkName,
+		VirtualIP:   m.cfg.VirtualIP,
+		NodeID:      fmt.Sprintf("%x", m.cfg.NodeID[:]),
+		Listen:      m.cfg.Listen,
+		TXFrames:    m.txFrames.Load(),
+		RXFrames:    m.rxFrames.Load(),
+		TXDropped:   m.txDropped.Load(),
+		RXDropped:   m.rxDropped.Load(),
+		HandshakeOK: m.hsOK.Load(),
+	}
 	if m.running {
 		st.UptimeSec = int64(time.Since(m.startedAt).Seconds())
-	}
-	for id := range m.links {
-		online := false
-		if _, ok := m.fsm.Session(id); ok {
-			online = true
-		}
-		st.Peers = append(st.Peers, Peer{NodeID: fmt.Sprintf("%x", id[:]), Online: online})
-	}
-	if !m.running {
+	} else {
 		st.Note = "+mesh 未运行"
+		return st
+	}
+
+	// 先列**配置里的对端**（即使还没建链路），否则用户看到的是空列表，
+	// 完全不知道自己在等谁。再按实际链路/会话补充地址与状态。
+	type peerView struct {
+		peer Peer
+		set  bool
+	}
+	views := make(map[NodeID]*peerView)
+	for _, p := range m.cfg.Peers {
+		v := &peerView{peer: Peer{
+			NodeID:    p.NodeID.Hex(),
+			VirtualIP: p.VirtualIP,
+			Addr:      p.Addr,
+			State:     "等待对端",
+			Via:       "udp",
+		}, set: true}
+		views[p.NodeID] = v
+	}
+	for id, link := range m.links {
+		v := views[id]
+		if v == nil {
+			v = &peerView{peer: Peer{NodeID: id.Hex(), Via: "udp", State: "等待对端"}, set: true}
+			views[id] = v
+		}
+		if addr := link.PeerAddr(); addr != nil && v.peer.Addr == "" {
+			v.peer.Addr = addr.String()
+		}
+	}
+
+	for id, v := range views {
+		p := &v.peer
+		// 会话状态：已建立 / 握手中 / 等待对端
+		if _, ok := m.fsm.Session(id); ok {
+			p.Online = true
+			p.State = "已连接"
+		} else if hs := m.fsm.State(id); hs != HSIdle {
+			p.State = "握手中"
+		}
+		// 传输档位：降级到 WSS 时明确标出来（直连假活时用户最需要看这个）
+		if m.degrade != nil && m.degrade.Kind(id) == TransportWSS {
+			p.Via = "wss"
+		}
+		// 探针实测 RTT / 丢包（样本不足时 Measurement 返回 0，不误报）
+		if m.probes != nil {
+			loss, _, rtt := m.probes.Measurement(id)
+			p.LossRate = loss
+			p.RTTMs = int64(rtt)
+		}
+		st.Peers = append(st.Peers, *p)
+	}
+	// 输出顺序固定（NodeID 升序），便于界面与日志对比
+	sort.Slice(st.Peers, func(i, j int) bool { return st.Peers[i].NodeID < st.Peers[j].NodeID })
+
+	if st.HandshakeOK == 0 {
+		st.Note = "尚无任何对端完成握手：确认两端网络名/PSK 一致、对端 UDP 地址可达、防火墙放行"
 	}
 	return st
 }
+
+
+
+
+

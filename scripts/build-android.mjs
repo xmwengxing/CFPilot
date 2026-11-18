@@ -150,7 +150,11 @@ let wrapperCached = false
 try {
   wrapperCached = readdirSync(join(process.env.USERPROFILE || '', '.gradle', 'wrapper', 'dists')).length > 0
 } catch { /* 没有缓存目录 */ }
-const gradleCmd = existsSync(gradlew) && wrapperCached ? gradlew : resolveGradleBin()
+// 本机优先用**本机 Gradle**：wrapper 会在 ~/.gradle 里尝试下载发行版，
+// 国内网络下经常卡住/失败，而本机 Gradle 已装好且版本一致。
+// CI 上仍用 wrapper（setup-gradle 会预置缓存）。
+const useWrapper = process.env.CI === 'true' && existsSync(gradlew) && wrapperCached
+const gradleCmd = useWrapper ? gradlew : resolveGradleBin()
 if (!gradleCmd) fail('找不到 Gradle：装 Gradle 8.9 或先跑 gradlew 下载一次')
 log(`Gradle assembleRelease（${gradleCmd}）…`)
 runTool(gradleCmd, ['assembleRelease', '--no-daemon'], {
@@ -186,4 +190,5 @@ if (ks && existsSync(ks)) {
 } else {
   log('未设置 CFPILOT_ANDROID_KEYSTORE，跳过签名（需 apksigner 手动签名后才能安装）')
 }
+
 

@@ -41,6 +41,9 @@ func main() {
 	// --version 用于排查「服务跑的是旧二进制」：面板/用户可直接请求
 	// http://127.0.0.1:19727/api/mesh/version 对照本程序版本。
 	showVersion := flag.Bool("version", false, "打印版本后退出")
+	// --console：Windows 上以前台进程运行（不开服务），用于真机调试看日志。
+	// 正常安装仍走服务模式（LocalSystem，才能建 TUN）。
+	console := flag.Bool("console", false, "内部参数：前台运行（调试用，Windows 不注册服务）")
 	// Windows SCM 启动服务时传入（见 service_windows.go 的 CreateService），
 	// 这里接收但不做额外动作——服务生命周期由 Execute 管理。
 	_ = flag.Bool("mesh-daemon", false, "内部参数：以服务模式运行")
@@ -64,7 +67,7 @@ func main() {
 	log.Printf("[meshd] 启动（版本 %s，%s/%s）", version, runtime.GOOS, runtime.GOARCH)
 
 	// Windows 下作为服务运行（SCM 管理生命周期）；Linux 下直接跑（systemd 管理）。
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == "windows" && !*console {
 		runAsService(func() { serve() })
 		return
 	}
@@ -74,8 +77,22 @@ func main() {
 func serve() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/mesh/status", func(w http.ResponseWriter, r *http.Request) {
+		// ⚠️ 必须**实时**调用 life.Status()。早前返回的是 Start 时拍下的快照，
+		// 于是面板永远看到 handshakeOk=0 / online=false / tx=0，
+		// 而底层其实早已握手并转发流量（真机实测踩到）。
 		mu.Lock()
-		st := status
+		l := life
+		mu.Unlock()
+		if l == nil {
+			mu.Lock()
+			st := status
+			mu.Unlock()
+			writeJSON(w, http.StatusOK, st)
+			return
+		}
+		st := l.Status()
+		mu.Lock()
+		status = st
 		mu.Unlock()
 		writeJSON(w, http.StatusOK, st)
 	})

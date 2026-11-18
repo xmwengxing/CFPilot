@@ -5109,6 +5109,102 @@ import { MeshTopology, type TopoNode } from './mesh-topology'
       }
     })
 
+    // ---- 组网状态（真实数据，每 2 秒刷新）----
+    // 早前界面完全没有轮询：启动后用户只能看着拓扑动画干等，
+    // 也分不清「已握手 / 握手中 / 对端根本不可达」。
+    type MeshStatus = {
+      running?: boolean
+      nodeId?: string
+      virtualIp?: string
+      listen?: string
+      uptimeSec?: number
+      handshakeOk?: number
+      txFrames?: number
+      rxFrames?: number
+      txDropped?: number
+      rxDropped?: number
+      note?: string
+      peers?: Array<{
+        nodeId: string
+        virtualIp?: string
+        addr?: string
+        state?: string
+        via?: string
+        rttMs?: number
+        lossRate?: number
+        online?: boolean
+      }>
+    }
+    const shortId = (s: string): string => (!s ? '—' : s.length > 8 ? s.slice(0, 8) : s)
+    const put = (id: string, text: string): void => {
+      const el = document.getElementById(id)
+      if (el) el.textContent = text
+    }
+    const fmtDur = (sec: number): string => {
+      if (!sec || sec < 1) return '—'
+      const h = Math.floor(sec / 3600)
+      const m = Math.floor((sec % 3600) / 60)
+      const s = sec % 60
+      return h > 0 ? `${h}h${m}m` : m > 0 ? `${m}m${s}s` : `${s}s`
+    }
+    const refreshMeshStatus = async (): Promise<void> => {
+      let data: MeshStatus
+      try {
+        const resp = await fetch('/api/mesh/status', { credentials: 'same-origin' })
+        if (!resp.ok) return
+        data = (await resp.json()) as MeshStatus
+      } catch {
+        return
+      }
+      put('meshStatRunning', data.running ? '运行中' : '未运行')
+      put('meshStatNode', data.nodeId || '—')
+      put('meshStatVip', data.virtualIp || '—')
+      put('meshStatListen', data.listen || '—')
+      put('meshStatUptime', fmtDur(Number(data.uptimeSec || 0)))
+      put('meshStatHs', String(data.handshakeOk || 0))
+      put('meshStatFrames', `${data.txFrames || 0} / ${data.rxFrames || 0}`)
+      put('meshStatDrop', `${data.txDropped || 0} / ${data.rxDropped || 0}`)
+      put('meshStatNote', data.note || (data.running ? '运行中：等待对端或已在线' : ''))
+
+      const tbody = document.getElementById('meshLivePeers')
+      if (!tbody) return
+      tbody.textContent = ''
+      const peers = data.peers || []
+      if (peers.length === 0) {
+        const tr = document.createElement('tr')
+        const td = document.createElement('td')
+        td.colSpan = 7
+        td.style.color = 'var(--muted)'
+        td.textContent = '暂无对端（启动后自动刷新）'
+        tr.append(td)
+        tbody.append(tr)
+        return
+      }
+      for (const p of peers) {
+        const tr = document.createElement('tr')
+        const cells = [
+          shortId(p.nodeId),
+          p.virtualIp || '—',
+          p.addr || '—',
+          p.state || (p.online ? '已连接' : '等待对端'),
+          p.via || '—',
+          p.rttMs ? `${p.rttMs} ms` : '—',
+          `${Math.round((p.lossRate || 0) * 100)}%`,
+        ]
+        for (const c of cells) {
+          const td = document.createElement('td')
+          td.textContent = c
+          tr.append(td)
+        }
+        if (p.online || p.state === '已连接') tr.style.color = '#22c55e'
+        tbody.append(tr)
+      }
+    }
+    window.setInterval(() => {
+      void refreshMeshStatus()
+    }, 2000)
+    void refreshMeshStatus()
+
     // 恢复本地配置
     try {
       const saved = localStorage.getItem('cfpilot-mesh-config')

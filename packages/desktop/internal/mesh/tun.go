@@ -69,18 +69,34 @@ type Status struct {
 	NodeID    string `json:"nodeId,omitempty"`
 	VirtualIP string `json:"virtualIp,omitempty"`
 	Network   string `json:"network,omitempty"`
+	// Listen 是 UDP 监听地址；排查「对端连不到我」时第一眼看它。
+	Listen    string `json:"listen,omitempty"`
 	Peers     []Peer `json:"peers,omitempty"`
 	UptimeSec int64  `json:"uptimeSec,omitempty"`
-	Note      string `json:"note,omitempty"`
+
+	// 帧计数：用户能据此判断「到底有没有在收发」，而不是干等。
+	TXFrames    uint64 `json:"txFrames"`
+	RXFrames    uint64 `json:"rxFrames"`
+	TXDropped   uint64 `json:"txDropped"`
+	RXDropped   uint64 `json:"rxDropped"`
+	HandshakeOK uint64 `json:"handshakeOk"`
+
+	Note string `json:"note,omitempty"`
 }
 
 // Peer 是对等节点快照（插件边界数据契约）。
 type Peer struct {
 	NodeID    string `json:"nodeId"`
 	VirtualIP string `json:"virtualIp,omitempty"`
-	Online    bool   `json:"online"`
-	Via       string `json:"via,omitempty"` // "direct" / "relay"（Phase 3b 填充）
-	RTTMs     int64  `json:"rttMs,omitempty"`
+	// Addr 是对端 UDP 地址（配置值，或从首帧学到的实际地址）。
+	Addr string `json:"addr,omitempty"`
+	// State 是给人看的状态：已连接 / 握手中 / 等待对端。
+	State  string `json:"state,omitempty"`
+	Online bool   `json:"online"`
+	Via    string `json:"via,omitempty"` // "udp" / "wss"
+	RTTMs  int64  `json:"rttMs,omitempty"`
+	// LossRate 只在样本足够（≥5）时才有意义，否则为 0。
+	LossRate float64 `json:"lossRate"`
 }
 
 // ErrStub 表示调用到了 Phase 3b 才实现的方法（骨架阶段显式报错，不静默成功）。

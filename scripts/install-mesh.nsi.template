@@ -47,10 +47,20 @@ ShowInstDetails show
 
 Section "主程序" Main
   SetOutPath "$INSTDIR"
+
+  ; ⚠️ 升级前必须先停服务 + 结束主程序：
+  ; 服务进程锁着 cfpilot-meshd.exe，覆盖会失败或「写进去了但仍在跑旧镜像」。
+  ; 这是 2026-11-19 实测到的升级缺陷（用户装了新包，报的还是旧版本错误）。
+  DetailPrint "正在停止旧版组网服务…"
+  ExecWait 'net stop CFPilotMesh'
+  ExecWait 'taskkill /F /IM "${EXE_NAME}" /T'
+  Sleep 800
+
   File "EXE_SOURCE_PLACEHOLDER"
   File "MESHD_SOURCE_PLACEHOLDER"
 
   ; 注册提权守护进程为 Windows 服务（LocalSystem 权限，面板/托盘通过本地 API 控制）
+  ; --install 会先删除旧服务再按当前路径重建，保证升级后跑的是新二进制。
   ExecWait '"$INSTDIR\${MESHD_NAME}" --install'
   ExecWait 'net start CFPilotMesh'
 

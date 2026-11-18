@@ -37,11 +37,13 @@ function findMakensis() {
 /** 编译提权守护进程 meshd（如果 dist 里没有）。 */
 function ensureMeshd(name) {
   const out = join(dist, name)
-  if (existsSync(out)) return
+  // ⚠️ 每次构建安装包都**重新编译**，不复用 dist 里的旧 meshd：
+  // 服务不随安装包更新（旧版 --install 发现服务已存在就返回），
+  // 复用旧产物会造成「装了新包、跑的还是旧代码」且极难察觉。
   const isWin = name.endsWith('.exe')
   const env = { ...process.env, CGO_ENABLED: isWin ? '0' : '0', GOOS: isWin ? 'windows' : 'linux', GOARCH: 'amd64' }
   console.log(`[installers] 编译 meshd → ${name} …`)
-  execFileSync('go', ['build', '-trimpath', '-tags=mesh', '-ldflags=-s -w', '-o', out, './cmd/cfpilot-meshd'],
+  execFileSync('go', ['build', '-trimpath', '-tags=mesh', '-ldflags=-s -w -X main.version=' + version, '-o', out, './cmd/cfpilot-meshd'],
     { cwd: join(repoRoot, 'packages', 'desktop'), stdio: 'inherit', env })
 }
 
@@ -181,3 +183,4 @@ if (existsSync(linBin) && has('dpkg-deb')) {
 
 rmSync(stage, { recursive: true, force: true })
 console.log('[installers] 完成')
+

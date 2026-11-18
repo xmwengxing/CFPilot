@@ -25,6 +25,8 @@ const meshdAddr = "http://127.0.0.1:19727"
 func (s *Server) registerMeshControlRoutes(mux *http.ServeMux) {
 	for _, p := range []string{
 		"/api/mesh/status", "/api/mesh/start", "/api/mesh/stop", "/api/mesh/peers",
+		// 版本自报：排查「装了新包但服务还是旧二进制」时对照用
+		"/api/mesh/version",
 	} {
 		mux.HandleFunc(p, s.guard(s.handleMeshProxy))
 	}

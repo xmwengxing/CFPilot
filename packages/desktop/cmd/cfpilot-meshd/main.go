@@ -38,10 +38,18 @@ var (
 func main() {
 	install := flag.Bool("install", false, "注册为系统服务（Windows）")
 	uninstall := flag.Bool("uninstall", false, "卸载系统服务（Windows）")
+	// --version 用于排查「服务跑的是旧二进制」：面板/用户可直接请求
+	// http://127.0.0.1:19727/api/mesh/version 对照本程序版本。
+	showVersion := flag.Bool("version", false, "打印版本后退出")
 	// Windows SCM 启动服务时传入（见 service_windows.go 的 CreateService），
 	// 这里接收但不做额外动作——服务生命周期由 Execute 管理。
 	_ = flag.Bool("mesh-daemon", false, "内部参数：以服务模式运行")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 
 	if *install {
 		installService()
@@ -70,6 +78,10 @@ func serve() {
 		st := status
 		mu.Unlock()
 		writeJSON(w, http.StatusOK, st)
+	})
+	// 版本自报：面板可据此发现「装的是新包，服务跑的是旧二进制」。
+	mux.HandleFunc("/api/mesh/version", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"version": version})
 	})
 	mux.HandleFunc("/api/mesh/start", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

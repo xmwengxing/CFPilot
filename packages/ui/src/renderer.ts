@@ -5071,7 +5071,15 @@ import { MeshTopology, type TopoNode } from './mesh-topology'
           const stop = $('btnMeshStop') as HTMLButtonElement
           if (stop) stop.disabled = false
         } else {
-          log('启动失败：' + (data.error || data.message || `HTTP ${resp.status}`), 'err')
+          let msg = data.error || data.message || `HTTP ${resp.status}`
+          // 旧版 meshd 的典型特征：JSON 解码 NodeID 失败。
+          // 这几乎总是「服务跑的是旧二进制」（升级时服务没被替换），给出可执行的修复步骤。
+          if (/cannot unmarshal string into Go struct field Config\.nodeId/.test(String(msg))) {
+            msg +=
+              '\n【诊断】组网服务仍是旧版本，安装包升级没有生效。' +
+              '请以管理员身份执行：net stop CFPilotMesh  →  sc delete CFPilotMesh  →  重新运行安装程序。'
+          }
+          log('启动失败：' + msg, 'err')
         }
       } catch (err) {
         log('启动失败：' + (err instanceof Error ? err.message : String(err)), 'err')

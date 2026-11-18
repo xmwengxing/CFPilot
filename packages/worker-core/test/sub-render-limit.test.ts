@@ -16,8 +16,9 @@ import { DEFAULT_CONFIG } from '../src/config'
 import { effectiveNodeLimit } from '../src/sub-engine'
 
 describe('effectiveNodeLimit', () => {
-  it('默认配置（单端口、单形态）→ 500', () => {
-    expect(effectiveNodeLimit(DEFAULT_CONFIG)).toBe(500)
+  it('默认配置（单端口、两形态 vless-ws+vless-xhttp）→ 250', () => {
+    // 默认开启 XHTTP 后形态数由 1 变 2，上限按 2 倍折算（500/2）。
+    expect(effectiveNodeLimit(DEFAULT_CONFIG)).toBe(250)
   })
 
   it('6 端口 × 3 形态 → 按 18 倍折算', () => {

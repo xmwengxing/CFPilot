@@ -100,7 +100,7 @@ export const DEFAULT_CONFIG: UserConfig = {
   subDomain: '',
   subProtocol: 'vless',
   subTransport: 'ws',
-  subVariants: 'vless-ws',
+  subVariants: 'vless-ws,vless-xhttp',
   subName: 'CFPilot',
   subPorts: '443',
   clientFingerprint: 'chrome',

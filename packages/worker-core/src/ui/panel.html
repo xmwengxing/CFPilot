@@ -700,7 +700,7 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
         </div>
         <div class="check-group">
           <label class="check-pill"><input type="checkbox" id="cfgVarVlessWs" /> VLESS + WebSocket（全客户端通用）</label>
-          <label class="check-pill"><input type="checkbox" id="cfgVarVlessXhttp" /> VLESS + XHTTP（仅限 Xray 内核）</label>
+<label class="check-pill"><input type="checkbox" id="cfgVarVlessXhttp" /> VLESS + XHTTP（新版 mihomo 1.19+ 支持）</label>
           <label class="check-pill"><input type="checkbox" id="cfgVarTrojan" /> Trojan + WebSocket</label>
         </div>
         <p class="tip">
@@ -1261,7 +1261,7 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
         if (c.subTransport === 'xhttp' || c.subTransport === 'both') legacy.push('vless-xhttp');
       }
       if (c.subProtocol === 'trojan' || c.subProtocol === 'both') legacy.push('trojan');
-      variants = legacy.length ? legacy : ['vless-ws'];
+      variants = legacy.length ? legacy : ['vless-ws','vless-xhttp'];
     }
     $('cfgVarVlessWs').checked = variants.indexOf('vless-ws') >= 0;
     $('cfgVarVlessXhttp').checked = variants.indexOf('vless-xhttp') >= 0;

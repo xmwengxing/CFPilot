@@ -1273,10 +1273,9 @@ export function resolveSubVariants(
   config: Pick<UserConfig, 'enableTrojan' | 'enableXhttp'>,
   /**
    * 该订阅格式**支持的**形态。
-   *
-   * Clash / mihomo / sing-box 都**不支持 XHTTP**（XHTTP 是 Xray 专有传输），
-   * 所以这些格式要传 `['vless-ws', 'trojan']`，
-   * 否则用户只勾 XHTTP 时会得到**空订阅**。
+   * 新版 mihomo（1.19+）已支持 XHTTP，Clash 传 CLASH_VARIANTS（含 xhttp）；
+   * sing-box 暂不支持，传 WS_ONLY_VARIANTS。
+   * 否则用户只勾了不支持的形态时会得到**空订阅**。
    */
   supported: readonly SubVariant[] = ALL_SUB_VARIANTS
 ): SubVariant[] {
@@ -1861,8 +1860,8 @@ export function renderSingbox(ctx: RenderContext): string {
   const outbounds: unknown[] = []
   const groupTags: Array<{ tag: string; members: string[] }> = []
 
-  // ⚠️ Clash / mihomo **不支持 XHTTP**（XHTTP 是 Xray 专有传输），
-  // 所以 XHTTP 变体在这些格式里跳过 —— 否则客户端会把它当未知 network 而失败。
+  // sing-box 暂不支持 XHTTP 传输（Clash/mihomo 1.19+ 已支持），故这里仅用 WS_ONLY_VARIANTS 过滤。
+  // 用户只勾 XHTTP 时会回落到 WS 节点，订阅不为空。
   const variants = resolveSubVariants(ctx.config.subVariants, ctx.config, WS_ONLY_VARIANTS)
   const wantVless = variants.some((v) => v === 'vless-ws')
   const wantTrojan = variants.includes('trojan')

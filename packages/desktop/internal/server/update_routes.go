@@ -35,6 +35,21 @@ import (
 
 // registerUpdateRoutes 挂载更新相关路由。
 func (s *Server) registerUpdateRoutes(mux *http.ServeMux) {
+	if meshVariantEnabled() {
+		// +mesh 版是 NSIS 安装包形态，不能 rename-swap 自我替换；
+		// 且两变体共用 tag / SHA256SUMS，按 OS+arch 选资产会串变体。
+		// 所以只暴露一个「请用安装包升级」的提示，不执行真实检查/下载/替换。
+		stub := func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok": false, "error": "+mesh 版请用最新安装包重新安装升级（不支持应用内自动更新）",
+			})
+		}
+		mux.HandleFunc("/api/update/check", s.guard(stub))
+		mux.HandleFunc("/api/update/download", s.guard(stub))
+		mux.HandleFunc("/api/update/apply", s.guard(stub))
+		mux.HandleFunc("/api/update/reveal", s.guard(stub))
+		return
+	}
 	mux.HandleFunc("/api/update/check", s.guard(s.handleUpdateCheck))
 	mux.HandleFunc("/api/update/download", s.guard(s.handleUpdateDownload))
 	mux.HandleFunc("/api/update/apply", s.guard(s.handleUpdateApply))

@@ -280,12 +280,12 @@ export interface UserConfig {
    * 是**两个独立开关**，组合起来会生成
    * `vless+ws` / `vless+xhttp` / `trojan+ws` 三种形态 —— 节点数被**乘三**。
    * 用户只想用 vless+ws 时也会收到另外两种，于是：
-   *   - 客户端里出现大量用不了的节点（XHTTP 需要 Xray 内核，Trojan 需另行配置）；
+   *   - 客户端里出现大量用不了的节点（Trojan 需另行配置）；
    *   - 延迟测试里一堆 `-1`，看起来像「节点坏了」。
    *
    * 改成**显式勾选**后，订阅只包含用户真正要的形态。
    *
-   * 默认只勾 `vless-ws`（兼容性最好，Clash Verge / mihomo / v2rayN 都支持）。
+   * 默认勾选 `vless-ws` + `vless-xhttp`：实测新版 mihomo 内核（1.19+）已稳定支持 XHTTP，两种形态兼容性都好，开箱即用；老客户端忽略不认识的 xhttp 节点，不影响 WS 节点。
    */
   subVariants: string
   /**

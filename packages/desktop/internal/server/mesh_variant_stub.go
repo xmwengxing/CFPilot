@@ -4,6 +4,9 @@ package server
 
 import "net/http"
 
+// 普通版未启用 +mesh 变体。
+func meshVariantEnabled() bool { return false }
+
 func (s *Server) handleMeshEnabled(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "仅支持 GET"})

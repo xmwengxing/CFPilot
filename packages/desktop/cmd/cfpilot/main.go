@@ -350,6 +350,14 @@ func main() {
 	//   「检查应用更新」→ 立刻查一次 + 打开说明页（有新版时说明页已有提示）
 	//   「检查部署更新」→ 立刻查一次 + 打开一键部署页
 	app.SetCheckAppUpdateHandler(func() {
+		if !appUpdateEnabled() {
+			// +mesh 版是安装包形态，不能自我替换；提示重新下载 +mesh 安装包。
+			notify.ShowViaShell(notify.Message{
+				Title: "CFPilot Mesh 升级",
+				Body:  "请使用最新的 +mesh 安装包重新安装（本版本不支持应用内自动更新）。",
+			})
+			return
+		}
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
@@ -409,23 +417,26 @@ func main() {
 	// 平时自动检查：启动 20 秒后查一次，之后每小时一次。
 	//
 	// 延迟 20 秒是为了不和用户第一次打开界面抢网络。
-	checker.StartAutoCheck(context.Background(), 20*time.Second, time.Hour, func(st *tray.UpdateState) {
-		logUpdateState(st)
-		if st.AppHasUpdate {
-			notify.ShowViaShell(notify.Message{
-				Title: "CFPilot 有新版本",
-				Body:  fmt.Sprintf("发现新版本 %s，可从托盘菜单「检查应用更新」查看。", st.AppLatest),
-			})
-		}
-		if st.DeployHasUpdate {
-			// 内核有新版的气泡 —— 只改内核、不发新包时（内核热更新通道），
-			// 用户不开界面就完全看不到「线上部署有更新」，气泡是唯一主动提醒。
-			notify.ShowViaShell(notify.Message{
-				Title: "CFPilot 内核有更新",
-				Body:  fmt.Sprintf("发现新内核 %s，可从托盘菜单「检查部署更新」更新线上部署。", st.DeployLatest),
-			})
-		}
-	})
+	// +mesh 版禁用（安装包不能 rename-swap 替换自身，且两变体共用 tag 会串变体）。
+	if appUpdateEnabled() {
+		checker.StartAutoCheck(context.Background(), 20*time.Second, time.Hour, func(st *tray.UpdateState) {
+			logUpdateState(st)
+			if st.AppHasUpdate {
+				notify.ShowViaShell(notify.Message{
+					Title: "CFPilot 有新版本",
+					Body:  fmt.Sprintf("发现新版本 %s，可从托盘菜单「检查应用更新」查看。", st.AppLatest),
+				})
+			}
+			if st.DeployHasUpdate {
+				// 内核有新版的气泡 —— 只改内核、不发新包时（内核热更新通道），
+				// 用户不开界面就完全看不到「线上部署有更新」，气泡是唯一主动提醒。
+				notify.ShowViaShell(notify.Message{
+					Title: "CFPilot 内核有更新",
+					Body:  fmt.Sprintf("发现新内核 %s，可从托盘菜单「检查部署更新」更新线上部署。", st.DeployLatest),
+				})
+			}
+		})
+	}
 
 	app.Run()
 

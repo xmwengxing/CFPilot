@@ -603,15 +603,16 @@ npx -y cfpilot@latest scan
 
 ## 订阅接入
 
-节点形态在面板「入站配置」里选，默认只下发 **VLESS + WebSocket**（兼容性最好）。
+节点形态在面板「入站配置」里选，默认下发 **VLESS + WebSocket** 与 **VLESS + XHTTP** 两种形态。
 
 | 形态                        | 支持        |
 | ------------------------- | --------- |
 | VLESS + WS                | 全部客户端     |
 | Trojan + WS               | 全部客户端     |
-| VLESS + XHTTP（stream-one） | 仅 Xray 内核 |
+| VLESS + XHTTP（packet-up） | Xray 内核、新版 mihomo（1.19+）；实测稳定 |
 
-> Clash / sing-box 内核不支持 XHTTP，订阅这两种格式时会自动跳过该形态。
+> mihomo / Clash.Meta 自 1.19+ 已支持 XHTTP 节点；老版本会忽略该节点，不影响 WS 节点。
+> sing-box 暂不支持，订阅里不下发。
 
 ### ECH（Encrypted Client Hello）
 
@@ -646,7 +647,8 @@ ECH 把 TLS ClientHello 里的真实 SNI 加密，隐藏你访问的是哪个域
 `npx wrangler kv key get --binding KV PANEL_PATH` 查回。
 
 **Q：XHTTP 节点连不上？**
-需要 Xray 内核（`type=xhttp`、`mode=stream-one`），Clash / sing-box 请改用 WS 节点。
+需要 Xray 内核或新版 mihomo（1.19+，`network: xhttp`）；sing-box 请改用 WS 节点。
+老版本 mihomo 会直接忽略 XHTTP 节点（不是报错），不影响其它节点。
 另外，XHTTP 在部分网络环境里会被拦截：Cloudflare 对
 `Content-Type: application/grpc` 的请求可能直接返回 403，
 此时**任何** XHTTP 客户端都无法使用。建议把 XHTTP 当作实验性形态，
@@ -836,11 +838,12 @@ CFPilot/
 | ------------------------------- | -------- | --------- | ----------- | -------------- |
 | Xray-core                       | 支持       | 支持        | 支持（需较新版本）   | 支持（需较新版本）      |
 | sing-box                        | 支持       | 支持        | **不支持**     | 支持（1.12+）      |
-| mihomo / Clash.Meta             | 支持       | 支持        | **不支持**     | 支持（`ech-opts`） |
-| v2rayN / v2rayNG / Shadowrocket | 支持       | 支持        | 不支持         | 不支持            |
+| mihomo / Clash.Meta             | 支持       | 支持        | 支持（1.19+）   | 支持（`ech-opts`） |
+| v2rayN / v2rayNG / Shadowrocket | 支持       | 支持        | 跟随内核       | 跟随内核          |
 
-XHTTP 是 Xray 的专有传输，sing-box 与 mihomo 没有这个传输类型 —— 订阅生成时
-已**硬过滤**，不会把它们塞进去（否则整个订阅加载失败，而不是少一个节点）。
+mihomo 自 1.19+ 原生支持 XHTTP（`network: xhttp` + `xhttp-opts`），实测可稳定连接。
+sing-box 暂无该传输类型，订阅生成时不向其下发 XHTTP 节点；老版本 mihomo 会忽略该节点，
+不影响其它节点。详见 [客户端兼容性矩阵](docs/COMPATIBILITY.md)。
 
 ***
 

@@ -64,7 +64,7 @@ var Version = "dev"
 //  3. helper 自己退出。
 //
 // 30 秒内旧进程没退出就放弃清理（.old 留着，下次启动的更新流程会再清）。
-func runUpdateHelper(oldExe string) {
+func runUpdateHelper(oldExe string, passArgs []string) {
 	deadline := time.Now().Add(30 * time.Second)
 	removed := false
 	for time.Now().Before(deadline) {
@@ -82,7 +82,10 @@ func runUpdateHelper(oldExe string) {
 		log.Printf("[cfpilot] 更新收尾失败：定位新版本失败：%v（请手动启动）", err)
 		return
 	}
-	if err := exec.Command(self).Start(); err != nil {
+	// 原样透传用户显式给过的启动参数（--port / --console 等）。
+	// helper 的启动命令是 `--update-helper <old> <originalArgs...>`，
+	// passArgs 由调用方从 os.Args 里剥掉 `--update-helper <old>` 后得到。
+	if err := exec.Command(self, passArgs...).Start(); err != nil {
 		log.Printf("[cfpilot] 更新收尾失败：重启主程序失败：%v（请手动启动）", err)
 		return
 	}
@@ -133,7 +136,17 @@ func main() {
 	// 它只是个几秒钟的收尾进程，正常模式的所有初始化对它都是浪费，
 	// 而且它会再 spawn 一个真正的主程序 —— 先处理完再走正常流程。
 	if strings.TrimSpace(*updateHelperOld) != "" {
-		runUpdateHelper(*updateHelperOld)
+		// 剥掉 `--update-helper <oldExe>` 及其值，剩下的是原主程序的启动参数，
+		// helper 重启主程序时原样透传（与 SpawnUpdateHelper 的拼接顺序对应）。
+		var passArgs []string
+		for i := 1; i < len(os.Args); i++ {
+			if os.Args[i] == "--update-helper" && i+1 < len(os.Args) {
+				i++ // 跳过参数值（oldExe）
+				continue
+			}
+			passArgs = append(passArgs, os.Args[i])
+		}
+		runUpdateHelper(*updateHelperOld, passArgs)
 		return
 	}
 
@@ -338,9 +351,12 @@ func main() {
 			if info == nil {
 				return &tray.DeployCheckResult{}, nil
 			}
+			// 必须拿远程内核版本比「线上已部署内核版本」，不能比应用包版本：
+			// 包版本（server.Version()）不随部署变化，会导致更新提示永远消不掉。
+			deployed := srv.DeployedKernelVersion()
 			return &tray.DeployCheckResult{
 				RemoteVersion: info.Version,
-				RemoteNewer:   kernel.CompareSemver(info.Version, server.Version()) > 0,
+				RemoteNewer:   kernel.CompareSemver(info.Version, deployed) > 0,
 			}, nil
 		},
 	)

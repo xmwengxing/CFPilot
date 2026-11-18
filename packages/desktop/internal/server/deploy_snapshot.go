@@ -95,6 +95,18 @@ func (s *Server) loadSnapshot() *DeploySnapshot {
 	return &snap
 }
 
+// DeployedKernelVersion 返回最近一次部署写入的内核语义版本（线上已部署版本）。
+// 供托盘的「检查部署更新」比较用：必须拿远程内核版本比**线上已部署版本**，
+// 不能比应用包版本（包版本不随部署变化，会导致更新提示永远消不掉）。
+// 没有部署记录时返回空串（调用方按「更旧」处理，提示重新部署）。
+func (s *Server) DeployedKernelVersion() string {
+	snap := s.loadSnapshot()
+	if snap == nil {
+		return ""
+	}
+	return strings.TrimSpace(snap.KernelVersion)
+}
+
 // saveSnapshot 写本地快照（原子替换，权限 0600）。
 //
 // saveSnapshot 写本地快照（原子替换，权限 0600）。

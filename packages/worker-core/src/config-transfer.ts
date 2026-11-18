@@ -46,6 +46,9 @@ const EXPORTABLE: ReadonlyArray<keyof UserConfig> = [
   'nat64',
   'concurrentDial',
   'dataBudgetMB',
+  // 面板可调的资源开关：不导出的话，用户换账号导入后会静默回到默认值，
+  // 而他正是为了压 CPU / 恢复下载才调过这两项。
+  'relayRedialMax',
   'resolvePreferred',
   'aggressiveRedial',
   'enableTrojan',

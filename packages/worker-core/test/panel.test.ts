@@ -39,4 +39,18 @@ describe('面板配置字段接线', () => {
     // 提交
     expect(html).toContain('dataBudgetMB:')
   })
+
+  it('无响应换入口上限：有输入框、读初值、提交且夹在 1-8', () => {
+    expect(html).toContain('id="cfgRelayRedial"')
+    expect(html).toContain("$('cfgRelayRedial').value")
+    expect(html).toContain('relayRedialMax:')
+    // 面板先夹紧，后端 config-validate 再校验一次
+    expect(html).toContain('Math.min(8, Math.max(1')
+  })
+
+  it('资源上限文案与当前默认值一致（默认 512，不再是「默认 0」）', () => {
+    expect(html).toContain('默认 512')
+    // 旧文案「默认 0 = 不限制」必须已被替换：改默认值却留着旧提示会误导用户
+    expect(html).not.toContain('默认 0 = 不限制')
+  })
 })

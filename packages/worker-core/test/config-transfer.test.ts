@@ -117,6 +117,14 @@ describe('配置导出', () => {
     expect(exported.schemaVersion).toBe(1)
   })
 
+  it('资源调优项（流量上限 / 换入口上限）能带出去', () => {
+    // 用户正是为了压 CPU 或恢复大文件下载才调这两项；
+    // 不导出的话换账号导入后会静默回到默认值。
+    const exported = buildConfigExport(baseConfig({ dataBudgetMB: 1024, relayRedialMax: 3 }))
+    expect(exported.config.dataBudgetMB).toBe(1024)
+    expect(exported.config.relayRedialMax).toBe(3)
+  })
+
   it('带口令的落地代理不导出，但会说明原因', () => {
     const exported = buildConfigExport(baseConfig())
     expect(exported.config.socks5).toBeUndefined()

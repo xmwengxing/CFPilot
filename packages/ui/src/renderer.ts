@@ -4979,6 +4979,26 @@ import { MeshTopology, type TopoNode } from './mesh-topology'
         log('对端需填写 ID、地址与 64 hex 静态公钥', 'warn')
         return
       }
+      // 网段校验：TUN 固定配 /24，且不会给对端加 /32 主机路由 ——
+      // 两端虚拟 IP 不在同一个 /24 时，内核不会把包送进隧道（默认经真实网卡出去），
+      // 表现为「握手成功但互 ping 不通」。这里只提示，不阻止（同机双节点+手工路由是例外）。
+      const selfVip = ($('meshVirtualIp')?.value || '').trim()
+      const subnetOf = (s: string): string | null => {
+        const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s)
+        if (!m) return null
+        const heads = [Number(m[1]), Number(m[2]), Number(m[3])]
+        if (heads.some((n) => n > 255) || Number(m[4]) > 255) return null
+        return heads.join('.')
+      }
+      const selfSubnet = subnetOf(selfVip)
+      const peerSubnet = subnetOf(vip)
+      if (selfSubnet && peerSubnet && selfSubnet !== peerSubnet) {
+        log(
+          `⚠ 对端虚拟 IP 与本节点不在同一 /24 网段（本机 ${selfSubnet}.x，对端 ${peerSubnet}.x）：` +
+            '两端默认无法互通，请改成同一网段、只改最后一段',
+          'warn'
+        )
+      }
       // 字段名对齐 Go 的 mesh.PeerConfig（JSON 解码按字段名匹配）
       meshPeers.push({ nodeId, addr, staticPub: pub, virtualIp: vip })
       renderMeshPeers()

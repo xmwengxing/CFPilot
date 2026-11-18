@@ -1820,7 +1820,7 @@
                 <div class="pair"><label for="meshNodeId" class="has-tip" data-tip="【自动生成】本机在网络里的身份证，16 位十六进制，由本地身份密钥派生，无需填写。各节点天然不同；字典序小的作为握手发起方。若克隆了配置导致 ID 冲突，软件会自动重新生成。">本节点 ID（自动生成）ⓘ</label><input type="text" id="meshNodeId" readonly style="opacity:.75;cursor:default" placeholder="启动后自动生成" /></div>
                 <div class="pair"><label for="meshNetwork" class="has-tip" data-tip="【必填】同一网络所有节点的网络名必须完全相同，用来派生网络密钥，写错就连不上。&#10;示例：my-home（建议简单英文）">网络名 ⓘ</label><input type="text" id="meshNetwork" placeholder="如 my-network" /></div>
                 <div class="pair"><label for="meshPsk" class="has-tip" data-tip="【必填】网络共享密钥（进网密码），所有节点必须完全相同。&#10;建议：16 位以上随机字符串；泄漏则网络不再私密">网络密钥 PSK ⓘ</label><input type="text" id="meshPsk" placeholder="网络共享密钥" /></div>
-                <div class="pair"><label for="meshVirtualIp" class="has-tip" data-tip="【必填】本机在组网内的虚拟 IP，各节点互 ping 用。建议不同节点用不同网段，避免与真实局域网冲突。&#10;示例：A 用 10.97.0.1，B 用 10.98.0.2">本节点虚拟 IP ⓘ</label><input type="text" id="meshVirtualIp" placeholder="如 10.97.0.1" /></div>
+                <div class="pair"><label for="meshVirtualIp" class="has-tip" data-tip="【必填】本机在组网内的虚拟 IP，各节点互 ping 用。&#10;【必须】所有节点在**同一网段**（前三段相同），只有最后一段不同；不同网段默认无法互通。&#10;【建议】选不常见的网段（如 10.97.0.x），避免与真实局域网冲突。&#10;示例：A 用 10.97.0.1，B 用 10.97.0.2">本节点虚拟 IP ⓘ</label><input type="text" id="meshVirtualIp" placeholder="如 10.97.0.1" /></div>
                 <div class="pair"><label for="meshListen" class="has-tip" data-tip="【可选】本机接收对端数据的 UDP 端口，默认 0.0.0.0:51820。同机多节点要改不同端口；有防火墙时放行该 UDP 端口。&#10;示例：0.0.0.0:51831">UDP 监听 ⓘ</label><input type="text" id="meshListen" placeholder="如 0.0.0.0:51820" /></div>
                 <div class="pair"><label for="meshTunName" class="has-tip" data-tip="【可选】虚拟网卡名，留空=cfpilot0。同机多节点必须不同（如 cfpilotA / cfpilotB），否则冲突。&#10;示例：cfpilotA">TUN 网卡名 ⓘ</label><input type="text" id="meshTunName" placeholder="留空 = cfpilot0" /></div>
               </div>
@@ -1848,7 +1848,7 @@
                     <div class="pair"><label for="peerNodeId" class="has-tip" data-tip="【添加对端时必填】对方节点 ID（16 位 hex），就是对方「本节点 ID」的值。两端要互相添加对方。&#10;示例：0200000000000002">对端 ID（16 hex）ⓘ</label><input type="text" id="peerNodeId" placeholder="如 0200000000000002" /></div>
                     <div class="pair"><label for="peerAddr" class="has-tip" data-tip="【添加对端时必填】对方可达的 IP:端口。同机测试用 127.0.0.1:端口；异地用对方公网 IP/域名；端口是对方的「UDP 监听」端口。&#10;示例：10.0.0.2:51820">对端地址（IP:端口）ⓘ</label><input type="text" id="peerAddr" placeholder="如 10.0.0.2:51820" /></div>
                     <div class="pair"><label for="peerPub" class="has-tip" data-tip="【添加对端时必填】对方的 X25519 静态公钥（64 位 hex），由对方节点生成后提供给你。用于端到端加密身份验证，填错会握手失败。&#10;示例：对方给出的 64 位公钥字符串">对端静态公钥（64 hex）ⓘ</label><input type="text" id="peerPub" placeholder="X25519 公钥" /></div>
-                    <div class="pair"><label for="peerVip" class="has-tip" data-tip="【添加对端时必填】对方的虚拟 IP，就是对方「本节点虚拟 IP」的值。用于 IP 包→对端的路由查表。&#10;示例：10.98.0.2">对端虚拟 IP ⓘ</label><input type="text" id="peerVip" placeholder="如 10.98.0.2" /></div>
+                    <div class="pair"><label for="peerVip" class="has-tip" data-tip="【添加对端时必填】对方的虚拟 IP，就是对方「本节点虚拟 IP」的值。用于 IP 包→对端的路由查表。&#10;【必须】与本节点同一网段（前三段相同），只有最后一段不同。&#10;示例：本机 10.97.0.1，对端填 10.97.0.2">对端虚拟 IP ⓘ</label><input type="text" id="peerVip" placeholder="如 10.97.0.2" /></div>
                   </div>
                   <div class="btn-row"><button class="btn btn-ghost" id="btnAddPeer">添加对端</button></div>
                   <div id="peerList" class="dim" style="margin-top:8px;font-size:12.5px">暂无对端</div>
@@ -2510,7 +2510,7 @@
                   <b>自动</b> <b>本节点 ID / 隧道密钥</b>：本地身份密钥派生，只读，不用填；
                   ★ <b>网络名</b> 例 <code>my-home</code>；
                   ★ <b>PSK</b> 例 <code>mysecret123456</code>（两端一致）；
-                  ★ <b>本节点虚拟 IP</b> 例 <code>10.97.0.1</code>（A）/ <code>10.98.0.2</code>（B，不同网段）；<br>
+                  ★ <b>本节点虚拟 IP</b> 例 <code>10.97.0.1</code>（A）/ <code>10.97.0.2</code>（B，<b>同一网段、末位不同</b>）；<br>
                   ○ <b>UDP 监听</b> 默认 <code>0.0.0.0:51820</code>；○ <b>TUN 名</b> 留空即可；
                   ○ <b>盲中继域名 / 房间</b> 由「填入组网配置」带入，不填也能用（仅直连）。<br><br>
                   <b>1.（可选）部署盲中继</b>：见上方「① 盲中继部署」，部署后点「填入组网配置」自动带入 WSS 信息。<br>
@@ -2525,7 +2525,7 @@
                   停止点「停止组网」；托盘右键也能启停、看节点列表。<br>
                   <b>三平台</b>：Windows 双击 setup.exe；Linux <code>sudo dpkg -i cfpilot-mesh*.deb</code>；
                   Android 装独立「CFPilot Mesh」App（VPN 授权免 root）。<br>
-                  <b>6. 验证</b>：互 ping 虚拟 IP（如 A 上 <code>ping 10.98.0.2</code>），通了即成功；「网络拓扑」显示节点与流量。<br>
+                  <b>6. 验证</b>：互 ping 虚拟 IP（如 A 上 <code>ping 10.97.0.2</code>），通了即成功；「网络拓扑」显示节点与流量。<br>
                   <b>连不上先查</b>：网络名 / PSK 是否两端一致 → 对端地址是否可达 →
                   防火墙是否放行 UDP 端口 → 同机多节点是否用了不同端口和 TUN 名。
                 </div>

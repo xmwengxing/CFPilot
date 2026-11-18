@@ -16,6 +16,8 @@ export interface TopoNode {
   connType: 'self' | 'p2p' | 'relay'
   up: boolean
   rttMs?: number | null
+  /** 丢包百分比（0-100），有样本时才显示 */
+  lossPct?: number | null
   txBps?: number
   rxBps?: number
   fx?: number // 归一化 x（0-1），仅手动布局用
@@ -172,7 +174,12 @@ export class MeshTopology {
         ctx.beginPath()
         ctx.moveTo(center.px, center.py)
         ctx.lineTo(n.px, n.py)
-        ctx.strokeStyle = n.up ? COLOR.line : 'rgba(148,163,184,0.10)'
+        // 连线按真实状态着色：绿=直连、琥珀=中继、暗=离线
+        ctx.strokeStyle = !n.up
+          ? 'rgba(148,163,184,0.10)'
+          : n.connType === 'relay'
+            ? 'rgba(245,158,11,0.55)'
+            : 'rgba(34,197,94,0.55)'
         ctx.lineWidth = 1.2
         ctx.stroke()
       }
@@ -228,6 +235,15 @@ export class MeshTopology {
         ctx.font = '10px ui-monospace, monospace'
         ctx.fillText(n.vip, n.px, n.py + baseR + 27)
       }
+      // 真实测量值直接画在节点下方：一眼看出「连通但很慢 / 丢包严重」
+      if (n.rttMs != null) {
+        const loss = n.lossPct
+        const extra = loss != null ? ` · 丢 ${Math.round(loss)}%` : ''
+        ctx.fillStyle = n.up ? 'rgba(34,197,94,0.95)' : 'rgba(148,163,184,0.9)'
+        ctx.font = '10px ui-monospace, monospace'
+        ctx.fillText(`RTT ${Math.round(n.rttMs)}ms${extra}`, n.px, n.py + baseR + 40)
+      }
     }
   }
 }
+

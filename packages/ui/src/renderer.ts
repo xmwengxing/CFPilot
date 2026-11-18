@@ -11,7 +11,7 @@ import {
   taskRowHtml,
   taskStatusText,
 } from './task-rows'
-import { MeshTopology, type TopoNode } from './mesh-topology'
+import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
 
 (function () {
   'use strict'
@@ -4779,6 +4779,10 @@ import { MeshTopology, type TopoNode } from './mesh-topology'
   let meshPeers: Array<{ nodeId: string; addr: string; staticPub: string; virtualIp: string }> = []
   /** 拓扑动画引擎 */
   let meshTopo: MeshTopology | null = null
+  /** 拓扑脉冲与上一次计数（用于把真实流量画成“动起来的点”） */
+  let topoPulses: TopoPulse[] = []
+  let topoLastTx = 0
+  let topoLastRx = 0
 
   /** 部署页二级页签：代理实例 / 盲中继云监测台 */
   function bindDeploySubtabs(): void {
@@ -5199,6 +5203,42 @@ import { MeshTopology, type TopoNode } from './mesh-topology'
         if (p.online || p.state === '已连接') tr.style.color = '#22c55e'
         tbody.append(tr)
       }
+
+      // ---- 把真实状态画到拓扑上：连通绿 / 中继琥珀 / 离线灰，节点下方带 RTT ----
+      const running = !!data.running
+      const nodes: TopoNode[] = [{
+        id: data.nodeId || 'local',
+        label: '本机',
+        vip: data.virtualIp || '',
+        connType: 'self',
+        up: running,
+      }]
+      for (const p of peers) {
+        nodes.push({
+          id: p.nodeId,
+          label: shortId(p.nodeId),
+          vip: p.virtualIp || '',
+          connType: p.via === 'wss' ? 'relay' : 'p2p',
+          up: !!p.online,
+          rttMs: p.online ? (p.rttMs || null) : null,
+          lossPct: p.online ? Math.round((p.lossRate || 0) * 100) : null,
+        })
+      }
+      const nowMs = performance.now()
+      const tx = data.txFrames || 0
+      const rx = data.rxFrames || 0
+      if (running && (tx > topoLastTx || rx > topoLastRx)) {
+        for (const p of peers) {
+          if (!p.online) continue
+          topoPulses.push({ id: `${nowMs}-${p.nodeId}`, to: p.nodeId, kind: 'traffic', bornAt: nowMs })
+        }
+      }
+      topoLastTx = Math.max(topoLastTx, tx)
+      topoLastRx = Math.max(topoLastRx, rx)
+      topoPulses = topoPulses.filter((x) => nowMs - x.bornAt < 2000).slice(-60)
+      meshTopo?.setData(nodes, topoPulses)
+      const emptyEl = document.getElementById('topoEmpty')
+      if (emptyEl) emptyEl.hidden = peers.length > 0
     }
     window.setInterval(() => {
       void refreshMeshStatus()
@@ -7417,3 +7457,4 @@ import { MeshTopology, type TopoNode } from './mesh-topology'
     })()
   })
 })()
+

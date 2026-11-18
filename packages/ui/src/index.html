@@ -1817,7 +1817,7 @@
                 <b>「填入组网配置」</b> 自动带入 WSS 地址与房间名；其余字段需手动填写。
               </p>
               <div class="pair-grid">
-                <div class="pair"><label for="meshNodeId" class="has-tip" data-tip="【必填】本机在网络里的身份证，16 位十六进制。各节点必须不同；建议 A 用小值、B 用大值（字典序小的作为握手发起方）。&#10;示例：0100000000000001">本节点 ID（16 hex）ⓘ</label><input type="text" id="meshNodeId" placeholder="如 0100000000000001" /></div>
+                <div class="pair"><label for="meshNodeId" class="has-tip" data-tip="【自动生成】本机在网络里的身份证，16 位十六进制，由本地身份密钥派生，无需填写。各节点天然不同；字典序小的作为握手发起方。若克隆了配置导致 ID 冲突，软件会自动重新生成。">本节点 ID（自动生成）ⓘ</label><input type="text" id="meshNodeId" readonly style="opacity:.75;cursor:default" placeholder="启动后自动生成" /></div>
                 <div class="pair"><label for="meshNetwork" class="has-tip" data-tip="【必填】同一网络所有节点的网络名必须完全相同，用来派生网络密钥，写错就连不上。&#10;示例：my-home（建议简单英文）">网络名 ⓘ</label><input type="text" id="meshNetwork" placeholder="如 my-network" /></div>
                 <div class="pair"><label for="meshPsk" class="has-tip" data-tip="【必填】网络共享密钥（进网密码），所有节点必须完全相同。&#10;建议：16 位以上随机字符串；泄漏则网络不再私密">网络密钥 PSK ⓘ</label><input type="text" id="meshPsk" placeholder="网络共享密钥" /></div>
                 <div class="pair"><label for="meshVirtualIp" class="has-tip" data-tip="【必填】本机在组网内的虚拟 IP，各节点互 ping 用。建议不同节点用不同网段，避免与真实局域网冲突。&#10;示例：A 用 10.97.0.1，B 用 10.98.0.2">本节点虚拟 IP ⓘ</label><input type="text" id="meshVirtualIp" placeholder="如 10.97.0.1" /></div>
@@ -1854,6 +1854,30 @@
                   <div id="peerList" class="dim" style="margin-top:8px;font-size:12.5px">暂无对端</div>
                 </div>
               </details>
+
+              <details class="fold" id="meshInviteFold" open>
+                <summary>邀请链接（推荐：一端生成，另一端粘贴即可入网）</summary>
+                <div class="fold-body">
+                  <p class="hint" style="line-height:1.8">
+                    一台设备填好「网络名 / PSK / 本节点虚拟 IP」后点「生成邀请链接」，
+                    把链接发给对端；对端粘贴进来点「从邀请链接填入」，即可自动带入网络名、PSK 与该对端信息，
+                    无需手抄 16 位 ID 和 64 位公钥。
+                  </p>
+                  <div class="btn-row" style="margin-top:8px">
+                    <button class="btn btn-ghost" id="btnMeshMakeInvite">生成邀请链接</button>
+                    <input type="text" id="meshInviteTtl" placeholder="有效期小时（留空=永久）" style="max-width:180px" />
+                  </div>
+                  <textarea id="meshInviteOut" readonly placeholder="生成的邀请链接显示在这里" style="width:100%;min-height:56px;margin-top:8px;font-family:monospace;font-size:11px"></textarea>
+                  <div class="btn-row" style="margin-top:8px">
+                    <input type="text" id="meshInviteInput" placeholder="粘贴对端发来的邀请链接（cfpilot-mesh://join/v1/...）" style="flex:1" />
+                    <button class="btn btn-primary" id="btnMeshApplyInvite">从邀请链接填入</button>
+                  </div>
+                  <p class="tip" style="margin-top:8px" id="meshInviteWarning">
+                    邀请链接含明文网络密钥（仅 base64 编码，非加密）。请勿发到公开群聊/日志/issue，泄露只能全网轮换 PSK。
+                  </p>
+                </div>
+              </details>
+
               <div class="btn-row" style="margin-top:12px">
                 <button class="btn btn-ghost" id="btnMeshSave">保存配置</button>
                 <button class="btn btn-primary" id="btnMeshStart">启动组网</button>

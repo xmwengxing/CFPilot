@@ -96,7 +96,9 @@ describe('单连接流量熔断的关闭码', () => {
     } as unknown as Parameters<typeof handleWebSocket>[2]
 
     await handleWebSocket(request, 'trojan', config, [])
-    const server = lastPair as { server: FakeWebSocket }
+    const pair = lastPair as { server: FakeWebSocket } | null
+    if (!pair) throw new Error('handleWebSocket 尚未创建 WebSocketPair')
+    const server = pair
 
     // 协议头 → 触发拨号并建立出站
     server.server.emit('message', { data: buildTrojanHeader(TROJAN_PASSWORD, 'example.com', 443) })

@@ -15,6 +15,19 @@ import (
 // WSS 降级期，每 1s 经已绑定 UDP socket 向对端 UDP 地址发 UdpProbe(Ping)，
 // 对端原路回 UdpProbe(Pong)。收集 RTT/丢包，作为回切判据数据源。
 // 0x08 不 e2e 路由（header.rs:64），中继收到即丢弃——它只在直连 UDP 上做健康探测。
+//
+// ## 时钟口径（H0-2，必须与 MobiHop 一致）
+//
+// `Ping.timestamp_ms` = **本机进程内单调毫秒**（进程启动为 0），
+// `Pong.timestamp_ms` = 原样回显 Ping 的值（不做任何时钟换算、不在回显侧重算），
+// RTT 只在**发送侧**算：`monotonic_now - echoed_timestamp_ms`。
+//
+// ⚠️ 用墙钟（UnixMilli）也能跑，但系统校时会让 RTT 出现负值/跳变；
+// 更危险的是「在回显侧用接收时刻回填」——那会把 RTT 算成 ≈0。
+var meshMonotonicStart = time.Now()
+
+// MonotonicMS 返回进程内单调毫秒（启动为 0）。
+func MonotonicMS() uint64 { return uint64(time.Since(meshMonotonicStart).Milliseconds()) }
 
 // PingMsg / PongMsg 是 named MessagePack（control.rs:24-36）。
 type PingMsg struct {
@@ -42,6 +55,9 @@ type ProbeTracker struct {
 	peers  map[NodeID]*peerProbe
 	hub    *UdpHub
 	selfID NodeID
+	// wireVersion 返回发给某对端的线速版本（nil 时用默认 v2）。
+	// 由生命周期注入，保证 v1 对端能收到探针。
+	wireVersion func(NodeID) byte
 }
 
 type peerProbe struct {
@@ -62,6 +78,24 @@ func NewProbeTracker(hub *UdpHub, selfID NodeID) *ProbeTracker {
 		hub:    hub,
 		selfID: selfID,
 	}
+}
+
+// SetWireVersionProvider 注入「对端线速版本」查询函数。
+func (t *ProbeTracker) SetWireVersionProvider(fn func(NodeID) byte) {
+	t.mu.Lock()
+	t.wireVersion = fn
+	t.mu.Unlock()
+}
+
+// versionFor 返回发给该对端的版本（未注入或未知时用默认 v2）。
+func (t *ProbeTracker) versionFor(id NodeID) byte {
+	if t.wireVersion == nil {
+		return WireVersionDefault
+	}
+	if v := t.wireVersion(id); v == WireVersionV1 || v == WireVersionV2 {
+		return v
+	}
+	return WireVersionDefault
 }
 
 // SetPeer 设置对端 UDP 地址（降级后仍需知道对端地址才能发探针）。
@@ -96,14 +130,15 @@ func (t *ProbeTracker) SendProbe(ctx context.Context, id NodeID) (uint64, error)
 	}
 	t.mu.Unlock()
 
-	ping := &PingMsg{TimestampMS: uint64(time.Now().UnixMilli()), Nonce: nonce}
+	ping := &PingMsg{TimestampMS: MonotonicMS(), Nonce: nonce}
 	payload, err := EncodePing(ping)
 	if err != nil {
 		return 0, err
 	}
 	// Ping 带 ACK_REQ 标志；Pong 不带（对齐 MobiHop：用 flags 区分请求/应答）
 	frame, err := (&Frame{
-		Type: MsgUdpProbe, Flags: FlagAckReq, TTL: DefaultTTL,
+		Version: t.versionFor(id),
+		Type:    MsgUdpProbe, Flags: FlagAckReq, TTL: DefaultTTL,
 		Payload: payload, Src: t.selfID, Dst: id, Counter: nonce,
 	}).Encode()
 	if err != nil {
@@ -140,8 +175,10 @@ func (t *ProbeTracker) OnProbeFrame(ctx context.Context, frameBytes []byte) (boo
 				if n == msg.Nonce && msg.Nonce != 0 {
 					p.probeResults[i] = true
 					p.pongTotal++
-					if msg.TimestampMS > 0 {
-						rtt := uint64(time.Now().UnixMilli()) - msg.TimestampMS
+					// RTT 只在发送侧算：单调当前 - 对端原样回显的单调值。
+					// 用有符号判断，避免校时/时钟重置后下溢成巨大值。
+					if now := MonotonicMS(); now >= msg.TimestampMS {
+						rtt := now - msg.TimestampMS
 						if rtt < 1<<32 {
 							p.lastRTTMS = uint32(rtt)
 						}
@@ -159,7 +196,8 @@ func (t *ProbeTracker) OnProbeFrame(ctx context.Context, frameBytes []byte) (boo
 	resp := &PongMsg{TimestampMS: ping.TimestampMS, Nonce: ping.Nonce}
 	payload, _ := msgpack.Marshal(resp)
 	reply, err := (&Frame{
-		Type: MsgUdpProbe, Flags: 0, TTL: DefaultTTL,
+		Version: t.versionFor(f.Src),
+		Type:    MsgUdpProbe, Flags: 0, TTL: DefaultTTL,
 		Payload: payload, Src: t.selfID, Dst: f.Src, Counter: f.Counter,
 	}).Encode()
 	if err != nil {
@@ -188,6 +226,11 @@ func (t *ProbeTracker) Measurement(id NodeID) (loss float64, samples uint32, rtt
 		return 0, 0, 0
 	}
 	n := len(p.probeResults)
+	// 样本不足时按 0.0 上报（不误报）—— 对齐 router.rs:49 的 LOSS_MIN_SAMPLES。
+	// 判「链路坏」需要连续坏窗口，不能让 1~4 个样本就把对端判死。
+	if n < LossMinSamples {
+		return 0, uint32(n), p.lastRTTMS
+	}
 	got := 0
 	for _, r := range p.probeResults {
 		if r {

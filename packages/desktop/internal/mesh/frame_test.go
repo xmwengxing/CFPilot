@@ -29,8 +29,8 @@ func TestFrameRoundTrip(t *testing.T) {
 	if len(buf) != HeaderLen+len(f.Payload) {
 		t.Fatalf("长度 = %d, 期望 %d", len(buf), HeaderLen+len(f.Payload))
 	}
-	// 逐字段核对线上字节
-	if buf[0] != 0x4D || buf[1] != 0x01 || buf[2] != byte(MsgData) {
+	// 逐字段核对线上字节（ADR-0016：出站默认 v2）
+	if buf[0] != 0x4D || buf[1] != WireVersionV2 || buf[2] != byte(MsgData) {
 		t.Errorf("头字节错误: % x", buf[:3])
 	}
 	if buf[3] != (FlagEncrypted|FlagAckReq) || buf[4] != 16 || buf[5] != 0 {
@@ -70,11 +70,13 @@ func TestDecodeErrors(t *testing.T) {
 	}{
 		{"truncated header", valid[:10], ErrTruncated},
 		{"bad magic", withByte(valid, 0, 0x00), ErrInvalidMagic},
-		{"bad version", withByte(valid, 1, 0x02), ErrInvalidVersion},
+		// 0x02 现在是合法版本；未知版本仍必须拒
+		{"bad version", withByte(valid, 1, 0x03), ErrInvalidVersion},
 		{"bad type", withByte(valid, 2, 0x09), ErrInvalidType},
 		{"reserved flags", withByte(valid, 3, 0x08), ErrInvalidFlags},
 		{"ttl over range", withByte(valid, 4, 65), ErrTtlOutOfRange},
-		{"reserved field", withByte(valid, 5, 0x01), ErrReservedField},
+		// v1 的 buf[5] 必须为 0；v2 任意 key_meta 都合法
+		{"reserved field", withByte(withByte(valid, 1, WireVersionV1), 5, 0x01), ErrReservedField},
 		{"oversized", withU16(valid, 6, 1401), ErrOversized},
 		{"truncated payload", valid[:HeaderLen+2], ErrTruncated},
 	}
@@ -104,7 +106,7 @@ func TestAADNormalization(t *testing.T) {
 		t.Errorf("AAD flags 应清除 RELAYED：%#x", aad[3])
 	}
 	// 其余字段与帧一致
-	if aad[0] != MagicByte || aad[1] != VersionByte || aad[2] != byte(f.Type) {
+	if aad[0] != MagicByte || aad[1] != f.WireVersion() || aad[2] != byte(f.Type) {
 		t.Error("AAD magic/version/type 应与帧一致")
 	}
 	if !bytes.Equal(aad[8:16], f.Src[:]) || !bytes.Equal(aad[16:24], f.Dst[:]) {

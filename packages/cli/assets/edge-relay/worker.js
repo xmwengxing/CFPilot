@@ -1,6 +1,7 @@
 // ../edge-relay/cf-worker-relay/src/proto.ts
 var MAGIC = 77;
-var VERSION = 1;
+var VERSION = 2;
+var LEGACY_VERSION = 1;
 var HEADER_LEN = 32;
 var MAX_FRAME = 1400;
 var MAX_WIRE_FRAME = HEADER_LEN + MAX_FRAME;
@@ -11,7 +12,8 @@ var OFF = {
   msgType: 2,
   flags: 3,
   ttl: 4,
-  reserved: 5,
+  /** ADR-0016：v2 中为 `key_meta`（高 4 位 key_slot / 低 4 位 qos_class），v1 必须为 0。 */
+  keyMeta: 5,
   payloadLen: 6,
   src: 8,
   dst: 16,
@@ -40,14 +42,17 @@ function parseFrame(input) {
   if (input[OFF.magic] !== MAGIC) {
     return fail("bad_magic");
   }
-  if (input[OFF.version] !== VERSION) {
+  const version = input[OFF.version];
+  if (version !== VERSION && version !== LEGACY_VERSION) {
     return fail("bad_version");
   }
+  const isLegacy = version === LEGACY_VERSION;
   const msgType = input[OFF.msgType] ?? 0;
   if (!MESSAGE_TYPES.includes(msgType)) {
     return fail("unknown_type");
   }
-  if ((input[OFF.reserved] ?? 1) !== 0) {
+  const keyMeta = input[OFF.keyMeta] ?? 1;
+  if (isLegacy && keyMeta !== 0) {
     return fail("reserved_nonzero");
   }
   const ttl = input[OFF.ttl] ?? 0;
@@ -67,6 +72,9 @@ function parseFrame(input) {
       msgType,
       flags: input[OFF.flags] ?? 0,
       ttl,
+      keyMeta,
+      keySlot: keyMeta >> 4,
+      qosClass: keyMeta & 15,
       payloadLen,
       src,
       dst,

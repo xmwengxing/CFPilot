@@ -94,7 +94,10 @@ func (t *VirtualIPTable) Lookup(ip net.IP) (id NodeID, broadcast bool, ok bool) 
 //	dst IP → NodeID（查表）→ 构造 Frame{Type:Data, Flags:ENCRYPTED, TTL:16,
 //	Src:self, Dst:target, Counter:session.send_counter()}
 //	→ 头编码为 AAD → Session.Encrypt(aad, 整个 IP 包) → 载荷=密文‖tag → Frame.Encode()
-func Encapsulate(packet []byte, srcID, dstID NodeID, sess *Session) ([]byte, error) {
+//
+// wireVersion 省略时用默认 v2；对已知 v1 对端必须传 WireVersionV1 ——
+// 因为 version 被纳入 AAD 且旧节点在头部校验处丢 0x02 帧，发错版本必然不通。
+func Encapsulate(packet []byte, srcID, dstID NodeID, sess *Session, wireVersion ...byte) ([]byte, error) {
 	dst, err := ParseDstAddr(packet)
 	if err != nil {
 		return nil, err
@@ -104,7 +107,12 @@ func Encapsulate(packet []byte, srcID, dstID NodeID, sess *Session) ([]byte, err
 	// AAD 的 payload_len 字段 = 密文长度（含 tag）。加密前先用等长占位，
 	// 保证计算 AAD 时的 payload_len 与最终 Encode 的一致（否则认证失败）。
 	ciphertextLen := len(packet) + TagLen
+	version := WireVersionDefault
+	if len(wireVersion) > 0 && wireVersion[0] != 0 {
+		version = wireVersion[0]
+	}
 	f := &Frame{
+		Version: version,
 		Type:    MsgData,
 		Flags:   FlagEncrypted,
 		TTL:     DefaultTTL,

@@ -1,19 +1,23 @@
-# edge-relay —— 盲中继 / 云监测台 权威源码
+# edge-relay —— 盲中继 / 云监测台 受校验副本
 
-本目录是 **CFPilot 盲中继 / 云监测台工程的唯一权威源码**（见 `docs/mesh-integration-plan.md` Phase 0）。
+本目录是 CFPilot 侧的**受校验参照副本**，供 `scripts/check-edge-relay.mjs` 与
+`FILELIST.json` 做漂移检测。**内容上游是 MobiHop**，见
+`E:\Projects\MobiHop\docs\reports\CROSS_PROJECT_SYNC.md §1`。
 
-## 权威关系
+## 权威关系（2026-11-18 起）
 
 ```
-packages/edge-relay/          ← 权威（唯一可手改的地方）
-      │  scripts/sync-edge-relay.mjs
-      ├──> CFPilot/edge/           同步副本（禁止手改）
-      └──> MobiHop/edge/           同步副本（禁止手改）
+MobiHop/edge/cf-worker-relay/     ← 上游源（协议演进的唯一发生地）
+      │  cfr 拉取（本仓库 scripts/sync-edge-relay.mjs 只做「参照 → 副本」分发）
+      ├──> packages/edge-relay/   受校验参照副本（内容必须与上游逐字节一致）
+      ├──> CFPilot/edge/          同步副本（禁止手改）
+      └──> MobiHop/edge/          上游本体（同步脚本对其为幂等写入）
 ```
 
-- MobiHop 的核心是组网；**CF 平台部署的权威在 CFPilot**（两仓库同属一个 GitHub 账户）。
-- MobiHop 侧 `edge/` 保留实体文件以兼容其 README / 部署脚本 / 文档的既有路径引用，
-  但内容由本目录同步，**不得在 MobiHop 侧直接修改 edge/**。
+- **协议演进只发生在 MobiHop**（ADR-0016 v2 就是这么来的）；CFPilot 拉取后刷新
+  `FILELIST.json`，**禁止反向推送**改动给 MobiHop。
+- CF 平台部署脚本的维护仍可由 CFPilot 发起，但涉及 `cf-worker-relay/` 协议字节的
+  改动必须先落到 MobiHop 上游，再由本目录拉取。
 - 品牌保留 MobiHop（用户决策），协议魔数 / Noise 模式 / 日志前缀均为协议身份，不改。
 
 ## 文件清单与漂移校验

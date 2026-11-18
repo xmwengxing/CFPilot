@@ -11,13 +11,22 @@ package mesh
 // ---- 帧协议（契约 §1）----
 
 const (
-	MagicByte   byte = 0x4D // 'M'，lib.rs:29
-	VersionByte byte = 0x01 // lib.rs:31
-	HeaderLen        = 32   // lib.rs:33
-	MaxPayload       = 1400 // lib.rs:35，单帧载荷上限 = 隧道 MTU
-	MaxFrame         = 1432 // HeaderLen + MaxPayload，ws.rs:55
-	DefaultTTL  byte = 16   // lib.rs:37
-	MaxTTL      byte = 64   // lib.rs:39
+	MagicByte byte = 0x4D // 'M'，lib.rs:29
+
+	// 线速版本（ADR-0016，2026-11-18 冻结）。
+	//
+	// 接受集合固定为 {v1, v2}；**出站默认 v2**。
+	// 对已知 v1 对端必须显式降级（Frame.Version = WireVersionV1），
+	// 否则旧节点在头部版本校验处直接丢帧。
+	WireVersionV1      byte = 0x01 // LEGACY_VERSION，lib.rs:35
+	WireVersionV2      byte = 0x02 // VERSION，lib.rs:31
+	WireVersionDefault byte = WireVersionV2
+
+	HeaderLen  = 32   // lib.rs:33
+	MaxPayload = 1400 // lib.rs:35，单帧载荷上限 = 隧道 MTU
+	MaxFrame   = 1432 // HeaderLen + MaxPayload，ws.rs:55
+	DefaultTTL byte = 16 // lib.rs:37
+	MaxTTL     byte = 64 // lib.rs:39
 )
 
 // 消息类型（契约 §1.2，header.rs:50-65）
@@ -97,8 +106,15 @@ const (
 // ---- 选路（契约 §5）----
 
 const (
-	LossWeight       = 500.0 // route.rs:14，每 1.0 丢包率折算 500ms
-	RelayPenaltyMS   = 15.0  // route.rs:16
+	LossWeight     = 500.0 // route.rs:18，每 1.0 丢包率折算 500ms
+	RelayPenaltyMS = 15.0  // route.rs:20，**每跳** 15ms
+
+	// H3-2 质量加权边权（route.rs:22/24/26）。
+	// 专项都已是「毫秒当量」，**不归一化**（归一化在实现中被否决）。
+	// 缺质量样本时退化为 rtt + loss*500 + 15，与 H3 之前逐字节等价。
+	WRttMin    = 1.0 // W_RTT_MIN
+	WRttVar    = 1.5 // W_RTT_VAR：相对 rtt_min 的方差惩罚
+	WJitter    = 2.0 // W_JITTER
 	HysteresisMS     = 10.0  // path.rs:122，新路径需优出至少此值
 	SwitchCooldownMS = 1000  // path.rs:123
 	ProbeTimeoutMS   = 2000  // path.rs:124

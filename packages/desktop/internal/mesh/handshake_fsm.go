@@ -50,6 +50,13 @@ type pending struct {
 	hs       *Handshake // flynn/noise 状态机（握手完成后其 CipherState 用于 KeyMaterial）
 	started  time.Time
 	attempts int
+	// lastMsg 是最近一次发出去的握手载荷（不含 32B 头）。
+	// ADR-0016 的降级兜底要「用 v1 重发 Init」，重发的必须是与首次**同一份** Noise 字节。
+	lastMsg []byte
+	// sentAt 是 lastMsg 的发送时刻（重试节流用）。
+	sentAt time.Time
+	// downgraded 表示已经因「从未收到该对端帧」把版本降到 v1（只降一次）。
+	downgraded bool
 }
 
 // peerSession 是已建立的会话（对齐 PeerSession：current + draining，session.rs:551-554）。
@@ -68,19 +75,45 @@ type HandshakeFSM struct {
 	pending  map[NodeID]*pending
 	sessions map[NodeID]*peerSession
 
+	// wireVersions 与生命周期共享：控制帧按对端版本编码，学到 v1 后立刻降级。
+	wireVersions *PeerWireVersions
+	// now 可注入（测试用）；nil 时用 time.Now。
+	now func() time.Time
+
 	sendFn        func(dst NodeID, frame []byte) error
 	onEstablished func(peer NodeID, sess *Session)
 }
 
 func NewHandshakeFSM(selfID NodeID, network, psk [32]byte, static noise.DHKey) *HandshakeFSM {
 	return &HandshakeFSM{
-		selfID:   selfID,
-		network:  network,
-		psk:      psk,
-		static:   static,
-		pending:  make(map[NodeID]*pending),
-		sessions: make(map[NodeID]*peerSession),
+		selfID:       selfID,
+		network:      network,
+		psk:          psk,
+		static:       static,
+		pending:      make(map[NodeID]*pending),
+		sessions:     make(map[NodeID]*peerSession),
+		wireVersions: NewPeerWireVersions(),
 	}
+}
+
+// WireVersions 返回共享的对端版本登记表（生命周期用它做学习与编码）。
+func (f *HandshakeFSM) WireVersions() *PeerWireVersions { return f.wireVersions }
+
+// SetWireVersions 注入共享登记表（到一个进程只有一份的语义）。
+func (f *HandshakeFSM) SetWireVersions(v *PeerWireVersions) {
+	if v != nil {
+		f.wireVersions = v
+	}
+}
+
+// SetClock 注入时钟（测试用）。
+func (f *HandshakeFSM) SetClock(now func() time.Time) { f.now = now }
+
+func (f *HandshakeFSM) clock() time.Time {
+	if f.now != nil {
+		return f.now()
+	}
+	return time.Now()
 }
 
 func (f *HandshakeFSM) SetSendFn(fn func(NodeID, []byte) error)    { f.sendFn = fn }
@@ -90,9 +123,16 @@ func (f *HandshakeFSM) SetOnEstablished(fn func(NodeID, *Session)) { f.onEstabli
 func (f *HandshakeFSM) IsInitiator(peer NodeID) bool { return lessNodeID(f.selfID, peer) }
 
 // EncodeHandshakeFrame 封装 0x01 Handshake 帧（不置 ENCRYPTED，control.rs:41-43）。
-func EncodeHandshakeFrame(src, dst NodeID, msg []byte) ([]byte, error) {
+//
+// wireVersion 省略时按默认（v2）；对已知 v1 对端必须传 WireVersionV1 ——
+// 否则旧节点在头部版本校验处直接丢帧，握手永远建立不起来。
+func EncodeHandshakeFrame(src, dst NodeID, msg []byte, wireVersion ...byte) ([]byte, error) {
+	v := WireVersionDefault
+	if len(wireVersion) > 0 && wireVersion[0] != 0 {
+		v = wireVersion[0]
+	}
 	return (&Frame{
-		Type: MsgHandshake, Flags: 0, TTL: DefaultTTL,
+		Version: v, Type: MsgHandshake, Flags: 0, TTL: DefaultTTL,
 		Payload: msg, Src: src, Dst: dst, Counter: 0,
 	}).Encode()
 }
@@ -124,14 +164,64 @@ func (f *HandshakeFSM) StartOutbound(peer NodeID, peerStatic []byte) error {
 	if err != nil {
 		return fmt.Errorf("handshake fsm: 生成 msg1 失败: %w", err)
 	}
-	frame, err := EncodeHandshakeFrame(f.selfID, peer, msg1)
+	version := f.wireVersions.VersionFor(peer)
+	frame, err := EncodeHandshakeFrame(f.selfID, peer, msg1, version)
 	if err != nil {
 		return err
 	}
+	// 记录载荷与时刻：ADR-0016 的 5s 降级兜底要用**同一份** msg1 以 v1 重发。
+	f.mu.Lock()
+	if p, ok := f.pending[peer]; ok {
+		p.lastMsg = append([]byte(nil), msg1...)
+		p.sentAt = f.clock()
+	}
+	f.mu.Unlock()
 	if f.sendFn == nil {
 		return fmt.Errorf("handshake fsm: sendFn 未设置")
 	}
 	return f.sendFn(peer, frame)
+}
+
+// RetryPending 处理「发出 Init 后一直没收到该对端任何帧」的降级兜底。
+//
+// 对齐 ADR-0016 / session.rs:1452：首次重试（5 s）时若从未收到过该对端任何帧，
+// 就把该对端置 LEGACY_VERSION 并**用同一份 Init 载荷**重发。
+// v2 对端也接受 0x01，所以降级是安全的；学到 v1 后该对端的所有帧都按 v1 发。
+//
+// 返回本次真正重发的 peer 数（诊断/测试用）。
+func (f *HandshakeFSM) RetryPending(now time.Time, after time.Duration) int {
+	f.mu.Lock()
+	type resend struct {
+		peer NodeID
+		msg  []byte
+	}
+	var todo []resend
+	for peer, p := range f.pending {
+		if p.state != HSWaitMsg2 || p.downgraded || len(p.lastMsg) == 0 {
+			continue
+		}
+		if f.wireVersions.Known(peer) {
+			continue // 已学到版本（对端活着），不降级
+		}
+		if now.Sub(p.sentAt) < after {
+			continue
+		}
+		p.downgraded = true
+		p.sentAt = now
+		p.attempts++
+		f.wireVersions.ForceVersion(peer, WireVersionV1)
+		todo = append(todo, resend{peer: peer, msg: p.lastMsg})
+	}
+	f.mu.Unlock()
+
+	for _, r := range todo {
+		frame, err := EncodeHandshakeFrame(f.selfID, r.peer, r.msg, WireVersionV1)
+		if err != nil || f.sendFn == nil {
+			continue
+		}
+		_ = f.sendFn(r.peer, frame)
+	}
+	return len(todo)
 }
 
 // OnFrame 处理入站 Handshake 帧。返回 (consumed, error)。
@@ -220,7 +310,9 @@ func (f *HandshakeFSM) onKeyMaterial(parsed *Frame, p *pending) error {
 }
 
 func (f *HandshakeFSM) sendFrame(dst NodeID, msg []byte) error {
-	frame, err := EncodeHandshakeFrame(f.selfID, dst, msg)
+	// 回帧版本跟随该对端：已学到 v1 就必须用 v1，否则旧节点丢帧。
+	version := f.wireVersions.VersionFor(dst)
+	frame, err := EncodeHandshakeFrame(f.selfID, dst, msg, version)
 	if err != nil {
 		return err
 	}

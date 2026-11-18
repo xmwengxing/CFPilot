@@ -8,7 +8,9 @@
 // - 不把载荷内容传给日志（调用方只应记录 peer_id / 包长 / room 前 4 字符）。
 
 export const MAGIC = 0x4d;
-export const VERSION = 0x01;
+/** ADR-0016：v2 线速协议；v1 帧（0x01）仍接受一个发布周期。 */
+export const VERSION = 0x02;
+export const LEGACY_VERSION = 0x01;
 export const HEADER_LEN = 32;
 export const MAX_FRAME = 1400;
 export const MAX_WIRE_FRAME = HEADER_LEN + MAX_FRAME; // 1432，与 Rust MAX_WIRE_FRAME 一致
@@ -21,7 +23,8 @@ export const OFF = {
   msgType: 2,
   flags: 3,
   ttl: 4,
-  reserved: 5,
+  /** ADR-0016：v2 中为 `key_meta`（高 4 位 key_slot / 低 4 位 qos_class），v1 必须为 0。 */
+  keyMeta: 5,
   payloadLen: 6,
   src: 8,
   dst: 16,
@@ -40,6 +43,12 @@ export interface ParsedFrame {
   readonly msgType: number;
   readonly flags: number;
   readonly ttl: number;
+  /** ADR-0016：原始 `key_meta` 字节（v1 恒为 0）。 */
+  readonly keyMeta: number;
+  /** 高 4 位 key_slot（0–15）。 */
+  readonly keySlot: number;
+  /** 低 4 位 qos_class（H2 只写 0）。 */
+  readonly qosClass: number;
   readonly payloadLen: number;
   /** 源 / 目的 NodeId（小写 16 hex）。 */
   readonly src: string;
@@ -68,8 +77,8 @@ function fail(reason: string): ParseResult {
 /**
  * 解析并严格校验一个完整 MobiHop 帧（一个 WS 二进制消息 = 一个完整帧）。
  *
- * 拒绝：超长、短于 32B、magic/version 不符、保留字节非零、TTL 越界、
- * 未知消息类型、帧长与头部 `payload_len` 不符。
+ * 拒绝：超长、短于 32B、magic/version 不符（仅接受 v1 `0x01` 与 v2 `0x02`）、
+ * v1 的保留字节非零、TTL 越界、未知消息类型、帧长与头部 `payload_len` 不符。
  */
 export function parseFrame(input: Uint8Array): ParseResult {
   if (input.length > MAX_WIRE_FRAME) {
@@ -81,14 +90,18 @@ export function parseFrame(input: Uint8Array): ParseResult {
   if (input[OFF.magic] !== MAGIC) {
     return fail("bad_magic");
   }
-  if (input[OFF.version] !== VERSION) {
+  const version = input[OFF.version];
+  if (version !== VERSION && version !== LEGACY_VERSION) {
     return fail("bad_version");
   }
+  const isLegacy = version === LEGACY_VERSION;
   const msgType = input[OFF.msgType] ?? 0;
   if (!(MESSAGE_TYPES as readonly number[]).includes(msgType)) {
     return fail("unknown_type");
   }
-  if ((input[OFF.reserved] ?? 1) !== 0) {
+  const keyMeta = input[OFF.keyMeta] ?? 1;
+  // v1：保留字节必须为 0；v2：任意 key_meta（中继不解密，只需透传）。
+  if (isLegacy && keyMeta !== 0) {
     return fail("reserved_nonzero");
   }
   const ttl = input[OFF.ttl] ?? 0;
@@ -108,6 +121,9 @@ export function parseFrame(input: Uint8Array): ParseResult {
       msgType,
       flags: input[OFF.flags] ?? 0,
       ttl,
+      keyMeta,
+      keySlot: keyMeta >> 4,
+      qosClass: keyMeta & 0x0f,
       payloadLen,
       src,
       dst,

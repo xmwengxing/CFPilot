@@ -37,6 +37,9 @@ type meshLifecycle struct {
 	links       map[NodeID]PeerLink // peer -> PeerLink
 	vipTable    *VirtualIPTable
 	gossip      *Gossip // 描述符库：动态发现对端虚拟 IP（对齐 MobiHop Gossip）
+	// wireVersions 记录每个对端的线速版本（ADR-0016）：控制帧与数据帧都按它编码。
+	// 只从能成功解码的入站帧学习，未知对端按 v2。
+	wireVersions *PeerWireVersions
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -64,6 +67,21 @@ type recvLoop struct {
 // Stats 返回运行时统计（诊断用）。
 func (m *meshLifecycle) Stats() (tx, rx, txDrop, rxDrop, hs uint64) {
 	return m.txFrames.Load(), m.rxFrames.Load(), m.txDropped.Load(), m.rxDropped.Load(), m.hsOK.Load()
+}
+
+// wireVersionFor 返回发给某对端的线速版本（未初始化/未知时用默认 v2）。
+func (m *meshLifecycle) wireVersionFor(id NodeID) byte {
+	if m.wireVersions == nil {
+		return WireVersionDefault
+	}
+	return m.wireVersions.VersionFor(id)
+}
+
+// learnWireVersion 从**解码成功**的入站帧学习对端版本（ADR-0016 协商纪律）。
+func (m *meshLifecycle) learnWireVersion(src NodeID, version byte) {
+	if m.wireVersions != nil {
+		m.wireVersions.Learn(src, version)
+	}
 }
 
 // NewLifecycle 返回 +mesh 变体的 Lifecycle 实现（使用默认空配置，需 SetConfig 注入）。
@@ -152,7 +170,10 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 	// 4. FSM（sendFn 经 peer 的 PeerLink 发帧）
 	m.links = make(map[NodeID]PeerLink)
 	m.recvLoops = make(map[NodeID]*recvLoop)
+	// 线速版本登记表：FSM / 探针 / 数据面共用一个实例，保证「学到 v1 后全部降级」。
+	m.wireVersions = NewPeerWireVersions()
 	m.fsm = NewHandshakeFSM(m.cfg.NodeID, network, psk, tunnel)
+	m.fsm.SetWireVersions(m.wireVersions)
 	m.fsm.SetOnEstablished(func(peer NodeID, sess *Session) {
 		m.hsOK.Add(1)
 		if m.cfg.Verbose {
@@ -185,6 +206,7 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 			m.udpLinks[id] = link
 		}
 		m.probes = NewProbeTracker(m.hub, m.cfg.NodeID)
+		m.probes.SetWireVersionProvider(m.wireVersionFor)
 		for _, p := range m.cfg.Peers {
 			addr, _ := net.ResolveUDPAddr("udp", p.Addr)
 			m.probes.SetPeer(p.NodeID, addr)
@@ -235,7 +257,11 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 				for i := range broadcast {
 					broadcast[i] = 0xff
 				}
-				frame, err := (&Frame{Type: MsgGossip, TTL: DefaultTTL, Src: m.cfg.NodeID, Dst: broadcast, Payload: payload}).Encode()
+				frame, err := (&Frame{
+					Version: m.wireVersionFor(id),
+					Type:    MsgGossip, TTL: DefaultTTL,
+					Src: m.cfg.NodeID, Dst: broadcast, Payload: payload,
+				}).Encode()
 				if err == nil {
 					_ = link.Send(context.Background(), frame)
 				}
@@ -254,6 +280,10 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 		// 不进普通 peer 队列 —— 降级后 active=WSS 时 UDP 探针仍能被接收。
 		m.hub.SetProbeHandler(func(frame []byte) {
 			if m.probes != nil {
+				// 探针帧同样要学习版本：它不进普通队列，否则 v1 对端永远学不到。
+				if parsed, derr := Decode(frame); derr == nil {
+					m.learnWireVersion(parsed.Src, parsed.Version)
+				}
 				_, _ = m.probes.OnProbeFrame(runCtx, frame)
 			}
 		})
@@ -282,27 +312,52 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 					for i := range broadcast {
 						broadcast[i] = 0xff
 					}
-					frame, err := (&Frame{
-						Type: MsgGossip, TTL: DefaultTTL,
-						Src: m.cfg.NodeID, Dst: broadcast,
-						Payload: payload,
-					}).Encode()
-					if err != nil {
-						continue
-					}
+					// ⚠️ 版本必须**按对端**分别编码：广播帧只有头字节不同，
+					// 但混合集群里 v1 节点会丢弃 0x02 帧（Gossip 收不到 ⇒ 拓扑永远不收敛）。
 					m.mu.Lock()
-					links := make([]PeerLink, 0, len(m.links))
-					for _, link := range m.links {
-						links = append(links, link)
+					type peerLink struct {
+						id   NodeID
+						link PeerLink
+					}
+					pairs := make([]peerLink, 0, len(m.links))
+					for id, link := range m.links {
+						pairs = append(pairs, peerLink{id, link})
 					}
 					m.mu.Unlock()
-					for _, link := range links {
-						_ = link.Send(runCtx, frame)
+					for _, p := range pairs {
+						frame, ferr := (&Frame{
+							Version: m.wireVersionFor(p.id),
+							Type:    MsgGossip, TTL: DefaultTTL,
+							Src: m.cfg.NodeID, Dst: broadcast,
+							Payload: payload,
+						}).Encode()
+						if ferr != nil {
+							continue
+						}
+						_ = p.link.Send(runCtx, frame)
 					}
 				}
 			}
 		}()
 	}
+	// 握手降级兜底（ADR-0016 / session.rs:1452）：
+	// 发出 Init 后 5 s 仍**从未收到该对端任何帧** → 用同一份 Init 载荷以 v1 重发，
+	// 并把该对端置 v1。没有这条兜底，v1 对端会永远解不开我们的 v2 Init。
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-ticker.C:
+				m.fsm.RetryPending(time.Now(), 5*time.Second)
+			}
+		}
+	}()
+
 	if m.cfg.Verbose {
 		m.wg.Add(1)
 		go func() {
@@ -400,7 +455,7 @@ func (m *meshLifecycle) tunToPeersLoop(ctx context.Context) {
 			// 握手异步进行；首个包丢弃（对齐 MobiHop：queued 可缓存，最小集简化为丢弃）
 			continue
 		}
-		frameBytes, err := Encapsulate(packet, m.cfg.NodeID, peerID, sess)
+		frameBytes, err := Encapsulate(packet, m.cfg.NodeID, peerID, sess, m.wireVersionFor(peerID))
 		if err != nil {
 			continue
 		}
@@ -491,6 +546,8 @@ func (m *meshLifecycle) startRecvLoop(ctx context.Context, id NodeID, link PeerL
 				continue
 			}
 			m.rxFrames.Add(1)
+			// 解码成功才学习版本（v1 已过 buf[5]==0 校验）；伪造帧最多让本机降级。
+			m.learnWireVersion(parsed.Src, parsed.Version)
 			if parsed.Type == MsgHandshake {
 				if _, err := m.fsm.OnFrame(frame); err != nil && m.cfg.Verbose {
 					log.Printf("[mesh] 握手帧处理失败: %v", err)

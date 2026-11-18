@@ -8,8 +8,19 @@ import (
 
 // Path Manager 选路（契约 §5，对齐 MobiHop crates/mobihop-node/src/path.rs）。
 //
-// 评分公式：score = rtt_ms + loss_rate * 500 + relay_penalty_ms
+// 评分公式（H3-2 质量加权，见 PathCandidate.Score）：
+// score = 1.0*rtt_min + 1.5*(rtt-rtt_min) + 2.0*jitter + loss*500 + 15/跳
 // 切换纪律：先探测后切换 + 滞回 10ms + 冷却 1s + 失效回滚上一路径。
+//
+// ## ⚠️ 路由覆盖（H0-2b）的纪律
+//
+// MobiHop 的 `PathManager.active_paths_map()` 只供**展示**，禁止喂给
+// `Router::set_path_overrides`；路由覆盖只应包含「**经中继**的激活路径」。
+// 早期把直连也写成 `dst → dst` 的恒等覆盖，会把 Dijkstra 的选路强行按回直连，
+// 于是真实丢包写进 LSDB 也绕不开（H0-2 的收益归零）。
+//
+// CFPilot Go 子集目前没有 Router 覆盖接口（只有 PathManager 自身决策），
+// 因此不存在这个 bug；**将来若加覆盖入口，必须只下发经中继的档位**。
 
 // PathID 是一条路径的标识：直连对端 或 经中继（契约 §5.1，path.rs:36-60）。
 type PathID struct {
@@ -31,7 +42,7 @@ func (p PathID) String() string {
 	return fmt.Sprintf("relay:%x", p.Peer[:4])
 }
 
-// PathCandidate 是候选路径的测量与状态（path.rs:63-95）。
+// PathCandidate 是候选路径的测量与状态（path.rs:63-95 + H3-2 质量样本）。
 type PathCandidate struct {
 	Path        PathID
 	RTTMS       uint32
@@ -39,10 +50,42 @@ type PathCandidate struct {
 	Validated   bool // 先探测后切换的凭据
 	Failed      bool // 链路丢失 / 中继宕机
 	LastProbeMS uint64
+
+	// H3-2：质量样本（nil = 无样本，退化为旧公式）。
+	//   RTTMinMS：窗口内最小观测值（只降不升）
+	//   JitterMS：RFC 3550 §6.4.1 的抖动估计
+	RTTMinMS *uint32
+	JitterMS *uint32
 }
 
+// Score 返回边权（对齐 route.rs:43 edge_cost_quality）。
+//
+//	edge_cost = W_RTT_MIN*rtt_min + W_RTT_VAR*max(0, rtt - rtt_min)
+//	          + W_JITTER*jitter + loss*500 + relay_penalty(每跳 15ms)
+//
+// 缺样本时 rtt_min = rtt、variance = 0、jitter = 0 ⇒ 退化为
+// `rtt + loss*500 + 15`，与 H3 之前完全等价（避免改公式反而让旧边变贵）。
+// `rtt_min` 再做一次 min(rtt) 夹紧：样本回退时声明值可能大于当前 RTT，
+// 不夹会让 variance 变负、把丢包边算得比直连还便宜。
 func (c *PathCandidate) Score() float64 {
-	return float64(c.RTTMS) + c.LossRate*LossWeight + c.Path.RelayPenaltyMS()
+	rtt := float64(c.RTTMS)
+	rttMin := rtt
+	if c.RTTMinMS != nil {
+		rttMin = float64(*c.RTTMinMS)
+		if rttMin > rtt {
+			rttMin = rtt
+		}
+	}
+	variance := rtt - rttMin
+	if variance < 0 {
+		variance = 0
+	}
+	jitter := 0.0
+	if c.JitterMS != nil {
+		jitter = float64(*c.JitterMS)
+	}
+	return WRttMin*rttMin + WRttVar*variance + WJitter*jitter +
+		c.LossRate*LossWeight + c.Path.RelayPenaltyMS()
 }
 
 func (c *PathCandidate) usable() bool { return c.Validated && !c.Failed }
@@ -113,6 +156,23 @@ func (m *PathManager) ApplyMeasurement(dst, via NodeID, rttMS uint32, lossRate f
 			cands[i].Validated = true
 			cands[i].Failed = false
 			cands[i].LastProbeMS = m.NowMS
+			m.Candidates[dst] = cands
+			return true
+		}
+	}
+	return false
+}
+
+// ApplyQuality 更新某条路径的质量样本（H3-2）：
+// rtt_min 取窗口最小、jitter 取 RFC 3550 平滑值（由调用方维护窗口/EWMA）。
+func (m *PathManager) ApplyQuality(dst, via NodeID, rttMinMS, jitterMS uint32) bool {
+	cands := m.Candidates[dst]
+	for i := range cands {
+		if cands[i].Path.Peer == via {
+			minV := rttMinMS
+			jitV := jitterMS
+			cands[i].RTTMinMS = &minV
+			cands[i].JitterMS = &jitV
 			m.Candidates[dst] = cands
 			return true
 		}

@@ -12,6 +12,7 @@ import {
   MAGIC,
   MAX_FRAME,
   MAX_WIRE_FRAME,
+  LEGACY_VERSION,
   SlidingWindow,
   VERSION,
   decideForward,
@@ -36,6 +37,7 @@ function buildFrame(opts = {}) {
     flags = 0,
     ttl = 8,
     reserved = 0,
+    keyMeta = 0,
     payload = new TextEncoder().encode("payload"),
     srcHex = src,
     dstHex = dst,
@@ -49,7 +51,7 @@ function buildFrame(opts = {}) {
   frame[2] = msgType;
   frame[3] = flags;
   frame[4] = ttl;
-  frame[5] = reserved;
+  frame[5] = keyMeta || reserved;
   frame[6] = (payloadLen >> 8) & 0xff;
   frame[7] = payloadLen & 0xff;
   writeHex(frame, 8, srcHex);
@@ -96,9 +98,10 @@ test("parseFrame 识别广播 Dst=0xFF…", () => {
 test("parseFrame 拒绝畸形帧", () => {
   const cases = [
     ["bad_magic", buildFrame({ magic: 0x4e })],
-    ["bad_version", buildFrame({ version: 0x02 })],
+    ["bad_version", buildFrame({ version: 0x03 })],
     ["unknown_type", buildFrame({ msgType: 0x08 })],
-    ["reserved_nonzero", buildFrame({ reserved: 1 })],
+    // v1 帧的保留字节仍必须为 0（v2 才允许 key_meta）。
+    ["reserved_nonzero", buildFrame({ version: LEGACY_VERSION, reserved: 1 })],
     ["ttl_out_of_range", buildFrame({ ttl: 65 })],
     ["length_mismatch", buildFrame({ declaredPayloadLen: 3 })],
     ["short", new Uint8Array(HEADER_LEN - 1)],

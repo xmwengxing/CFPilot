@@ -22,10 +22,13 @@ func TestMenuLabel(t *testing.T) {
 		{"检查应用更新", true, "", "检查应用更新"},
 	}
 	for _, c := range cases {
-		if got := menuLabel(c.base, c.hasUpdate, c.latest); got != c.want {
+		if got := menuLabel(c.base, c.hasUpdate, c.latest, false, ""); got != c.want {
 			t.Errorf("menuLabel(%q,%v,%q) = %q，期望 %q",
 				c.base, c.hasUpdate, c.latest, got, c.want)
 		}
+	}
+	if got := menuLabel("检查应用更新", true, "1.0.0-beta.1", true, "beta.1"); got != "检查应用更新（测试版 1.0.0-beta.1）" {
+		t.Errorf("beta 标注错误: %q", got)
 	}
 }
 

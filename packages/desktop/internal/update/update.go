@@ -72,6 +72,12 @@ type CheckResult struct {
 	Latest string `json:"latest"`
 	// HasUpdate 表示是否有新版本
 	HasUpdate bool `json:"hasUpdate"`
+	// Prerelease 表示最新发行版是预发布（beta/rc 等）。
+	// 稳定用户也能收到它的更新提示（让用户知晓控制面/数据面的改进），
+	// 但必须在界面显著标注「测试版」，避免误当成正式稳定版。
+	Prerelease bool `json:"prerelease"`
+	// PrereleaseLabel 是预发布标识（如 "beta.1"），空串表示正式版。
+	PrereleaseLabel string `json:"prereleaseLabel,omitempty"`
 	// DownloadURL 是新版本下载地址
 	DownloadURL string `json:"downloadUrl"`
 	// Notes 是发行说明
@@ -148,6 +154,11 @@ func Check(ctx context.Context, current string) *CheckResult {
 		res.Notes = latest.Notes
 	}
 	res.HasUpdate = CompareVersion(ParseVersion(latest.Tag), ParseVersion(current)) > 0
+	// 预发布标识（beta/rc 等）：让稳定用户也能收到提示，但界面必须标注「测试版」。
+	// 注意 ParseVersion 故意丢弃后缀 —— 这是为了让 0.50.0 用户能收到 1.0.0-beta.1
+	// 的提示（用户明确要求知晓新版本的改进），而非把它当正式版静默跳过。
+	res.PrereleaseLabel = prereleaseLabel(latest.Version)
+	res.Prerelease = res.PrereleaseLabel != ""
 	return res
 }
 
@@ -504,6 +515,21 @@ func releaseVersion(tag string) string {
 		}
 	}
 	return ""
+}
+
+// prereleaseLabel 从版本号里提取预发布标识（"1.0.0-beta.1" → "beta.1"，正式版返回 ""）。
+// 用于界面标注「测试版」，避免把 beta 误当成正式稳定版。
+func prereleaseLabel(version string) string {
+	i := strings.IndexByte(version, '-')
+	if i < 0 {
+		return ""
+	}
+	label := version[i+1:]
+	// 去掉 build 元数据（+xxx）
+	if j := strings.IndexByte(label, '+'); j >= 0 {
+		label = label[:j]
+	}
+	return label
 }
 
 // semverRe 匹配 x.y.z 形式的版本号。

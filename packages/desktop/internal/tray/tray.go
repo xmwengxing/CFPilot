@@ -189,8 +189,8 @@ func (a *App) refreshUpdateLabels(st *UpdateState) {
 	if st == nil {
 		return
 	}
-	a.mCheckAppUpdate.SetTitle(menuLabel("检查应用更新", st.AppHasUpdate, st.AppLatest))
-	a.mCheckDeployUpdate.SetTitle(menuLabel("检查部署更新", st.DeployHasUpdate, st.DeployLatest))
+	a.mCheckAppUpdate.SetTitle(menuLabel("检查应用更新", st.AppHasUpdate, st.AppLatest, st.AppPrerelease, st.AppPrereleaseLabel))
+	a.mCheckDeployUpdate.SetTitle(menuLabel("检查部署更新", st.DeployHasUpdate, st.DeployLatest, false, ""))
 }
 
 // handleCheckAppUpdate 点击「检查应用更新」。

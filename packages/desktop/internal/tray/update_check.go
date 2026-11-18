@@ -35,6 +35,9 @@ type UpdateState struct {
 	AppHasUpdate bool
 	// AppLatest 是可升级到的应用版本
 	AppLatest string
+	// AppPrerelease / AppPrereleaseLabel 标注新版本是否为测试版（beta/rc）
+	AppPrerelease      bool
+	AppPrereleaseLabel string
 	// DeployHasUpdate 表示线上内核有新版（远程内核比线上新）
 	DeployHasUpdate bool
 	// DeployLatest 是可升级到的内核版本
@@ -104,6 +107,8 @@ func (c *UpdateChecker) Check(ctx context.Context) *UpdateState {
 		} else if res != nil {
 			st.AppHasUpdate = res.HasUpdate
 			st.AppLatest = res.Latest
+			st.AppPrerelease = res.Prerelease
+			st.AppPrereleaseLabel = res.PrereleaseLabel
 			if res.Error != "" {
 				errs = append(errs, "应用："+res.Error)
 			}
@@ -180,9 +185,12 @@ func (c *UpdateChecker) StartAutoCheck(ctx context.Context, delay, interval time
 // menuLabel 根据状态生成菜单项标题。
 //
 // 有新版时把版本号写进标题 —— 用户不用点开就知道有新版。
-func menuLabel(base string, hasUpdate bool, latest string) string {
+func menuLabel(base string, hasUpdate bool, latest string, prerelease bool, preLabel string) string {
 	if !hasUpdate || latest == "" {
 		return base
+	}
+	if prerelease {
+		return fmt.Sprintf("%s（测试版 %s）", base, latest)
 	}
 	return fmt.Sprintf("%s（有新版 %s）", base, latest)
 }

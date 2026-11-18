@@ -873,6 +873,10 @@ interface Window {
       current: string
       latest: string | null
       hasUpdate: boolean
+      /** true = 新版本是预发布（beta/rc），界面需标注「测试版」避免误导 */
+      prerelease?: boolean
+      /** 预发布标识（如 "beta.1"），空/缺省表示正式版 */
+      prereleaseLabel?: string
       downloadUrl: string | null
       notes: string
       error?: string

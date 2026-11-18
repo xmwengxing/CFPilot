@@ -5743,11 +5743,16 @@ import { MeshTopology, type TopoNode } from './mesh-topology'
         renderUpdateNotes(result.latest, result.notes)
         return
       }
-      badge.textContent = '有新版 ' + (result.latest ?? '')
+      // 预发布（beta/rc）显著标注，避免用户把测试版误当正式稳定版
+      const preTag = result.prerelease ? '【测试版' + (result.prereleaseLabel ? ' ' + result.prereleaseLabel : '') + '】' : ''
+      badge.textContent = preTag + ' ' + (result.latest ?? '')
       badge.className = 'badge warn'
       // 发现新版 → **自动开始下载到缓存**（用户不需要再点一次下载按钮）；
       // 下载完成（SSE update-done）后「重启并更新应用」按钮才会亮起。
-      hint.textContent = '发现新版本 ' + result.latest + '（当前 ' + result.current + '），正在自动下载…'
+      hint.textContent = '发现' + (result.prerelease ? '测试版' : '新版本') + ' ' + result.latest +
+        '（当前 ' + result.current + '）' +
+        (result.prerelease ? '。这是测试版，可能包含未稳定功能，请确认后再更新；' : '，') +
+        '正在自动下载…'
       ;(document.getElementById('btnUpdate') as HTMLButtonElement).disabled = true
       ;(document.getElementById('btnUpdate') as HTMLButtonElement).textContent = '重启并更新应用'
       renderUpdateNotes(result.latest, result.notes)

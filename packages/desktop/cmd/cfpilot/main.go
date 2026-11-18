@@ -422,10 +422,12 @@ func main() {
 		checker.StartAutoCheck(context.Background(), 20*time.Second, time.Hour, func(st *tray.UpdateState) {
 			logUpdateState(st)
 			if st.AppHasUpdate {
-				notify.ShowViaShell(notify.Message{
-					Title: "CFPilot 有新版本",
-					Body:  fmt.Sprintf("发现新版本 %s，可从托盘菜单「检查应用更新」查看。", st.AppLatest),
-				})
+				title, body := "CFPilot 有新版本", fmt.Sprintf("发现新版本 %s，可从托盘菜单「检查应用更新」查看。", st.AppLatest)
+				if st.AppPrerelease {
+					title = "CFPilot 有测试版"
+					body = fmt.Sprintf("发现测试版 %s（非稳定版），请确认后再从托盘菜单「检查应用更新」升级。", st.AppLatest)
+				}
+				notify.ShowViaShell(notify.Message{Title: title, Body: body})
 			}
 			if st.DeployHasUpdate {
 				// 内核有新版的气泡 —— 只改内核、不发新包时（内核热更新通道），
@@ -495,7 +497,11 @@ func logUpdateState(st *tray.UpdateState) {
 		return
 	}
 	if st.AppHasUpdate {
-		log.Printf("[cfpilot] 应用有新版本：%s（当前 %s）", st.AppLatest, server.Version())
+		if st.AppPrerelease {
+			log.Printf("[cfpilot] 应用有测试版：%s（当前 %s，非稳定版）", st.AppLatest, server.Version())
+		} else {
+			log.Printf("[cfpilot] 应用有新版本：%s（当前 %s）", st.AppLatest, server.Version())
+		}
 	}
 	if st.DeployHasUpdate {
 		log.Printf("[cfpilot] 线上内核有新版本可用：%s", st.DeployLatest)

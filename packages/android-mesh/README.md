@@ -23,24 +23,58 @@ Go mesh 协议栈 (packages/desktop/internal/mesh)
 
 ## 构建
 
-前提：Go + gomobile、Android SDK（`ANDROID_HOME`）、JDK 17、Gradle wrapper。
+### 一条命令（本机工具链已备好）
 
-```bash
-# 1. 生成 Go AAR
-go install golang.org/x/mobile/cmd/gomobile@latest
-gomobile init
-node scripts/build-android.mjs
-
-# 2. 或用 Android Studio 打开 packages/android 直接构建 APK
+```powershell
+. .\scripts\android-env.ps1      # 设置 JAVA_HOME / ANDROID_HOME / NDK / Gradle / PATH
+node scripts/build-android.mjs   # gomobile AAR → Gradle APK →（可选）签名
 ```
 
-`scripts/build-android.mjs` 会先 `gomobile bind -tags=mesh` 生成
-`app/libs/mobile.aar`，再调用 gradlew assembleRelease（有 wrapper 时）。
+`scripts/build-android.mjs` 会**自动探测工具链**（环境变量优先，其次本机约定位置），
+不需要手动 export 一堆变量；缺哪一项会直接说明缺什么。
+
+### 本机工具链位置（不再依赖临时目录）
+
+| 组件 | 位置 |
+|---|---|
+| JDK 17 | `%USERPROFILE%\tools\android\jdk17\jdk-17.0.21+9` |
+| Gradle 8.9 | `%USERPROFILE%\tools\android\gradle-8.9` |
+| Android SDK | `%LOCALAPPDATA%\Android\Sdk`（platform 34 / build-tools 34.0.0 / NDK 27.2.12479018） |
+| gomobile | `%USERPROFILE%\go\bin\gomobile.exe` |
+
+这四样都是**机器级、可被任意会话/agent 复用**的；仓库只提供探测与调用逻辑。
+
+### 签名（可选）
+
+```powershell
+$env:CFPILOT_ANDROID_KEYSTORE='<keystore>'
+$env:CFPILOT_ANDROID_KEY_ALIAS='cfpilot'
+$env:CFPILOT_ANDROID_STORE_PASS='<口令>'
+$env:CFPILOT_ANDROID_KEY_PASS='<口令>'
+node scripts/build-android.mjs
+# 产物：app/build/outputs/apk/release/cfpilot-<版本>+mesh-android.apk
+```
+
+不设置则只出 unsigned APK，脚本会打印需要手动 `apksigner`。
+
+### 已踩过的坑（脚本已内置处理，别删）
+
+1. `gomobile bind` 必须 `-androidapi=26`（默认 API 16 会报 unsupported）。
+2. Windows 中文 locale 下 javac 按 GBK 读生成的 `Mobile.java` 会报「GBK 不可映射字符」
+   ⇒ 必须 `JAVA_TOOL_OPTIONS=-Dfile.encoding=UTF-8`。
+3. Go 1.27 要求 `golang.org/x/mobile` 在**当前模块**的 tool graph 里（否则
+   "missing golang.org/x/mobile dependency"）⇒ 脚本临时 `go get -tool` 后**必定还原**
+   `desktop/go.mod` / `go.sum`，不把这条约束固化进仓库。
+4. Node 20+/26 在 Windows 不能直接 spawn `.bat`（EINVAL）⇒ 脚本用 `cmd /c` 包装。
+5. gradlew 在 `~/.gradle` 无发行版缓存时会去下载（离线环境会挂）⇒ 脚本只在缓存
+   非空时用 wrapper，否则回落到本机 Gradle。
 
 ## 说明
 
 - Android 上地址 / 路由 / MTU 由 `VpnService.Builder` 下发（addAddress/addRoute/setMtu），
   不走 Linux 的 `ip` 命令，也不需要 root。
+- 虚拟 IP 必须与对端**同一 /24 网段、只改最后一段**；`MeshVpnService` 会用配置里的
+  `virtualIp` 同时设置接口地址与同网段路由。
 - 首次启动会弹系统 VPN 授权对话框，用户确认后才能建 TUN。
-- 这是 9.5b 阶段的代码骨架；本机无 Android SDK，需在 CI（android runner）或装有 SDK 的环境构建验证。
+- CI 的 `android-mesh` job 产的是 unsigned APK；正式分发的签名由发布流程处理。
 

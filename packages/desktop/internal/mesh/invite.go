@@ -27,6 +27,79 @@ type InvitePayload struct {
 	Exp       int64  `json:"exp,omitempty"`       // 过期时间 Unix 秒，0=永久
 }
 
+// ReachableListenAddr 把「监听地址」换成对端**可直连**的地址。
+//
+// 邀请链接里的 addr 如果照抄面板默认的 `0.0.0.0:51820`，对端根本连不上
+// 0.0.0.0（UDP 发往通配地址会被丢弃），表现为「握手一直不成功」。
+// 这里在生链接时换成本机第一个非回环 IPv4（优先私网段），端口保持不变。
+//
+// 返回原值时说明没有做替换（要么本来就可直连，要么找不到可用网卡）。
+func ReachableListenAddr(listen string) string {
+	trimmed := strings.TrimSpace(listen)
+	if trimmed == "" {
+		trimmed = "0.0.0.0:51820"
+	}
+	host, port, err := net.SplitHostPort(trimmed)
+	if err != nil {
+		return listen
+	}
+	if host != "" && net.ParseIP(host) != nil && !isWildcardHost(host) {
+		return trimmed // 已是具体地址，尊重用户填写
+	}
+	if port == "" {
+		port = "51820"
+	}
+	if ip := pickReachableIPv4(localIPv4s()); ip != "" {
+		return net.JoinHostPort(ip, port)
+	}
+	return listen
+}
+
+func isWildcardHost(host string) bool {
+	ip := net.ParseIP(host)
+	return ip == nil || ip.IsUnspecified()
+}
+
+// localIPv4s 收集本机所有非回环 IPv4（冒烟环境可能为空）。
+func localIPv4s() []string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip := ipnet.IP.To4()
+		if ip == nil || ip.IsLoopback() {
+			continue
+		}
+		out = append(out, ip.String())
+	}
+	return out
+}
+
+// pickReachableIPv4 从候选里优先选私网地址（同局域网最可能直达），
+// 其次任意公网 IPv4。纯函数，便于单测。
+func pickReachableIPv4(candidates []string) string {
+	var fallback string
+	for _, raw := range candidates {
+		ip := net.ParseIP(raw)
+		if ip == nil || ip.To4() == nil {
+			continue
+		}
+		if ip.IsPrivate() {
+			return ip.String()
+		}
+		if fallback == "" {
+			fallback = ip.String()
+		}
+	}
+	return fallback
+}
+
 // BuildInvite 生成邀请链接。
 // ttlSeconds=0 表示永久；>0 则设置过期时间。
 func BuildInvite(p InvitePayload, ttlSeconds int64) (string, error) {
@@ -34,6 +107,8 @@ func BuildInvite(p InvitePayload, ttlSeconds int64) (string, error) {
 		return "", fmt.Errorf("生成邀请链接需要网络名与 PSK")
 	}
 	p.V = 1
+	// 监听地址若是通配（0.0.0.0 / ::），换成对端能直连的本机 IPv4。
+	p.Addr = ReachableListenAddr(p.Addr)
 	// 建议对端虚拟 IP：**同一 /24 内顺延最后一段**。
 	// 组网要求同网段（TUN 固定 /24 且不给对端加主机路由），
 	// 让对端自己填很容易写成另一个网段（如 10.98.0.2），那是最常见的连不上原因。

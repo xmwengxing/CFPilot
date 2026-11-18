@@ -100,3 +100,43 @@ func TestBuildInviteSuggestsSameSubnet(t *testing.T) {
 		t.Errorf("末位回绕不正确: %q", got2.Suggested)
 	}
 }
+
+func TestPickReachableIPv4(t *testing.T) {
+	if got := pickReachableIPv4([]string{"203.0.113.5", "192.168.1.10"}); got != "192.168.1.10" {
+		t.Errorf("应优先私网地址，实际 %q", got)
+	}
+	if got := pickReachableIPv4([]string{"", "2001:db8::1", "198.51.100.7"}); got != "198.51.100.7" {
+		t.Errorf("无私网时应退回公网 IPv4，实际 %q", got)
+	}
+	if got := pickReachableIPv4(nil); got != "" {
+		t.Errorf("无候选应返回空，实际 %q", got)
+	}
+}
+
+func TestBuildInviteKeepsExplicitAddr(t *testing.T) {
+	p := InvitePayload{Network: "n", PSK: "s", Addr: "1.2.3.4:51820", VirtualIP: "10.97.0.1"}
+	uri, err := BuildInvite(p, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := ParseInvite(uri)
+	if got.Addr != "1.2.3.4:51820" {
+		t.Errorf("用户填写的具体地址不应被替换，实际 %q", got.Addr)
+	}
+}
+
+func TestBuildInviteReplacesWildcardAddr(t *testing.T) {
+	p := InvitePayload{Network: "n", PSK: "s", Addr: "0.0.0.0:51820", VirtualIP: "10.97.0.1"}
+	uri, err := BuildInvite(p, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := ParseInvite(uri)
+	if strings.HasPrefix(got.Addr, "0.0.0.0:") {
+		t.Skip("本机没有可用的非回环 IPv4，跳过（真实机器上应被替换）")
+	}
+	if !strings.Contains(got.Addr, ":51820") {
+		t.Errorf("端口应保持不变: %q", got.Addr)
+	}
+}
+

@@ -101,6 +101,10 @@ const baseEnv = {
   ANDROID_NDK_HOME: ndk,
   JAVA_TOOL_OPTIONS: '-Dfile.encoding=UTF-8',
   PATH: `${javaHome}/bin${isWin ? ';' : ':'}${process.env.PATH || ''}`,
+  // ⚠️ 必须写进全局 env：gomobile 内部还会再跑 `go mod tidy`，
+  // 只给外层 `go get` 设 GOPROXY 的话，它仍会走系统默认 proxy.golang.org
+  // （本机 IPv6 到不了，报 dial tcp ... connectex timeout）。
+  GOPROXY: process.env.GOPROXY || 'https://goproxy.cn,direct',
 }
 log(`JAVA_HOME=${javaHome}`)
 log(`ANDROID_HOME=${sdk}`)

@@ -63,7 +63,7 @@ const REDIAL_DIAL_TIMEOUT_MS = 3000
  * **直连成功后若下行无数据，自动重拨到反代入口**重试一次；用 NAT64 同理。
  *
  * 窗口值来自 `config.dialStallMs`（默认 2500ms），换入口上限来自
- * `config.relayRedialMax`（默认 4）。重拨后的确认窗口取静默窗口的一半
+ * `config.relayRedialMax`（默认 2）。重拨后的确认窗口取静默窗口的一半
  * （下限 400ms）—— 那是「已知上一个入口假活」后的确认，不该再等满全程。
  * 全部可在 KV / 环境变量里调整，无需改源码发版。
  */
@@ -908,10 +908,10 @@ export async function handleWebSocket(
   /**
    * 单连接流量计量（上下行合计）。
    *
-   * 上限来自配置 `dataBudgetMB`，**0 表示不限制**（默认，行为与未引入时一致）。
+   * 上限来自配置 `dataBudgetMB`，**默认 512MB**；显式设为 0 才表示不限制。
    * 数据面本身不会被「跑太久」杀掉，但每条中继连接都在持续消耗 CPU 配额，
    * 单条超大流量连接能把账号当日额度吃穿，之后所有请求一起 503。
-   * 超限时主动断连让客户端重连，比整账号被限流划算。
+   * 超限时主动断连让客户端重连（CPU 随新 invocation 归零），比整账号被限流划算。
    */
   const traffic = new TrafficMeter((config.dataBudgetMB || 0) * 1024 * 1024)
 

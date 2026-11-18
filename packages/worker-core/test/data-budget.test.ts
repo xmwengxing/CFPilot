@@ -122,9 +122,23 @@ describe('relay 的流量熔断回调', () => {
 })
 
 describe('dataBudgetMB 配置项', () => {
-  it('默认不限制（保持历史行为）', () => {
-    expect(DEFAULT_CONFIG.dataBudgetMB).toBe(0)
-    expect(configFromEnv({} as Env).dataBudgetMB).toBe(0)
+  it('默认 512MB 熔断，防止长连接吃穿账号 CPU 配额', () => {
+    expect(DEFAULT_CONFIG.dataBudgetMB).toBe(512)
+    expect(configFromEnv({} as Env).dataBudgetMB).toBe(512)
+  })
+
+  it('显式 0 关闭熔断（保留旧行为作为逃生口）', () => {
+    expect(configFromEnv({ DATA_BUDGET_MB: '0' } as unknown as Env).dataBudgetMB).toBe(0)
+    expect(mergeConfig(configFromEnv({} as Env), { dataBudgetMB: 0 }).dataBudgetMB).toBe(0)
+    expect(new TrafficMeter(0).enabled).toBe(false)
+  })
+
+  it('默认值真的会触发熔断（不是只改了配置数字）', () => {
+    const limit = DEFAULT_CONFIG.dataBudgetMB * 1024 * 1024
+    const meter = new TrafficMeter(limit)
+    expect(meter.enabled).toBe(true)
+    expect(meter.add(limit)).toBe(false)
+    expect(meter.add(1)).toBe(true)
   })
 
   it('环境变量 DATA_BUDGET_MB 生效', () => {
@@ -137,5 +151,25 @@ describe('dataBudgetMB 配置项', () => {
     // 面板 / KV 里可能存成字符串
     expect(mergeConfig(base, { dataBudgetMB: '64' as unknown as number }).dataBudgetMB).toBe(64)
     expect(mergeConfig(base, { dataBudgetMB: 'abc' as unknown as number }).dataBudgetMB).toBe(0)
+  })
+})
+
+describe('relayRedialMax 配置项', () => {
+  it('默认 2：假活换入口最多 2 次，压低重拨的 CPU 开销', () => {
+    expect(DEFAULT_CONFIG.relayRedialMax).toBe(2)
+    expect(configFromEnv({} as Env).relayRedialMax).toBe(2)
+  })
+
+  it('环境变量 RELAY_REDIAL_MAX 生效', () => {
+    expect(configFromEnv({ RELAY_REDIAL_MAX: '3' } as unknown as Env).relayRedialMax).toBe(3)
+  })
+
+  it('KV 覆盖环境变量，且 clamp 到 [1,8]', () => {
+    const base = configFromEnv({} as Env)
+    expect(mergeConfig(base, { relayRedialMax: 6 }).relayRedialMax).toBe(6)
+    expect(mergeConfig(base, { relayRedialMax: 0 }).relayRedialMax).toBe(1)
+    expect(mergeConfig(base, { relayRedialMax: 99 }).relayRedialMax).toBe(8)
+    // 非法值回退到新默认值，而不是旧的 4
+    expect(mergeConfig(base, { relayRedialMax: 'abc' as unknown as number }).relayRedialMax).toBe(2)
   })
 })

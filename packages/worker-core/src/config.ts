@@ -51,14 +51,21 @@ export const DEFAULT_CONFIG: UserConfig = {
   proxyMode: 'only' as ProxyMode,
   nat64: '',
   concurrentDial: true,
-  dataBudgetMB: 0,
+  // 单连接流量熔断（512MB）：数据面不受 CpuBudget 约束，WS/XHTTP 长连接
+  // 在同一 invocation 里持续累积 CPU，Free 版 10ms 上限撞穿就是 1102。
+  // 512MB 对单连接是很大的量（正常浏览/视频不会触及），超限主动断流让
+  // 客户端重连，CPU 随新 invocation 归零。显式设 0 可恢复旧的不限制行为。
+  dataBudgetMB: 512,
   // 出站拨号时序（P1 #11）：此前散落在 4 个调用点的硬编码常量，
   // 统一到这里，经 configFromEnv / mergeConfig 走 KV > env > default 三层。
   dialConnectMs: 5000,
   dialBudgetMs: 15_000,
   dohBudgetMs: 1200,
   dialStallMs: 2500,
-  relayRedialMax: 4,
+  // 假活换入口上限 4→2：每轮重拨都是一次完整 dial（DoH + 6 路 TCP/TLS），
+  // 是数据面 CPU 的最大放大器。配合 pinnedHosts 固定反代入口已能覆盖
+  // 已知假活目标；保留 2 轮作为兜底，避免 4 轮累积 10~18s 的 CPU 开销。
+  relayRedialMax: 2,
   resolvePreferred: true,
   // 默认保守：只修「直连假活」，不替用户在代理出口上擅自换路
   aggressiveRedial: false,

@@ -1245,3 +1245,57 @@ func keysOfInt(m map[string]int) []string {
 }
 
 var _ = errors.New
+
+// TestMigrateLegacyResourceDefaults 守护「旧默认 → 新默认」的迁移语义。
+//
+// 对照 CLI 的 deploy-legacy-migration.test.ts：迁移只认**恰好等于旧默认值**
+// 的项，键不存在 / 用户改过 / 非法值都不动 —— 否则会把用户刻意的设置改掉。
+func TestMigrateLegacyResourceDefaults(t *testing.T) {
+	cfg, applied := migrateLegacyResourceDefaults(map[string]any{
+		"uuid":           "keep-me",
+		"dataBudgetMB":   float64(0),
+		"relayRedialMax": float64(4),
+	})
+	if got := cfg["dataBudgetMB"]; got != float64(512) {
+		t.Errorf("dataBudgetMB 应升级为 512，实际 %v", got)
+	}
+	if got := cfg["relayRedialMax"]; got != float64(2) {
+		t.Errorf("relayRedialMax 应升级为 2，实际 %v", got)
+	}
+	if cfg["uuid"] != "keep-me" {
+		t.Errorf("其余字段必须原样保留，实际 %v", cfg["uuid"])
+	}
+	if len(applied) != 2 {
+		t.Errorf("应记录 2 项升级，实际 %v", applied)
+	}
+
+	// 键不存在：不写进 KV（写进去会把内核新默认钉死）
+	cfg, applied = migrateLegacyResourceDefaults(map[string]any{"uuid": "x"})
+	if _, ok := cfg["dataBudgetMB"]; ok {
+		t.Error("缺省键不应被写入")
+	}
+	if len(applied) != 0 {
+		t.Errorf("缺省键不应产生升级记录，实际 %v", applied)
+	}
+
+	// 用户改过的值必须尊重
+	cfg, applied = migrateLegacyResourceDefaults(map[string]any{
+		"dataBudgetMB":   float64(1024),
+		"relayRedialMax": float64(3),
+	})
+	if cfg["dataBudgetMB"] != float64(1024) || cfg["relayRedialMax"] != float64(3) {
+		t.Errorf("用户设置被覆盖：%v", cfg)
+	}
+	if len(applied) != 0 {
+		t.Errorf("不应产生升级记录，实际 %v", applied)
+	}
+
+	// KV 里存成字符串数字时同样识别
+	cfg, _ = migrateLegacyResourceDefaults(map[string]any{
+		"dataBudgetMB":   "0",
+		"relayRedialMax": "4",
+	})
+	if cfg["dataBudgetMB"] != float64(512) || cfg["relayRedialMax"] != float64(2) {
+		t.Errorf("字符串数字未迁移：%v", cfg)
+	}
+}

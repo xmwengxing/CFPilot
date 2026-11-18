@@ -521,6 +521,58 @@ export async function assertKvOwnership(
 }
 
 /**
+ * 旧默认资源值的迁移（部署时一次性）。
+ *
+ * ## 为什么部署时做，而不是内核读配置时做
+ *
+ * 配置优先级是 `KV > 环境变量 > 默认值`。老部署的 KV 里**已经显式存了**
+ * `dataBudgetMB: 0` / `relayRedialMax: 4`（那是旧版本的默认值），
+ * 于是改成新默认值后，老用户读到的仍是旧值 —— 新默认对他们是无效的。
+ *
+ * 迁移必须放在部署里：部署本来就「读一次 CONFIG、写一次 CONFIG」，
+ * 不会多花 KV 写配额；而把它放进内核的读路径，就变成 AGENTS §2.2.F
+ * 明令禁止的「读不到/读到旧值就写回」——陈旧读会反复触发写，吃光配额。
+ *
+ * ## 边界
+ *
+ * - 只迁移**恰好等于旧默认值**的项：用户改成别的值（如 1024）一律尊重；
+ * - 键**不存在**时不动：内核新默认值自然会生效；
+ * - 迁移结果会打一行日志，用户知道发生了什么、也能在面板改回去。
+ */
+export const LEGACY_RESOURCE_DEFAULTS: ReadonlyArray<{
+  field: 'dataBudgetMB' | 'relayRedialMax'
+  legacy: number
+  next: number
+}> = [
+  { field: 'dataBudgetMB', legacy: 0, next: 512 },
+  { field: 'relayRedialMax', legacy: 4, next: 2 },
+]
+
+export interface LegacyResourceMigration {
+  config: Record<string, unknown>
+  applied: Array<{ field: string; from: number; to: number }>
+}
+
+/** 按 `LEGACY_RESOURCE_DEFAULTS` 把旧默认值升级为新默认值（纯函数，便于单测） */
+export function migrateLegacyResourceDefaults(
+  existing: Record<string, unknown>
+): LegacyResourceMigration {
+  const config: Record<string, unknown> = { ...existing }
+  const applied: Array<{ field: string; from: number; to: number }> = []
+  for (const rule of LEGACY_RESOURCE_DEFAULTS) {
+    const raw = config[rule.field]
+    // 缺省 → 走内核新默认值，不需要写进 KV（写进去反而把默认值钉死）
+    if (raw === undefined || raw === null) continue
+    const value = Number(raw)
+    // 用户改过的值（含 0 以外的任何数）一律不改
+    if (!Number.isFinite(value) || value !== rule.legacy) continue
+    config[rule.field] = rule.next
+    applied.push({ field: rule.field, from: rule.legacy, to: rule.next })
+  }
+  return { config, applied }
+}
+
+/**
  * 把本次部署的凭据写入 KV 的 **大写 `CONFIG` 键**。
  *
  * ## 为什么写 `CONFIG` 而不是小写 `config`
@@ -585,8 +637,16 @@ async function writeEffectiveConfig(
     }
   }
 
+  // 旧默认资源值升级（见 migrateLegacyResourceDefaults 注释）：
+  // 部署时一次完成，不占额外 KV 写配额，也不在内核读路径上制造写回。
+  const migrated = migrateLegacyResourceDefaults(existing)
+  if (migrated.applied.length > 0) {
+    const detail = migrated.applied.map((m) => `${m.field} ${m.from}→${m.to}`).join('、')
+    log(`· 已升级旧默认资源值：${detail}（如需关闭或调整，可在面板改回）`)
+  }
+
   const merged: Record<string, unknown> = {
-    ...existing,
+    ...migrated.config,
     uuid: effective.uuid,
     trojanPassword: effective.trojanPassword,
     wsPath: effective.wsPath,

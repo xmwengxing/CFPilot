@@ -36,6 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 	"time"
 
@@ -888,6 +889,72 @@ func (d *Deployer) writeManifest(ctx context.Context, old *Manifest, eff effecti
 	return d.client.SetKVValue(ctx, d.opt.AccountID, d.opt.KVNamespaceID, ManifestKey, string(raw))
 }
 
+// legacyResourceDefaults 是「旧默认 → 新默认」的资源项迁移表。
+//
+// 对照 CLI 的 LEGACY_RESOURCE_DEFAULTS（packages/cli/src/deploy/pages-deploy.ts），
+// 两处语义必须完全一致（AGENTS §2.2：先 CLI 定语义，Go 按同一份实现）。
+//
+// 为什么需要：配置优先级是 KV > 环境变量 > 默认值，老部署的 KV 里已经显式
+// 存了旧默认（dataBudgetMB 0 / relayRedialMax 4），改成新默认后老用户读到的
+// 仍是旧值。迁移放在部署里（本来就读一次写一次 CONFIG），不额外消耗 KV 写配额；
+// 放进内核读路径会变成「读到旧值就写回」，陈旧读反复触发写（AGENTS §2.2.F）。
+var legacyResourceDefaults = []struct {
+	Field  string
+	Legacy float64
+	Next   float64
+}{
+	{Field: "dataBudgetMB", Legacy: 0, Next: 512},
+	{Field: "relayRedialMax", Legacy: 4, Next: 2},
+}
+
+// migrateLegacyResourceDefaults 把恰好等于旧默认值的项升级为新默认值。
+//
+// 只改「恰等于旧默认」的项：用户改成别的值（如 1024）一律尊重；
+// 键不存在时不动（内核新默认值会自然生效，写进去反而把默认钉死）。
+// 返回升级后的配置与「已升级」的可读描述（供日志），纯函数便于单测。
+func migrateLegacyResourceDefaults(existing map[string]any) (map[string]any, []string) {
+	cfg := make(map[string]any, len(existing)+2)
+	for k, v := range existing {
+		cfg[k] = v
+	}
+	var applied []string
+	for _, rule := range legacyResourceDefaults {
+		raw, ok := cfg[rule.Field]
+		if !ok || raw == nil {
+			continue
+		}
+		var value float64
+		switch t := raw.(type) {
+		case float64:
+			value = t
+		case int:
+			value = float64(t)
+		case int64:
+			value = float64(t)
+		case json.Number:
+			f, err := t.Float64()
+			if err != nil {
+				continue
+			}
+			value = f
+		case string:
+			f, err := strconv.ParseFloat(strings.TrimSpace(t), 64)
+			if err != nil {
+				continue
+			}
+			value = f
+		default:
+			continue
+		}
+		if value != rule.Legacy {
+			continue
+		}
+		cfg[rule.Field] = rule.Next
+		applied = append(applied, fmt.Sprintf("%s %v→%v", rule.Field, rule.Legacy, rule.Next))
+	}
+	return cfg, applied
+}
+
 // writeEffectiveConfig 把生效的凭据写进 KV 的 CONFIG 键。
 //
 // ⚠️ 写的是**大写** `CONFIG`（CFPilot 数据面读它），
@@ -918,6 +985,12 @@ func (d *Deployer) writeEffectiveConfig(ctx context.Context, eff effective) erro
 				d.warn("已有 KV 配置解析失败，本次只写入凭据字段（面板里配过的设置会丢失）")
 			}
 		}
+	}
+
+	// 旧默认资源值升级（见 migrateLegacyResourceDefaults 注释）。
+	cfg, migrated := migrateLegacyResourceDefaults(cfg)
+	if len(migrated) > 0 {
+		d.log("· 已升级旧默认资源值：" + strings.Join(migrated, "、") + "（如需关闭或调整，可在面板改回）")
 	}
 
 	// 覆盖本次部署的凭据类字段；其余字段保持旧值不动。

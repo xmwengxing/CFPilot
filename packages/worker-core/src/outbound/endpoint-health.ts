@@ -36,12 +36,23 @@ const FAIL_THRESHOLD = 2
 const BASE_COOLDOWN_MS = 30_000
 /** 冷却上限 */
 const MAX_COOLDOWN_MS = 5 * 60_000
+/**
+ * 「不足阈值的失败记录」保留多久（ms）。
+ *
+ * 超过这个时间没有再失败，说明那只是一次偶发抖动，不必继续累计到阈值。
+ * 保留它是有必要的：**第一次失败时 `cooldownUntil` 还是 0**，若按
+ * 「`cooldownUntil <= now` 就删」来清理，第二次失败到来前记录就被删掉，
+ * 计数永远停在 1 —— 阈值 2 永远不会触发，整套健康记忆实际失效。
+ */
+const FAIL_DECAY_MS = 10 * 60_000
 /** 表大小上限：防止长生命周期 isolate 无限累积（§2.2.G 内存纪律） */
 const MAX_ENTRIES = 256
 
 interface HealthState {
   fails: number
   cooldownUntil: number
+  /** 最后一次失败时刻（用于「不足阈值记录」的衰减清理） */
+  lastFailAt: number
 }
 
 const HEALTH = new Map<string, HealthState>()
@@ -57,10 +68,20 @@ export function isEndpointCooled(key: string, now: number): boolean {
   return state !== undefined && state.cooldownUntil > now
 }
 
-/** 清掉过期条目；仍超上限就按插入顺序淘汰最旧的 */
+/**
+ * 清掉过期条目；仍超上限就按插入顺序淘汰最旧的。
+ *
+ * ⚠️ 只清理**两种**条目：
+ *   1. 冷却期已过的（`cooldownUntil > 0 && <= now`）；
+ *   2. 距最后一次失败已超过 `FAIL_DECAY_MS`。
+ * 绝不能在 `cooldownUntil === 0` 时按「<= now」删 —— 那会把「只失败过一次、
+ * 还没到阈值」的记录一起抹掉，阈值永远不会被触发（见 HealthState.lastFailAt）。
+ */
 function prune(now: number): void {
   for (const [key, state] of HEALTH) {
-    if (state.cooldownUntil <= now) HEALTH.delete(key)
+    const cooled = state.cooldownUntil > 0 && state.cooldownUntil <= now
+    const stale = now - state.lastFailAt >= FAIL_DECAY_MS
+    if (cooled || stale) HEALTH.delete(key)
   }
   while (HEALTH.size >= MAX_ENTRIES) {
     const oldest = HEALTH.keys().next().value
@@ -75,8 +96,9 @@ function prune(now: number): void {
 export function recordEndpointFailure(key: string, now: number, targetRejected: boolean): void {
   if (targetRejected) return
   prune(now)
-  const state = HEALTH.get(key) ?? { fails: 0, cooldownUntil: 0 }
+  const state = HEALTH.get(key) ?? { fails: 0, cooldownUntil: 0, lastFailAt: 0 }
   state.fails += 1
+  state.lastFailAt = now
   if (state.fails >= FAIL_THRESHOLD) {
     const over = state.fails - FAIL_THRESHOLD
     state.cooldownUntil = now + Math.min(MAX_COOLDOWN_MS, BASE_COOLDOWN_MS * 2 ** over)

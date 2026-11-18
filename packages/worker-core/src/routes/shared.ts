@@ -41,6 +41,27 @@ export function invalidateConfig(): void {
   caches.configAt = 0
 }
 
+/**
+ * 清空鉴权上下文缓存。
+ *
+ * ## 为什么必须能失效
+ *
+ * `getAuth` 的缓存是 60 秒。登录成功时 `POST /login` 会做两件**改 KV** 的事：
+ * `upgradePasswordHash`（旧 SHA-256 → PBKDF2）与 `discardPlaintextPassword`
+ * （删掉自动生成密码的明文副本）。缓存不失效时：
+ *
+ *   1. 登录后的 60 秒内 `/api/v1/status` 仍会把**已删除的明文密码**下发；
+ *   2. 60 秒内再次登录，缓存里的 `passwordHash` 还是旧格式，会**重复**触发
+ *      一次 PBKDF2 派生 + KV 写（免费版 1000 写/天，见 §1.30）。
+ *
+ * 清掉缓存后，下一次 `getAuth` 会重新 `ensureBootstrap`：只读 KV，
+ * 值没变就不会写（`hashMatches` 先读再比）。
+ */
+export function invalidateAuth(): void {
+  caches.auth = null
+  caches.authAt = 0
+}
+
 export async function getAuth(store: Store, env: Env): Promise<AuthContext> {
   if (caches.auth && Date.now() - caches.authAt < AUTH_TTL_MS) return caches.auth
   const auth = await ensureBootstrap(store, env.PANEL_PASSWORD, env.PANEL_PATH)

@@ -338,7 +338,7 @@ export async function discardPlaintextPassword(store: Store): Promise<void> {
   if (plain) await store.delete(ADMIN_PW_PLAIN_KEY)
 }
 
-/** 解析 Cookie 头 */
+/** 解析 Cookie 头（容错：单个非法编码的 Cookie 视为无效，不让整个请求 500） */
 export function parseCookies(request: Request): Record<string, string> {
   const header = request.headers.get('Cookie') ?? ''
   const out: Record<string, string> = {}
@@ -347,7 +347,14 @@ export function parseCookies(request: Request): Record<string, string> {
     if (idx < 0) continue
     const key = part.slice(0, idx).trim()
     const value = part.slice(idx + 1).trim()
-    if (key) out[key] = decodeURIComponent(value)
+    if (!key) continue
+    try {
+      out[key] = decodeURIComponent(value)
+    } catch {
+      // `Cookie: cfp_session=%` 这类畸形百分号编码会让 decodeURIComponent 抛
+      // URIError；早前没有捕获，/session、/logout 与所有依赖会话的 API 直接 500。
+      // 视为「没有这个 Cookie」即可 —— 鉴权失败应该是 401，不是 500。
+    }
   }
   return out
 }

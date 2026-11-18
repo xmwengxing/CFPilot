@@ -224,12 +224,18 @@ export function parseLocalList(text: string): NodeEntry[] {
   return out
 }
 
-/** 解析远程 TXT API 结果 */
-export function parseApiList(text: string): NodeEntry[] {
+/**
+ * 解析远程 TXT API 结果。
+ *
+ * `maxEntries` 用于前置截断：2 MB 的 TXT 可以塞进几十万行，
+ * 而订阅最终只需要几百个节点 —— 先把 NodeEntry 对象造出来再截断纯属浪费 CPU。
+ */
+export function parseApiList(text: string, maxEntries = Number.POSITIVE_INFINITY): NodeEntry[] {
   const out: NodeEntry[] = []
   for (const line of text.split(/\r?\n/)) {
     const clean = cleanIpLine(line)
     if (clean) out.push(toEntry(clean, 'addapi'))
+    if (out.length >= maxEntries) break
   }
   return out
 }
@@ -239,6 +245,8 @@ export interface CsvParseOptions {
   dls?: number
   /** 最高延迟（ms），0 表示不限制 */
   maxLatency?: number
+  /** 最多解析多少条（前置截断，避免超大 CSV 造出几十万个节点对象） */
+  maxEntries?: number
 }
 
 export interface CsvParseResult {
@@ -352,6 +360,7 @@ export function parseCsvText(text: string, options: CsvParseOptions = {}): CsvPa
   }
 
   for (let i = start; i < lines.length; i++) {
+    if (options.maxEntries !== undefined && entries.length >= options.maxEntries) break
     const cells = splitCsvLine(lines[i]!)
     if (cells.length === 0) continue
 
@@ -848,8 +857,37 @@ const REMOTE_TEXT_CACHE_TTL_MS = 120_000
 /** 远程池缓存条数上限（防止长时间运行后 URL 列表无限增长占内存） */
 const REMOTE_TEXT_CACHE_MAX = 32
 
-/** 远程池文本缓存：URL → { 写入时间, 响应正文 } */
-const remoteTextCache = new Map<string, { at: number; text: string }>()
+/**
+ * 远程池文本缓存的**总字节预算**。
+ *
+ * 条数上限不等于内存上限：单响应 2 MB × 32 条 = 64 MB 原始字节，
+ * 而 JavaScript 字符串在 V8 里还有额外开销（UTF-16 时甚至翻倍）。
+ * 控制面 isolate 与数据面共享 128 MB 上限，不能把一半留给缓存 ——
+ * 这里按**实际正文字节**记账，超预算就按插入顺序淘汰最旧的。
+ */
+const REMOTE_TEXT_CACHE_MAX_BYTES = 8 * 1024 * 1024
+
+/** 远程池文本缓存：URL → { 写入时间, 响应正文, 正文字节数 } */
+const remoteTextCache = new Map<string, { at: number; text: string; bytes: number }>()
+
+/** 缓存当前占用的正文字节总数（按条目求和，条目数 ≤32，代价可忽略） */
+function remoteCacheBytes(): number {
+  let total = 0
+  for (const entry of remoteTextCache.values()) total += entry.bytes
+  return total
+}
+
+/** 按插入顺序淘汰，直到同时满足条数上限与字节预算 */
+function trimRemoteCache(): void {
+  let total = remoteCacheBytes()
+  while (remoteTextCache.size > REMOTE_TEXT_CACHE_MAX || total > REMOTE_TEXT_CACHE_MAX_BYTES) {
+    const oldest = remoteTextCache.keys().next().value
+    if (oldest === undefined) break
+    const entry = remoteTextCache.get(oldest)
+    if (entry) total -= entry.bytes
+    remoteTextCache.delete(oldest)
+  }
+}
 
 /**
  * 清空远程池文本缓存。
@@ -948,11 +986,14 @@ async function fetchText(url: string, timeoutMs: number, bypassCache = false): P
   // 只有成功拿到正文才写缓存。
   // bypass 请求拿到的也是**新鲜数据**，同样写回去刷新缓存（下一次订阅就能直接受益）。
   remoteTextCache.delete(url)
-  if (remoteTextCache.size >= REMOTE_TEXT_CACHE_MAX) {
-    const oldest = remoteTextCache.keys().next().value
-    if (oldest !== undefined) remoteTextCache.delete(oldest)
-  }
-  remoteTextCache.set(url, { at: Date.now(), text })
+  remoteTextCache.set(url, {
+    at: Date.now(),
+    text,
+    // 用字节数而不是字符数记账：中文池（UTF-16 双字节）与纯 ASCII 池的
+    // 实际占用差一倍，按字符数统计会把预算算小一半。
+    bytes: new TextEncoder().encode(text).byteLength,
+  })
+  trimRemoteCache()
   return text
 }
 
@@ -966,6 +1007,21 @@ function buildGroups(parts: Array<{ key: PoolKey; entries: NodeEntry[] }>): Pool
     .filter((g) => g.entries.length > 0)
     .map((g) => ({ key: g.key, name: POOL_LABELS[g.key], entries: g.entries }))
 }
+
+/**
+ * 单个远程池 URL 的解析条目上限。
+ *
+ * 2 MB 的 TXT / CSV 可以塞进十几万行，而订阅最终只需要几百个节点。
+ * 早前是「先全量解析、造出 NodeEntry、最后才按 maxNodes 截断」——
+ * 解析与去重的 CPU 早已付出，截断只是把结果丢掉。前置截断把这条成本按 URL 封顶。
+ */
+const MAX_REMOTE_ENTRIES_PER_URL = 20_000
+
+/** 所有来源合并后的候选总量上限（进入去重之前） */
+const MAX_CANDIDATES_TOTAL = 40_000
+
+/** CPU 预算已耗尽时的候选上限：宁可少给节点，也不要在收尾阶段撞 1102 */
+const CPU_EXHAUSTED_CANDIDATE_CAP = 1_000
 
 /**
  * 收集全部来源并合并。
@@ -1024,7 +1080,7 @@ export async function collectNodes(
     }
     for (const result of results) {
       if (result.status === 'fulfilled') {
-        addapi = addapi.concat(parseApiList(result.value))
+        addapi = addapi.concat(parseApiList(result.value, MAX_REMOTE_ENTRIES_PER_URL))
       } else {
         errors.push(`ADDAPI 拉取失败：${String(result.reason?.message ?? result.reason)}`)
       }
@@ -1049,7 +1105,11 @@ export async function collectNodes(
     }
     for (const result of results) {
       if (result.status === 'fulfilled') {
-        const parsed = parseCsvText(result.value, { dls: config.dls, maxLatency: config.maxLatency })
+        const parsed = parseCsvText(result.value, {
+          dls: config.dls,
+          maxLatency: config.maxLatency,
+          maxEntries: MAX_REMOTE_ENTRIES_PER_URL,
+        })
         addcsv = addcsv.concat(parsed.entries)
         filtered += parsed.filtered
       } else {
@@ -1076,6 +1136,25 @@ export async function collectNodes(
   ]
 
   let groups = buildGroups(sourceParts)
+
+  // 候选总量上限（在去重之前）：最终订阅只取 maxNodes（默认几百条），
+  // 但远程池可能给出几十万条 —— 先截断再进入去重，去重本身是 CPU 热点。
+  // 预算已耗尽时用更紧的上限：宁可少给节点，也不要在收尾阶段撞 1102。
+  const candidateCap = budget?.exhausted ? CPU_EXHAUSTED_CANDIDATE_CAP : MAX_CANDIDATES_TOTAL
+  const totalCandidates = groups.reduce((n, g) => n + g.entries.length, 0)
+  if (totalCandidates > candidateCap) {
+    let remaining = candidateCap
+    groups = groups
+      .map((g) => {
+        const entries = g.entries.slice(0, Math.max(0, remaining))
+        remaining -= entries.length
+        return { ...g, entries }
+      })
+      .filter((g) => g.entries.length > 0)
+    errors.push(
+      `候选节点超过上限（${candidateCap} 条），已截断 ${totalCandidates - candidateCap} 条`
+    )
+  }
 
   // 国家筛选
   if (countries.length > 0 && groups.length > 0) {
@@ -1284,6 +1363,34 @@ export function resolveSubPorts(config: UserConfig): number[] {
     .filter((p) => Number.isInteger(p) && p > 0 && p <= 65535)
   const unique = [...new Set(ports)]
   return unique.length > 0 ? unique : [DEFAULT_NODE_PORT]
+}
+
+/**
+ * 订阅渲染的**基础节点**上限（按「端口 × 形态」的展开倍数折算）。
+ *
+ * ## 为什么不能直接按 500 截基础节点
+ *
+ * 渲染时每个基础节点会按 `subPorts`（最多 6 个端口）× `subVariants`
+ * （最多 3 种形态）做笛卡尔积展开。500 个基础节点因此可能变成 9000 条最终节点，
+ * 而订阅渲染是纯 CPU 工作（逐条拼 URI + base64 + YAML），免费版单请求只有
+ * 10 ms —— 展开后的体积会把 `renderClash` 直接顶到 1102。
+ *
+ * 这里把上限按展开倍数折算：总展开条目控制在 `base` 以内，
+ * 同时保留一个下限（10），避免极限配置下一条节点都不给。
+ *
+ * ⚠️ 形态按用户**写下的**条目数计（不按启用的子集），只会更保守：
+ * 宁可少给几条节点，也不要在渲染阶段撞 CPU 上限。
+ */
+export function effectiveNodeLimit(config: UserConfig, base = 500): number {
+  const ports = resolveSubPorts(config).length
+  const variants = Math.max(
+    1,
+    String(config.subVariants ?? '')
+      .split(/[,;\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean).length
+  )
+  return Math.max(10, Math.floor(base / Math.max(1, ports * variants)))
 }
 
 /**

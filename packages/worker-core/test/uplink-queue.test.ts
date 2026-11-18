@@ -104,3 +104,42 @@ describe('UplinkQueue（上行顺序）', () => {
     expect(first.order).toEqual([])
   })
 })
+
+describe('上行队列的字节上限', () => {
+  it('积压超过上限只回调一次，之后不再接收新写入', async () => {
+    let overflowCalls = 0
+    let observed = 0
+    const queue = new UplinkQueue({
+      maxQueuedBytes: 2 * 1024 * 1024,
+      onOverflow: (bytes) => {
+        overflowCalls++
+        observed = bytes
+      },
+    })
+    // 写入器永远阻塞：积压只增不减
+    const blocked: UplinkWriter = { write: () => new Promise<void>(() => {}) }
+    const chunk = new Uint8Array(1024 * 1024)
+    for (let i = 0; i < 4; i++) void queue.write(() => blocked, chunk)
+    expect(overflowCalls).toBe(1)
+    // 超过上限的这次也计入回调值（便于诊断里看到实际峰值）
+    expect(observed).toBe(3 * 1024 * 1024)
+    // 超限之后再入队直接被丢弃，不再长大
+    void queue.write(() => blocked, chunk)
+    expect(overflowCalls).toBe(1)
+  })
+
+  it('未超限时正常串行写入并归还计数', async () => {
+    const order: number[] = []
+    const queue = new UplinkQueue({ maxQueuedBytes: 4 * 1024 * 1024 })
+    const writer: UplinkWriter = {
+      async write(chunk: Uint8Array) {
+        order.push(chunk[0]!)
+      },
+    }
+    for (const tag of [1, 2, 3]) {
+      await queue.write(() => writer, new Uint8Array([tag]))
+    }
+    expect(order).toEqual([1, 2, 3])
+    expect(queue.queuedByteCount).toBe(0)
+  })
+})

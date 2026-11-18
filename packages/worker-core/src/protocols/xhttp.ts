@@ -17,9 +17,10 @@
  */
 import type { UserConfig } from '../types'
 import { ByteStream } from './stream'
-import { parseVless, parseVlessBuffer, validateVlessHeader, VLESS_COMMAND_TCP, type VlessHeader } from './vless'
+import { parseVless, parseVlessBuffer, validateVlessHeader, vlessAuthFailed, VLESS_COMMAND_TCP, type VlessHeader } from './vless'
 import type { DialResult, ProxyEndpoint } from '../outbound/dial'
 import { relay, TrafficMeter } from '../budget'
+import { readBodyLimited } from '../util'
 
 import { dial } from '../outbound/dial'
 import { buildDialOptions } from '../outbound/dial-options'
@@ -112,13 +113,13 @@ export function parseXhttpRoute(pathname: string, baseValue: string | undefined)
   const parts = rest.split('/')
   // 下行 / 流式上行：<会话>
   if (parts.length === 1 && parts[0]) {
-    // 会话 id 不含空白与控制字符
-    if (/[\s\u0000-\u001f]/.test(parts[0])) return null
+    // 会话 id 不含空白与控制字符，且长度有上限（它会成为 isolate Map 的键）
+    if (/[\s\u0000-\u001f]/.test(parts[0]) || parts[0].length > SESSION_ID_MAX_CHARS) return null
     return { kind: 'session', sessionId: parts[0] }
   }
   // 分包上行：<会话>/<seq>
   if (parts.length === 2 && parts[0] && /^\d+$/.test(parts[1]!)) {
-    if (/[\s\u0000-\u001f]/.test(parts[0])) return null
+    if (/[\s\u0000-\u001f]/.test(parts[0]) || parts[0].length > SESSION_ID_MAX_CHARS) return null
     const seq = Number(parts[1])
     if (!Number.isSafeInteger(seq) || seq < 0 || seq > 1_000_000) return null
     return { kind: 'packet-up', sessionId: parts[0], seq }
@@ -198,6 +199,13 @@ interface XhttpSession {
 const XHTTP_SESSIONS = new Map<string, XhttpSession>()
 const SESSION_ASSOCIATE_MS = 30_000
 const SESSION_MAX = 100
+/**
+ * 会话 id 的长度上限。
+ *
+ * 会话 id 会成为 isolate 内存 Map 的键（最多 100 条）。正常客户端给的是
+ * 20~40 字符的随机串；不设上限时任何人可以塞超长路径段来放大键的内存占用。
+ */
+const SESSION_ID_MAX_CHARS = 128
 /**
  * **尚未收到协议头**的会话数上限。
  *
@@ -457,6 +465,37 @@ function touchSession(session: XhttpSession, kind: 'upload' | 'downlink', now: n
   session.lastActivityAt = now
 }
 
+/**
+ * 已被关闭的出站结果（弱引用集合，只为幂等）。
+ *
+ * 下行取消的路径上，`ensureDial` 的 `.then` 与 `pull` 里的 `await dialPromise`
+ * 都可能拿到同一条结果并尝试关闭 —— 不防重的话会对同一个 Socket 调两次 close。
+ */
+const CLOSED_DIALS = new WeakSet<object>()
+
+/**
+ * 静默关闭一条出站结果（幂等、绝不外抛）。
+ *
+ * 用于「拨号结果到达时会话已经关闭 / 下行已被取消」的场景：
+ * 这条 Socket 既没有归属也没有关闭者，不主动关就会一直占着
+ * 单请求 6 条并发出站连接里的一个槽位，直到运行时超时。
+ */
+function closeDialResult(result: DialResult): void {
+  if (CLOSED_DIALS.has(result)) return
+  CLOSED_DIALS.add(result)
+  try {
+    try {
+      void result.readable.cancel('session closed')
+    } catch {
+      /* 已关闭 */
+    }
+    const close = result.close
+    void Promise.resolve(close ? close() : result.writable.close()).catch(() => {})
+  } catch {
+    /* 已关闭 */
+  }
+}
+
 function closeSession(id: string, session: XhttpSession): void {
   if (session.closed) return
   session.closed = true
@@ -566,6 +605,12 @@ async function ensureDial(
       })
     )
       .then((result) => {
+        // ⚠️ 会话可能在下行 GET 取消 / 客户端断开时已经关闭（此时 `session.closed`）。
+        // 直接挂到 `dialResult` 上没有意义：`closeSession` 早已执行过，不会再关它。
+        if (session.closed) {
+          closeDialResult(result)
+          return result
+        }
         session.dialResult = result
         return result
       })
@@ -591,16 +636,18 @@ async function pumpUplink(session: XhttpSession, dialResult: DialResult): Promis
       if (chunk) {
         session.pending.delete(session.nextPumpSeq)
         session.nextPumpSeq += 1
-        // 泵出一块只归还**这一块**的额度（审计 B1：全额归还会使剩余块脱离 isolate 预算）
-        releaseRetainedBytes(session, chunk.byteLength)
         if (chunk.byteLength === 0) continue
         if (session.traffic.add(chunk.byteLength)) {
+          // 超限直接丢弃这一块并归还额度
+          releaseRetainedBytes(session, chunk.byteLength)
           recordXhttpDiagnostics(session.targetLabel, { kind: 'budget', message: '流量超限', candidate: 'traffic' }, 'XHTTP 上行流量超限')
           break
         }
         try {
           await writer.write(chunk)
         } catch (err) {
+          // 写入失败：字节已被本地引用但没写出去，额度同样要归还
+          releaseRetainedBytes(session, chunk.byteLength)
           recordXhttpDiagnostics(
             session.targetLabel,
             { kind: 'relay-write', message: String(err), candidate: dialResult.endpoint },
@@ -608,6 +655,10 @@ async function pumpUplink(session: XhttpSession, dialResult: DialResult): Promis
           )
           break
         }
+        // 泵出一块只归还**这一块**的额度（审计 B1：全额归还会使剩余块脱离 isolate 预算）。
+        // ⚠️ 必须放在写入**成功之后**：写在挂起期间这块字节仍被闭包持有，
+        // 提前归还会让新 POST 复用这份额度，账面与实际内存不一致（GPT 审计 perf-4）。
+        releaseRetainedBytes(session, chunk.byteLength)
         continue
       }
       // 无可泵的下一块：等下一 POST 通知
@@ -670,26 +721,31 @@ async function handlePacketUpChunk(
     return null
   }
 
-  let body: Uint8Array
-  try {
-    const buffer = await request.arrayBuffer()
-    body = new Uint8Array(buffer)
-  } catch {
+  // ⚠️ 读 body 也必须**边读边限量**：`Content-Length` 可能缺失（分块传输），
+  // 先 `arrayBuffer()` 再判长度等于「先分配 100MB 再拒绝」——
+  // 并发几个这样的请求就能把 isolate 顶到 1101（GPT 审计 D-04）。
+  const body = await readBodyLimited(request, limit)
+  if (!body) {
     if (isFirstChunk) closeSession(sessionId, session)
-    recordXhttpDiagnostics(sessionId, { kind: 'body-read-error', message: '请求体读取失败', candidate: '' }, '请求体读取失败')
-    return null
-  }
-  if (body.byteLength > limit) {
-    if (isFirstChunk) closeSession(sessionId, session)
-    recordXhttpDiagnostics(sessionId, { kind: 'packet-too-large', message: '分包超出上限', candidate: '' }, '分包超出上限')
+    recordXhttpDiagnostics(
+      sessionId,
+      { kind: 'packet-too-large', message: '分包超出上限或读取失败', candidate: '' },
+      '分包超出上限或读取失败'
+    )
     return null
   }
 
   if (isFirstChunk) {
     const parsed = parseVlessBuffer(body, config.uuid)
     if (!parsed) {
+      // 字节数已够判 UUID 且不匹配 → 明确认证失败，不用等半包（与 WS 路径同口径）
+      const mismatch = vlessAuthFailed(body, config.uuid)
       closeSession(sessionId, session)
-      recordXhttpDiagnostics(sessionId, { kind: 'header-invalid', message: '协议头解析失败或认证未通过', candidate: '' }, '协议头解析失败（含错误 UUID）')
+      recordXhttpDiagnostics(
+        sessionId,
+        { kind: mismatch ? 'header-auth' : 'header-invalid', message: mismatch ? '凭据不匹配' : '协议头解析失败或认证未通过', candidate: '' },
+        mismatch ? '认证失败（UUID 不匹配）' : '协议头解析失败（含错误 UUID）'
+      )
       // 中性页：认证失败绝不回显 VLESS 关键字（铁律 33，静态脱敏管不到运行期响应体）
       return null
     }
@@ -796,6 +852,13 @@ async function handleSessionDownlink(
           const header = await headerPromise
           if (cancelled) return
           if (!header) {
+            // 会话关联失败（多半是上行 POST 与下行 GET 落到了不同 isolate）：
+            // 不写诊断的话，客户端只看到「下行一直不响应」，无从判断是哪个环节。
+            recordXhttpDiagnostics(
+              sessionId,
+              { kind: 'session-assoc', message: '等待上行协议头超时', candidate: '' },
+              '下行等待协议头超时（会话可能落在其他 isolate）'
+            )
             cleanup()
             controller.close()
             return
@@ -813,6 +876,12 @@ async function handleSessionDownlink(
           dialPromise = ensureDial(session, config, proxies)
           void dialPromise
             .then((dr) => {
+              // 客户端在拨号完成前取消了下行：刚建好的 Socket 必须在这里关掉，
+              // 否则既没人读也没人关（见 closeDialResult 注释）。
+              if (cancelled || session.closed) {
+                closeDialResult(dr)
+                return
+              }
               dialResult = dr
               // 上行泵随下行一起起（泵的生命周期与下行流绑定）
               if (session.pumpStarted) return
@@ -838,6 +907,11 @@ async function handleSessionDownlink(
             )
             cleanup()
             controller.close()
+            return
+          }
+          // await 期间客户端可能已取消：此时不能再把这条流当成可用通路。
+          if (cancelled || session.closed) {
+            closeDialResult(dialResult)
             return
           }
         }

@@ -12,7 +12,7 @@
  *   之后    负载
  */
 import type { ByteStream } from './stream'
-import { readAddressFromStream } from './address'
+import { formatIpv6, readAddressFromStream } from './address'
 import { sha224Hex } from './sha224'
 
 export const TROJAN_COMMAND_TCP = 0x01
@@ -54,6 +54,21 @@ export function trojanPasswordHash(password: string): string {
 
 function isCrLf(bytes: Uint8Array): boolean {
   return bytes.length === 2 && bytes[0] === 0x0d && bytes[1] === 0x0a
+}
+
+/**
+ * 协议头字节已够判口令、但口令不匹配。
+ *
+ * 与 `vlessAuthFailed` 同理：`parseTrojanBuffer` 对「半包」与「认证失败」
+ * 都返回 null，WS 入站会白等 2 秒握手截止并允许继续灌包。
+ * Trojan 的凭据是前 56 字节的 SHA-224 十六进制串；空口令一律视为失败（fail-closed）。
+ */
+export function trojanAuthFailed(bytes: Uint8Array, expectedPassword: string): boolean {
+  if (bytes.byteLength < 56) return false
+  if (!expectedPassword) return true
+  const expectedHash = trojanPasswordHash(expectedPassword)
+  const provided = TEXT_DECODER.decode(bytes.subarray(0, 56)).trim().toLowerCase()
+  return provided !== expectedHash
 }
 
 /** 解析 Trojan 请求头 */
@@ -159,9 +174,9 @@ export function parseTrojanBuffer(
     offset += len
   } else if (addressType === 4) {
     if (bytes.byteLength < offset + 16) return null
-    const parts: string[] = []
-    for (let i = 0; i < 8; i++) parts.push(((bytes[offset + i * 2]! << 8) | bytes[offset + i * 2 + 1]!).toString(16))
-    hostname = parts.join(':')
+    const groups: number[] = []
+    for (let i = 0; i < 8; i++) groups.push((bytes[offset + i * 2]! << 8) | bytes[offset + i * 2 + 1]!)
+    hostname = formatIpv6(groups)
     offset += 16
   } else {
     return null

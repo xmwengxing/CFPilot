@@ -38,7 +38,34 @@ import { buildConfigExport, diffConfig, pickImportable } from './config-transfer
 import { CF_IPV4_CIDRS, COUNTRY_NAMES, PREFERRED_DOMAINS, SUPPORTED_COUNTRIES, coloLabel } from './data/pools'
 import { randomHex } from './util'
 import { CpuBudget } from './budget'
+import { readJsonLimited } from './util'
+import { invalidateAuth } from './routes/shared'
 import { BUILD_VERSION, PKG_VERSION } from './version'
+
+
+// 请求体大小上限。
+//
+// 早前所有接口都直接 `request.json()` —— 读多少由客户端说了算，
+// 一个不带 Content-Length 的超大 body 就能把 isolate 内存吃满（1101）。
+// 统一在读取前限量，超限回 413，而不是先分配再校验。
+const MAX_LOGIN_BODY = 8 * 1024
+const MAX_CONFIG_BODY = 256 * 1024
+const MAX_IP_POOL_BODY = 4 * 1024 * 1024
+const MAX_DOMAINS_BODY = 512 * 1024
+
+/** 限量读取 + 解析 JSON；失败时直接给出可返回的 Response */
+async function parseJsonBody<T>(
+  request: Request,
+  maxBytes: number
+): Promise<{ value: T } | { response: Response }> {
+  const result = await readJsonLimited<T>(request, maxBytes)
+  if (!result.ok) {
+    return {
+      response: error(result.tooLarge ? '请求体过大' : '请求体解析失败', result.tooLarge ? 413 : 400),
+    }
+  }
+  return { value: result.value }
+}
 
 // 回填时的条数上限。
 //
@@ -198,13 +225,9 @@ export async function handleApi(
   }
 
   if (path === '/login' && method === 'POST') {
-    let password = ''
-    try {
-      const body = (await request.json()) as { password?: string }
-      password = String(body.password ?? '')
-    } catch {
-      return error('请求体解析失败', 400)
-    }
+    const parsed = await parseJsonBody<{ password?: string }>(request, MAX_LOGIN_BODY)
+    if ('response' in parsed) return parsed.response
+    const password = String(parsed.value.password ?? '')
     if (!password) return error('请输入密码', 400)
     const ip = clientIp(request)
     const now = Date.now()
@@ -235,6 +258,9 @@ export async function handleApi(
     // 自动生成的密码明文只保留到「第一次登录成功」为止。
     // 部署向导注入 PANEL_PASSWORD 的实例根本没有这个键（内部先 get 再决定是否删）。
     await discardPlaintextPassword(store).catch(() => undefined)
+    // 上面两步都改了 KV（哈希升级 / 删明文）：必须让 60 秒鉴权缓存立即失效，
+    // 否则 /status 仍会下发已删除的明文密码，且 60 秒内重复登录会再写一次 KV。
+    invalidateAuth()
     const token = await createSession(store)
     return json({ ok: true }, 200, { 'Set-Cookie': sessionCookie(token) })
   }
@@ -269,12 +295,12 @@ export async function handleApi(
     const token = header.startsWith('Bearer ') ? header.slice(7).trim() : header.trim()
     const authorized = await verifyScanToken(store, token, env)
     if (!authorized) return error('Token 校验失败', 401)
-    let body: { ips?: unknown; mode?: unknown; target?: unknown }
-    try {
-      body = (await request.json()) as { ips?: unknown; mode?: unknown; target?: unknown }
-    } catch {
-      return error('请求体解析失败', 400)
-    }
+    const parsed = await parseJsonBody<{ ips?: unknown; mode?: unknown; target?: unknown }>(
+      request,
+      MAX_IP_POOL_BODY
+    )
+    if ('response' in parsed) return parsed.response
+    const body = parsed.value
     const list = Array.isArray(body.ips) ? body.ips.map((v) => String(v)) : []
     const rawLines = list.map((line) => line.trim()).filter((line) => line.length > 0)
 
@@ -405,12 +431,17 @@ export async function handleApi(
     //
     // 两种模式都**自动启用「手动指定 IP」来源**（poolManual）——
     // 否则用户没勾选该来源时，回填的 IP 不会进订阅，看起来「回填没生效」。
+    //
+    // ⚠️ 必须**重新读一次 CONFIG** 再合并（与上面的 relay 分支同口径）：
+    // `config` 是 15 秒缓存的（见 getConfig），拿它写回会把用户刚在面板上
+    // 改过的其它字段一起覆盖掉，表现为「刚改完又变回去了」。
+    const fresh = await readFreshConfig(store, config)
     const patch: Partial<typeof config> = {}
-    if (!append && (config.add ?? '').trim() !== '') patch.add = ''
-    if (!config.poolManual) patch.poolManual = true
+    if (!append && (fresh.add ?? '').trim() !== '') patch.add = ''
+    if (!fresh.poolManual) patch.poolManual = true
     let clearedManual = false
     if (Object.keys(patch).length > 0) {
-      await saveConfig(store, mergeConfig(config, patch))
+      await saveConfig(store, mergeConfig(fresh, patch))
       ctx.onConfigChanged()
       clearedManual = patch.add !== undefined
     }
@@ -517,12 +548,9 @@ export async function handleApi(
   }
 
   if (path === '/config' && method === 'PUT') {
-    let body: { config?: Partial<UserConfig> }
-    try {
-      body = (await request.json()) as { config?: Partial<UserConfig> }
-    } catch {
-      return error('请求体解析失败', 400)
-    }
+    const parsed = await parseJsonBody<{ config?: Partial<UserConfig> }>(request, MAX_CONFIG_BODY)
+    if ('response' in parsed) return parsed.response
+    const body = parsed.value
     if (!body.config || typeof body.config !== 'object') return error('缺少配置对象', 400)
     // 后端才是安全边界：前端校验只负责体验，任何值都能绕过前端直接打接口
     const invalid = validateConfigPatch(body.config as Record<string, unknown>)
@@ -547,12 +575,9 @@ export async function handleApi(
   // 导入分两步：先 dryRun 拿差异，用户确认后再真正写入。
   // 直接从别人那里拿一份配置覆盖，会静默改掉节点来源、代理模式这类不显眼但影响大的项。
   if (path === '/config/import' && method === 'POST') {
-    let body: { config?: unknown; dryRun?: boolean }
-    try {
-      body = (await request.json()) as { config?: unknown; dryRun?: boolean }
-    } catch {
-      return error('请求体解析失败', 400)
-    }
+    const parsed = await parseJsonBody<{ config?: unknown; dryRun?: boolean }>(request, MAX_CONFIG_BODY)
+    if ('response' in parsed) return parsed.response
+    const body = parsed.value
     if (!body.config || typeof body.config !== 'object') return error('缺少配置对象', 400)
 
     const incoming = pickImportable(body.config as Record<string, unknown>)
@@ -599,12 +624,9 @@ export async function handleApi(
   // ⚠️ 语义：这里**无条件保存**，与 poolManual 勾选无关。
   // poolManual 只决定这些 IP 是否成为订阅节点。
   if (path === '/ips' && method === 'PUT') {
-    let body: { raw?: unknown }
-    try {
-      body = (await request.json()) as { raw?: unknown }
-    } catch {
-      return error('请求体解析失败', 400)
-    }
+    const parsed = await parseJsonBody<{ raw?: unknown }>(request, MAX_IP_POOL_BODY)
+    if ('response' in parsed) return parsed.response
+    const body = parsed.value
     if (typeof body.raw !== 'string') return error('缺少 raw 字段', 400)
 
     // 语法校验：解析层遇到看不懂的行会静默跳过，
@@ -681,12 +703,9 @@ export async function handleApi(
   }
 
   if (path === '/pool/library' && method === 'PUT') {
-    let body: { domains?: unknown }
-    try {
-      body = (await request.json()) as { domains?: unknown }
-    } catch {
-      return error('请求体解析失败', 400)
-    }
+    const parsed = await parseJsonBody<{ domains?: unknown }>(request, MAX_DOMAINS_BODY)
+    if ('response' in parsed) return parsed.response
+    const body = parsed.value
     const list = Array.isArray(body.domains) ? body.domains.map((v) => String(v)) : []
     await saveDomainLibrary(store, list)
     return json({ ok: true, count: list.filter((d) => d.trim()).length })
@@ -718,12 +737,9 @@ export async function handleApi(
   }
 
   if (path === '/route-profile' && method === 'PUT') {
-    let body: { raw?: unknown }
-    try {
-      body = (await request.json()) as { raw?: unknown }
-    } catch {
-      return error('请求体解析失败', 400)
-    }
+    const parsed = await parseJsonBody<{ raw?: unknown }>(request, MAX_CONFIG_BODY)
+    if ('response' in parsed) return parsed.response
+    const body = parsed.value
     if (typeof body.raw !== 'string') return error('缺少 raw 字段', 400)
     if (body.raw.length > 20000) return error('分流规则过长（上限 20000 字符）', 400)
 

@@ -615,3 +615,19 @@ describe('节点命名（回填备注 → 订阅节点名）', () => {
     expect(name).toContain('香港 HKG')
   })
 })
+
+describe('远程池解析的前置截断', () => {
+  /** 25000 行合法 TXT 池条目（2 MB 的池很容易达到这个规模） */
+  const many = Array.from({ length: 25_000 }, (_, i) => `104.16.${(i % 250)}.${(i % 250)}:443`).join('\n')
+
+  it('parseApiList 按 maxEntries 截断，不把几十万个 NodeEntry 造出来', () => {
+    expect(parseApiList(many, 20_000)).toHaveLength(20_000)
+  })
+
+  it('parseCsvText 支持 maxEntries', () => {
+    const header = 'IP 地址,端口,平均延迟,下载速度 (MB/s)'
+    const rows = Array.from({ length: 25_000 }, (_, i) => `104.16.${i % 250}.${i % 250},443,50,9.5`)
+    const parsed = parseCsvText([header, ...rows].join('\n'), { maxEntries: 20_000 })
+    expect(parsed.entries).toHaveLength(20_000)
+  })
+})

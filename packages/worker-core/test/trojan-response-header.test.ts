@@ -155,8 +155,10 @@ describe('Trojan 入站不发 VLESS 响应头', () => {
     await flush()
 
     expect(server.sent).toEqual([])
-    // 口令错 → 首次解析失败 → 80ms 后重试一次仍失败 → 保持静默等待，不发响应头
-    // （重试期间不能把半截报文当成功）
-    expect(server.closed).toBeNull()
+    // 字节数已够判凭据、口令不匹配 → 明确认证失败并立即关闭（close 1008）。
+    // 早前它被当成「半包未收齐」：白等 2 秒握手截止，期间还允许对端继续灌包，
+    // 扫描器与错配客户端都能低成本占用 isolate 资源。
+    expect(server.closed?.code).toBe(1008)
+    expect(server.closed?.reason).toContain('认证失败')
   })
 })

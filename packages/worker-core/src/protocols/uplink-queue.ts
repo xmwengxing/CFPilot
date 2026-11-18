@@ -30,12 +30,42 @@ export interface UplinkWriter {
   write(chunk: Uint8Array): Promise<void>
 }
 
+/**
+ * 队列里允许积压的字节上限（默认 8 MiB）。
+ *
+ * 队列只保证**顺序**，不保证**容量**：目标站读得慢时，客户端仍会一帧帧
+ * 灌进来，每条消息的字节都被闭包持有直到轮到它写。单连接 8 MiB 是
+ * 「TLS ClientHello + 大 POST 首包」的合理上界；超过说明对端已经不读，
+ * 继续积压只会把 isolate 内存吃穿。超限时由上层主动断开（1009），
+ * 让客户端重连，而不是静默堆到 1101。
+ */
+export const DEFAULT_MAX_QUEUED_BYTES = 8 * 1024 * 1024
+
+export interface UplinkQueueOptions {
+  /** 积压上限（字节）；<=0 表示不限制 */
+  maxQueuedBytes?: number
+  /** 超限时回调一次（上层据此关闭连接） */
+  onOverflow?: (queuedBytes: number) => void
+}
+
 export class UplinkQueue {
   /**
    * 链尾。始终以「已结算」状态收尾 —— 一次写失败不能让后续写入被整体跳过，
    * 否则会出现「一次抖动之后隧道再也发不出数据」。
    */
   private tail: Promise<unknown> = Promise.resolve()
+
+  /** 已入队但尚未写完的字节数 */
+  private queuedBytes = 0
+  /** 是否已经因超限停止接收（只回调一次，之后写入直接丢弃） */
+  private overflowed = false
+  private readonly maxQueuedBytes: number
+  private readonly onOverflow?: (queuedBytes: number) => void
+
+  constructor(options: UplinkQueueOptions = {}) {
+    this.maxQueuedBytes = options.maxQueuedBytes ?? DEFAULT_MAX_QUEUED_BYTES
+    this.onOverflow = options.onOverflow
+  }
 
   /**
    * 把一个任务排到链尾。
@@ -56,10 +86,27 @@ export class UplinkQueue {
    * 过早捕获会把数据写给已经关闭的 socket。
    */
   write(current: () => UplinkWriter | null, bytes: Uint8Array): Promise<void> {
+    if (this.overflowed) return Promise.resolve()
+    const size = bytes.byteLength
+    if (this.maxQueuedBytes > 0 && this.queuedBytes + size > this.maxQueuedBytes) {
+      this.overflowed = true
+      this.onOverflow?.(this.queuedBytes + size)
+      return Promise.resolve()
+    }
+    this.queuedBytes += size
     return this.run(async () => {
-      const writer = current()
-      if (!writer) return
-      await writer.write(bytes)
+      try {
+        const writer = current()
+        if (!writer) return
+        await writer.write(bytes)
+      } finally {
+        this.queuedBytes = Math.max(0, this.queuedBytes - size)
+      }
     })
+  }
+
+  /** 当前积压字节（诊断与测试用） */
+  get queuedByteCount(): number {
+    return this.queuedBytes
   }
 }

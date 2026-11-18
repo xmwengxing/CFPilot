@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ensureBootstrap, upgradePasswordHash, verifyPassword, verifyPasswordDetailed } from '../src/auth'
+import { ensureBootstrap, parseCookies, upgradePasswordHash, verifyPassword, verifyPasswordDetailed } from '../src/auth'
 import { MemoryStore } from '../src/store'
 import { ADMIN_PW_HASH_KEY, ADMIN_PW_PLAIN_KEY, PANEL_PATH_KEY } from '../src/config'
 import { sha256Hex } from '../src/util'
@@ -122,5 +122,24 @@ describe('ensureBootstrap 凭据优先级', () => {
     // 两项都未提供：路径随机生成，密码随机生成并留明文
     expect(ctx.panelPath).toMatch(/^\/cfpilot-[a-z0-9]{6}$/)
     expect(ctx.generatedPassword).toBeTruthy()
+  })
+})
+
+describe('Cookie 解析容错', () => {
+  it('畸形百分号编码只让该项无效，不抛出、不影响其它 Cookie', () => {
+    const request = new Request('https://panel.example.com/login', {
+      headers: { Cookie: 'cfp_session=%; theme=dark' },
+    })
+    expect(() => parseCookies(request)).not.toThrow()
+    const cookies = parseCookies(request)
+    expect(cookies.theme).toBe('dark')
+    expect(cookies.cfp_session).toBeUndefined()
+  })
+
+  it('正常百分号编码照常解码', () => {
+    const request = new Request('https://panel.example.com/', {
+      headers: { Cookie: 'a=%E4%B8%AD' },
+    })
+    expect(parseCookies(request).a).toBe('中')
   })
 })

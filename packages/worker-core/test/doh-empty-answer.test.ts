@@ -193,4 +193,37 @@ describe('DoH 空应答短路', () => {
     // 命中负缓存，无新请求
     expect(calls.length).toBe(callsAfterFirst)
   })
+
+  it('所有 provider 都失败（超时/网络错误）→ 不写负缓存，下一次仍会重试', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        calls.push(url)
+        throw new Error('network down')
+      })
+    )
+
+    // 全失败只是一次「没拿到结论」，不是权威空应答
+    expect(await resolveEndpointIps('flaky.example', 443)).toEqual([])
+    const callsAfterFirst = calls.length
+    expect(await resolveEndpointIps('flaky.example', 443)).toEqual([])
+    // 没有被 30 秒负缓存钉死：第二次仍然发起了 DoH
+    expect(calls.length).toBeGreaterThan(callsAfterFirst)
+  })
+
+  it('预算已耗尽导致的空结果同样不进负缓存', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        calls.push(url)
+        throw new Error('aborted')
+      })
+    )
+
+    expect(await resolveEndpointIps('budget.example', 443, { deadline: Date.now() - 1 })).toEqual([])
+    const callsAfterFirst = calls.length
+    // 没有拿到权威结论 → 不该进负缓存；给足预算再解析时必须真的发起查询
+    expect(await resolveEndpointIps('budget.example', 443)).toEqual([])
+    expect(calls.length).toBeGreaterThan(callsAfterFirst)
+  })
 })

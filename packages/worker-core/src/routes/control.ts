@@ -13,6 +13,7 @@ import { CpuBudget } from '../budget'
 import type { RenderContext, SubFormat } from '../sub-engine'
 import {
   collectNodes,
+  effectiveNodeLimit,
   renderSubscription,
   resolveSubPorts,
   subContentDisposition,
@@ -117,7 +118,12 @@ async function handleSubscription(
   // 无上限时超大池子会直接烧穿免费版 CPU 配额。统一封顶 500 条，
   // 超出部分丢弃并在 Content 层面对用户不可见 —— 500 条对任何客户端
   // 都远超可用上限，且与面板预览的展示口径一致。
-  const RENDER_NODE_LIMIT = 500
+  //
+  // ⚠️ 上限必须按「端口 × 形态」的展开倍数折算（Gemini 审计 P2-1）：
+  // 500 是**基础节点**上限，而渲染会对每个基础节点按 ≤6 端口 × ≤3 形态展开，
+  // 最坏 9000 条最终节点，直接撞免费版 10 ms CPU（1102）。
+  const ports = resolveSubPorts(config)
+  const effectiveLimit = effectiveNodeLimit(config)
   let renderNodes = collected.nodes
   let renderGroups = collected.groups
   // 收集结束后复核预算：内部 check 只覆盖循环中段，收尾段仍可能超限。
@@ -128,9 +134,9 @@ async function handleSubscription(
   } catch {
     /* 预算已耗尽：下面的截断即是保护 */
   }
-  if (renderNodes.length > RENDER_NODE_LIMIT) {
-    renderNodes = renderNodes.slice(0, RENDER_NODE_LIMIT)
-    let remaining = RENDER_NODE_LIMIT
+  if (renderNodes.length > effectiveLimit) {
+    renderNodes = renderNodes.slice(0, effectiveLimit)
+    let remaining = effectiveLimit
     renderGroups = collected.groups
       .map((g) => {
         const entries = g.entries.slice(0, Math.max(0, remaining))
@@ -163,7 +169,7 @@ async function handleSubscription(
     config,
     domain,
     port: 443,
-    ports: resolveSubPorts(config),
+    ports,
     protocol: config.subProtocol,
     transport: config.subTransport,
     routeProfile,

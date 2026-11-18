@@ -22,8 +22,8 @@
  */
 import type { UserConfig } from '../types'
 import type { ProxyEndpoint } from '../outbound/proxy-pool'
-import { parseVlessBuffer, validateVlessHeader, VLESS_COMMAND_UDP } from '../protocols/vless'
-import { parseTrojanBuffer, TROJAN_COMMAND_UDP } from '../protocols/trojan'
+import { parseVlessBuffer, validateVlessHeader, vlessAuthFailed, VLESS_COMMAND_UDP } from '../protocols/vless'
+import { parseTrojanBuffer, TROJAN_COMMAND_UDP, trojanAuthFailed } from '../protocols/trojan'
 import { DnsUdpSession } from './udp-dns'
 import { concatBytes, DownlinkPacer, normalizeWsMessage } from '../protocols/stream'
 import { canSwitchToBuiltinRelay } from './relay-guard'
@@ -31,6 +31,7 @@ import { UplinkQueue } from './uplink-queue'
 import { dial, type DialResult } from '../outbound/dial'
 import { buildDialOptions } from '../outbound/dial-options'
 import { TrafficMeter } from '../budget'
+import { truncate } from '../util'
 import {
   classifyDialFailure,
   explainDialFailure,
@@ -108,6 +109,11 @@ const MAX_PENDING_TOTAL_BYTES = 32 * 1024 * 1024
 /** 拨号暂存池只允许通过属性更新，避免增加模块级可变 let（作用域护栏测试）。 */
 const pendingBudget = { bytes: 0 }
 
+/** 拨号暂存池当前占用（诊断与回归测试用，只读） */
+export function pendingBudgetBytes(): number {
+  return pendingBudget.bytes
+}
+
 /**
  * 截断 close reason 到 RFC 6455 允许的长度。
  *
@@ -166,6 +172,8 @@ const RECENT_DIAGNOSTICS_LIMIT = 20
 const DIAG_COUNTERS = {
   stallRedials: 0,
   eofRedials: 0,
+  /** 下行读取报错次数（区分「上游 Reset」与「正常 EOF」，见 pumpDown 的 catch） */
+  downlinkReadErrors: 0,
   guardedRedials: 0,
   firstPacketTimeouts: 0,
   downlinkYields: 0,
@@ -465,7 +473,11 @@ export async function handleWebSocket(
    * 常规路径的写入本身按调用顺序入队，但**换出站**时「重放 + 补写缓存」
    * 与「切换期间新到的帧」会互相插队 —— 必须全部走同一条链。
    */
-  const uplink = new UplinkQueue()
+  const uplink = new UplinkQueue({
+    // 队列只保证顺序，不保证容量：目标站读得慢时客户端仍在灌帧，
+    // 单连接积压超过上限说明对端已经不读 —— 主动断开让客户端重连。
+    onOverflow: () => closeWith(1009, '上行积压过多（目标侧不读）'),
+  })
   /** 握手截止定时器（**唯一一个**：绝不在每帧里新建） */
   let handshakeTimer: ReturnType<typeof setTimeout> | null = null
   /** 首包等待定时器（WS 建立后零字节时关闭连接） */
@@ -598,6 +610,22 @@ export async function handleWebSocket(
   }
 
   /**
+   * 静默关闭一条出站结果（幂等、绝不外抛）。
+   *
+   * 优先 `DialResult.close()`：它会同时关读写两端并立即释放并发连接槽位；
+   * 只有写端时退回 `writable.close()`（对 sockets 来说同样会关掉整条连接）。
+   * 调用方负责保证「这条连接不该再被使用」。
+   */
+  const closeDialResult = (result: DialResult): void => {
+    try {
+      const close = result.close
+      void Promise.resolve(close ? close() : result.writable.close()).catch(() => {})
+    } catch {
+      /* 已关闭 */
+    }
+  }
+
+  /**
    * 统一清理：**幂等**，无论谁先触发（客户端断开 / 读错误 / 拨号超时 / 正常结束）
    * 都只真正执行一次。
    *
@@ -635,22 +663,9 @@ export async function handleWebSocket(
         /* 已释放 */
       }
     }
-    if (dialed) {
-      const close = dialed.close
-      if (close) {
-        try {
-          void close()
-        } catch {
-          /* 已关闭 */
-        }
-      } else {
-        try {
-          void dialed.writable.close()
-        } catch {
-          /* 已关闭 */
-        }
-      }
-    }
+    // DNS-over-DoH 会话：断开后必须中止在飞查询，否则后台继续吃子请求配额
+    udpSession?.close()
+    if (dialed) closeDialResult(dialed)
   }
 
   /**
@@ -692,20 +707,21 @@ export async function handleWebSocket(
   let retained: Uint8Array[] = []
   let retainedBytes = 0
 
-  const retain = (bytes: Uint8Array): void => {
-    if (bytes.byteLength === 0 || downlinkBytes > 0) return // 通路已确认，无需留存
+  const retain = (bytes: Uint8Array): boolean => {
+    if (bytes.byteLength === 0 || downlinkBytes > 0) return true // 通路已确认，无需留存
     if (retainedBytes + bytes.byteLength > MAX_RELAY_BUFFER_BYTES) {
       closeWith(1009, '未确认通路的上行数据过多')
-      return
+      return false
     }
     // 单连接上限之外还要看 isolate 总预算：并发连接各留几 MB 就能把内存吃穿
     if (retainedTotalBytes + bytes.byteLength > MAX_RETAINED_TOTAL_BYTES) {
       closeWith(1009, '实例内存预算已满，请重试')
-      return
+      return false
     }
     retained.push(bytes)
     retainedBytes += bytes.byteLength
     retainedTotalBytes += bytes.byteLength
+    return true
   }
 
   const clearRetained = (): void => {
@@ -797,8 +813,10 @@ export async function handleWebSocket(
           send(value)
         }
       }
-    } catch {
-      /* 传输错误 */
+    } catch (err) {
+      // 传输错误：留痕（原因会进 close reason 与 /__diag 计数器）
+      downReadError = err
+      DIAG_COUNTERS.downlinkReadErrors++
     } finally {
       try {
         reader.releaseLock()
@@ -837,17 +855,31 @@ export async function handleWebSocket(
       const used = dialed
       // `dl/ret/rd`：下行字节 / 未确认留存 / 重拨次数，定位「零下行直接 done」时区分
       // 「上行没发出去」与「发了但目标没回」。
+      // `err=`：下行读错误。只在零下行时前置（有下行时说明通路已确认，
+      // 末尾的错误不该挤掉 via/ep 这两项判据）。
+      const readErr =
+        downReadError && downlinkBytes === 0
+          ? ` err=${truncate(String(downReadError), 40)}`
+          : ''
       closeWith(
         1000,
         used
-          ? `done via=${used.via} ep=${used.endpoint} dl=${downlinkBytes} ret=${retainedBytes} rd=${relayRedialCount}`
-          : 'done'
+          ? `done${readErr} via=${used.via} ep=${used.endpoint} dl=${downlinkBytes} ret=${retainedBytes} rd=${relayRedialCount}`
+          : `done${readErr}`
       )
     }
   }
 
   /** 已收到的下行字节数（用于静默检测） */
   let downlinkBytes = 0
+  /**
+   * 下行读取的异常（上游 Reset / 连接被重置）。
+   *
+   * 早前 `catch { 传输错误 }` 把它整个吞掉，正常收尾仍按
+   * `close 1000 done` —— 客户端与 /__diag 都分不清「目标站正常结束」
+   * 与「上游连接被重置」，自动重连与故障定位都缺判据。
+   */
+  let downReadError: unknown = null
   /** 本会话累计上行字节（供 /__diag 的结构化会话快照；TrafficMeter 在无限额时不计数） */
   let sessionUlBytes = 0
 
@@ -919,14 +951,21 @@ export async function handleWebSocket(
     // 先摘链再写：写入期间新到的帧会看到 `writer` 已就绪而走 `pumpUp`，
     // 排在本任务之后（顺序由 `UplinkQueue` 保证），不会被本次循环再写一遍。
     const pending = pendingUplink
+    const totalBytes = pendingUplinkBytes
     pendingUplink = []
     pendingUplinkBytes = 0
+    // ⚠️ isolate 额度**一次性**归还，不能逐块还：
+    // 逐块还时只要循环在中途抛错（`retain` 超限已 close、`target.write` 被对端重置），
+    // 后面没遍历到的分块字节就永远留在 `pendingBudget.bytes` 里 ——
+    // `cleanup()` 扣的是已经清零的 `pendingUplinkBytes`，补不回来。
+    // 攒到 32 MiB 后本 isolate 所有新连接在拨号期间收数据都会被 1009 拒掉。
+    pendingBudget.bytes = Math.max(0, pendingBudget.bytes - totalBytes)
     for (const chunk of pending) {
-      // 额度从「拨号暂存池」转交给「留存池」：先归还 pending 计数，
-      // retain 会重新计入 retainedTotalBytes，两池不重复计数（审计 L5）。
-      pendingBudget.bytes = Math.max(0, pendingBudget.bytes - chunk.byteLength)
-      // 逐块留存：重放需要的是**原始帧边界**，拼成一块既多一次复制、也让留存配额失真。
-      retain(chunk)
+      // 已关闭就别再写了：`retain` 失败会触发 closeWith，继续写只会制造一次注定失败的写入。
+      if (closed) return
+      // 额度从「拨号暂存池」转交给「留存池」（retain 重新计入 retainedTotalBytes），
+      // 两池不重复计数（审计 L5）；留存由 cleanup 的 clearRetained 兜底归还。
+      if (!retain(chunk)) return
       await target.write(chunk)
     }
   }
@@ -1002,10 +1041,27 @@ export async function handleWebSocket(
     )
   }
 
+  /**
+   * 协议头已够判凭据、但凭据不匹配 —— 应立即关闭，而不是等握手截止。
+   *
+   * 早前 `parseXxxBuffer` 对「半包」与「认证失败」都返回 null，
+   * 这里误当成半包：启动 2 秒截止定时器，期间还允许对端继续灌最多 64KB
+   * （扫描器与错误 UUID 客户端白占资源）。
+   */
+  const credentialMismatch = (bytes: Uint8Array): boolean =>
+    mode === 'vless'
+      ? vlessAuthFailed(bytes, config.uuid)
+      : trojanAuthFailed(bytes, config.trojanPassword)
+
   const establish = async (): Promise<void> => {
     if (closed || established) return
     const parsed = parseTarget(buffer)
     if (!parsed) {
+      if (credentialMismatch(buffer)) {
+        recordDiagnostics('', [], '认证失败：凭据不匹配（立即关闭，不等握手截止）')
+        closeWith(1008, '认证失败或协议头非法')
+        return
+      }
       // 数据还不够（客户端可能分帧发送）：登记**唯一一个**截止定时器。
       //
       // ⚠️ 不能每帧都 setTimeout：旧定时器不会被清掉，会累积出多个
@@ -1119,6 +1175,15 @@ export async function handleWebSocket(
       return
     }
 
+    // ⚠️ 拨号期间客户端可能已经断开（`onClose` 会置 `closed` 并 cleanup）。
+    // 这时刚建好的 Socket 既没有归属也没有关闭者，必须在这里丢掉 ——
+    // 否则它会一直占着「单请求 6 条并发出站」里的一个槽位等到运行时超时。
+    if (closed) {
+      closeDialResult(dialed)
+      recordDiagnostics(`${parsed.hostname}:${parsed.port}`, [], '入站已关闭，丢弃拨号结果')
+      return
+    }
+
     const establishedWriter = dialed.writable.getWriter()
     writer = establishedWriter
     recordRoute(`${parsed.hostname}:${parsed.port}`, dialed, 'initial')
@@ -1131,17 +1196,16 @@ export async function handleWebSocket(
     // ⚠️ 「首包 + 暂存帧」必须写在**同一个串行任务**里：拆成两次排队时，
     // 两者之间到达的新帧会插到暂存帧前面，TLS 分片一换序就是 bad_record_mac。
     //
-    // 用 subarray 而不是 slice：这里只是给「协议头之后的负载」一个视图，
-    // 复制一遍纯属浪费（大首包 / TLS ClientHello 有几 KB）。
-    // 视图指向的 buffer 紧接着会被重置，retain 留存的是视图本身，重放时会真正复制。
+    // 用 slice 而不是 subarray：subarray 与 `buffer` 共享底层 ArrayBuffer，
+    // 留存期间整块（最多 64KB 握手缓冲）都无法回收；这里只复制负载本身。
     const payload =
-      buffer.byteLength > parsed.headerLength ? buffer.subarray(parsed.headerLength) : new Uint8Array(0)
+      buffer.byteLength > parsed.headerLength ? buffer.slice(parsed.headerLength) : new Uint8Array(0)
     buffer = new Uint8Array(0)
     try {
       await uplink.run(async () => {
         if (payload.byteLength > 0) {
           // 先留存再写：直连可能假活，首字节确认前上行必须可重放
-          retain(payload)
+          if (!retain(payload)) return
           await establishedWriter.write(payload)
         }
         await drainPendingUplink(establishedWriter)
@@ -1320,11 +1384,15 @@ export async function handleWebSocket(
           )
         )
         if (!socket) continue
+        // 拨号期间客户端已断开：这条入口的 Socket 也不能留（同 establish 的收口）。
+        if (closed) {
+          closeDialResult(socket)
+          return
+        }
 
         dialed = socket
         recordRoute(`${targetInfo.hostname}:${targetInfo.port}`, socket, 'redial')
         const nextWriter = socket.writable.getWriter()
-        writer = nextWriter
 
         // 反代是「按 SNI 转发」的第三方服务器。
         //
@@ -1344,17 +1412,29 @@ export async function handleWebSocket(
           replayOffset += chunk.byteLength
         }
 
-        // ⚠️ 重放与补写必须**在同一个队列任务里**完成。
+        // ⚠️ 重放与补写必须**在同一个队列任务里**完成，且 `writer` 要**推迟到
+        // 重放完成后**才对外开放：
         //
-        // 拆成两个 await 时，重放写入期间到达的帧会看到 `writer` 已就绪而
-        // 直接排队，随后补写的旧缓存帧反而排在它后面 —— 上行顺序变成
-        // 「重放, 新帧, 旧缓存帧」，TLS 分片一换序就是 bad_record_mac。
+        // 早前实现在 `uplink.run` 之前就 `writer = nextWriter`。于是重放写挂起的那段
+        // 微任务窗口里到达的新帧会看到 writer 非空 → 先 `retain`、再排进队列；
+        // 而随后 `drainPendingUplink` 又把**重拨期间**积压的旧帧追加到 retained 末尾。
+        // retained 的字节顺序变成「首包, 新帧, 旧帧」—— 这条入口若也假活、进入
+        // 下一轮重拨，重放给下一个入口的 TLS 密文流顺序彻底错乱（bad_record_mac）。
+        //
+        // 现在：重放 + 补写全部完成后才开放 writer，期间到达的新帧继续进
+        // `pendingUplink`；开放后再补一次 drain，覆盖「补写期间新到」的尾部帧。
         await uplink.run(async () => {
           if (replay.byteLength > 0) await nextWriter.write(replay)
           // 重拨期间客户端继续发的帧暂存在 `pendingUplink` 里 —— 这里补写，
           // 否则它们会一直留在暂存区等待一个永远不会到来的 establish。
           await drainPendingUplink(nextWriter)
+          if (closed) return
+          writer = nextWriter
+          // 补写期间可能又有新帧进了暂存区（它们比「开放 writer 后排队」的帧更早到达）
+          await drainPendingUplink(nextWriter)
         })
+        // 重放期间客户端断开：Socket 已由 cleanup 关闭，不再起新泵。
+        if (closed) return
 
         recordDiagnostics(
           `${targetInfo.hostname}:${targetInfo.port}`,
@@ -1390,72 +1470,103 @@ export async function handleWebSocket(
     }
   }
 
+  /**
+   * 一条入站消息的完整处理（**只做同步状态变更**，异步工作放到链外）。
+   *
+   * ## 为什么要归一化「在链内」完成
+   *
+   * 早前每条 message 都各自起一个 async IIFE：`Blob` 分支要先 `await
+   * arrayBuffer()`，而 `ArrayBuffer` 分支不 await —— 两类消息混发时，
+   * 后到的 ArrayBuffer 帧可能先完成归一化，字节顺序就乱了
+   * （TLS 分片换序 = bad_record_mac）。这里把「归一化 + 状态变更」放进
+   * 严格顺序链，异步工作（拨号 / 写入）**不 await**，避免把它们的长延迟
+   * 串进后续帧的处理顺序。
+   */
+  let inboundChain: Promise<void> = Promise.resolve()
+
+  const handleMessage = async (data: unknown): Promise<void> => {
+    // ⚠️ 不能再直接 `new Uint8Array(data as ArrayBuffer)`：CF 运行时下
+    // event.data 也可能是 Blob，那样会得到长度 0 的视图、每条消息被
+    // 静默丢弃（101 成功但隧道全 -1）。复用 stream.ts 的四分支归一化。
+    const normalized = normalizeWsMessage(data)
+    const bytes = normalized instanceof Promise ? await normalized : normalized
+    if (!bytes || bytes.byteLength === 0) return
+    // 收到任意首字节即解除首包等待；established 之后不再重启这个定时器
+    clearFirstPacketTimer()
+
+    // 数据面流量熔断：上下行都计量，超限即断（0 = 不限制）
+    sessionUlBytes += bytes.byteLength
+    if (traffic.add(bytes.byteLength)) {
+      cutByTraffic()
+      return
+    }
+
+    if (!established) {
+      buffer = concatBytes(buffer, bytes)
+      if (buffer.byteLength > MAX_HEADER_BYTES) {
+        closeWith(1009, '握手头超过 64KB')
+        return
+      }
+      // 不 await：拨号可能要好几秒，等它会把后续帧堵在顺序链里
+      void establish().catch((err) => closeWith(1011, String(err)))
+      return
+    }
+    // DNS-over-DoH 会话：上行全部按长度前缀切帧，不走出站 socket
+    if (udpSession) {
+      udpSession.push(bytes)
+      return
+    }
+    // ⚠️ 拨号期间（established 已置位但 writer 未就绪）到达的数据**不能丢**：
+    // 真实客户端（Xray / v2rayN / Clash 等）都是把协议响应头之后的首包
+    // 紧跟协议头背靠背发出，不等响应头。早前这里直接走 pumpUp，
+    // 而 writer 仍为 null → `if (!writer) return` 静默丢弃 →
+    // 表现为「VLESS 认证通过但隧道挂起、永远等不到响应」。
+    //
+    // 处理方式：按帧暂存（**不拼接**），writer 就绪后与首包一起补写。
+    // ⚠️ 不能写成 `concatBytes(buffer, bytes)`：那会把已有全部字节每帧重拷一遍，
+    // 是 O(n²)，拨号窗口里传 1 MB 就会撞穿 10 ms CPU 预算（见 `pendingUplink` 注释）。
+    if (!writer) {
+      // isolate 级总预算（审计 L5）：并发拨号连接各留几 MiB 就能把内存吃穿。
+      if (pendingBudget.bytes + bytes.byteLength > MAX_PENDING_TOTAL_BYTES) {
+        closeWith(1009, '实例内存预算已满，请重试')
+        return
+      }
+      pendingUplink.push(bytes)
+      pendingUplinkBytes += bytes.byteLength
+      pendingBudget.bytes += bytes.byteLength
+      // 兜底防内存膨胀：拨号期间暂存上限（协议头之后就是负载，允许较大值）
+      if (pendingUplinkBytes > MAX_RELAY_BUFFER_BYTES) {
+        closeWith(1009, '拨号期间数据过多')
+        return
+      }
+      return
+    }
+    // 首字节确认前的上行留存（假活时反代重拨要重放，见 retain 注释）。
+    // retain 返回 false 表示已超预算并 closeWith，此时不能再写入（流已关）。
+    if (!retain(bytes)) return
+    // 写入由 UplinkQueue 串行化，不在这里 await（顺序由队列保证，块内的
+    // 长写入不应阻塞后续帧的接收与留存）
+    void pumpUp(bytes)
+  }
+
   server.addEventListener('message', (event: MessageEvent) => {
-    void (async () => {
-      // ⚠️ 不能再直接 `new Uint8Array(data as ArrayBuffer)`：CF 运行时下
-      // event.data 也可能是 Blob，那样会得到长度 0 的视图、每条消息被
-      // 静默丢弃（101 成功但隧道全 -1）。复用 stream.ts 的四分支归一化。
-      // Blob 的 arrayBuffer() 必须先 await 完成，再做任何拼接/入队，
-      // 否则字节顺序会乱（TLS 分片换序 = bad_record_mac）。
-      const normalized = normalizeWsMessage(event.data)
-      const bytes = normalized instanceof Promise ? await normalized : normalized
-      if (!bytes || bytes.byteLength === 0) return
-      // 收到任意首字节即解除首包等待；established 之后不再重启这个定时器
-      clearFirstPacketTimer()
-
-      // 数据面流量熔断：上下行都计量，超限即断（0 = 不限制）
-      sessionUlBytes += bytes.byteLength
-      if (traffic.add(bytes.byteLength)) {
-        cutByTraffic()
-        return
-      }
-
-      if (!established) {
-        buffer = concatBytes(buffer, bytes)
-        if (buffer.byteLength > MAX_HEADER_BYTES) {
-          closeWith(1009, '握手头超过 64KB')
-          return
-        }
-        await establish()
-        return
-      }
-      // DNS-over-DoH 会话：上行全部按长度前缀切帧，不走出站 socket
-      if (udpSession) {
-        udpSession.push(bytes)
-        return
-      }
-      // ⚠️ 拨号期间（established 已置位但 writer 未就绪）到达的数据**不能丢**：
-      // 真实客户端（Xray / v2rayN / Clash 等）都是把协议响应头之后的首包
-      // 紧跟协议头背靠背发出，不等响应头。早前这里直接走 pumpUp，
-      // 而 writer 仍为 null → `if (!writer) return` 静默丢弃 →
-      // 表现为「VLESS 认证通过但隧道挂起、永远等不到响应」。
-      //
-      // 处理方式：按帧暂存（**不拼接**），writer 就绪后与首包一起补写。
-      // ⚠️ 不能写成 `concatBytes(buffer, bytes)`：那会把已有全部字节每帧重拷一遍，
-      // 是 O(n²)，拨号窗口里传 1 MB 就会撞穿 10 ms CPU 预算（见 `pendingUplink` 注释）。
-      if (!writer) {
-        // isolate 级总预算（审计 L5）：并发拨号连接各留几 MiB 就能把内存吃穿。
-        if (pendingBudget.bytes + bytes.byteLength > MAX_PENDING_TOTAL_BYTES) {
-          closeWith(1009, '实例内存预算已满，请重试')
-          return
-        }
-        pendingUplink.push(bytes)
-        pendingUplinkBytes += bytes.byteLength
-        pendingBudget.bytes += bytes.byteLength
-        // 兜底防内存膨胀：拨号期间暂存上限（协议头之后就是负载，允许较大值）
-        if (pendingUplinkBytes > MAX_RELAY_BUFFER_BYTES) {
-          closeWith(1009, '拨号期间数据过多')
-          return
-        }
-        return
-      }
-      // 首字节确认前的上行留存（假活时反代重拨要重放，见 retain 注释）
-      retain(bytes)
-      await pumpUp(bytes)
-    })()
+    inboundChain = inboundChain
+      .then(() => handleMessage(event.data))
+      .catch(() => {
+        /* 单条消息的错误不打断整条链 */
+      })
   })
 
+  /**
+   * 客户端断开 / 传输错误。
+   *
+   * ⚠️ 必须**先**置终止状态再清理：`cleanup()` 只会关掉当时已存在的 `dialed`，
+   * 而 `establish()` 可能正 `await dial()`。不置 `closed` 的话，拨号稍后成功时
+   * 那条 `if (closed)` 判定看不到「客户端已经走了」，仍会建 writer、起泵，
+   * 留下一条无人持有也无人关闭的出站连接，直到运行时超时才释放槽位。
+   */
   const onClose = (): void => {
+    closed = true
     cleanup()
   }
   server.addEventListener('close', onClose)

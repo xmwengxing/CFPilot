@@ -119,6 +119,21 @@ describe('POST /api/v1/preferred-ips（回填）', () => {
     expect(saved.addApi).toBe('https://example.test/pool.txt')
   })
 
+  it('用 KV 里的最新配置合并（不覆盖面板刚改的字段）', async () => {
+    // 用户在回填前 15 秒改过别的字段：KV 里已是新值，
+    // 而上下文里的 config 仍是 15 秒缓存（旧值）。
+    const fresh = mergeConfig(config, { maxNodes: 999 })
+    await store.put(CONFIG_KEY, JSON.stringify(fresh))
+    expect(config.maxNodes).not.toBe(999)
+
+    const r = await push(['9.9.9.9:443#LAX'])
+    expect(r.count).toBe(1)
+
+    const saved = JSON.parse((await store.get(CONFIG_KEY))!) as UserConfig
+    expect(saved.maxNodes).toBe(999) // 不能被旧缓存回滚
+    expect(saved.add).toBe('') // 回填照常清空手填池
+  })
+
   it('手填池本来为空时不算覆盖', async () => {
     config = mergeConfig(DEFAULT_CONFIG, { add: '' })
     await store.put(CONFIG_KEY, JSON.stringify(config))

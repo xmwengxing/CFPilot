@@ -62,6 +62,16 @@ const BASE_COOLDOWN_MS = 30_000
 /** 冷却上限 */
 const MAX_COOLDOWN_MS = 5 * 60_000
 
+/**
+ * 表大小上限。
+ *
+ * 用户长期更换 SOCKS5 / HTTP 代理时，每次失败都会产生一条新记录；
+ * 早前这张表**既无上限也无过期清理**，长生命周期 isolate 会一直累积。
+ * 按插入顺序 FIFO 淘汰（与 `endpoint-health.ts` 的容量口径一致，但不合并两套模块 ——
+ * 代理有「目标站拒绝 = 节点是活的」这条独立语义，合并只会让判定漂移）。
+ */
+const MAX_ENTRIES = 256
+
 interface HealthState {
   /** 连续失败次数（成功一次就清零） */
   fails: number
@@ -71,6 +81,24 @@ interface HealthState {
 
 /** isolate 级的健康记忆 */
 const HEALTH = new Map<string, HealthState>()
+
+/**
+ * 清理「冷却已过期」的条目，并守住容量上限。
+ *
+ * ⚠️ 只删 `cooldownUntil > 0 && <= now`（已进过冷却且已过期）。
+ * 不足阈值的记录 `cooldownUntil === 0`，按 `<= now` 删会把计数打回 1，
+ * 阈值永远触发不了 —— 与 `endpoint-health.ts` 的 prune 同一类错误，不要改成两套口径。
+ */
+function prune(now: number): void {
+  for (const [key, state] of HEALTH) {
+    if (state.cooldownUntil > 0 && state.cooldownUntil <= now) HEALTH.delete(key)
+  }
+  while (HEALTH.size >= MAX_ENTRIES) {
+    const oldest = HEALTH.keys().next().value
+    if (oldest === undefined) break
+    HEALTH.delete(oldest)
+  }
+}
 
 /** 节点的唯一标识 */
 export function proxyHealthKey(p: ProxyIdentity): string {
@@ -90,6 +118,7 @@ export function isProxyInCooldown(p: ProxyIdentity, now: number): boolean {
  */
 export function recordProxyFailure(p: ProxyIdentity, now: number): void {
   const key = proxyHealthKey(p)
+  prune(now)
   const state = HEALTH.get(key) ?? { fails: 0, cooldownUntil: 0 }
   state.fails += 1
   if (state.fails >= FAIL_THRESHOLD) {

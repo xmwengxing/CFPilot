@@ -99,14 +99,23 @@ export function buildConfigExport(config: UserConfig, now: number = Date.now()):
 
   const omitted = NEVER_EXPORT.map((item) => ({ field: item.field, reason: item.reason }))
 
-  // 落地代理里可能带 `user:pass@`：有凭据就整体不导出，避免把 VPS 口令送出去
-  for (const key of ['socks5', 'httpProxy'] as const) {
+  /**
+   * 可能携带凭据的代理类字段：有 userinfo（`user:pass@`）就整体不导出。
+   *
+   * ⚠️ 早前只检查 `socks5` / `httpProxy`，但 `proxyIp` 与 `relayPool` 同样
+   * 走 `PROXY_LINE` 校验（该规则允许带 userinfo 的条目），于是
+   * 「`socks5://user:pass@host` 写进 proxyIp / relayPool」时会被原样导出。
+   * 校验规则与导出规则必须同一口径。
+   */
+  for (const key of ['socks5', 'httpProxy', 'proxyIp', 'relayPool'] as const) {
     const value = String(config[key] ?? '')
     if (!value) {
       out[key] = ''
       continue
     }
     if (value.includes('@')) {
+      // 白名单循环里已经先赋过值，这里必须删掉（否则脱敏形同虚设）
+      delete out[key]
       omitted.push({ field: key, reason: '含用户名/口令，需手工重新填写' })
       continue
     }

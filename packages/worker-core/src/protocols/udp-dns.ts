@@ -101,12 +101,37 @@ export class DnsUdpSession {
   private waiting: Uint8Array[] = []
   private inflight = 0
   private dropped = 0
+  /** 连接是否已关闭（关闭后在飞请求要中止、回写要停止） */
+  private closed = false
+  /** 在飞 DoH 请求的取消器（关闭时统一 abort，别让后台继续吃子请求配额） */
+  private readonly controllers = new Set<AbortController>()
 
   constructor(private readonly options: DnsUdpOptions) {}
 
+  /**
+   * 关闭会话：清空队列并中止在飞查询。
+   *
+   * WebSocket 断开后必须调用 —— 否则后台 DoH 请求会继续消耗子请求配额，
+   * 回写也会打到一个已经关闭的 WebSocket 上。
+   */
+  close(): void {
+    if (this.closed) return
+    this.closed = true
+    this.waiting.length = 0
+    this.pending = new Uint8Array(0)
+    for (const controller of this.controllers) {
+      try {
+        controller.abort()
+      } catch {
+        /* 已中止 */
+      }
+    }
+    this.controllers.clear()
+  }
+
   /** 收到一段上行字节（可能是半帧、一帧或多帧） */
   push(bytes: Uint8Array): void {
-    if (bytes.byteLength === 0) return
+    if (this.closed || bytes.byteLength === 0) return
     this.pending = concat(this.pending, bytes)
     if (this.pending.byteLength > MAX_BUFFER) {
       // 不像 DNS 流量：整段丢弃，别让它把内存吃掉
@@ -157,6 +182,7 @@ export class DnsUdpSession {
 
   /** 在不越过并发上限的前提下，尽量把等待队列里的帧发出去 */
   private pump(): void {
+    if (this.closed) return
     while (this.inflight < MAX_CONCURRENT_QUERIES && this.waiting.length > 0) {
       const packet = this.waiting.shift()!
       this.inflight += 1
@@ -171,6 +197,7 @@ export class DnsUdpSession {
   /** 一条查询 → DoH → 回写 */
   private async resolve(packet: Uint8Array): Promise<void> {
     const controller = new AbortController()
+    this.controllers.add(controller)
     const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? QUERY_TIMEOUT_MS)
     try {
       const res = await fetch(this.options.endpoint, {
@@ -189,7 +216,8 @@ export class DnsUdpSession {
         return
       }
       const body = new Uint8Array(await res.arrayBuffer())
-      if (body.byteLength === 0) {
+      // 超过 DNS/TCP 报文上限的响应不是合法 DNS 应答（也挡住畸形体吃内存）。
+      if (body.byteLength === 0 || body.byteLength > MAX_PACKET) {
         this.reply(servfail(packet))
         return
       }
@@ -198,6 +226,7 @@ export class DnsUdpSession {
       this.reply(servfail(packet))
     } finally {
       clearTimeout(timer)
+      this.controllers.delete(controller)
     }
   }
 
@@ -212,6 +241,30 @@ export class DnsUdpSession {
    * DNS 报文解析：跳过 12 字节头 + Question 段，逐条遍历 RR，
    * 丢弃 type=28 的并重算 ANCOUNT/NSCOUNT/ARCOUNT。
    */
+  /**
+   * 跳过 DNS 报文里的 NAME 字段，返回其后的偏移；非法或越界返回 -1。
+   *
+   * 三种形态都必须认（RFC 1035 / 3597）：
+   *   - 普通标签序列：`... 0x00`
+   *   - 压缩指针：`0xc0 xxxx`（NAME 到此结束，指针本身占 2 字节）
+   *   - **复合形态**：若干普通标签 + 结尾压缩指针（如 `03 'www' 0xc0 0x0c`）
+   *
+   * ⚠️ 早前实现在非指针分支末尾多跳了 4 字节（把 Question 段的 QTYPE+QCLASS
+   * 偏移误用到 RR 段），且把 0xc0 当成 192 字节的普通标签长度 → 直接越界。
+   */
+  private skipName(packet: Uint8Array, offset: number): number {
+    let pos = offset
+    while (pos < packet.byteLength) {
+      const len = packet[pos]!
+      if (len === 0) return pos + 1
+      if ((len & 0xc0) === 0xc0) return pos + 2 <= packet.byteLength ? pos + 2 : -1
+      // 0x40 / 0x80 两个高位是保留值；标签长度上限 63
+      if ((len & 0xc0) !== 0 || len > 63) return -1
+      pos += 1 + len
+    }
+    return -1
+  }
+
   private filterAaaa(packet: Uint8Array): Uint8Array {
     if (packet.byteLength < 12) return packet
     const qd = (packet[4]! << 8) | packet[5]!
@@ -219,69 +272,63 @@ export class DnsUdpSession {
     const ns = (packet[8]! << 8) | packet[9]!
     const ar = (packet[10]! << 8) | packet[11]!
     if (qd === 0 && an === 0 && ns === 0 && ar === 0) return packet
-    let i = 12
+
     // 跳过 Question 段（QNAME 变长 + QTYPE 2 + QCLASS 2）
-    for (let q = 0; q < qd && i < packet.byteLength; ) {
-      const l = packet[i++]!
-      if (l === 0) { i += 4; q++; continue }
-      i += l
+    let pos = 12
+    for (let q = 0; q < qd; q++) {
+      pos = this.skipName(packet, pos)
+      if (pos < 0 || pos + 4 > packet.byteLength) return packet
+      pos += 4
     }
-    // 逐条 RR 过滤：每条 = NAME + TYPE2 + CLASS2 + TTL4 + RDLEN2 + RDATA
-    const out = packet.slice(0, i)
+
+    /**
+     * ⚠️ 必须**预分配与原件等长**的缓冲再按 writePos 追加：
+     * 早前用 `packet.slice(0, pos)` 建定长数组，随后 `out.set(rr, out.byteLength)`
+     * 写入必然抛 `RangeError`，被 resolve() 的 catch 吞成 SERVFAIL ——
+     * 于是**任何含 A / CNAME 记录的正常应答都变成 SERVFAIL**。
+     */
+    const out = new Uint8Array(packet.byteLength)
+    out.set(packet.subarray(0, pos), 0)
+    let writePos = pos
     let removed = 0
-    let pos = i
-    for (const total of [an, ns, ar]) {
-      for (let r = 0; r < total && pos < packet.byteLength; r++) {
+    // 三个区段**按索引**遍历 —— 用记录数（an/ns/ar）的值相等来区分区段不可靠
+    const counts = [an, ns, ar]
+    const kept = [0, 0, 0]
+    for (let sec = 0; sec < 3; sec++) {
+      const total = counts[sec]!
+      for (let r = 0; r < total; r++) {
         const rrStart = pos
-        // NAME：优先 0xc0 压缩指针；非指针则按标签跳
-        if ((packet[pos]! & 0xc0) === 0xc0) { pos += 2 } else {
-          while (pos < packet.byteLength) {
-            const l = packet[pos++]!
-            if (l === 0) break
-            pos += l
-          }
-          pos += 4
-        }
-        if (pos + 10 > packet.byteLength) return packet
-        const type = (packet[pos]! << 8) | packet[pos + 1]!
-        const rdlen = (packet[pos + 8]! << 8) | packet[pos + 9]!
-        const rrEnd = pos + 10 + rdlen
+        // 每条 RR = NAME + TYPE2 + CLASS2 + TTL4 + RDLEN2 + RDATA
+        const afterName = this.skipName(packet, pos)
+        if (afterName < 0 || afterName + 10 > packet.byteLength) return packet
+        const type = (packet[afterName]! << 8) | packet[afterName + 1]!
+        const rdlen = (packet[afterName + 8]! << 8) | packet[afterName + 9]!
+        const rrEnd = afterName + 10 + rdlen
         if (rrEnd > packet.byteLength) return packet
-        if (type !== 28) {
-          out.set(packet.subarray(rrStart, rrEnd), out.byteLength)
-        } else {
+        if (type === 28) {
           removed += 1
+        } else {
+          const len = rrEnd - rrStart
+          out.set(packet.subarray(rrStart, rrEnd), writePos)
+          writePos += len
+          kept[sec]! += 1
         }
         pos = rrEnd
       }
     }
     if (removed === 0) return packet
-    // 重算 ANCOUNT / NSCOUNT / ARCOUNT：AAAA 只出现在 Answer 段（NS/AR 是权威
-    // 与附加信息，无 AAAA），保守做法是按实际重扫出的段计数回填。
-    let scan = i
-    let nan = 0, nns = 0, nar = 0
-    for (const total of [an, ns, ar]) {
-      for (let r = 0; r < total && scan < out.byteLength; r++) {
-        if ((out[scan]! & 0xc0) === 0xc0) { scan += 2 } else {
-          while (scan < out.byteLength) { const l = out[scan++]!; if (l === 0) break; scan += l }
-          scan += 4
-        }
-        if (scan + 10 > out.byteLength) break
-        const rdlen = (out[scan + 8]! << 8) | out[scan + 9]!
-        scan += 10 + rdlen
-        if (total === an) nan++
-        else if (total === ns) nns++
-        else nar++
-      }
-    }
-    out[6] = (nan >> 8) & 0xff; out[7] = nan & 0xff
-    out[8] = (nns >> 8) & 0xff; out[9] = nns & 0xff
-    out[10] = (nar >> 8) & 0xff; out[11] = nar & 0xff
-    return out.subarray(0, out.byteLength)
+    out[6] = (kept[0]! >> 8) & 0xff
+    out[7] = kept[0]! & 0xff
+    out[8] = (kept[1]! >> 8) & 0xff
+    out[9] = kept[1]! & 0xff
+    out[10] = (kept[2]! >> 8) & 0xff
+    out[11] = kept[2]! & 0xff
+    return out.subarray(0, writePos)
   }
 
   /** 加 2 字节长度前缀后回写 */
   private reply(packet: Uint8Array): void {
+    if (this.closed) return
     if (packet.byteLength === 0 || packet.byteLength > MAX_PACKET) return
     const framed = new Uint8Array(2 + packet.byteLength)
     framed[0] = (packet.byteLength >> 8) & 0xff

@@ -13,7 +13,7 @@
  *   之后    负载
  */
 import type { ByteStream } from './stream'
-import { readAddressFromStream } from './address'
+import { formatIpv6, readAddressFromStream } from './address'
 
 export const VLESS_VERSION = 0x00
 export const VLESS_COMMAND_TCP = 0x01
@@ -66,6 +66,27 @@ export function uuidToBytes(uuid: string): Uint8Array | null {
   if (uuidBytesCache.size >= 16) uuidBytesCache.clear()
   uuidBytesCache.set(uuid, out)
   return out
+}
+
+/**
+ * 协议头字节已够判凭据、但 UUID 不匹配。
+ *
+ * ## 为什么需要区分「半包」与「认证失败」
+ *
+ * `parseVlessBuffer` 对两种情况都返回 `null`，而 WS 入站会把它当成
+ * 「半包还没收齐」，启动 2 秒握手截止定时器，并在等待期间允许对端继续
+ * 灌最多 64KB —— 扫描器/错误 UUID 的客户端因此白占 2 秒与内存。
+ * 这里把「字节数已够 17 字节（版本 + UUID）」且不匹配的情况单独判出来，
+ * 调用方可以立即关闭。
+ */
+export function vlessAuthFailed(bytes: Uint8Array, expectedUuid: string): boolean {
+  if (bytes.byteLength < 17) return false
+  const expected = uuidToBytes(expectedUuid)
+  if (!expected) return false
+  for (let i = 0; i < 16; i++) {
+    if (bytes[1 + i] !== expected[i]) return true
+  }
+  return false
 }
 
 /** 解析 VLESS 请求头 */
@@ -226,9 +247,11 @@ export function parseVlessBuffer(bytes: Uint8Array, expectedUuid: string): Vless
     offset += len
   } else if (addressType === 3) {
     if (bytes.byteLength < offset + 16) return null
-    const parts: string[] = []
-    for (let i = 0; i < 8; i++) parts.push(((bytes[offset + i * 2]! << 8) | bytes[offset + i * 2 + 1]!).toString(16))
-    hostname = parts.join(':')
+    // 与 address.ts / readAddressFromStream 同口径（RFC 5952 压缩形式）：
+    // 两个入口解析同一个 IPv6 目标必须得到同一个键，否则健康记忆/固定映射会分裂。
+    const groups: number[] = []
+    for (let i = 0; i < 8; i++) groups.push((bytes[offset + i * 2]! << 8) | bytes[offset + i * 2 + 1]!)
+    hostname = formatIpv6(groups)
     offset += 16
   } else {
     return null

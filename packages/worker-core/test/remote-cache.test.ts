@@ -259,3 +259,29 @@ describe('远程池文本缓存', () => {
     expect(userAgent).not.toContain('github.com')
   })
 })
+
+describe('远程池缓存的字节预算', () => {
+  it('按实际正文字节淘汰（32 条 × 2 MB 不再等于 64 MB 常驻）', async () => {
+    // 每条 ~1.83 MB 的响应（2 行 × 900KB 备注）—— 必须小于 2 MiB 单源上限，
+    // 否则 fetchText 会直接拒绝，根本不会进缓存。
+    const line = '104.16.1.1:443#' + 'x'.repeat(900 * 1024)
+    const text = [line, line].join('\n')
+    const urls = Array.from({ length: 6 }, (_, i) => `https://example.test/big-${i}.txt`)
+    fetchMock.mockImplementation(async (input: string | URL) => {
+      const url = String(input)
+      if (/big-\d+.txt/.test(url)) return new Response(text, { status: 200 })
+      return new Response('104.16.9.9:443\n', { status: 200 })
+    })
+
+    const config = makeConfig({ addApi: urls.join('\n') })
+    await collectNodes(config, '')
+    expect(urls.every((u) => callsFor(u) === 1)).toBe(true)
+
+    await collectNodes(config, '')
+    // 8 MB 预算装不下 6 条 ~1.83 MB 正文：必然有 URL 被淘汰后重新拉取，
+    // 但也必然有 URL 仍在缓存里（不是「全部丢弃」的粗暴实现）。
+    const refetched = urls.filter((u) => callsFor(u) > 1).length
+    expect(refetched).toBeGreaterThan(0)
+    expect(refetched).toBeLessThan(urls.length)
+  })
+})

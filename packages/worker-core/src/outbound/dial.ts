@@ -180,6 +180,15 @@ export interface DialOptions {
    */
   budgetMs?: number
   /**
+   * **单次候选尝试**的绝对截止时间（epoch ms，内部使用）。
+   *
+   * 早前每阶段（TCP 建连 / TLS 升级 / 代理握手 / NAT64 重试）各自用同一份
+   * `timeoutMs`，一个候选最坏能吃掉 2~3 倍剩余预算，多候选累加就会超出
+   * `budgetMs`。现在由 `attemptOf` 算出「本次尝试的绝对截止」并贯穿各阶段，
+   * 每阶段的有效超时取 `min(阶段上限, 剩余)`。
+   */
+  deadline?: number
+  /**
    * 收集每次失败的详情（用于诊断）。
    *
    * 旧实现把所有异常吞成 null，导致每一层失败都表现为「目标不可达」，
@@ -223,6 +232,20 @@ export interface DialResult {
 }
 
 const DEFAULT_TIMEOUT_MS = 8000
+
+/**
+ * 「本次拨号总预算已用尽」——与「候选节点本身不可用」必须分开。
+ *
+ * 竞速里预算耗尽是**我们自己**的决定（或平台侧限制），把它记进端点健康记忆
+ * 会把健康的反代入口 / 优选 IP 误判成宕机并拉入冷却，之后每个请求都少一批候选。
+ * 因此用一个专用错误类型，`attemptOf` 的 catch 识别它后**不记账**。
+ */
+export class DialBudgetError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'DialBudgetError'
+  }
+}
 
 /**
  * 单次拨号的默认总预算（ms）。
@@ -303,7 +326,8 @@ async function connectWithTimeout(
   port: number,
   timeoutMs: number,
   secureTransport?: 'off' | 'on' | 'starttls',
-  expectedServerHostname?: string
+  expectedServerHostname?: string,
+  deadline?: number
 ): Promise<SocketLike> {
   // 惰性加载：模块启动阶段不触碰 sockets，避免 isolate 启动失败（1101）
   const connect = await getConnect()
@@ -317,11 +341,20 @@ async function connectWithTimeout(
       : undefined
   ) as unknown as SocketLike
 
-  /** 单阶段超时（每次等待都重新计时，避免共用一个已被消耗的计时器） */
+  /**
+   * 单阶段超时。
+   *
+   * ⚠️ 每一阶段都要**重新取**「剩余预算」，而不是共用同一个 `timeoutMs`：
+   * `connect()` 与 `startTls()` 各等满一次，一个候选最坏就是 2 倍超时。
+   * 传入 `deadline` 时剩余不足直接抛 `DialBudgetError`（预算耗尽 ≠ 节点坏）。
+   */
   const withTimeout = async <T>(promise: Promise<T>, label: string): Promise<T> => {
+    const remaining =
+      deadline === undefined ? timeoutMs : Math.max(0, Math.min(timeoutMs, deadline - Date.now()))
+    if (remaining <= 0) throw new DialBudgetError(`拨号预算已用尽：${hostname}:${port}`)
     let timer: ReturnType<typeof setTimeout> | undefined
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`${label}超时：${hostname}:${port}`)), timeoutMs)
+      timer = setTimeout(() => reject(new Error(`${label}超时：${hostname}:${port}`)), remaining)
     })
     try {
       return await Promise.race([promise, timeout])
@@ -366,8 +399,11 @@ async function connectWithTimeout(
 /** 直连（含 NAT64 兜底） */
 async function dialDirect(options: DialOptions): Promise<DialResult> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  // NAT64 兜底与首次尝试共用同一个绝对截止：原实现每次都用满 timeoutMs，
+  // 一次直连最坏能吃掉 2 倍预算（见 DialOptions.deadline 注释）。
+  const deadline = options.deadline
   try {
-    const socket = await connectWithTimeout(options.hostname, options.port, timeoutMs)
+    const socket = await connectWithTimeout(options.hostname, options.port, timeoutMs, undefined, undefined, deadline)
     return {
       readable: socket.readable,
       writable: socket.writable,
@@ -385,7 +421,7 @@ async function dialDirect(options: DialOptions): Promise<DialResult> {
     if (options.nat64 && isIpv4(options.hostname)) {
       const synthesized = nat64Address(options.hostname, options.nat64)
       if (synthesized) {
-        const socket = await connectWithTimeout(synthesized, options.port, timeoutMs)
+        const socket = await connectWithTimeout(synthesized, options.port, timeoutMs, undefined, undefined, deadline)
         return {
           readable: socket.readable,
           writable: socket.writable,
@@ -433,13 +469,22 @@ async function dialViaProxy(
   // ⚠️ 代理握手不能再用固定的 6s：`attemptOf` 已把 timeoutMs 夹到
   // 「本次拨号总预算的剩余时间」，握手若仍各自等满 6s，单候选最坏
   // 5s(connect) + 6s(handshake) = 11s，多候选顺序累加可直接顶穿预算。
-  // 这里让握手超时跟随剩余预算（下限 200ms，绝不移除超时 —— 铁律 15）。
-  const handshakeMs = Math.min(HANDSHAKE_TIMEOUT_MS, Math.max(200, timeoutMs))
+  // 这里让握手超时跟随**本次尝试的绝对截止**（下限 0：已过期就立即失败，
+  // 绝不移除超时 —— 铁律 15）。
+  const budgetLeft = (): number =>
+    options.deadline === undefined ? timeoutMs : options.deadline - Date.now()
 
   // ProxyIP 语义：连到指定地址，但请求的目标仍是原始 hostname:port。
   // 这是同类实现的通用做法，用于让出站流量落在指定的 Cloudflare 网段。
   if (proxy.kind === 'direct') {
-    const socket = await connectWithTimeout(proxy.host, proxy.port, timeoutMs)
+    const socket = await connectWithTimeout(
+      proxy.host,
+      proxy.port,
+      timeoutMs,
+      undefined,
+      undefined,
+      options.deadline
+    )
     return {
       readable: socket.readable,
       writable: socket.writable,
@@ -481,8 +526,22 @@ async function dialViaProxy(
     proxy.port,
     timeoutMs,
     secureTransport,
-    proxy.kind === 'https' ? proxy.serverName : undefined
+    proxy.kind === 'https' ? proxy.serverName : undefined,
+    options.deadline
   )
+  // 握手预算也必须重新取剩余：建连可能已经用掉了大半预算。
+  const handshakeNow = Math.min(
+    HANDSHAKE_TIMEOUT_MS,
+    Math.max(0, Math.min(timeoutMs, budgetLeft()))
+  )
+  if (handshakeNow <= 0) {
+    try {
+      void socket.close()
+    } catch {
+      /* 已关闭 */
+    }
+    throw new DialBudgetError(`拨号预算已用尽：${proxy.host}:${proxy.port}`)
+  }
   try {
     if (proxy.kind === 'http' || proxy.kind === 'https') {
       const readable = await httpConnect(
@@ -491,7 +550,7 @@ async function dialViaProxy(
         options.hostname,
         options.port,
         { username: proxy.username, password: proxy.password },
-        handshakeMs
+        handshakeNow
       )
       return {
         readable,
@@ -510,7 +569,7 @@ async function dialViaProxy(
     const readable = await socks5Connect(socket.readable, socket.writable, options.hostname, options.port, {
       username: proxy.username,
       password: proxy.password,
-      handshakeTimeoutMs: handshakeMs,
+      handshakeTimeoutMs: handshakeNow,
     })
     return {
       readable,
@@ -963,7 +1022,7 @@ export async function dial(options: DialOptions): Promise<DialResult> {
     // 总预算约束：剩余时间不足时不再发起连接，超了则截断本次连接超时
     const remaining = deadline - Date.now()
     if (remaining <= 0) {
-      throw new Error(`拨号预算已用尽（${budgetMs}ms）：${options.hostname}:${options.port}`)
+      throw new DialBudgetError(`拨号预算已用尽（${budgetMs}ms）：${options.hostname}:${options.port}`)
     }
     // 反代入口失效时应快速失败，把总预算留给后续批次；只缩短、不放大用户设置。
     const baseTimeout =
@@ -971,7 +1030,13 @@ export async function dial(options: DialOptions): Promise<DialResult> {
         ? Math.min(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, RELAY_CONNECT_TIMEOUT_MS)
         : options.timeoutMs ?? DEFAULT_TIMEOUT_MS
     const connectTimeout = Math.max(200, Math.min(baseTimeout, remaining))
-    const attemptOptions: DialOptions = { ...options, timeoutMs: connectTimeout }
+    // 本次尝试的绝对截止：连接 / TLS / 代理握手 / NAT64 重试共用它，
+    // 避免一个候选把「剩余预算」按阶段重复吃掉（见 DialOptions.deadline）。
+    const attemptOptions: DialOptions = {
+      ...options,
+      timeoutMs: connectTimeout,
+      deadline: Date.now() + connectTimeout,
+    }
     try {
       // IPv6 字面量目标 + 非出站代理候选 → 立刻失败，不发任何 socket。
       //
@@ -1021,8 +1086,12 @@ export async function dial(options: DialOptions): Promise<DialResult> {
       recordEndpointSuccess(healthKey)
       return result
     } catch (err) {
-      // 目标站拒绝（TargetRejectedError）说明节点是活的，不计入健康统计
-      recordEndpointFailure(healthKey, Date.now(), err instanceof TargetRejectedError)
+      // 「本次尝试预算耗尽 / 平台并发限制」是我们自己的决定，不是节点故障：
+      // 记进健康记忆会让健康的反代入口 / 优选 IP 被拉入冷却，之后每个请求都少一批候选
+      // （见 DialBudgetError 注释）。其余失败照常记账；目标站拒绝说明节点是活的。
+      if (!(err instanceof DialBudgetError)) {
+        recordEndpointFailure(healthKey, Date.now(), err instanceof TargetRejectedError)
+      }
       const failure = classifyDialFailure(err, candidate.label)
       options.onFailure?.(failure)
       throw err
@@ -1134,12 +1203,19 @@ export async function dial(options: DialOptions): Promise<DialResult> {
    *
    * 命名加 `Group` 后缀是为了不和模块级的 `dialDirect(options)` 撞名 ——
    * 后者是「连到某个 hostname:port」的底层实现。
+   *
+   * ⚠️ 必须先按端点健康做**稳定排序**：`attemptOf` 给所有类型（含 direct /
+   * optimized）都记了成败，但早前这里直接 `directCandidates.map(attemptOf)`，
+   * 冷却中的坏优选 IP 每次仍排在前面，白白抢占「单请求 6 条并发出站」的槽位。
+   * 排序**不删除**任何候选（窗口化 ≠ 截断，§1.31）。
    */
   const dialDirectGroup = async (): Promise<DialResult> => {
-    return await raceDial(
-      directCandidates.map(attemptOf),
-      concurrent
+    const sorted = sortByEndpointHealth(
+      directCandidates,
+      (c) => endpointKey(c.source, c.host, c.port),
+      Date.now()
     )
+    return await raceDial(sorted.map(attemptOf), concurrent)
   }
 
   /**

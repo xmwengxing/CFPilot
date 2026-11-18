@@ -198,7 +198,7 @@ describe('XHTTP 暂存逐块记账（审计 B1）', () => {
     dialMock.mockReset()
   })
 
-  it('泵出一块后，剩余 pending 块仍计入 isolate 预算', async () => {
+  it('正在写的块与剩余 pending 块都计入 isolate 预算', async () => {
     const written: Uint8Array[] = []
     // 写入首块即永久阻塞：模拟目标慢读，让剩余块留在 pending
     const writer = new WritableStream<Uint8Array>({
@@ -238,10 +238,10 @@ describe('XHTTP 暂存逐块记账（审计 B1）', () => {
     expect(down.status).toBe(200)
     await vi.waitFor(() => expect(written.length).toBe(1))
 
-    // 会话 B：首块 10MiB（20+10=30≤32）应过；第二块（30+10=40>32）必须被拒。
-    // 旧实现 A 全额归还后预算为 0，B 两块都会通过 —— 据此区分。
-    expect((await post('b1b', 1, big))!.status).toBe(200)
-    // 暂存超限：中性页（不回显 503 明文），额度仍被正确占用
+    // 会话 A 此刻仍占用 30MiB：seq1 正在写（字节还被闭包持有）+ seq2/seq3 在 pending。
+    // 32MiB 的 isolate 预算放不下 B 的 10MiB 块 → 首块就必须被拒。
+    // （旧实现「泵出即归还」会把账面压到 20MiB，B 的首块会被错误放行。）
+    expect(await post('b1b', 1, big)).toBeNull()
     expect(await post('b1b', 2, big)).toBeNull()
   })
 })

@@ -60,11 +60,14 @@ const DIAG_MAX_BUCKETS = 500
 const diagFailuresByIp = new Map<string, number>()
 const diagBucketOrder: string[] = []
 
-function diagBucket(ip: string, now: number): number {
-  // 窗口过期 → 全部清零
+function diagBucket(ip: string, now: number): number {  // 窗口过期 → 全部清零
   let windowResetAt = diagFailuresByIp.get('__window__') ?? 0
   if (now >= windowResetAt) {
     diagFailuresByIp.clear()
+    // ⚠️ 队列数组必须一起清：只 clear() Map 会让历史上千个 IP 一直堆积在
+    // FIFO 数组里，之后新 IP 到达时会不断弹出早已过期的键（还可能误删本轮
+    // 刚记录的活跃桶），淘汰顺序与计数都不再对应。
+    diagBucketOrder.length = 0
     windowResetAt = now + DIAG_WINDOW_MS
     diagFailuresByIp.set('__window__', windowResetAt)
   }
@@ -85,6 +88,17 @@ function diagBucket(ip: string, now: number): number {
 function diagRecordFailure(ip: string, now: number): void {
   const count = diagBucket(ip, now)
   diagFailuresByIp.set(ip, count + 1)
+}
+
+/** 只给测试：诊断限流桶的 FIFO 数组长度（窗口重置必须同步清空它） */
+export function diagBucketOrderSize(): number {
+  return diagBucketOrder.length
+}
+
+/** 只给测试：清空诊断限流状态（窗口时间戳也在内） */
+export function clearDiagBuckets(): void {
+  diagFailuresByIp.clear()
+  diagBucketOrder.length = 0
 }
 
 function diagThrottledFor(ip: string, now: number): boolean {

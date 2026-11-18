@@ -222,12 +222,24 @@ async function dohQuery(
   }
 }
 
+/**
+ * 一次「类型查询」的结果。
+ *
+ * `authoritative=false` 表示**所有 provider 都网络失败/超时**（没有任何一方
+ * 给出可用的 DNS 应答）。这种空结果**不能**当负缓存：否则一次冷启动抖动
+ * 就会让这个域名在 30 秒内完全解析不出来（表现为「刚才还能开，现在全部 -1」）。
+ */
+interface QueryOutcome {
+  records: string[]
+  authoritative: boolean
+}
+
 /** 依次尝试所有 DoH 提供商；任一给出权威应答（哪怕为空）即停止 */
 async function queryAll(
   name: string,
   type: 'TXT' | 'A' | 'AAAA',
   opts: ResolveEndpointOptions = {}
-): Promise<string[]> {
+): Promise<QueryOutcome> {
   for (const provider of DOH_PROVIDERS) {
     // 预算耗尽后不再发起新查询（已在飞的不受控，但至少不新增）
     if (opts.deadline !== undefined && Date.now() >= opts.deadline) break
@@ -236,9 +248,9 @@ async function queryAll(
     const budget = Math.max(50, Math.min(perQuery, remaining))
     const answers = await dohQuery(provider, name, type, budget)
     // 空数组也是权威应答：立即停止，别为了「没有记录」再跨回国问一遍
-    if (answers !== null) return answers
+    if (answers !== null) return { records: answers, authoritative: true }
   }
-  return []
+  return { records: [], authoritative: false }
 }
 
 /**
@@ -262,9 +274,11 @@ async function queryAll(
  *   NXDOMAIN / 空应答不会被误判成「查询失败」而继续轮询国内 DoH。
  * - 只有**两家都网络失败**（null）才回落到原有的串行兜底链路。
  */
-async function queryAllA(name: string, opts: ResolveEndpointOptions): Promise<string[]> {
+async function queryAllA(name: string, opts: ResolveEndpointOptions): Promise<QueryOutcome> {
   // 与 queryAll 一致：预算耗尽时一次查询都不发起（已在飞的不受控，但至少不新增）
-  if (opts.deadline !== undefined && Date.now() >= opts.deadline) return []
+  if (opts.deadline !== undefined && Date.now() >= opts.deadline) {
+    return { records: [], authoritative: false }
+  }
   const providers = DOH_PROVIDERS.slice(0, 2)
   const perQuery = opts.timeoutMs ?? DOH_TIMEOUT_MS
   const remaining = opts.deadline !== undefined ? opts.deadline - Date.now() : Number.POSITIVE_INFINITY
@@ -283,7 +297,7 @@ async function queryAllA(name: string, opts: ResolveEndpointOptions): Promise<st
       merged.push(ip)
     }
   }
-  if (authoritative) return merged
+  if (authoritative) return { records: merged, authoritative: true }
   // 两家境外 DoH 都网络失败 → 回落原有串行链路（后续国内 DoH 兜底）
   return await queryAll(name, 'A', opts)
 }
@@ -401,10 +415,14 @@ async function resolveUncached(
   // 1) TXT（优选 IP 库）与 A 记录**并行**查询 ——
   // 顺序查时 TXT 没命中（绝大多数域名）要白等一整轮 DoH 往返（50~300ms 首包延迟）；
   // 并行后总耗时取决于更快的一支，语义仍是「TXT 优先、A 兑底」。
-  const [txt, aRecords] = await Promise.all([
-    opts.skipTxt ? Promise.resolve([] as string[]) : queryAll(target, 'TXT', opts),
+  const [txtOutcome, aOutcome] = await Promise.all([
+    opts.skipTxt
+      ? Promise.resolve<QueryOutcome>({ records: [], authoritative: false })
+      : queryAll(target, 'TXT', opts),
     queryAllA(target, opts),
   ])
+  const txt = txtOutcome.records
+  const aRecords = aOutcome.records
 
   if (!opts.skipTxt) {
     for (const raw of txt) {
@@ -443,17 +461,23 @@ async function resolveUncached(
   }
 
   // 写缓存：正结果长缓存、负结果短缓存（审计 B14）。
-  // 空应答也缓存（短 TTL），挡住 IPv6-only / 不存在域名的重复 DoH 开销。
-  const now = Date.now()
-  for (const [k, v] of cache) {
-    if (now - v.at >= entryTtl(v)) cache.delete(k)
+  //
+  // ⚠️ 只有**权威**空应答（NXDOMAIN / NODATA）才写负缓存。
+  // 早前 `queryAll` 用 `[]` 同时表达「权威空」与「所有 provider 都失败/超时」，
+  // 于是一次冷启动抖动就会把该域名钉死 30 秒 —— 明明上游一秒后就恢复了，
+  // 表现却是「刚才还能打开，刷新一下全部 -1」。
+  if (deduped.length > 0 || aOutcome.authoritative) {
+    const now = Date.now()
+    for (const [k, v] of cache) {
+      if (now - v.at >= entryTtl(v)) cache.delete(k)
+    }
+    while (cache.size >= CACHE_MAX_ENTRIES) {
+      const oldest = cache.keys().next().value
+      if (oldest === undefined) break
+      cache.delete(oldest)
+    }
+    cache.set(key, { at: now, ips: deduped })
   }
-  while (cache.size >= CACHE_MAX_ENTRIES) {
-    const oldest = cache.keys().next().value
-    if (oldest === undefined) break
-    cache.delete(oldest)
-  }
-  cache.set(key, { at: now, ips: deduped })
   return deduped
 }
 

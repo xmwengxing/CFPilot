@@ -4906,6 +4906,7 @@ import { MeshTopology, type TopoNode } from './mesh-topology'
           localStorage.setItem('cfpilot-mesh-node-id', data.nodeId)
           if (data.tunnelPub) localStorage.setItem('cfpilot-mesh-tunnel-pub', data.tunnelPub)
           if (data.tunnelPrivate) localStorage.setItem('cfpilot-mesh-tunnel-priv', data.tunnelPrivate) // base64，直接对接 Go []byte
+          if (data.identitySeed) localStorage.setItem('cfpilot-mesh-identity-seed', data.identitySeed)
         }
       } catch { /* 身份加载失败不阻断其它配置 */ }
     })()
@@ -4945,31 +4946,6 @@ import { MeshTopology, type TopoNode } from './mesh-topology'
       }
     })
 
-    // 从邀请链接填入：自动填网络名/PSK/对端信息
-    $('btnMeshApplyInvite')?.addEventListener('click', async () => {
-      const uri = ($('meshInviteInput')?.value || '').trim()
-      if (!uri) { log('请先粘贴邀请链接', 'warn'); return }
-      try {
-        const resp = await fetch('/api/mesh/invite/parse', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          credentials: 'same-origin', body: JSON.stringify({ uri }),
-        })
-        const data = await resp.json().catch(() => ({}))
-        if (!resp.ok) { log('邀请链接解析失败：' + (data.error || `HTTP ${resp.status}`), 'err'); return }
-        const put = (id: string, v: string) => { const el = $(id); if (el && v) el.value = v }
-        put('meshNetwork', data.network || '')
-        put('meshPsk', data.psk || '')
-        put('peerNodeId', data.peerNodeId || '')
-        put('peerAddr', data.peerAddr || '')
-        put('peerPub', data.peerPub || '')
-        put('peerVip', data.peerVip || '')
-        // 建议虚拟 IP 自动填入本机（若本机还没填）
-        if (data.suggestedIp && !($('meshVirtualIp')?.value || '').trim()) put('meshVirtualIp', data.suggestedIp)
-        log('已从邀请链接填入网络参数与对端，请核对后点「添加对端」', 'ok')
-      } catch (err) {
-        log('邀请链接解析失败：' + (err instanceof Error ? err.message : String(err)), 'err')
-      }
-    })
 
     // 填入组网配置（来自盲中继部署结果）
     $('btnFillMeshConfig')?.addEventListener('click', () => {
@@ -5023,6 +4999,32 @@ import { MeshTopology, type TopoNode } from './mesh-topology'
 
     // 启动组网：把配置直接交给提权服务（无需命令行/JSON 文件）
     $('btnMeshStart')?.addEventListener('click', async () => {
+      // 若粘贴了邀请链接：先解析并自动填入网络参数 + 把发起方加为对端（一次点击完成入网）
+      const inviteUri = ($('meshInviteInput')?.value || '').trim()
+      if (inviteUri) {
+        try {
+          const ir = await fetch('/api/mesh/invite/parse', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin', body: JSON.stringify({ uri: inviteUri }),
+          })
+          const id = await ir.json().catch(() => ({}))
+          if (!ir.ok) { log('邀请链接解析失败：' + (id.error || `HTTP ${ir.status}`), 'err'); return }
+          const put = (elId: string, v: string) => { const el = $(elId); if (el && v) el.value = v }
+          put('meshNetwork', id.network || '')
+          put('meshPsk', id.psk || '')
+          // 建议虚拟 IP 自动填入本机（若未填）
+          if (id.suggestedIp && !($('meshVirtualIp')?.value || '').trim()) put('meshVirtualIp', id.suggestedIp)
+          // 把发起方加为对端（若尚未添加）
+          if (id.peerNodeId && !meshPeers.some(p => p.nodeId === id.peerNodeId)) {
+            meshPeers.push({ nodeId: id.peerNodeId, addr: id.peerAddr || '', staticPub: id.peerPub || '', virtualIp: id.peerVip || '' })
+            renderMeshPeers()
+          }
+          log('已从邀请链接填入配置并添加对端，正在启动组网…', 'ok')
+        } catch (err) {
+          log('邀请链接处理失败：' + (err instanceof Error ? err.message : String(err)), 'err')
+          return
+        }
+      }
       const cfg = collectMeshConfig()
       const btn = $('btnMeshStart') as HTMLButtonElement
       if (btn) btn.disabled = true
@@ -5035,6 +5037,7 @@ import { MeshTopology, type TopoNode } from './mesh-topology'
           const idData = await idResp.json().catch(() => ({}))
           if (idData.nodeId) { cfg.nodeId = idData.nodeId; const el = $('meshNodeId'); if (el) el.value = idData.nodeId }
           if (idData.tunnelPrivate) { cfg.tunnelPrivate = idData.tunnelPrivate; localStorage.setItem('cfpilot-mesh-tunnel-priv', idData.tunnelPrivate) }
+          if (idData.identitySeed) { cfg.identitySeed = idData.identitySeed; localStorage.setItem('cfpilot-mesh-identity-seed', idData.identitySeed) }
         }
         const resp = await fetch('/api/mesh/start', {
           method: 'POST',
@@ -5095,6 +5098,7 @@ import { MeshTopology, type TopoNode } from './mesh-topology'
     return {
       nodeId: ($('meshNodeId')?.value || '').trim(),
       tunnelPrivate: localStorage.getItem('cfpilot-mesh-tunnel-priv') || '',
+      identitySeed: localStorage.getItem('cfpilot-mesh-identity-seed') || '',
       network: ($('meshNetwork')?.value || '').trim(),
       psk: ($('meshPsk')?.value || '').trim(),
       virtualIp: ($('meshVirtualIp')?.value || '').trim(),

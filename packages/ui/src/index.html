@@ -1859,9 +1859,9 @@
                 <summary>邀请链接（推荐：一端生成，另一端粘贴即可入网）</summary>
                 <div class="fold-body">
                   <p class="hint" style="line-height:1.8">
-                    一台设备填好「网络名 / PSK / 本节点虚拟 IP」后点「生成邀请链接」，
-                    把链接发给对端；对端粘贴进来点「从邀请链接填入」，即可自动带入网络名、PSK 与该对端信息，
-                    无需手抄 16 位 ID 和 64 位公钥。
+                    <b>发起方</b>：填好「网络名 / PSK / 本节点虚拟 IP」后点「生成邀请链接」，把链接发给对端。
+                    <b>加入方</b>：把链接粘贴到下方输入框，直接点页面底部的「启动组网」——
+                    软件会自动解析链接、填好网络参数与对端并启动，<b>无需手抄 ID/公钥，也无需单独点"添加对端"</b>。
                   </p>
                   <div class="btn-row" style="margin-top:8px">
                     <button class="btn btn-ghost" id="btnMeshMakeInvite">生成邀请链接</button>
@@ -1869,8 +1869,7 @@
                   </div>
                   <textarea id="meshInviteOut" readonly placeholder="生成的邀请链接显示在这里" style="width:100%;min-height:56px;margin-top:8px;font-family:monospace;font-size:11px"></textarea>
                   <div class="btn-row" style="margin-top:8px">
-                    <input type="text" id="meshInviteInput" placeholder="粘贴对端发来的邀请链接（cfpilot-mesh://join/v1/...）" style="flex:1" />
-                    <button class="btn btn-primary" id="btnMeshApplyInvite">从邀请链接填入</button>
+                    <input type="text" id="meshInviteInput" placeholder="加入方：粘贴对端发来的邀请链接，然后点底部「启动组网」" style="flex:1" />
                   </div>
                   <p class="tip" style="margin-top:8px" id="meshInviteWarning">
                     邀请链接含明文网络密钥（仅 base64 编码，非加密）。请勿发到公开群聊/日志/issue，泄露只能全网轮换 PSK。

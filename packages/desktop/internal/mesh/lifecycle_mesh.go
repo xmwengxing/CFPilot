@@ -36,6 +36,7 @@ type meshLifecycle struct {
 	fsm         *HandshakeFSM
 	links       map[NodeID]PeerLink // peer -> PeerLink
 	vipTable    *VirtualIPTable
+	gossip      *Gossip // 描述符库：动态发现对端虚拟 IP（对齐 MobiHop Gossip）
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -90,6 +91,20 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 	}
 
 	// 1. 身份与网络
+	// 优先用面板传入的密钥构造身份（对齐本地派生的 NodeId）；旧配置/CLI 缺密钥时回落到 tunnelKey。
+	var ident *Identity
+	var identitySeed [32]byte
+	if len(m.cfg.IdentitySeed) == 32 && len(m.cfg.TunnelPrivate) == 32 {
+		copy(identitySeed[:], m.cfg.IdentitySeed)
+		var tunnelSeed [32]byte
+		copy(tunnelSeed[:], m.cfg.TunnelPrivate)
+		var idErr error
+		ident, idErr = IdentityFromSeeds(identitySeed, tunnelSeed)
+		if idErr != nil {
+			return idErr
+		}
+		m.cfg.NodeID = ident.NodeID // 以身份派生为准，忽略手填值
+	}
 	network := DeriveNetworkID(m.cfg.NetworkName)
 	psk := DerivePSK(m.cfg.NetworkName, m.cfg.PSK)
 	tunnel, err := m.cfg.tunnelKey()
@@ -98,6 +113,13 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 	}
 	selfIP := net.ParseIP(m.cfg.VirtualIP)
 	m.vipTable = NewVirtualIPTable(m.cfg.NodeID, selfIP)
+	// Gossip：描述符签名需要身份私钥种子；缺种子（旧 CLI）时不启用动态发现
+	if ident != nil {
+		m.gossip, err = NewGossip(ident, m.cfg.VirtualIP)
+		if err != nil {
+			return err
+		}
+	}
 
 	// 2. UdpHub（新 peer 发现后由回调建 link）
 	var onIncoming func(NodeID, *net.UDPAddr)
@@ -195,9 +217,29 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 	// onIncoming：新 peer 自动建 link
 	onIncoming = func(id NodeID, addr *net.UDPAddr) {
 		m.mu.Lock()
-		defer m.mu.Unlock()
+		isNew := false
 		if _, ok := m.links[id]; !ok {
 			m.links[id] = m.hub.LinkTo(addr)
+			isNew = true
+		}
+		link := m.links[id]
+		m.mu.Unlock()
+		// 新链路建立后立即发一次本地描述符（不等 5s tick），加速双向发现
+		if isNew && m.gossip != nil {
+			go func() {
+				payload, err := m.gossip.GossipMessageBytes()
+				if err != nil {
+					return
+				}
+				var broadcast NodeID
+				for i := range broadcast {
+					broadcast[i] = 0xff
+				}
+				frame, err := (&Frame{Type: MsgGossip, TTL: DefaultTTL, Src: m.cfg.NodeID, Dst: broadcast, Payload: payload}).Encode()
+				if err == nil {
+					_ = link.Send(context.Background(), frame)
+				}
+			}()
 		}
 	}
 
@@ -219,6 +261,47 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 		if m.cfg.Verbose {
 			log.Printf("[mesh] 降级控制器已启动 relay=%s room=%s", m.cfg.RelayDomain, m.cfg.RelayRoom)
 		}
+	}
+	// Gossip 广播：每 5s 把本地描述符发给所有已建链路，让对端动态得知本机虚拟 IP
+	if m.gossip != nil {
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-runCtx.Done():
+					return
+				case <-ticker.C:
+					payload, err := m.gossip.GossipMessageBytes()
+					if err != nil {
+						continue
+					}
+					var broadcast NodeID
+					for i := range broadcast {
+						broadcast[i] = 0xff
+					}
+					frame, err := (&Frame{
+						Type: MsgGossip, TTL: DefaultTTL,
+						Src: m.cfg.NodeID, Dst: broadcast,
+						Payload: payload,
+					}).Encode()
+					if err != nil {
+						continue
+					}
+					m.mu.Lock()
+					links := make([]PeerLink, 0, len(m.links))
+					for _, link := range m.links {
+						links = append(links, link)
+					}
+					m.mu.Unlock()
+					for _, link := range links {
+						_ = link.Send(runCtx, frame)
+					}
+				}
+			}
+		}()
 	}
 	if m.cfg.Verbose {
 		m.wg.Add(1)
@@ -411,6 +494,24 @@ func (m *meshLifecycle) startRecvLoop(ctx context.Context, id NodeID, link PeerL
 			if parsed.Type == MsgHandshake {
 				if _, err := m.fsm.OnFrame(frame); err != nil && m.cfg.Verbose {
 					log.Printf("[mesh] 握手帧处理失败: %v", err)
+				}
+				continue
+			}
+			if parsed.Type == MsgGossip {
+				if m.gossip != nil {
+					added, gerr := m.gossip.OnGossip(parsed.Payload)
+					if gerr != nil && m.cfg.Verbose {
+						log.Printf("[mesh] Gossip 处理失败: %v", gerr)
+					}
+					// 动态登记发现的对端虚拟 IP（一次链接双向自动发现的核心）
+					for _, d := range added {
+						if ip := d.VirtualIP(); ip != nil {
+							m.vipTable.Add(ip, d.NodeID)
+							if m.cfg.Verbose {
+								log.Printf("[mesh] 发现对端 %s → %s", d.NodeID.Hex(), d.VirtualIPv4)
+							}
+						}
+					}
 				}
 				continue
 			}

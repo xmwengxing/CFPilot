@@ -20,6 +20,9 @@ type Config struct {
 	PSK         string
 	// TunnelPrivate 是 X25519 隧道静态私钥（32 字节原始字节）；留空则随机生成
 	TunnelPrivate []byte
+	// IdentitySeed 是 Ed25519 身份私钥种子（32 字节原始字节），用于描述符签名。
+	// 由面板从本地身份传入；留空则用 TunnelPrivate 派生（兼容旧配置/CLI）。
+	IdentitySeed []byte
 	Listen        string // UDP 监听，如 "0.0.0.0:51820"
 	VirtualIP     string // 本节点虚拟 IP，如 "10.93.0.1"
 	MTU           int    // TUN MTU，默认 1400
@@ -65,6 +68,9 @@ func (c *Config) Validate() error {
 	}
 	if len(c.TunnelPrivate) > 0 && len(c.TunnelPrivate) != 32 {
 		return fmt.Errorf("mesh config: TunnelPrivate 必须 32 字节，实际 %d", len(c.TunnelPrivate))
+	}
+	if len(c.IdentitySeed) > 0 && len(c.IdentitySeed) != 32 {
+		return fmt.Errorf("mesh config: IdentitySeed 必须 32 字节，实际 %d", len(c.IdentitySeed))
 	}
 	for i, p := range c.Peers {
 		if p.Addr == "" {

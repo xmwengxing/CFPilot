@@ -87,6 +87,23 @@ func (id *Identity) EnsureDistinct(dataDir string, peerIDs []NodeID) (*Identity,
 	return fresh, true, nil
 }
 
+// IdentityFromSeeds 从传入的 seeds 构造身份（提权服务 meshd 用：面板传入密钥，不重新生成）。
+func IdentityFromSeeds(identitySeed, tunnelSeed [32]byte) (*Identity, error) {
+	priv := ed25519.NewKeyFromSeed(identitySeed[:])
+	pub := priv.Public().(ed25519.PublicKey)
+	tunnelPub, err := curve25519.X25519(tunnelSeed[:], curve25519.Basepoint)
+	if err != nil {
+		return nil, err
+	}
+	return &Identity{
+		IdentitySeed: identitySeed,
+		TunnelSeed:   tunnelSeed,
+		NodeID:       NodeIDFromIdentityPub(pub),
+		IdentityPub:  []byte(pub),
+		TunnelPub:    tunnelPub,
+	}, nil
+}
+
 // NodeIDFromIdentityPub 计算 NodeId = BLAKE3(pub)[0..8]（对齐 MobiHop identity.rs:117-120）。
 func NodeIDFromIdentityPub(pub []byte) NodeID {
 	h := blake3.Sum256(pub)

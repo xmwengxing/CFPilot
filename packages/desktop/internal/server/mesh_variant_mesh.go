@@ -58,8 +58,9 @@ func (s *Server) handleMeshIdentity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"nodeId":    ident.NodeID.Hex(),
 		"tunnelPub": hex.EncodeToString(ident.TunnelPub),
-		// []byte 的 JSON 编码是 base64——mesh.Config.TunnelPrivate 直接对接
+		// []byte 的 JSON 编码是 base64——mesh.Config.TunnelPrivate/IdentitySeed 直接对接
 		"tunnelPrivate": base64.StdEncoding.EncodeToString(ident.TunnelSeed[:]),
+		"identitySeed":  base64.StdEncoding.EncodeToString(ident.IdentitySeed[:]),
 		"warning":       mesh.SensitiveWarning(),
 	})
 }

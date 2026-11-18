@@ -30,6 +30,12 @@ func (n NodeID) MarshalJSON() ([]byte, error) { return json.Marshal(n.Hex()) }
 func (n *NodeID) UnmarshalJSON(b []byte) error {
 	var s string
 	if err := json.Unmarshal(b, &s); err == nil {
+		// 空串 = 「还没拿到身份」：按零值处理，交给 Lifecycle 用 identitySeed 派生。
+		// 直接报错会让「身份接口稍慢一点就点启动」变成 400，用户完全看不懂。
+		if strings.TrimSpace(s) == "" {
+			*n = NodeID{}
+			return nil
+		}
 		id, perr := ParseNodeIDHex(s)
 		if perr != nil {
 			return perr

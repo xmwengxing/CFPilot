@@ -85,3 +85,16 @@ func TestNodeIDJSONRoundTrip(t *testing.T) {
 		t.Errorf("往返不一致: %v != %v", got, id)
 	}
 }
+
+func TestConfigJSONAllowsEmptyNodeID(t *testing.T) {
+	// 身份接口还没返回时 UI 会传空 nodeId；内核会用 identitySeed 重新派生，
+	// 这里不能报 400（否则用户看到的是「点了启动就失败」）。
+	var cfg Config
+	payload := `{"nodeId":"","networkName":"n","psk":"s","virtualIp":"10.97.0.1"}`
+	if err := json.Unmarshal([]byte(payload), &cfg); err != nil {
+		t.Fatalf("空 nodeId 应被容忍: %v", err)
+	}
+	if cfg.NodeID != (NodeID{}) {
+		t.Errorf("空 nodeId 应解成零值，实际 %v", cfg.NodeID)
+	}
+}

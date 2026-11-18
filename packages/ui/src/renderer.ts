@@ -5119,7 +5119,10 @@ import { MeshTopology, type TopoNode } from './mesh-topology'
       nodeId: ($('meshNodeId')?.value || '').trim(),
       tunnelPrivate: localStorage.getItem('cfpilot-mesh-tunnel-priv') || '',
       identitySeed: localStorage.getItem('cfpilot-mesh-identity-seed') || '',
-      network: ($('meshNetwork')?.value || '').trim(),
+      // ⚠️ 键必须是 networkName（Go 字段 NetworkName，JSON 解码按字段名忽略大小写匹配）。
+      // 早前写成 network，解码后 NetworkName 为空 —— 网络名被静默忽略，
+      // 不同网络只要 PSK 相同就会互相发现（失去按网络名隔离的意义）。
+      networkName: ($('meshNetwork')?.value || '').trim(),
       psk: ($('meshPsk')?.value || '').trim(),
       virtualIp: ($('meshVirtualIp')?.value || '').trim(),
       listen: ($('meshListen')?.value || '').trim(),

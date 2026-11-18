@@ -15,6 +15,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import mobile.Mesh // gomobile bind 生成的类名（包名由 -pkgname 指定）
+import org.json.JSONObject // 读取配置里的 virtualIp（TUN 地址必须与 Go 侧一致）
 
 /**
  * CFPilot +mesh 的 Android VpnService。
@@ -53,12 +54,24 @@ class MeshVpnService : VpnService() {
     private fun startMesh(configJson: String) {
         if (tun != null) return
         try {
-            // 建 TUN：地址/路由/MTU 由 Builder 下发（Go 侧不碰 ip 命令）
+            // 虚拟 IP 必须来自配置：TUN 地址与 Go 侧的 virtualIp 必须一致，
+            // 否则 vipTable 的自有 IP 与内核路由表对不上。
+            val VIP_KEY = "virtualIp"
+            val vip = runCatching { JSONObject(configJson).optString(VIP_KEY, "") }
+                .getOrDefault("")
+                .trim()
+            require(Regex("""\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}""").matches(vip)) {
+                "配置缺少合法的 virtualIp（例：10.97.0.1）"
+            }
+            // ⚠️ 组网是**同一 /24 网段、只改最后一段**：地址 /24 的同时必须把
+            // 同一个 /24 路由进 VPN，包才会进隧道。写死 10.98.0.0/24 是早期
+            // 「不同节点不同网段」的错误模型（跨机器必然不通）。
+            val subnet = vip.substringBeforeLast('.') + ".0"
             val builder = Builder()
                 .setSession("CFPilot Mesh")
                 .setMtu(1400)
-                .addAddress("10.97.0.1", 24)
-                .addRoute("10.98.0.0", 24)
+                .addAddress(vip, 24)
+                .addRoute(subnet, 24)
                 .addDnsServer("1.1.1.1")
             val pfd = builder.establish() ?: throw IllegalStateException("VpnService 授权失败")
             tun = pfd

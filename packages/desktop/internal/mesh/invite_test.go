@@ -16,7 +16,7 @@ func TestInviteRoundTrip(t *testing.T) {
 		NodeID:    "0100000000000001",
 		TunnelPub: strings.Repeat("ab", 32),
 		VirtualIP: "10.97.0.1",
-		Suggested: "10.98.0.2",
+		Suggested: "10.97.0.2",
 	}
 	uri, err := BuildInvite(p, 0)
 	if err != nil {
@@ -69,5 +69,34 @@ func TestSensitiveWarning(t *testing.T) {
 	w := SensitiveWarning()
 	if !strings.Contains(w, "密钥") || !strings.Contains(w, "公开") {
 		t.Errorf("敏感提示应包含密钥与公开警告: %s", w)
+	}
+}
+
+
+// 建议对端虚拟 IP 必须落在**同一 /24**（生链接时自动顺延最后一段）。
+// 这条守护「不同网段」的错误模型不再回来：TUN 固定 /24，跨网段默认不可达。
+func TestBuildInviteSuggestsSameSubnet(t *testing.T) {
+	p := InvitePayload{
+		Network: "n", PSK: "s", NodeID: "0100000000000001",
+		VirtualIP: "10.97.0.1",
+	}
+	uri, err := BuildInvite(p, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseInvite(uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Suggested != "10.97.0.2" {
+		t.Errorf("建议 IP = %q, 期望 10.97.0.2（同网段、末位顺延）", got.Suggested)
+	}
+
+	// 末位已到 254 时不能生成 .255（广播地址）
+	p2 := InvitePayload{Network: "n", PSK: "s", VirtualIP: "10.97.0.254"}
+	uri2, _ := BuildInvite(p2, 0)
+	got2, _ := ParseInvite(uri2)
+	if got2.Suggested == "10.97.0.255" || got2.Suggested == "" {
+		t.Errorf("末位回绕不正确: %q", got2.Suggested)
 	}
 }

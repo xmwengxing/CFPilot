@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 )
@@ -33,6 +34,20 @@ func BuildInvite(p InvitePayload, ttlSeconds int64) (string, error) {
 		return "", fmt.Errorf("生成邀请链接需要网络名与 PSK")
 	}
 	p.V = 1
+	// 建议对端虚拟 IP：**同一 /24 内顺延最后一段**。
+	// 组网要求同网段（TUN 固定 /24 且不给对端加主机路由），
+	// 让对端自己填很容易写成另一个网段（如 10.98.0.2），那是最常见的连不上原因。
+	if strings.TrimSpace(p.Suggested) == "" {
+		if ip := net.ParseIP(strings.TrimSpace(p.VirtualIP)); ip != nil {
+			if v4 := ip.To4(); v4 != nil {
+				last := int(v4[3]) + 1
+				if last > 254 {
+					last = 2 // .255 是广播地址，回绕到一个安全值
+				}
+				p.Suggested = fmt.Sprintf("%d.%d.%d.%d", v4[0], v4[1], v4[2], last)
+			}
+		}
+	}
 	if ttlSeconds > 0 {
 		p.Exp = time.Now().Unix() + ttlSeconds
 	}

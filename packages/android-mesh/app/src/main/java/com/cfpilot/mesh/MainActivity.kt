@@ -27,8 +27,10 @@ class MainActivity : Activity() {
         btnToggle = findViewById(R.id.btnToggle)
 
         // 默认配置模板（用户填入节点 ID / PSK / 对端等）
+        // ⚠️ 各节点的 virtualIp 必须**同一网段（前三段相同）、只改最后一段**：
+        //    如本机 10.97.0.1、对端 10.97.0.2。不同 /24 默认互相到不了。
         configEdit.setText("""
-{"nodeId":"0100000000000001","network":"my-network","psk":"secret",
+{"nodeId":"0100000000000001","networkName":"my-network","psk":"secret",
  "virtualIp":"10.97.0.1","listen":"0.0.0.0:51820",
  "relayDomain":"","relayRoom":"","enableDegrade":false,
  "peers":[]}

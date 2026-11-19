@@ -114,6 +114,18 @@ func (m *meshLifecycle) handleRelayMgmt(parsed *Frame, remote *net.UDPAddr) {
 		return
 	}
 	if msg.AuthAccept == nil {
+		// AuthReject：中继重启 / 会话被回收后，本端还留着「已准入」标记，
+		// 注册循环已停 ⇒ 只剩心跳被拒，永远回不到已准入状态（真机：中继重新部署后
+		// 两端都显示 via=relay 却全是死腿）。这里清掉标记，让注册循环恢复重试。
+		if msg.AuthReject != nil && remote != nil {
+			m.relayHbMu.Lock()
+			delete(m.relayAccepted, remote.String())
+			delete(m.relayHbStarted, remote.String())
+			m.relayHbMu.Unlock()
+			if m.cfg.Verbose {
+				log.Printf("[mesh] 中继拒绝会话（%v），恢复注册重试 %s", msg.AuthReject.Reason, remote)
+			}
+		}
 		return // Register/Heartbeat 等由我们发出，收到即忽略
 	}
 	acc := msg.AuthAccept

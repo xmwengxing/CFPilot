@@ -279,9 +279,19 @@ func DecodePunchMessage(b []byte) (*PunchMessage, error) {
 type RelayMessage struct {
 	Register   *RelayRegister   `msgpack:"Register,omitempty"`
 	AuthAccept *RelayAuthAccept `msgpack:"AuthAccept,omitempty"`
+	AuthReject *RelayAuthReject `msgpack:"AuthReject,omitempty"`
 	Heartbeat  *RelayHeartbeat  `msgpack:"Heartbeat,omitempty"`
 	Stats      *RelayStatsMsg   `msgpack:"Stats,omitempty"`
 	Disconnect *RelayDisconnect `msgpack:"Disconnect,omitempty"`
+}
+
+// RelayAuthReject 是中继拒绝注册 / 回收会话的回包。
+//
+// `Reason` 用 `any` 接收：Rust 侧是 `RelayReason` 枚举（serde 外部标签），
+// 未来新增变体也不应让整帧解码失败（那会把「被拒」误当成「无关帧」）。
+type RelayAuthReject struct {
+	NodeID NodeID `msgpack:"node_id"`
+	Reason any    `msgpack:"reason"`
 }
 
 // MsgpackByteArray 是「Rust `Vec<u8>` / `[u8; N]` 兼容」的字节串。

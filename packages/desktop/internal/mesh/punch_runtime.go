@@ -210,6 +210,11 @@ func (m *meshLifecycle) localCandidates() []Candidate {
 		if ip == nil || ip.To4() != nil {
 			continue
 		}
+		// 虚拟 IP 不能做候选：向它发 UDP 会被本机 TUN 吃掉，绕一圈又从
+		// 隧道的另一端出来，等于自己给自己造了一条「直连」。
+		if m.isVirtualMeshIP(ip) {
+			continue
+		}
 		var ip6 [16]byte
 		copy(ip6[:], ip.To16())
 		add(Candidate{
@@ -227,6 +232,9 @@ func (m *meshLifecycle) localCandidates() []Candidate {
 		if v4 == nil {
 			continue
 		}
+		if m.isVirtualMeshIP(ip) {
+			continue
+		}
 		add(Candidate{
 			Addr:     NewV4Addr([4]byte{v4[0], v4[1], v4[2], v4[3]}, uint16(port)),
 			Kind:     CandidateHost,
@@ -234,6 +242,26 @@ func (m *meshLifecycle) localCandidates() []Candidate {
 		})
 	}
 	return out
+}
+
+// isVirtualMeshIP 报告地址是否属于本网状网络的虚拟 IP（自身或任何静态对端）。
+//
+// 这些地址只在 TUN 内部有意义：直接向它们发 UDP 会被本机隧道吃掉，再从
+// 对端隧道口出来（源地址也是虚拟 IP）。于是「打洞成功」实际是把链路换成一条
+// 指向虚拟 IP 的假直连腿（真机：via=udp、中继侧看不到任何 Data、甚至无限封装）。
+func (m *meshLifecycle) isVirtualMeshIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if own := net.ParseIP(m.cfg.VirtualIP); own != nil && own.Equal(ip) {
+		return true
+	}
+	for _, p := range m.cfg.Peers {
+		if vip := net.ParseIP(p.VirtualIP); vip != nil && vip.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // isSymmetricNat 报告 IPv4 侧是否判成对称映射（只有这时才启用硬对称扫描）。
@@ -380,8 +408,12 @@ func (m *meshLifecycle) handlePunch(peer NodeID, parsed *Frame, remote *net.UDPA
 		m.beginProbe(peer, reply.Candidates, reply.Nonce)
 	case msg.PunchProbe != nil:
 		probe := msg.PunchProbe
-		if remote == nil {
-			return // 没有真实源地址，无法回 Ack
+		// ⚠️ 经中继转发来的帧源地址是**中继**，不是对端。把它当直连证据会把
+		// 中继腿换成「到中继地址的直连腿」（Send 不再经中继，对端收不到），
+		// 真机症状：握手已成功、via=udp、rtt 有值，但 ping 100% 丢。
+		// 只有真正从对端地址直发的探针才算直连可达。
+		if remote == nil || m.hub.isRelayAddr(remote) || m.isVirtualMeshIP(remote.IP) {
+			return // 没有真实源地址 / 中继回显 / 隧道自环：都不算直连
 		}
 		ack := &PunchMessage{PunchAck: &PunchAck{From: m.cfg.NodeID, Nonce: probe.Nonce}}
 		if frame, e := m.encodePunchFrame(peer, ack); e == nil {
@@ -397,7 +429,8 @@ func (m *meshLifecycle) handlePunch(peer NodeID, parsed *Frame, remote *net.UDPA
 		}
 		m.upgradeToDirect(peer, remote)
 	case msg.PunchAck != nil:
-		if remote == nil {
+		// 同上：中继转发回来的 Ack 只说明「中继通」，不说明「直连通」。
+		if remote == nil || m.hub.isRelayAddr(remote) || m.isVirtualMeshIP(remote.IP) {
 			return
 		}
 		if m.cfg.Verbose {
@@ -418,7 +451,11 @@ func (m *meshLifecycle) beginProbe(peer NodeID, cands []Candidate, nonce uint64)
 	targets := make([]*net.UDPAddr, 0, len(cands))
 	for _, c := range cands {
 		if a := candidateUDP(c); a != nil {
-			targets = append(targets, a)
+			// 虚拟 IP 候选一律不打：探针会被本机 TUN 送回对端隧道口，
+			// 制造出「已直连」的假象（见 isVirtualMeshIP）。
+			if !m.isVirtualMeshIP(a.IP) {
+				targets = append(targets, a)
+			}
 		}
 	}
 	if len(targets) == 0 {

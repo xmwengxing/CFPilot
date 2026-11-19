@@ -787,6 +787,11 @@ func (m *meshLifecycle) startRecvLoop(ctx context.Context, id NodeID, link PeerL
 				continue
 			}
 			m.rxFrames.Add(1)
+			// 任何从该 peer 链路成功解出的帧都是「链路活着」的证据 —— 不能只在
+			// Decapsulate 成功后才 markOKRx：经中继的链路在没有业务数据时只有周期
+			// Gossip，面板会一直显示「已断开（无响应）」而实际 ping 全通（真机）。
+			// 只认本循环所属的 peer（不用帧头 src，避免同房间冒名改写别人状态）。
+			m.markOKRx(id)
 			// 解码成功才学习版本（v1 已过 buf[5]==0 校验）；伪造帧最多让本机降级。
 			m.learnWireVersion(parsed.Src, parsed.Version)
 			// HolePunch / RelayMgmt 已由 UdpHub 的独立观察通道（onControl）处理，

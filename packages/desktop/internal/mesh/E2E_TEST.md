@@ -146,6 +146,26 @@ sudo ip netns exec n1 /tmp/cfpilot-meshd
 用途：为「打洞信令经第三方节点中转」提供最小转发能力；仍缺 MobiHop Router 的
 路由表与多跳寻路。
 
+### 6.4 P4：经盲中继的真机打洞（未成功，如实记录）
+
+拓扑：本机 Win（192.168.31.19）↔ 另一台 Win（192.168.31.139，同一 LAN），
+经已部署盲中继 `edge.shijingtian.dpdns.org` 房间 `0123456789abcdef` 作信令。
+
+实测结果（2026-11-19）：
+
+| 项 | 结果 |
+|---|---|
+| WSS 中继握手 | **成功**：两端 `handshakeOk=1`、`via=wss`、RTT 1–5ms |
+| 切 WSS 后主动打洞 | 已触发（日志「经中继向 xxx 发起打洞（候选 6 个）」） |
+| 打洞升级直连 | **未成功**：`via` 始终停在 wss；`txFrames` 暴涨（探针在发）但 `rxFrames` 不增长 |
+| STUN | `natType=Unknown`（四个公共 STUN 端点在本环境均不可达，无 reflexive 候选） |
+| 双向 ping | B→A 通（450ms，走中继绕道）；A→B 100% 丢包 |
+
+结论与待查：中继路径（P1）已真机验证可用；打洞（P3）代码已触发但未能完成升级。
+可能原因：对端 active link 为 WSS 时，打洞探针发到其 UDP 端口后由 UdpHub.demux
+接收，但当前接收循环绑在 WssLink 上，来自 UDP 候选地址的探测帧未被处理
+（待下一轮在 dispatch/recv-loop 层对齐）。此状态**不算跨 NAT P2P 已验收**。
+
 ## 7. 已知限制（不是 bug）
 
 - 握手窗口内的第一个 IP 包会被丢弃（未实现拨号期排队），表现为新建会话时首包丢失。
@@ -160,6 +180,7 @@ sudo ip netns exec n1 /tmp/cfpilot-meshd
   （同一局域网、公网 IP+端口映射、或覆盖网）时才能直连。通过 easytier 跑通不等于有 P2P
   能力 —— 那是覆盖网提供了可达地址。要验证真实 P2P，必须去掉覆盖网，
   在两台真实机器上测试（同 LAN 或公网端口映射）。
+
 
 
 

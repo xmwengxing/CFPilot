@@ -316,6 +316,12 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 					_ = m.fsm.StartOutboundForce(peer, cfg.StaticPub)
 				}
 			}
+			// ⚠️ 切到 WSS（中继）后必须主动打洞：
+			// 若会话最初在 UDP 阶段建立，onEstablished 回调时 link 还不是 relayed，
+			// 那次不会触发 startPunch；而 UDP 不通才降级到 WSS，正是最需要打洞的时候。
+			if kind == TransportWSS {
+				go m.startPunch(peer, active)
+			}
 			if m.cfg.Verbose {
 				log.Printf("[mesh] 链路切换完成 peer=%x kind=%v，接收循环已重启", peer[:4], kind)
 			}

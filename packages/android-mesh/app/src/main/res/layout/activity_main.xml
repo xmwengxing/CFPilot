@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- CFPilot Mesh 组网配置：与桌面版一致的「必填项 + 高级选项」两层结构。
+     必填区常显；监听 / 打洞 / 服务器中继 / 监测台 / 对端全部收进「高级选项」。 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -11,39 +13,213 @@
         android:text="CFPilot Mesh 异地组网"
         android:textSize="20sp"
         android:textStyle="bold"
-        android:paddingBottom="12dp" />
+        android:paddingBottom="8dp" />
 
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="组网配置（JSON，字段与桌面版 --mesh-config 一致）："
-        android:textSize="14sp" />
+        android:text="只填下面几项必填即可组网；其余在「高级选项」里。"
+        android:textSize="13sp"
+        android:paddingBottom="8dp" />
 
-    <EditText
-        android:id="@+id/configEdit"
+    <ScrollView
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:gravity="top|start"
-        android:inputType="textMultiLine"
-        android:fontFamily="monospace"
-        android:textSize="12sp"
-        android:background="#EEEEEE"
-        android:padding="8dp"
-        android:layout_marginTop="8dp" />
+        android:fillViewport="true">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <!-- ===== 必填（常显） ===== -->
+            <TextView style="@style/Label" android:text="网络名（各节点必须一致）" />
+            <EditText
+                android:id="@+id/edNetwork"
+                style="@style/Field"
+                android:hint="如 my-network"
+                android:inputType="text" />
+
+            <TextView style="@style/Label" android:text="网络密钥 PSK（各节点必须一致）" />
+            <EditText
+                android:id="@+id/edPsk"
+                style="@style/Field"
+                android:hint="网络共享密钥"
+                android:inputType="text" />
+
+            <TextView style="@style/Label" android:text="本节点虚拟 IP（同网段，末段不同）" />
+            <EditText
+                android:id="@+id/edVirtualIp"
+                style="@style/Field"
+                android:hint="如 10.97.0.1"
+                android:inputType="text" />
+
+            <TextView style="@style/Label" android:text="盲中继域名（没有它基本连不上）" />
+            <EditText
+                android:id="@+id/edRelayDomain"
+                style="@style/Field"
+                android:hint="如 edge.example.com"
+                android:inputType="text" />
+
+            <TextView style="@style/Label" android:text="房间名（8-64 位十六进制）" />
+            <EditText
+                android:id="@+id/edRelayRoom"
+                style="@style/Field"
+                android:hint="如 0123456789abcdef"
+                android:inputType="text" />
+
+            <!-- ===== 高级选项（折叠） ===== -->
+            <Button
+                android:id="@+id/btnAdvanced"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="高级选项（监听 / 打洞 / 服务器中继 / 监测台 / 对端）"
+                android:textSize="13sp" />
+
+            <LinearLayout
+                android:id="@+id/advancedGroup"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <TextView style="@style/Section" android:text="本机身份（自动生成，用于告知对端）" />
+                <TextView
+                    android:id="@+id/tvNodeId"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="节点 ID：—"
+                    android:textSize="12sp"
+                    android:fontFamily="monospace"
+                    android:textIsSelectable="true" />
+                <TextView
+                    android:id="@+id/tvTunnelPub"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="隧道公钥：—"
+                    android:textSize="11sp"
+                    android:fontFamily="monospace"
+                    android:textIsSelectable="true" />
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="把这两项发给对端，对方才能把你加为对端节点。"
+                    android:textSize="11sp"
+                    android:paddingBottom="4dp" />
+
+                <TextView style="@style/Section" android:text="监听" />
+                <TextView style="@style/Label" android:text="UDP 监听" />
+                <EditText
+                    android:id="@+id/edListen"
+                    style="@style/Field"
+                    android:hint="留空 = 0.0.0.0:51820"
+                    android:inputType="text" />
+
+                <TextView style="@style/Section" android:text="盲中继微调" />
+                <TextView style="@style/Label" android:text="WSS 入口 IP（留空按域名解析）" />
+                <EditText
+                    android:id="@+id/edRelayConnectIp"
+                    style="@style/Field"
+                    android:hint="如 104.16.123.45"
+                    android:inputType="text" />
+
+                <CheckBox
+                    android:id="@+id/cbEnableDegrade"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:checked="true"
+                    android:text="启用 UDP→WSS 自动降级"
+                    android:textSize="13sp" />
+                <CheckBox
+                    android:id="@+id/cbEnablePunch"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:checked="true"
+                    android:text="启用 NAT 打洞（经中继时升级直连）"
+                    android:textSize="13sp" />
+
+                <TextView style="@style/Section" android:text="服务器中继（兜底，三项都填才启用）" />
+                <TextView style="@style/Label" android:text="中继节点 ID（16 hex）" />
+                <EditText
+                    android:id="@+id/edRelayServerId"
+                    style="@style/Field"
+                    android:hint="如 aabbccddeeff0011"
+                    android:inputType="text" />
+                <TextView style="@style/Label" android:text="中继地址（IP:端口）" />
+                <EditText
+                    android:id="@+id/edRelayServerAddr"
+                    style="@style/Field"
+                    android:hint="如 1.2.3.4:51830"
+                    android:inputType="text" />
+                <TextView style="@style/Label" android:text="中继准入令牌" />
+                <EditText
+                    android:id="@+id/edRelayServerToken"
+                    style="@style/Field"
+                    android:hint="中继 token"
+                    android:inputType="textPassword" />
+
+                <TextView style="@style/Section" android:text="云监测台上报（留空=不上报）" />
+                <TextView style="@style/Label" android:text="上报地址" />
+                <EditText
+                    android:id="@+id/edMonitorEndpoint"
+                    style="@style/Field"
+                    android:hint="https://xxx.workers.dev"
+                    android:inputType="textUri" />
+                <TextView style="@style/Label" android:text="上报令牌" />
+                <EditText
+                    android:id="@+id/edMonitorToken"
+                    style="@style/Field"
+                    android:hint="MONITOR_TOKEN"
+                    android:inputType="text" />
+                <TextView style="@style/Label" android:text="上报间隔（秒，5-3600）" />
+                <EditText
+                    android:id="@+id/edMonitorInterval"
+                    style="@style/Field"
+                    android:hint="30"
+                    android:inputType="number" />
+                <TextView style="@style/Label" android:text="设备名（留空=主机名）" />
+                <EditText
+                    android:id="@+id/edMonitorAlias"
+                    style="@style/Field"
+                    android:hint="如 my-phone"
+                    android:inputType="text" />
+
+                <TextView style="@style/Section" android:text="对端节点（每行一条）" />
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="格式：对端ID,地址,公钥,虚拟IP&#10;例：0200000000000002,1.2.3.4:51820,64位hex,10.97.0.2"
+                    android:textSize="11sp"
+                    android:paddingBottom="4dp" />
+                <EditText
+                    android:id="@+id/edPeers"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minLines="3"
+                    android:gravity="top|start"
+                    android:inputType="textMultiLine"
+                    android:fontFamily="monospace"
+                    android:textSize="11sp"
+                    android:padding="8dp"
+                    android:background="#11000000" />
+            </LinearLayout>
+        </LinearLayout>
+    </ScrollView>
 
     <TextView
         android:id="@+id/statusText"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="未启动"
-        android:textSize="14sp"
-        android:paddingTop="12dp" />
+        android:textSize="13sp"
+        android:paddingTop="8dp" />
 
     <Button
         android:id="@+id/btnToggle"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="启动组网"
-        android:layout_marginTop="12dp" />
+        android:layout_marginTop="8dp"
+        android:text="启动组网" />
 </LinearLayout>

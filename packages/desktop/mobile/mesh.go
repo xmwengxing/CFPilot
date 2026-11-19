@@ -15,8 +15,12 @@ package mobile
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/mesh"
@@ -99,3 +103,60 @@ func (m *Mesh) StatusJSON() string {
 // Version 返回绑定库版本（供 Android 侧展示）。
 func (m *Mesh) Version() string { return "0.50.0+mesh" }
 
+// IdentityJSON 派生本机节点身份并返回 JSON（供 App 展示 nodeId / 公钥）。
+//
+// 两个 seed 都是 base64 的 32 字节：任一为空则随机生成，**并在返回值里带上
+// 生成的 seeds**。App 必须把它们存下来、下次启动原样传回 —— 否则每次启动
+// 都会重新生成密钥，NodeId 变化，对端配置里记的 ID 立刻失效。
+//
+// 返回：{"nodeId":"<16hex>","identityPublic":"<64hex>","tunnelPublic":"<64hex>",
+//
+//	"identitySeed":"<base64>","tunnelSeed":"<base64>"}
+func (m *Mesh) IdentityJSON(identitySeedB64, tunnelSeedB64 string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	identSeed, err := seedFromBase64OrRandom(identitySeedB64)
+	if err != nil {
+		return "", fmt.Errorf("mesh: identitySeed 非法: %w", err)
+	}
+	tunnelSeed, err := seedFromBase64OrRandom(tunnelSeedB64)
+	if err != nil {
+		return "", fmt.Errorf("mesh: tunnelSeed 非法: %w", err)
+	}
+	ident, err := mesh.IdentityFromSeeds(identSeed, tunnelSeed)
+	if err != nil {
+		return "", err
+	}
+	out, err := json.Marshal(map[string]string{
+		"nodeId":         ident.NodeID.Hex(),
+		"identityPublic": hex.EncodeToString(ident.IdentityPub),
+		"tunnelPublic":   hex.EncodeToString(ident.TunnelPub),
+		"identitySeed":   base64.StdEncoding.EncodeToString(identSeed[:]),
+		"tunnelSeed":     base64.StdEncoding.EncodeToString(tunnelSeed[:]),
+	})
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// seedFromBase64OrRandom 解 base64 的 32 字节种子；空串则随机生成。
+func seedFromBase64OrRandom(b64 string) ([32]byte, error) {
+	var seed [32]byte
+	b64 = strings.TrimSpace(b64)
+	if b64 == "" {
+		if _, err := rand.Read(seed[:]); err != nil {
+			return seed, err
+		}
+		return seed, nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return seed, err
+	}
+	if len(raw) != 32 {
+		return seed, fmt.Errorf("需要 32 字节，实际 %d", len(raw))
+	}
+	copy(seed[:], raw)
+	return seed, nil
+}

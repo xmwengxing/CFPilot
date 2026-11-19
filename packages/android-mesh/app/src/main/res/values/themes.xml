@@ -5,4 +5,33 @@
         <item name="colorPrimaryDark">#0353E9</item>
         <item name="colorAccent">#0F62FE</item>
     </style>
+
+    <!-- 字段标签（灰、小字） -->
+    <style name="Label">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:paddingTop">8dp</item>
+        <item name="android:paddingBottom">2dp</item>
+        <item name="android:textColor">#667085</item>
+    </style>
+
+    <!-- 分组小标题（比字段标签更重） -->
+    <style name="Section">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:paddingTop">14dp</item>
+        <item name="android:paddingBottom">4dp</item>
+    </style>
+
+    <!-- 输入框 -->
+    <style name="Field">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:inputType">text</item>
+        <item name="android:singleLine">true</item>
+    </style>
 </resources>

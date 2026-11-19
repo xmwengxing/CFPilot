@@ -29,6 +29,11 @@ class MeshVpnService : VpnService() {
         const val ACTION_START = "com.cfpilot.mesh.START"
         const val ACTION_STOP = "com.cfpilot.mesh.STOP"
         const val EXTRA_CONFIG = "config_json"
+
+        /** 服务向界面广播真实运行状态（界面据此驱动按钮，而不是靠猜测）。 */
+        const val ACTION_STATE = "com.cfpilot.mesh.STATE"
+        const val EXTRA_RUNNING = "running"
+        const val EXTRA_ERROR = "error"
         private const val CHANNEL_ID = "cfpilot-mesh"
     }
 
@@ -90,10 +95,21 @@ class MeshVpnService : VpnService() {
                 }
             }
             Log.i(TAG, "mesh 已启动")
+            broadcastState(true, null)
         } catch (e: Exception) {
             Log.e(TAG, "mesh 启动失败", e)
             stopMesh()
+            // 启动失败也要回状态，否则界面会一直停在「处理中」（直到超时）。
+            broadcastState(false, e.message ?: e.javaClass.simpleName)
         }
+    }
+
+    /** 把真实运行状态发给界面（显式 setPackage，避免跨应用泄露）。 */
+    private fun broadcastState(running: Boolean, error: String?) {
+        val i = Intent(ACTION_STATE).setPackage(packageName)
+        i.putExtra(EXTRA_RUNNING, running)
+        if (error != null) i.putExtra(EXTRA_ERROR, error)
+        sendBroadcast(i)
     }
 
     private fun stopMesh() {
@@ -103,6 +119,7 @@ class MeshVpnService : VpnService() {
         tun?.close(); tun = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+        broadcastState(false, null)
     }
 
     private fun buildNotification(): Notification {

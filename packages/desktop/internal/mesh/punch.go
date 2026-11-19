@@ -284,11 +284,40 @@ type RelayMessage struct {
 	Disconnect *RelayDisconnect `msgpack:"Disconnect,omitempty"`
 }
 
+// MsgpackByteArray 是「Rust `Vec<u8>` / `[u8; N]` 兼容」的字节串。
+//
+// ⚠️ msgpack/v5 对 `[]byte` 默认走 **bin8（0xc4）**，而 Rust 侧 rmp-serde 把
+// `Vec<u8>` / `[u8;8]` 编成**整数 array**（0x90…）。两者 wire 不同，中继端反序列化
+// 直接失败并静默丢帧——症状是“节点日志说已注册、中继侧恒 rooms=0”。
+// 这里显式按整数 array 编码（与 punch.go 里 NodeID 的处理同因同法）。
+type MsgpackByteArray []byte
+
+func (b MsgpackByteArray) MarshalMsgpack() ([]byte, error) {
+	arr := make([]int, len(b))
+	for i, v := range b {
+		arr[i] = int(v)
+	}
+	return msgpack.Marshal(arr)
+}
+
+func (b *MsgpackByteArray) UnmarshalMsgpack(raw []byte) error {
+	var arr []int
+	if err := msgpack.Unmarshal(raw, &arr); err != nil {
+		return err
+	}
+	out := make([]byte, len(arr))
+	for i, v := range arr {
+		out[i] = byte(v)
+	}
+	*b = out
+	return nil
+}
+
 type RelayRegister struct {
-	NodeID        NodeID   `msgpack:"node_id"`
-	TokenHash     []byte   `msgpack:"token_hash"`
-	RequestedKbps uint32   `msgpack:"requested_kbps"`
-	RoomTag       *[8]byte `msgpack:"room_tag,omitempty"` // None 时键不出现
+	NodeID        NodeID            `msgpack:"node_id"`
+	TokenHash     MsgpackByteArray  `msgpack:"token_hash"`
+	RequestedKbps uint32            `msgpack:"requested_kbps"`
+	RoomTag       *MsgpackByteArray `msgpack:"room_tag,omitempty"` // None 时键不出现
 }
 
 type RelayAuthAccept struct {

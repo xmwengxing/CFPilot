@@ -3,6 +3,8 @@ package mesh
 import (
 	"fmt"
 	"net"
+	"strconv"
+	"strings"
 
 	"github.com/flynn/noise"
 )
@@ -24,6 +26,17 @@ type Config struct {
 	// 由面板从本地身份传入；留空则用 TunnelPrivate 派生（兼容旧配置/CLI）。
 	IdentitySeed []byte
 	Listen        string // UDP 监听，如 "0.0.0.0:51820"
+	// DisableListenDual 关闭双栈监听（默认 false = 开启）。
+	//
+	// 具体行为：`Listen` 是未指定地址（0.0.0.0 / :: / 空）时优先绑 `[::]:port`
+	// 并显式关闭 IPV6_V6ONLY，一个 socket 同时收 IPv4 与 IPv6；
+	// 绑失败则回退到配置地址。`Listen` 写具体 IP 时本项无效。
+	DisableListenDual bool
+	// PublicAddr 是手工声明的外网地址（`ip:port`），用于路由器端口映射 / DMZ /
+	// 公网 IPv6 这类「STUN 看不准但确实可达」的场景。填了就按**固定端口**
+	// 注入候选并排在候选表最前（不按偏移展开、不参与端口校准）。
+	// 留空 = 完全按 STUN/网卡推导。
+	PublicAddr    string
 	VirtualIP     string // 本节点虚拟 IP，如 "10.93.0.1"
 	MTU           int    // TUN MTU，默认 1400
 	Peers         []PeerConfig
@@ -81,12 +94,45 @@ type RelayServerConfig struct {
 	NodeID string // 中继节点 ID（16 hex）
 	Addr   string // 中继 UDP 地址，如 203.0.113.10:51830
 	Token  string // 准入令牌（只用于计算 BLAKE3 摘要，不写日志/不落盘）
+	// Blind 表示这是**零知识公共盲中继**（`mobihop-relay --relay-only`）：
+	// 按 PSK 派生的 `room_tag` 分房，不需要令牌（Token 可留空）。
+	Blind bool
 }
 type PeerConfig struct {
 	NodeID    NodeID
 	Addr      string // "host:port"
 	StaticPub []byte // X25519 静态公钥（32 字节）；IK 握手需预知
 	VirtualIP string // 对端虚拟 IP（如 "10.96.0.2"），用于 IP 包→NodeID 查表
+}
+
+// ParsePublicAddr 解析 `public_addr`，同时接受 `1.2.3.4:51820`、`[240e::1]:51820`
+// 与**裸 IPv6 带端口** `240e::1:51820`。
+//
+// 裸 IPv6 是用户最常见的写法：直接交给 `net.SplitHostPort` 会报
+// "too many colons"，于是看似合法的配置被拒（真机踩到）。这里按最后一个冒号切。
+func ParsePublicAddr(raw string) (*net.UDPAddr, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return nil, fmt.Errorf("mesh config: PublicAddr 为空")
+	}
+	host, portStr, err := net.SplitHostPort(s)
+	if err != nil {
+		// 再试一次；ip:port 形式（含裸 IPv6）用最后一个冒号切
+		if i := strings.LastIndex(s, ":"); i > 0 {
+			host, portStr = s[:i], s[i+1:]
+		} else {
+			return nil, fmt.Errorf("mesh config: PublicAddr 需为 ip:port: %w", err)
+		}
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil {
+		return nil, fmt.Errorf("mesh config: PublicAddr 不是合法 IP: %s", host)
+	}
+	port, perr := strconv.Atoi(portStr)
+	if perr != nil || port <= 0 || port > 65535 {
+		return nil, fmt.Errorf("mesh config: PublicAddr 端口非法: %s", portStr)
+	}
+	return &net.UDPAddr{IP: ip, Port: port}, nil
 }
 
 // Validate 校验配置（fail-closed）。
@@ -108,6 +154,31 @@ func (c *Config) Validate() error {
 	}
 	if c.MTU <= 0 {
 		c.MTU = 1400
+	}
+	// public_addr：必须是「非回环 / 非私网 / 非链路本地 / 端口非 0」的 ip:port，
+	// 否则写进候选池只会制造假希望（MobiHop validate_public_addr 同款约束）。
+	if c.PublicAddr != "" {
+		addr, err := ParsePublicAddr(c.PublicAddr)
+		if err != nil {
+			return err
+		}
+		if addr.Port == 0 {
+			return fmt.Errorf("mesh config: PublicAddr 端口不能为 0")
+		}
+		switch {
+		case addr.IP == nil:
+			return fmt.Errorf("mesh config: PublicAddr 必须是 ip:port")
+		case addr.IP.IsLoopback():
+			return fmt.Errorf("mesh config: PublicAddr 不能是回环地址: %s", c.PublicAddr)
+		case addr.IP.IsPrivate():
+			return fmt.Errorf("mesh config: PublicAddr 不能是私网地址: %s", c.PublicAddr)
+		case addr.IP.IsLinkLocalUnicast():
+			return fmt.Errorf("mesh config: PublicAddr 不能是链路本地地址: %s", c.PublicAddr)
+		default:
+			if v4 := addr.IP.To4(); v4 != nil && v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
+				return fmt.Errorf("mesh config: PublicAddr 不能是运营商 CGNAT 地址（100.64.0.0/10）: %s", c.PublicAddr)
+			}
+		}
 	}
 	// STUN：nil 用默认池；显式空数组表示关闭探测。
 	if c.StunServers == nil {
@@ -148,6 +219,11 @@ func (c *Config) Validate() error {
 			if _, err := ParseNodeIDHex(r.NodeID); err != nil {
 				return fmt.Errorf("mesh config: RelayServers[%d].NodeID 非法: %w", i, err)
 			}
+		}
+		// 盲中继不需要令牌（按 room_tag 分房）；令牌中继必须给令牌，
+		// 否则线上只发空摘要，中继会判 AuthReject 而用户看不出原因。
+		if !r.Blind && r.Token == "" {
+			return fmt.Errorf("mesh config: RelayServers[%d] 既非 blind 又缺 token", i)
 		}
 	}
 	for i, p := range c.Peers {

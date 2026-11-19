@@ -72,6 +72,8 @@ type Status struct {
 	// NatType / Reflexive 是 STUN 探测结果（Unknown / NAT3 / NAT4 + 公网映射）。
 	NatType   string `json:"natType,omitempty"`
 	Reflexive string `json:"reflexive,omitempty"`
+	// Reflexive6 是 IPv6 反射地址（无 NAT 时即本机全球地址，免映射直连依据）。
+	Reflexive6 string `json:"reflexive6,omitempty"`
 	// Listen 是 UDP 监听地址；排查「对端连不到我」时第一眼看它。
 	Listen    string `json:"listen,omitempty"`
 	Peers     []Peer `json:"peers,omitempty"`

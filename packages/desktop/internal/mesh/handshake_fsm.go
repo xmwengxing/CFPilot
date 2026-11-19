@@ -271,6 +271,17 @@ func (f *HandshakeFSM) OnFrame(frame []byte) (bool, error) {
 	}
 	switch p.state {
 	case HSWaitMsg2:
+		// 双向同时发起（真机：中继 AuthAccept 后两端都会 StartOutboundForce）：
+		// 大 NodeId 一侧收到小 NodeId 的 msg1 时，它的 pending 正是「等 msg2」，
+		// 若直接当 msg2 解，就会 chacha20poly1305: message authentication failed，
+		// 双方永远卡在握手中。破对称规则：**小 NodeId 保持发起方**，大的一侧放弃
+		// 自己的 pending 改当响应方（与 onInit 里忽略对端 Init 的规则对称）。
+		if !f.IsInitiator(parsed.Src) {
+			f.mu.Lock()
+			delete(f.pending, parsed.Src)
+			f.mu.Unlock()
+			return true, f.onInit(parsed)
+		}
 		return true, f.onMsg2(parsed, p)
 	case HSWaitKeyMaterial:
 		return true, f.onKeyMaterial(parsed, p)
@@ -292,6 +303,17 @@ func (f *HandshakeFSM) onInit(parsed *Frame) error {
 			return nil
 		}
 	}
+	// 响应方去重：发起方会周期性重发**同一份** Init（UDP 无连接，5s 一次）。
+	// 每收到一次就重建 responder 握手，会让后续 KeyMaterial 对不上刚生成的那份
+	// msg2 —— 真机症状：`恢复 KeyMaterial 失败` 每 5s 刷一次，永远握不上。
+	f.mu.Lock()
+	if cur, ok := f.pending[parsed.Src]; ok && cur.state == HSWaitKeyMaterial &&
+		time.Since(cur.started) < 5*time.Second {
+		f.mu.Unlock()
+		return nil
+	}
+	f.mu.Unlock()
+
 	hs, err := NewResponderHandshake(f.psk, f.network[:], f.static)
 	if err != nil {
 		return fmt.Errorf("handshake fsm: 构造响应方失败: %w", err)

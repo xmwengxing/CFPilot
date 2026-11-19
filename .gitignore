@@ -86,3 +86,6 @@ packages/android/app/build/
 packages/android/.gradle/
 packages/android/build/
 packages/android/app/src/main/jniLibs/
+
+# 组网真机测试的临时配置（含密钥，绝不入库）
+e2e-*/

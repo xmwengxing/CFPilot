@@ -56,10 +56,17 @@ type meshLifecycle struct {
 	relayCtx       context.Context
 	relayHbMu      sync.Mutex
 	relayHbStarted map[string]bool
+	// relayAccepted 记录已收到 AuthAccept 的中继地址：注册循环据此停止重试。
+	relayAccepted map[string]bool
 
 	// P3 打洞编排状态（每个对端一份）。
 	punchMu sync.Mutex
 	punch   map[NodeID]*punchRun
+	// probeBackSent 记录已回发过 probe-back 的 (peer|nonce)：
+	// 两端互探必须去重，否则形成探测风暴。
+	probeBackSent map[string]struct{}
+	// hardSymCursor 是硬对称洗牌扫描的游标（每对端一份，跨轮推进、不重复端口）。
+	hardSymCursor map[NodeID]uint32
 
 	// wireVersions 记录每个对端的线速版本（ADR-0016）：控制帧与数据帧都按它编码。
 	// 只从能成功解码的入站帧学习，未知对端按 v2。
@@ -203,7 +210,9 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 
 	// 2. UdpHub（新 peer 发现后由回调建 link）
 	var onIncoming func(NodeID, *net.UDPAddr)
-	m.hub, err = NewUdpHub(m.cfg.Listen, func(id NodeID, addr *net.UDPAddr) {
+	// 双栈默认开启：listen 为未指定地址时实际绑 [::]（v4 走 v4-mapped），
+	// IPv6 侧无需端口映射即可直连；IPv4 侧路径不变。
+	m.hub, err = NewUdpHubWithDual(m.cfg.Listen, !m.cfg.DisableListenDual, func(id NodeID, addr *net.UDPAddr) {
 		if onIncoming != nil {
 			onIncoming(id, addr)
 		}
@@ -238,8 +247,9 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 	m.lastTxData = make(map[NodeID]time.Time)
 	m.punch = make(map[NodeID]*punchRun)
 	m.relayHbStarted = make(map[string]bool)
-	m.punch = make(map[NodeID]*punchRun)
-	m.relayHbStarted = make(map[string]bool)
+	m.relayAccepted = make(map[string]bool)
+	m.probeBackSent = make(map[string]struct{})
+	m.hardSymCursor = make(map[NodeID]uint32)
 	m.fsm = NewHandshakeFSM(m.cfg.NodeID, network, psk, tunnel)
 	m.fsm.SetWireVersions(m.wireVersions)
 	m.fsm.SetOnEstablished(func(peer NodeID, sess *Session) {
@@ -320,7 +330,7 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 			// 新链路上重发 Init（打洞/中继建立后双方都需要重新握手）。
 			if _, ok := m.fsm.Session(peer); !ok {
 				if cfg := m.peerConfig(peer); cfg != nil {
-					_ = m.fsm.StartOutboundForce(peer, cfg.StaticPub)
+					_ = m.fsm.StartOutbound(peer, cfg.StaticPub)
 				}
 			}
 			// ⚠️ 切到 WSS（中继）后必须主动打洞：
@@ -398,12 +408,20 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 			return
 		}
 		timeout := time.Duration(m.cfg.StunProbeTimeoutMS) * time.Millisecond
-		a := DiscoverNat(runCtx, m.hub, m.cfg.StunServers, timeout)
+		// 第一轮 IPv4：NAT 类型语义只对 v4 有意义（对称/锥形）。
+		nat4 := DiscoverNatFamily(runCtx, m.hub, m.cfg.StunServers, timeout, 4)
+		// 第二轮 IPv6：只为了拿反射地址（无 NAT 即本机全球地址），
+		// 它是「免端口映射直连」的直接依据。失败不降级也不报错。
+		nat6 := DiscoverNatFamily(runCtx, m.hub, m.cfg.StunServers, timeout, 6)
+		if nat6.Reflexive6 != "" {
+			nat4.Reflexive6 = nat6.Reflexive6
+		}
 		m.natMu.Lock()
-		m.nat = a
+		m.nat = nat4
 		m.natMu.Unlock()
 		if m.cfg.Verbose {
-			log.Printf("[mesh] STUN 探测完成 nat=%s reflexive=%s", a.Type, a.Reflexive)
+			log.Printf("[mesh] STUN 探测完成 nat=%s reflexive=%s reflexive6=%s",
+				nat4.Type, nat4.Reflexive, nat4.Reflexive6)
 		}
 	}()
 
@@ -439,7 +457,14 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 	})
 
 	// 服务器中继：启动注册 + 心跳（兜底链路，独立于盲中继 WSS）。
-	spawnRelayClients(runCtx, m.hub, m.cfg.NodeID, m.cfg.RelayServers, m.cfg.Verbose)
+	// relayCtx 必须先注入：心跳 goroutine 会拿它做退出信号（漏了就 nil.Done() 崩进程）。
+	m.relayCtx = runCtx
+	spawnRelayClients(runCtx, m.hub, m.cfg.NodeID, m.cfg.RelayServers, DeriveRoomTag(psk), m.cfg.Verbose, func(addr string) bool {
+		m.relayHbMu.Lock()
+		ok := m.relayAccepted[addr]
+		m.relayHbMu.Unlock()
+		return ok
+	})
 
 	// 6a. 启动即主动握手：UDP 无连接，双方都只「等对方先发包」就会永远无事发生。
 	// 小 NodeId 一方作为发起方直接发 Init（对齐 FSM 的破对称角色），
@@ -474,7 +499,11 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 				m.mu.Unlock()
 				for id, addr := range pairs {
 					m.probes.SetPeer(id, addr)
-					_, _ = m.probes.SendProbe(runCtx, id)
+					// 发送失败必须可见：旧实现丢掉错误，于是「对端地址不可达 / 地址族不匹配」
+					// 只会表现为「探针一直 loss=1」，完全看不出是发不出去还是收不到。
+					if _, err := m.probes.SendProbe(runCtx, id); err != nil && m.cfg.Verbose {
+						log.Printf("[mesh] UDP 探针发送失败 peer=%x addr=%s: %v", id[:4], addr, err)
+					}
 				}
 			}
 		}
@@ -901,10 +930,11 @@ func (m *meshLifecycle) Status() Status {
 		Running:     m.running,
 		NatType:     nat.Type,
 		Reflexive:   nat.Reflexive,
+		Reflexive6:  nat.Reflexive6,
 		Network:     m.cfg.NetworkName,
 		VirtualIP:   m.cfg.VirtualIP,
 		NodeID:      fmt.Sprintf("%x", m.cfg.NodeID[:]),
-		Listen:      m.cfg.Listen,
+		Listen:      listenActual(m.cfg.Listen, m.hub),
 		TXFrames:    m.txFrames.Load(),
 		RXFrames:    m.rxFrames.Load(),
 		TXDropped:   m.txDropped.Load(),
@@ -968,8 +998,11 @@ func (m *meshLifecycle) Status() Status {
 		} else {
 			p.State = "未连接（仅配置）"
 		}
-		// 传输档位：降级到 WSS 时明确标出来（直连假活时用户最需要看这个）
-		if m.degrade != nil && m.degrade.Kind(id) == TransportWSS {
+		// 传输档位：经中继转发 / 降级到 WSS 都要明确标出来
+		// （直连假活、却其实走中继时，用户最需要看这个）。
+		if link := m.links[id]; link != nil && link.IsRelayed() {
+			p.Via = "relay"
+		} else if m.degrade != nil && m.degrade.Kind(id) == TransportWSS {
 			p.Via = "wss"
 		}
 		// 探针实测 RTT / 丢包（样本不足时 Measurement 返回 0，不误报）

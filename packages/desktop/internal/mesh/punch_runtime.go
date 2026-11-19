@@ -5,16 +5,17 @@ package mesh
 // P3：Punch 编排（对齐 MobiHop punch_runtime.rs 的最小可验证子集）。
 //
 // 流程（与 MobiHop 一致的部分）：
-//   1. 会话经**中继**建立后，立刻经该链路发 PunchRequest（携带本机候选）；
-//   2. 对端回 PunchReply（携带它的候选），双方按 ~100ms 间隔向对方候选发 PunchProbe；
-//   3. 收到 PunchProbe 的一方回 PunchAck（回到**探测来源地址**）；
-//   4. **只有收到 PunchAck**（或收到来自候选地址的合法帧）才把链路从"中继"升级为"直连"；
-//      打洞失败则保持不变（继续走中继）——绝不静默切出口。
+//  1. 会话经**中继**建立后，立刻经该链路发 PunchRequest（携带本机候选）；
+//  2. 对端回 PunchReply（携带它的候选），双方按 ~100ms 间隔向对方候选发 PunchProbe；
+//  3. 收到 PunchProbe 的一方回 PunchAck（回到**探测来源地址**），并回发一条 PunchProbe
+//     做**反向证明**（probe-back）——否则响应方永远拿不到「对端 Ack」这个直连证据，
+//     升级只能是单边的（MobiHop 2026-11-19 修的正是这个不对称）；
+//  4. **只有收到 PunchAck**（或收到来自候选地址的合法帧）才把链路从"中继"升级为"直连"；
+//     打洞失败则保持不变（继续走中继）——绝不静默切出口。
 //
 // 与 MobiHop 的差异（如实标注）：
 //   - 未实现 `punch_at_ms` 的双方时钟对齐（本地直接立即开打；MobiHop 用约定时刻同步）；
-//   - 未做 2s/5s/10s 退避重试（只在会话建立时尝试一轮）；
-//   - 未引入 Relayed 候选（本子集的中继腿已由 WSS 承担）。
+//   - 未做 2s/5s/10s 退避重试（只在会话建立时尝试一轮）。
 //
 // 关键纪律：**信令走现有链路（通常是中继），探测走 UdpHub 同一个 socket**。
 // 用另一个 socket 会让 NAT 映射不一致，打洞必然失败。
@@ -23,6 +24,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"log"
 	"net"
 	"strconv"
@@ -39,6 +41,17 @@ type punchRun struct {
 const (
 	punchProbeInterval = 100 * time.Millisecond
 	punchProbeWindow   = 3 * time.Second
+
+	// 硬对称洗牌扫描（对齐 MobiHop HARD_SYM_* 与 easytier send_punch_packet_hard_sym）：
+	// 跨度 2048、步长 1021（与 2048 互质 ⇒ [0,2048) 上的置换，连续调用不重复），
+	// 每个探测间隔发一批（≈ hardSymBatch/0.1s ≈ 400 pkt/s）。
+	hardSymSpan     = 2048
+	hardSymStep     = 1021
+	hardSymBatch    = 40
+	hardSymPortBase = 1024
+
+	// probeBackTracked 上限：防止对端用随机 nonce 把去重表撑爆。
+	probeBackTracked = 256
 )
 
 // randUint64 生成 nonce。
@@ -61,12 +74,150 @@ func listenPort(listen string) int {
 	return port
 }
 
-// localCandidates 生成本机候选：Host（各网卡 IPv4）+ ServerReflexive（STUN 映射）。
+// localIPv6s 收集本机可用于直连的 IPv6 全球地址（排除回环 / 链路本地 / ULA）。
+func localIPv6s() []string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip := ipnet.IP
+		if ip.To4() != nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			continue
+		}
+		if !ip.IsGlobalUnicast() {
+			continue
+		}
+		out = append(out, ip.String())
+	}
+	return out
+}
+
+// candidateUDP 把候选地址转成 UDPAddr（v4 / v6 都支持）。
+func candidateUDP(c Candidate) *net.UDPAddr {
+	switch {
+	case c.Addr.V4 != nil:
+		v4 := c.Addr.V4
+		return &net.UDPAddr{
+			IP:   net.IPv4(v4.IP[0], v4.IP[1], v4.IP[2], v4.IP[3]),
+			Port: int(v4.Port),
+		}
+	case c.Addr.V6 != nil:
+		v6 := c.Addr.V6
+		ip := make(net.IP, net.IPv6len)
+		copy(ip, v6.IP[:])
+		return &net.UDPAddr{IP: ip, Port: int(v6.Port)}
+	default:
+		return nil
+	}
+}
+
+// candidateKey 用于候选去重。
+func candidateKey(c Candidate) string {
+	if a := candidateUDP(c); a != nil {
+		return a.String()
+	}
+	return ""
+}
+
+// publicAddrCandidate 把配置里的 `public_addr` 变成固定端口候选。
 //
-// 优先级沿用 MobiHop 常量（Host > ServerReflexive > Relayed）。
+// 语义（对齐 MobiHop `add_static_reflexive`）：手工声明的外网地址最可信、
+// 端口固定，**排在候选表最前**；它不会按 skip 展开、也不参与端口偏移校准。
+func (m *meshLifecycle) publicAddrCandidate() *Candidate {
+	raw := m.cfg.PublicAddr
+	if raw == "" {
+		return nil
+	}
+	addr, err := ParsePublicAddr(raw)
+	if err != nil || addr.Port == 0 {
+		return nil
+	}
+	if addr.IP.IsLoopback() || addr.IP.IsPrivate() || addr.IP.IsLinkLocalUnicast() {
+		return nil // 校验已在 Config.Validate 拒绝，这里再兜一层
+	}
+	if addr.IP.To4() != nil {
+		v4 := addr.IP.To4()
+		c := Candidate{
+			Addr:     NewV4Addr([4]byte{v4[0], v4[1], v4[2], v4[3]}, uint16(addr.Port)),
+			Kind:     CandidateServerReflexive,
+			Priority: PriorityFor(CandidateServerReflexive, false) + 1000,
+		}
+		return &c
+	}
+	v6 := addr.IP.To16()
+	var ip6 [16]byte
+	copy(ip6[:], v6)
+	c := Candidate{
+		Addr:     NewV6Addr(ip6, uint16(addr.Port)),
+		Kind:     CandidateServerReflexive,
+		Priority: PriorityFor(CandidateServerReflexive, true) + 1000,
+	}
+	return &c
+}
+
+// localCandidates 生成本机候选：
+//  1. `public_addr`（用户声明，固定端口，排最前）
+//  2. STUN 反射地址（IPv6 优先：无 NAT，免映射即直连）
+//  3. 网卡 Host 候选（IPv6 全球地址 + IPv4）
+//
+// 优先级沿用 MobiHop 常量（Host > ServerReflexive > Relayed，v6 有加分）。
 func (m *meshLifecycle) localCandidates() []Candidate {
 	port := listenPort(m.cfg.Listen)
-	out := make([]Candidate, 0, 4)
+	out := make([]Candidate, 0, 8)
+	seen := make(map[string]bool, 8)
+	add := func(c Candidate) {
+		if k := candidateKey(c); k != "" && !seen[k] {
+			seen[k] = true
+			out = append(out, c)
+		}
+	}
+	if pub := m.publicAddrCandidate(); pub != nil {
+		add(*pub)
+	}
+	m.natMu.Lock()
+	nat := m.nat
+	m.natMu.Unlock()
+	if nat.Reflexive6 != "" {
+		if addr, err := net.ResolveUDPAddr("udp", nat.Reflexive6); err == nil && addr.IP.To4() == nil {
+			var ip6 [16]byte
+			copy(ip6[:], addr.IP.To16())
+			add(Candidate{
+				Addr:     NewV6Addr(ip6, uint16(addr.Port)),
+				Kind:     CandidateServerReflexive,
+				Priority: PriorityFor(CandidateServerReflexive, true),
+			})
+		}
+	}
+	if nat.Reflexive != "" {
+		if addr, err := net.ResolveUDPAddr("udp", nat.Reflexive); err == nil && addr.IP.To4() != nil {
+			v4 := addr.IP.To4()
+			add(Candidate{
+				Addr:     NewV4Addr([4]byte{v4[0], v4[1], v4[2], v4[3]}, uint16(addr.Port)),
+				Kind:     CandidateServerReflexive,
+				Priority: PriorityFor(CandidateServerReflexive, false),
+			})
+		}
+	}
+	// Host 候选的端口必须是**监听端口**：NAT 保活与打洞都依赖同一个映射。
+	for _, raw := range localIPv6s() {
+		ip := net.ParseIP(raw)
+		if ip == nil || ip.To4() != nil {
+			continue
+		}
+		var ip6 [16]byte
+		copy(ip6[:], ip.To16())
+		add(Candidate{
+			Addr:     NewV6Addr(ip6, uint16(port)),
+			Kind:     CandidateHost,
+			Priority: PriorityFor(CandidateHost, true),
+		})
+	}
 	for _, raw := range localIPv4s() {
 		ip := net.ParseIP(raw)
 		if ip == nil {
@@ -76,38 +227,79 @@ func (m *meshLifecycle) localCandidates() []Candidate {
 		if v4 == nil {
 			continue
 		}
-		out = append(out, Candidate{
+		add(Candidate{
 			Addr:     NewV4Addr([4]byte{v4[0], v4[1], v4[2], v4[3]}, uint16(port)),
 			Kind:     CandidateHost,
 			Priority: PriorityFor(CandidateHost, false),
 		})
 	}
+	return out
+}
+
+// isSymmetricNat 报告 IPv4 侧是否判成对称映射（只有这时才启用硬对称扫描）。
+func (m *meshLifecycle) isSymmetricNat() bool {
 	m.natMu.Lock()
-	reflexive := m.nat.Reflexive
-	m.natMu.Unlock()
-	if reflexive != "" {
-		if addr, err := net.ResolveUDPAddr("udp", reflexive); err == nil && addr.IP.To4() != nil {
-			v4 := addr.IP.To4()
-			out = append(out, Candidate{
-				Addr:     NewV4Addr([4]byte{v4[0], v4[1], v4[2], v4[3]}, uint16(addr.Port)),
-				Kind:     CandidateServerReflexive,
-				Priority: PriorityFor(CandidateServerReflexive, false),
-			})
+	defer m.natMu.Unlock()
+	return m.nat.Type == "NAT4"
+}
+
+// hardSymTargets 生成硬对称洗牌扫描的目标（跨度 2048、步长 1021 的置换）。
+//
+// 只对**对端的公网 IP**（反射候选）换端口扫：对端在对称 NAT 后时，
+// 它对每个目的端口都会重新分配映射，扫不中端口就永远打不通。
+func (m *meshLifecycle) hardSymTargets(peer NodeID, cands []Candidate, count int) []*net.UDPAddr {
+	if count <= 0 {
+		return nil
+	}
+	ips := make([]net.IP, 0, 2)
+	for _, c := range cands {
+		if c.Kind != CandidateServerReflexive {
+			continue
+		}
+		if a := candidateUDP(c); a != nil && a.IP.To4() != nil {
+			ips = append(ips, a.IP)
+		}
+	}
+	if len(ips) == 0 {
+		return nil
+	}
+	m.punchMu.Lock()
+	if m.hardSymCursor == nil {
+		m.hardSymCursor = make(map[NodeID]uint32)
+	}
+	base := m.hardSymCursor[peer]
+	m.hardSymCursor[peer] = base + uint32(count)
+	m.punchMu.Unlock()
+
+	out := make([]*net.UDPAddr, 0, count*len(ips))
+	for i := 0; i < count; i++ {
+		port := hardSymPortBase + int(((base+uint32(i))*hardSymStep)%hardSymSpan)
+		for _, ip := range ips {
+			out = append(out, &net.UDPAddr{IP: ip, Port: port})
 		}
 	}
 	return out
 }
 
-// candidateUDP 把候选地址转成 UDPAddr；IPv6 候选取本机子集不支持，返回 nil。
-func candidateUDP(c Candidate) *net.UDPAddr {
-	if c.Addr.V4 == nil {
-		return nil
+// shouldProbeBack 保证同一 (peer, nonce) 只回发一次 probe-back，防止互探回环。
+func (m *meshLifecycle) shouldProbeBack(peer NodeID, nonce uint64) bool {
+	key := fmt.Sprintf("%x|%d", peer, nonce)
+	m.punchMu.Lock()
+	defer m.punchMu.Unlock()
+	if m.probeBackSent == nil {
+		m.probeBackSent = make(map[string]struct{})
 	}
-	v4 := c.Addr.V4
-	return &net.UDPAddr{
-		IP:   net.IPv4(v4.IP[0], v4.IP[1], v4.IP[2], v4.IP[3]),
-		Port: int(v4.Port),
+	if _, ok := m.probeBackSent[key]; ok {
+		return false
 	}
+	if len(m.probeBackSent) >= probeBackTracked {
+		for k := range m.probeBackSent {
+			delete(m.probeBackSent, k)
+			break
+		}
+	}
+	m.probeBackSent[key] = struct{}{}
+	return true
 }
 
 // encodePunchFrame 封装 0x05 PunchMessage 帧。
@@ -144,7 +336,7 @@ func (m *meshLifecycle) startPunch(peer NodeID, via PeerLink) {
 	}
 	_ = via.Send(context.Background(), frame)
 	if m.cfg.Verbose {
-		log.Printf("[mesh] 经中继向 %x 发起打洞（候选 %d 个）", peer[:4], len(cands))
+		log.Printf("[mesh] 经中继向 %x 发起打洞（候选 %d 个，对称NAT=%v）", peer[:4], len(cands), m.isSymmetricNat())
 	}
 }
 
@@ -179,8 +371,10 @@ func (m *meshLifecycle) handlePunch(peer NodeID, parsed *Frame, remote *net.UDPA
 		reply := msg.PunchReply
 		m.punchMu.Lock()
 		run := m.punch[peer]
+		hasRun := run != nil
 		m.punchMu.Unlock()
-		if run == nil || run.nonce != reply.Nonce {
+		// 响应方没有 punchRun（它只在收到 PunchReq 时开始探测），不能因此丢掉候选。
+		if hasRun && run.nonce != reply.Nonce {
 			return // nonce 不匹配：过期的应答，忽略
 		}
 		m.beginProbe(peer, reply.Candidates, reply.Nonce)
@@ -193,21 +387,34 @@ func (m *meshLifecycle) handlePunch(peer NodeID, parsed *Frame, remote *net.UDPA
 		if frame, e := m.encodePunchFrame(peer, ack); e == nil {
 			_ = m.hub.SendProbeTo(context.Background(), remote, frame)
 		}
+		// 反向证明（probe-back）：让对端也从我们的真实地址看到一条 PunchProbe，
+		// 它回 Ack 后双方都有「对端直连可达」的证据。每个 (peer,nonce) 只发一次。
+		if m.shouldProbeBack(peer, probe.Nonce) {
+			back := &PunchMessage{PunchProbe: &PunchProbe{From: m.cfg.NodeID, Nonce: probe.Nonce}}
+			if frame, e := m.encodePunchFrame(peer, back); e == nil {
+				_ = m.hub.SendProbeTo(context.Background(), remote, frame)
+			}
+		}
 		m.upgradeToDirect(peer, remote)
 	case msg.PunchAck != nil:
 		if remote == nil {
 			return
+		}
+		if m.cfg.Verbose {
+			log.Printf("[mesh] 收到 PunchAck：%x 直连可达 %s", peer[:4], remote)
 		}
 		m.upgradeToDirect(peer, remote)
 	}
 }
 
 // beginProbe 向对端候选喷洒 PunchProbe（窗口 3s、间隔 100ms）。
+//
+// 对端判为对称映射时，额外做硬对称洗牌扫描：同一公网 IP 上按置换表换端口，
+// 每轮 40 个目标；否则只打候选表里的确切地址。
 func (m *meshLifecycle) beginProbe(peer NodeID, cands []Candidate, nonce uint64) {
 	if m.hub == nil {
 		return // 未启动/UDP 通道不可用（单元测试或半初始化状态）
 	}
-	// 只取 IPv4 候选（本机子集的 UDP 通道只跑 IPv4）
 	targets := make([]*net.UDPAddr, 0, len(cands))
 	for _, c := range cands {
 		if a := candidateUDP(c); a != nil {
@@ -217,6 +424,7 @@ func (m *meshLifecycle) beginProbe(peer NodeID, cands []Candidate, nonce uint64)
 	if len(targets) == 0 {
 		return
 	}
+	hardSym := m.isSymmetricNat()
 	msg := &PunchMessage{PunchProbe: &PunchProbe{From: m.cfg.NodeID, Nonce: nonce}}
 	frame, err := m.encodePunchFrame(peer, msg)
 	if err != nil {
@@ -227,6 +435,11 @@ func (m *meshLifecycle) beginProbe(peer NodeID, cands []Candidate, nonce uint64)
 		for time.Now().Before(deadline) {
 			for _, addr := range targets {
 				_ = m.hub.SendProbeTo(context.Background(), addr, frame)
+			}
+			if hardSym {
+				for _, addr := range m.hardSymTargets(peer, cands, hardSymBatch) {
+					_ = m.hub.SendProbeTo(context.Background(), addr, frame)
+				}
 			}
 			time.Sleep(punchProbeInterval)
 		}
@@ -240,6 +453,7 @@ func (m *meshLifecycle) upgradeToDirect(peer NodeID, addr *net.UDPAddr) {
 	if addr == nil || m.hub == nil {
 		return
 	}
+	addr = canonicalAddr(addr)
 	m.mu.Lock()
 	cur := m.links[peer]
 	if cur != nil && !cur.IsRelayed() {

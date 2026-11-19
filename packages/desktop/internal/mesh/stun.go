@@ -61,10 +61,13 @@ type StunMapping struct {
 
 // NatAssessment 是 NAT 判定结果（供状态面板展示）。
 type NatAssessment struct {
-	// Type：Unknown / NAT3（锥形，保守）/ NAT4（对称）
+	// Type：Unknown / NAT3（锥形，保守）/ NAT4（对称）/ Public（v6 无 NAT）
 	Type string `json:"type"`
 	// Reflexive 是某一致映射（ip:port），仅当探测成功时存在。
 	Reflexive string `json:"reflexive,omitempty"`
+	// Reflexive6 是 IPv6 侧的反射地址（无 NAT 时即本机全球地址）。
+	// IPv6 轮探测到它就足以作为免映射直连候选，无需端口映射。
+	Reflexive6 string `json:"reflexive6,omitempty"`
 	// Observations 是各服务器的原始观测（诊断用）。
 	Observations []StunMapping `json:"observations,omitempty"`
 }
@@ -88,7 +91,11 @@ func buildBindingRequest(txid [12]byte) []byte {
 }
 
 // parseBindingResponse 解析 Binding Success Response，提取映射地址。
-func parseBindingResponse(b []byte) (addr string, port int, err error) {
+//
+// txid 是本次请求的事务 ID：XOR-MAPPED-ADDRESS 的 IPv6 地址要与
+// `magic cookie || txid` 逐字节异或，不传进来就还原不出真实地址（旧实现
+// 只处理了 IPv4，IPv6 会直接拿到被异或过的值）。
+func parseBindingResponse(b []byte, txid [12]byte) (addr string, port int, err error) {
 	if len(b) < stunHeaderLen {
 		return "", 0, fmt.Errorf("stun: 报文过短")
 	}
@@ -114,9 +121,9 @@ func parseBindingResponse(b []byte) (addr string, port int, err error) {
 		val := b[valStart : valStart+alen]
 		switch typ {
 		case stunAttrXorMapped:
-			xorMapped, xorPort, _ = parseAddressAttr(val, true)
+			xorMapped, xorPort, _ = parseAddressAttr(val, true, txid)
 		case stunAttrMapped:
-			mapped, mappedPort, _ = parseAddressAttr(val, false)
+			mapped, mappedPort, _ = parseAddressAttr(val, false, txid)
 		}
 		// 属性按 4 字节对齐
 		off = valStart + alen
@@ -134,37 +141,44 @@ func parseBindingResponse(b []byte) (addr string, port int, err error) {
 }
 
 // parseAddressAttr 解析 MAPPED-ADDRESS / XOR-MAPPED-ADDRESS 属性体。
-func parseAddressAttr(val []byte, xor bool) (ip string, port int, err error) {
-	if len(val) < 4 {
+//
+// ⚠️ 属性体布局（RFC 5389 §15.1/§15.2）是：
+//
+//	[0]    保留（恒 0）
+//	[1]    地址族（0x01 = IPv4，0x02 = IPv6）
+//	[2:4]  端口（大端）
+//	[4:]   地址
+//
+// 旧实现把 `val[0]` 当地址族、`val[1:3]` 当端口，于是每一个真实 STUN 响应都会
+// 解析成「未知地址族 / 属性过短」，`natType` 永远 Unknown、候选表里永远没有反射地址
+// （真机定位：Cloudflare 回包 32 字节，`00 20 00 08 | 00 01 36 7c ...`）。
+func parseAddressAttr(val []byte, xor bool, txid [12]byte) (ip string, port int, err error) {
+	if len(val) < 8 {
 		return "", 0, fmt.Errorf("stun: 地址属性过短")
 	}
-	family := val[0]
-	p := int(binary.BigEndian.Uint16(val[1:3]))
+	family := val[1]
+	p := int(binary.BigEndian.Uint16(val[2:4]))
 	var addr []byte
 	switch family {
 	case stunFamilyIPv4:
-		if len(val) < 8 {
-			return "", 0, fmt.Errorf("stun: IPv4 属性过短")
-		}
-		addr = append([]byte(nil), val[3:7]...)
+		addr = append([]byte(nil), val[4:8]...)
 	case stunFamilyIPv6:
 		if len(val) < 20 {
 			return "", 0, fmt.Errorf("stun: IPv6 属性过短")
 		}
-		addr = append([]byte(nil), val[3:19]...)
+		addr = append([]byte(nil), val[4:20]...)
 	default:
 		return "", 0, fmt.Errorf("stun: 未知地址族 %#x", family)
 	}
 	if xor {
-		// XOR-MAPPED-ADDRESS：端口 ^ (magic>>16)，IPv4 地址逐字节与 magic 异或；
-		// IPv6 还要再异或事务 ID 的后 12 字节（这里只做 IPv4，IPv6 直接返回原值）。
+		// XOR-MAPPED-ADDRESS：端口 ^ (magic>>16)；地址与 `magic cookie || txid` 逐字节异或
+		// （IPv4 用前 4 字节，IPv6 用完整 16 字节，RFC 5389 §15.2）。
 		p ^= int(stunMagicCookie >> 16)
-		if family == stunFamilyIPv4 {
-			cookie := [4]byte{}
-			binary.BigEndian.PutUint32(cookie[:], stunMagicCookie)
-			for i := 0; i < 4; i++ {
-				addr[i] ^= cookie[i]
-			}
+		mask := make([]byte, 16)
+		binary.BigEndian.PutUint32(mask[0:4], stunMagicCookie)
+		copy(mask[4:16], txid[:])
+		for i := 0; i < len(addr) && i < len(mask); i++ {
+			addr[i] ^= mask[i]
 		}
 	}
 	ip = net.IP(addr).String()
@@ -176,8 +190,21 @@ func parseAddressAttr(val []byte, xor bool) (ip string, port int, err error) {
 // ctx 取消 / 超时即返回已收集到的观测（可能为空）。失败只返回 Unknown，
 // 绝不阻断组网（与 MobiHop 的异步后台探测语义一致）。
 func DiscoverNat(ctx context.Context, hub *UdpHub, servers []string, timeout time.Duration) NatAssessment {
+	return DiscoverNatFamily(ctx, hub, servers, timeout, 4)
+}
+
+// DiscoverNatFamily 用指定地址族（4 或 6）探测公共 STUN。
+//
+// IPv4 轮用来判定 NAT 类型（对称/锥形，NAT 语义只对 v4 有意义）；
+// IPv6 轮只为了拿到**反射地址**——IPv6 通常没有 NAT，它就是本机全球地址，
+// 直接作为免端口映射的直连候选。
+func DiscoverNatFamily(ctx context.Context, hub *UdpHub, servers []string, timeout time.Duration, family int) NatAssessment {
 	if hub == nil || len(servers) == 0 {
 		return NatAssessment{Type: "Unknown"}
+	}
+	network := "udp4"
+	if family == 6 {
+		network = "udp6"
 	}
 	if timeout <= 0 {
 		timeout = DefaultStunProbeMS * time.Millisecond
@@ -207,7 +234,7 @@ func DiscoverNat(ctx context.Context, hub *UdpHub, servers []string, timeout tim
 		if w == nil {
 			return
 		}
-		ip, port, err := parseBindingResponse(b)
+		ip, port, err := parseBindingResponse(b, txid)
 		if err != nil {
 			return
 		}
@@ -222,9 +249,12 @@ func DiscoverNat(ctx context.Context, hub *UdpHub, servers []string, timeout tim
 	var rmu sync.Mutex
 	for _, srv := range servers {
 		srv = strings.TrimSpace(srv)
-		addr, err := net.ResolveUDPAddr("udp", srv)
+		addr, err := net.ResolveUDPAddr(network, srv)
 		if err != nil {
 			continue
+		}
+		if (family == 6) != (addr.IP.To4() == nil) {
+			continue // 该服务器没有对应地址族的记录：跳过，别用 v4 假装 v6
 		}
 		txid := randomTxID()
 		w := &waiter{ch: make(chan StunMapping, 1)}
@@ -255,7 +285,7 @@ func DiscoverNat(ctx context.Context, hub *UdpHub, servers []string, timeout tim
 		}(srv, addr, txid, w)
 	}
 	wg.Wait()
-	return classifyMappings(results)
+	return classifyMappings(results, family)
 }
 
 // randomTxID 生成 12 字节事务 ID。
@@ -269,10 +299,26 @@ func randomTxID() [12]byte {
 }
 
 // classifyMappings 按映射一致性保守判定 NAT 形态。
-func classifyMappings(ms []StunMapping) NatAssessment {
+func classifyMappings(ms []StunMapping, family int) NatAssessment {
 	out := NatAssessment{Observations: ms}
 	if len(ms) == 0 {
 		out.Type = "Unknown"
+		return out
+	}
+	if family == 6 {
+		// IPv6 没有 NAT：映射就是本机地址。一致即可直接用；不一致说明多出口。
+		consistent := true
+		for _, m := range ms[1:] {
+			if m.Address != ms[0].Address {
+				consistent = false
+			}
+		}
+		if consistent {
+			out.Type = "Public"
+			out.Reflexive6 = ms[0].Address
+		} else {
+			out.Type = "NAT6-varies"
+		}
 		return out
 	}
 	first := ms[0].Address

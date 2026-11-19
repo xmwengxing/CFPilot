@@ -37,14 +37,16 @@ func makeResponse(txid []byte, client *net.UDPAddr) []byte {
 	attr := make([]byte, 12) // 头部 4 + 值 8（IPv4 值 7 字节，按 4 对齐补 1）
 	binary.BigEndian.PutUint16(attr[0:2], stunAttrXorMapped)
 	binary.BigEndian.PutUint16(attr[2:4], 8)
-	attr[4] = stunFamilyIPv4
+	// RFC 5389 §15.2：值 = 保留(1) | family(1) | port(2，已异或) | addr(4，已异或)
+	attr[4] = 0x00
+	attr[5] = stunFamilyIPv4
 	port := client.Port ^ int(stunMagicCookie>>16)
-	binary.BigEndian.PutUint16(attr[5:7], uint16(port))
+	binary.BigEndian.PutUint16(attr[6:8], uint16(port))
 	cookie := [4]byte{}
 	binary.BigEndian.PutUint32(cookie[:], stunMagicCookie)
 	ip := client.IP.To4()
 	for i := 0; i < 4; i++ {
-		attr[7+i] = ip[i] ^ cookie[i]
+		attr[8+i] = ip[i] ^ cookie[i]
 	}
 	hdr := make([]byte, stunHeaderLen)
 	binary.BigEndian.PutUint16(hdr[0:2], stunBindingResponse)
@@ -102,22 +104,22 @@ func TestClassifyMappings(t *testing.T) {
 	// 映射一致 → NAT3（保守）
 	m1 := []StunMapping{{IP: "203.0.113.5", Port: 5000, Address: "203.0.113.5:5000"},
 		{IP: "203.0.113.5", Port: 5000, Address: "203.0.113.5:5000"}}
-	if got := classifyMappings(m1); got.Type != "NAT3" || got.Reflexive != "203.0.113.5:5000" {
+	if got := classifyMappings(m1, 4); got.Type != "NAT3" || got.Reflexive != "203.0.113.5:5000" {
 		t.Errorf("一致映射应 NAT3 + 反射地址: %+v", got)
 	}
 	// 同 IP 不同端口 → NAT4
 	m2 := []StunMapping{{IP: "203.0.113.5", Port: 5000, Address: "203.0.113.5:5000"},
 		{IP: "203.0.113.5", Port: 5001, Address: "203.0.113.5:5001"}}
-	if got := classifyMappings(m2); got.Type != "NAT4" {
+	if got := classifyMappings(m2, 4); got.Type != "NAT4" {
 		t.Errorf("同 IP 不同端口应 NAT4: %+v", got)
 	}
 	// 不同 IP → NAT4
 	m3 := []StunMapping{{IP: "203.0.113.5", Port: 5000, Address: "203.0.113.5:5000"},
 		{IP: "198.51.100.7", Port: 5000, Address: "198.51.100.7:5000"}}
-	if got := classifyMappings(m3); got.Type != "NAT4" {
+	if got := classifyMappings(m3, 4); got.Type != "NAT4" {
 		t.Errorf("不同公网 IP 应 NAT4: %+v", got)
 	}
-	if got := classifyMappings(nil); got.Type != "Unknown" {
+	if got := classifyMappings(nil, 4); got.Type != "Unknown" {
 		t.Errorf("无观测应 Unknown: %+v", got)
 	}
 }

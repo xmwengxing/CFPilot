@@ -49,7 +49,7 @@ func TestRelayRegisterFrame(t *testing.T) {
 		t.Skip("端口 51830 被占用，跳过")
 	}
 	defer ln.Close()
-	if err := relayRegister(context.Background(), hub, selfID, srv); err != nil {
+	if err := relayRegister(context.Background(), hub, selfID, srv, [8]byte{}); err != nil {
 		t.Fatal(err)
 	}
 	_ = ln.SetReadDeadline(time.Now().Add(2 * time.Second))

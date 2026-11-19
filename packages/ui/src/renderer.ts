@@ -4841,7 +4841,9 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
           dashboardProject: ($('edgeDashboardProject')?.value || '').trim(),
           monitorPassword: ($('edgePassword')?.value || '').trim(),
           monitorToken: ($('edgeMonitorToken')?.value || '').trim(),
-          zoneId: (document.getElementById('edgeZone') as HTMLSelectElement | null)?.value || '',
+          zoneId:
+            ((document.getElementById('edgeZone') as HTMLSelectElement | null)?.value || '') ||
+            ($('edgeZoneId')?.value || '').trim(),
           autoDns: ($('edgeAutoDns') as HTMLInputElement | null)?.checked !== false,
           withDashboard: ($('edgeWithDashboard') as HTMLInputElement | null)?.checked !== false,
           windowMs: ($('edgeWindowMs')?.value || '').trim(),
@@ -7558,6 +7560,7 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
     })()
   })
 })()
+
 
 
 

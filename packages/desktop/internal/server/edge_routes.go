@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/cfapi"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/edge"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/safe"
 )
@@ -48,6 +49,20 @@ type edgeDeployRequest struct {
 }
 
 // edgeActiveToken 从当前 profile 取 token + account（与 deploy 一致）。
+// activeTokenOnly 只要求 Token（列 Zone 不需要账号 ID）。
+// 旧实现走 edgeActiveToken 强制要求 accountID，账户里没存就会「加载失败」，
+// 用户看到的是「未选择 Cloudflare Zone」，完全误导。
+func (s *Server) activeTokenOnly() (string, error) {
+	profile, err := s.store.Active()
+	if err != nil || profile == nil {
+		return "", fmt.Errorf("尚未保存 Cloudflare 凭据，请先在「账户配置」填写 API Token")
+	}
+	if strings.TrimSpace(profile.CfToken) == "" {
+		return "", fmt.Errorf("缺少 API Token，请先在「账户配置」里填写")
+	}
+	return profile.CfToken, nil
+}
+
 func (s *Server) edgeActiveToken() (token, accountID string, err error) {
 	profile, err := s.store.Active()
 	if err != nil || profile == nil {
@@ -60,6 +75,26 @@ func (s *Server) edgeActiveToken() (token, accountID string, err error) {
 		return "", "", fmt.Errorf("缺少账号 ID，请先点「自动检测账号」")
 	}
 	return profile.CfToken, profile.AccountID, nil
+}
+
+// matchZoneID 按最长后缀匹配域名所属 zone（relay.a.example.com → example.com）。
+func matchZoneID(zones []cfapi.Zone, domain string) string {
+	domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+	best := ""
+	bestLen := 0
+	for _, z := range zones {
+		name := strings.ToLower(strings.TrimSuffix(z.Name, "."))
+		if name == "" {
+			continue
+		}
+		if domain == name || strings.HasSuffix(domain, "."+name) {
+			if len(name) > bestLen {
+				best = z.ID
+				bestLen = len(name)
+			}
+		}
+	}
+	return best
 }
 
 func (s *Server) handleEdgeDeploy(w http.ResponseWriter, r *http.Request) {
@@ -149,7 +184,7 @@ func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "仅支持 GET"})
 		return
 	}
-	token, _, err := s.edgeActiveToken()
+	token, err := s.activeTokenOnly()
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
@@ -165,4 +200,6 @@ func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"zones": out})
 }
+
+
 

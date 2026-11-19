@@ -1478,6 +1478,11 @@
                     <span class="switch"></span>
                   </label>
                 </div>
+                <div class="pair">
+                  <label for="edgeZoneId">手动 Zone ID（可选）</label>
+                  <input type="text" id="edgeZoneId" class="mono" placeholder="下拉读取失败时可直接粘贴 Zone ID（控制台域名页可见）" />
+                  <p class="tip">不选 Zone 时，工具也会按域名后缀自动匹配账号下的 zone；两者都为空才会报错。</p>
+                </div>
               </div>
 
               <div class="pair-grid">
@@ -3068,6 +3073,7 @@
   <script src="./renderer.js"></script>
 </body>
 </html>
+
 
 
 

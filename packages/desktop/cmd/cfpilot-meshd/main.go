@@ -105,28 +105,36 @@ func serve() {
 			writeErr(w, "仅支持 POST")
 			return
 		}
+		// 允许「再次启动」：旧实现遇到 life != nil 直接返回「已启动」，
+		// 一旦上一次停止不彻底/半运行，就永远无法再启动（用户只能卸载重装）。
+		// 这里先取出旧实例、停掉它，再按新配置启动。
 		mu.Lock()
-		if life != nil {
-			mu.Unlock()
-			writeErr(w, "已启动")
-			return
+		old := life
+		life = nil
+		mu.Unlock()
+		if old != nil {
+			_ = old.Stop()
 		}
+
 		var cfg mesh.Config
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&cfg); err != nil {
-			mu.Unlock()
 			writeErr(w, "配置非法: "+err.Error())
 			return
 		}
-		life = mesh.NewLifecycleWithConfig(cfg)
+		// 上报给云监测台的客户端版本：由本进程注入（面板不必知道内核版本）
+		if cfg.ClientVersion == "" {
+			cfg.ClientVersion = version
+		}
+		newLife := mesh.NewLifecycleWithConfig(cfg)
 		ctx, cancel := context.WithCancel(context.Background())
-		_ = cancel
-		if err := life.Start(ctx); err != nil {
-			life = nil
-			mu.Unlock()
+		_ = cancel // 生命周期内部会创建自己的 runCtx；Stop 会关闭它
+		if err := newLife.Start(ctx); err != nil {
 			writeErr(w, "启动失败: "+err.Error())
 			return
 		}
-		st := life.Status()
+		st := newLife.Status()
+		mu.Lock()
+		life = newLife
 		status = st
 		mu.Unlock()
 		log.Printf("[meshd] 组网已启动 node=%s vip=%s", st.NodeID, st.VirtualIP)
@@ -152,10 +160,12 @@ func serve() {
 			writeJSON(w, http.StatusOK, mesh.ActionResult{OK: true, Message: "未运行"})
 			return
 		}
-		err := life.Stop()
+		// 先摘出实例再 Stop：持全局锁等 Stop 会把 status/start 一起堵住。
+		l := life
 		life = nil
 		status = mesh.Status{Note: "未启动"}
 		mu.Unlock()
+		err := l.Stop()
 		if err != nil {
 			writeErr(w, err.Error())
 			return

@@ -185,6 +185,8 @@ interface Window {
       dashboardProject?: string
       withDashboard?: boolean
       zoneId?: string
+      /** 绑定前自动创建 DNS 占位记录（已代理 AAAA 100::），默认 true */
+      autoDns?: boolean
       windowMs?: string
       maxBytes?: string
       maxPackets?: string
@@ -1385,3 +1387,4 @@ interface SourcesListResult {
 }
 
 type ExternalSourceType = 'github-raw' | 'custom-url' | 'ripe-stat'
+

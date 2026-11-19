@@ -1469,6 +1469,14 @@
                   <label for="edgeZone">Cloudflare Zone（自动绑定用）</label>
                   <select id="edgeZone"><option value="">— 不自动绑定（手动）/ 加载失败 —</option></select>
                   <p class="tip">选域名所在 zone 后，工具会尝试自动绑定；留空则只部署 Worker，域名需手动绑。</p>
+                  <label class="switch-box" style="margin-top:8px">
+                    <span class="sw-info">
+                      <span class="sw-title">自动创建域名 DNS 记录</span>
+                      <span class="sw-desc">绑定前先在 Zone 里建占位记录（已代理 AAAA 100::），并等解析生效再设置监测台密码</span>
+                    </span>
+                    <input type="checkbox" id="edgeAutoDns" checked />
+                    <span class="switch"></span>
+                  </label>
                 </div>
               </div>
 
@@ -2551,28 +2559,25 @@
                   <b>每个填写项的含义把鼠标停在字段名的 ⓘ 上看气泡说明。</b>
                 </p>
                 <div class="links" style="line-height:1.9">
-                  <b>字段速查（★必填 / 自动 / ○可选）</b><br>
-                  <b>自动</b> <b>本节点 ID / 隧道密钥</b>：本地身份密钥派生，只读，不用填；
-                  ★ <b>网络名</b> 例 <code>my-home</code>；
-                  ★ <b>PSK</b> 例 <code>mysecret123456</code>（两端一致）；
-                  ★ <b>本节点虚拟 IP</b> 例 <code>10.97.0.1</code>（A）/ <code>10.97.0.2</code>（B，<b>同一网段、末位不同</b>）；<br>
-                  ○ <b>UDP 监听</b> 默认 <code>0.0.0.0:51820</code>；○ <b>TUN 名</b> 留空即可；
-                  ○ <b>盲中继域名 / 房间</b> 由「填入组网配置」带入，不填也能用（仅直连）。<br><br>
-                  <b>1.（可选）部署盲中继</b>：见上方「① 盲中继部署」，部署后点「填入组网配置」自动带入 WSS 信息。<br>
-                  <b>2. A 生成邀请链接</b>：A 填好「网络名 / PSK / 本节点虚拟 IP」，展开「邀请链接」点
-                  「生成邀请链接」，把链接发给 B。<b>链接含明文 PSK，勿发公开群</b>。<br>
-                  <b>3. B 加入</b>：B 把链接粘贴进「邀请链接」输入框 → 点「从邀请链接填入」，
-                  自动带入网络名 / PSK / 对端信息；核对后展开「对端节点」点「添加对端」。<br>
-                  <b>4. 无需回传</b>：B 加入后主动连 A，A 从首帧自动识别 B 并建立链路，
-                  <b>不用把 B 的信息回传给 A，也不用 B 再生成链接给 A</b>（一次链接双向自动发现）。<br>
-                  <b>5. 启动</b>：两端都点「启动组网」，提权服务自动建虚拟网卡并运行，
-                  <b>无需命令行 / 无需存 JSON</b>。首次系统授权框点「允许」。
+                  <b>字段速查（★必填 / 自动 / ○可选）</b><br><br>
+                  <b>自动</b> <b>本节点 ID / 隧道密钥</b>：本地身份密钥派生，只读；<br>
+                  ★ <b>网络名</b>：例 <code>my-home</code>（两端一致）；<br>
+                  ★ <b>密钥PSK</b>：例 <code>mysecret123456</code>（两端一致）；<br>
+                  ★ <b>本节点虚拟 IP</b>：例 <code>10.97.0.1</code>（A）/ <code>10.97.0.2</code>（B，<b>同一网段、末位不同</b>）；<br>
+                  ○ <b>UDP 监听</b>：默认 <code>0.0.0.0:51820</code>；○ <b>TUN 名</b>：留空即可；<br>
+                  ○ <b>盲中继域名 / 房间</b>：由「填入组网配置」带入，UDP 无法直连时兜底，可选但建议。<br><br>
+				  <b>组网流程</b>
+                  1.（可选）部署盲中继：见上方「① 盲中继部署」，部署后点「填入组网配置」自动带入 WSS 信息。<br>
+                  2. 设备A 填写「网络名 / 密钥 PSK / 本节点虚拟 IP」，展开「邀请链接」点
+                  「生成邀请链接」后复制链接，点「启动组网」。<b>链接含明文密钥 PSK，勿公开</b>。<br>
+                  3. 设备B 在「邀请链接」输入框粘贴邀请链接 → 点「启动组网」。<br>
+                  4. AB两端提权服务自动建虚拟网卡并运行，首次运行弹出系统授权框请点「允许」。
                   停止点「停止组网」；托盘右键也能启停、看节点列表。<br>
-                  <b>三平台</b>：Windows 双击 setup.exe；Linux <code>sudo dpkg -i cfpilot-mesh*.deb</code>；
+                  <b>5. 验证</b>：命令终端互 ping 虚拟 IP（如<code>ping 10.97.0.2</code>），有延迟/无超时即成功；「网络拓扑」显示节点与流量。<br>
+                  <b>连接失败速查</b>：网络名 / PSK 是否两端一致 → 对端地址是否可达 →
+                  防火墙是否放行 UDP 端口 → 同机多节点是否用了不同端口和 TUN 名。<br><br>
+				  <b>三平台</b>：Windows 双击 setup.exe；Linux <code>sudo dpkg -i cfpilot-mesh*.deb</code>；
                   Android 装独立「CFPilot Mesh」App（VPN 授权免 root）。<br>
-                  <b>6. 验证</b>：互 ping 虚拟 IP（如 A 上 <code>ping 10.97.0.2</code>），通了即成功；「网络拓扑」显示节点与流量。<br>
-                  <b>连不上先查</b>：网络名 / PSK 是否两端一致 → 对端地址是否可达 →
-                  防火墙是否放行 UDP 端口 → 同机多节点是否用了不同端口和 TUN 名。
                 </div>
               </div>
             </details>
@@ -3053,6 +3058,8 @@
   <script src="./renderer.js"></script>
 </body>
 </html>
+
+
 
 
 

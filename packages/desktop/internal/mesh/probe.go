@@ -64,8 +64,9 @@ type peerProbe struct {
 	addr      *net.UDPAddr
 	sentTotal uint64
 	pongTotal uint64
-	lastRTTMS uint32
-	lastNonce uint64
+	lastRTTMS   uint32
+	lastNonce   uint64
+	lastPongAt  time.Time // 最近一次收到 Pong 的时刻（会话活性/离线判定）
 	// 探针结果（与发送一一对应）：下标=发送序号，值=是否收到应答。
 	// SendProbe append(false)，收到 Pong 时按 nonce 找到位置改 true。
 	probeNonces  []uint64
@@ -175,6 +176,7 @@ func (t *ProbeTracker) OnProbeFrame(ctx context.Context, frameBytes []byte) (boo
 				if n == msg.Nonce && msg.Nonce != 0 {
 					p.probeResults[i] = true
 					p.pongTotal++
+					p.lastPongAt = time.Now()
 					// RTT 只在发送侧算：单调当前 - 对端原样回显的单调值。
 					// 用有符号判断，避免校时/时钟重置后下溢成巨大值。
 					if now := MonotonicMS(); now >= msg.TimestampMS {
@@ -244,6 +246,19 @@ func (t *ProbeTracker) Measurement(id NodeID) (loss float64, samples uint32, rtt
 // 此处无需额外动作；保留空实现避免调用方改动。
 func (t *ProbeTracker) RecordSample(id NodeID) {}
 
+// LastPongAge 返回距最近一次 Pong 的时间；从未收到返回极大值。
+//
+// 用途：状态面板判定「会话还在、但对端已无响应」（例如对端停止组网）。
+func (t *ProbeTracker) LastPongAge(id NodeID) time.Duration {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	p := t.peers[id]
+	if p == nil || p.lastPongAt.IsZero() {
+		return 1 << 62
+	}
+	return time.Since(p.lastPongAt)
+}
+
 // Counters 返回 (sent, pong, rtt)（诊断用）。
 func (t *ProbeTracker) Counters(id NodeID) (sent, pong uint64, rtt uint32) {
 	t.mu.Lock()
@@ -253,3 +268,4 @@ func (t *ProbeTracker) Counters(id NodeID) (sent, pong uint64, rtt uint32) {
 	}
 	return 0, 0, 0
 }
+

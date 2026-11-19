@@ -17,6 +17,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"regexp"
 	"strings"
@@ -43,6 +44,10 @@ type Options struct {
 	DashboardProject  string
 	WithDashboard     bool
 	ZoneID            string
+	// AutoDNS 在绑定 Worker 自定义域名**之前**，先在 Zone 里创建占位 DNS 记录
+	// （已代理的 AAAA 100::）。否则「绑定」只是受理、域名仍无解析，
+	// 后续 https://域名/auth/setup 必然 no such host。
+	AutoDNS bool
 	WindowMs          string
 	MaxBytesPerWindow string
 	MaxPackets        string
@@ -93,6 +98,48 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// ensurePlaceholderDNS 确保 zone 里有一条「已代理的 AAAA 100::」记录。
+//
+// 这是 Worker 自定义域名的标准占位：没有它，绑定只是受理、域名无解析，
+// 后面的 https://域名/auth/setup 会 no such host。
+// 已存在时直接复用；存在同名的**未代理**记录时先删掉（否则绑定会被拒）。
+func ensurePlaceholderDNS(ctx context.Context, client *cfapi.Client, zoneID, domain string) error {
+	records, err := client.ListDNSRecords(ctx, zoneID, domain)
+	if err != nil {
+		return err
+	}
+	for _, r := range records {
+		if strings.EqualFold(r.Name, domain) && r.Proxied {
+			return nil // 已有可用记录
+		}
+	}
+	for _, r := range records {
+		if strings.EqualFold(r.Name, domain) && !r.Proxied {
+			_ = client.DeleteDNSRecord(ctx, zoneID, r.ID)
+		}
+	}
+	_, err = client.CreateDNSRecord(ctx, zoneID, domain, "AAAA", "100::", true)
+	return err
+}
+
+// waitDomainResolvable 轮询直到域名可解析（DNS 生效通常要几秒到几十秒）。
+func waitDomainResolvable(ctx context.Context, domain string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := net.LookupHost(domain); err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("DNS 未生效")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(3 * time.Second):
+		}
+	}
+}
+
 // zoneNameFromDomain 从 relay.example.com 推 example.com（仅用于提示）。
 func zoneNameFromDomain(domain string) string {
 	parts := strings.Split(strings.TrimSuffix(strings.ToLower(domain), "."), ".")
@@ -128,8 +175,11 @@ func Deploy(ctx context.Context, client *cfapi.Client, raw Options) (*Result, er
 	if strings.TrimSpace(opt.Domain) == "" {
 		return nil, fmt.Errorf("盲中继必须提供自定义域名（*.workers.dev 国内被污染）")
 	}
-	if len(opt.MonitorPassword) < 8 {
-		return nil, fmt.Errorf("监测台密码至少 8 位")
+	// 初始密码留空 = 自动生成（此前界面写着「留空则自动生成」，实现却直接报错）
+	if strings.TrimSpace(opt.MonitorPassword) == "" {
+		opt.MonitorPassword = randomHex(8) // 16 位 hex，满足 ≥8
+	} else if len(opt.MonitorPassword) < 8 {
+		return nil, fmt.Errorf("监测台密码至少 8 位（留空可自动生成）")
 	}
 
 	workerCode, err := assets.ReadFile("assets/worker.js")
@@ -187,14 +237,31 @@ func Deploy(ctx context.Context, client *cfapi.Client, raw Options) (*Result, er
 	workerURL := "https://" + opt.Domain
 	wss := "wss://" + opt.Domain + "/mesh/<network_hash>?peer_id=<16hex>"
 
-	// 3. 域名
+	// 3. 域名（先建 DNS 占位记录 → 再绑定 → 再等解析生效）
 	if opt.ZoneID != "" {
+		if opt.AutoDNS {
+			opt.Progress("步骤 3/5：创建域名 DNS 占位记录 " + opt.Domain)
+			if err := ensurePlaceholderDNS(ctx, client, opt.ZoneID, opt.Domain); err != nil {
+				return nil, fmt.Errorf("创建 DNS 记录失败：%w", err)
+			}
+		}
 		opt.Progress("步骤 3/5：绑定自定义域名 " + opt.Domain)
 		if _, err := client.AttachWorkerDomain(ctx, opt.AccountID, opt.Domain, opt.WorkerName, opt.ZoneID); err != nil {
 			return nil, fmt.Errorf("绑定域名失败：%w", err)
 		}
 	} else {
+		if opt.AutoDNS {
+			opt.Progress("警告：未选择 Cloudflare Zone，无法自动创建 DNS 记录；请在控制台手动创建 " + opt.Domain)
+		}
 		opt.Progress("步骤 3/5：跳过域名绑定（请到控制台手动绑定 " + opt.Domain + "）")
+	}
+
+	// 3b. 等域名真正可解析：绑定是「受理」，DNS 生效需要时间。
+	// 不等就会在 /auth/setup 处报 lookup no such host（真机踩到）。
+	opt.Progress("步骤 3/5：等待域名解析生效 " + opt.Domain)
+	if err := waitDomainResolvable(ctx, opt.Domain, 60*time.Second); err != nil {
+		return nil, fmt.Errorf("域名 %s 在 60 秒内仍无法解析：%w。请确认 DNS 记录已创建（或勾选「自动创建 DNS 记录」）后重试",
+			opt.Domain, err)
 	}
 
 	// 4. /auth/setup
@@ -284,3 +351,6 @@ func firstN(s string, n int) string {
 
 // ZoneNameFromDomain 暴露给 server 层用于自动查 zone。
 func ZoneNameFromDomain(domain string) string { return zoneNameFromDomain(domain) }
+
+
+

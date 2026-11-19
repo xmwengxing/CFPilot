@@ -40,6 +40,7 @@ type edgeDeployRequest struct {
 	DashboardProject string `json:"dashboardProject"`
 	WithDashboard    *bool  `json:"withDashboard"`
 	ZoneID           string `json:"zoneId"`
+	AutoDNS          bool   `json:"autoDns"`
 	WindowMs         string `json:"windowMs"`
 	MaxBytes         string `json:"maxBytes"`
 	MaxPackets       string `json:"maxPackets"`
@@ -121,6 +122,7 @@ func (s *Server) handleEdgeDeploy(w http.ResponseWriter, r *http.Request) {
 			DashboardProject:  strings.TrimSpace(req.DashboardProject),
 			WithDashboard:     withDash,
 			ZoneID:            strings.TrimSpace(req.ZoneID),
+			AutoDNS:           req.AutoDNS,
 			WindowMs:          req.WindowMs,
 			MaxBytesPerWindow: req.MaxBytes,
 			MaxPackets:        req.MaxPackets,
@@ -163,3 +165,4 @@ func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"zones": out})
 }
+

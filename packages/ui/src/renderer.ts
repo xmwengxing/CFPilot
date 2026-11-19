@@ -4842,6 +4842,7 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
           monitorPassword: ($('edgePassword')?.value || '').trim(),
           monitorToken: ($('edgeMonitorToken')?.value || '').trim(),
           zoneId: (document.getElementById('edgeZone') as HTMLSelectElement | null)?.value || '',
+          autoDns: ($('edgeAutoDns') as HTMLInputElement | null)?.checked !== false,
           withDashboard: ($('edgeWithDashboard') as HTMLInputElement | null)?.checked !== false,
           windowMs: ($('edgeWindowMs')?.value || '').trim(),
           maxBytes: ($('edgeMaxBytes')?.value || '').trim(),
@@ -4889,8 +4890,10 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
           connType: 'self', up: true,
         }]
         meshTopo.setData(nodes)
+        // ⚠️ 该元素是 inline style="display:flex"，`hidden` 属性会被它覆盖 ⇒
+        // 无论如何都消不掉（真机反馈「这行字从来不消失」）。必须直接改 display。
         const empty = document.getElementById('topoEmpty')
-        if (empty) empty.hidden = true
+        if (empty) empty.style.display = 'none'
         onMeshPageShow = () => {
           meshTopo?.refresh()
           void refreshRelayIpPick()
@@ -5304,7 +5307,14 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
       topoPulses = topoPulses.filter((x) => nowMs - x.bornAt < 2000).slice(-60)
       meshTopo?.setData(nodes, topoPulses)
       const emptyEl = document.getElementById('topoEmpty')
-      if (emptyEl) emptyEl.hidden = peers.length > 0
+      if (emptyEl) {
+        if (peers.length > 0) {
+          emptyEl.style.display = 'none'
+        } else {
+          emptyEl.style.display = 'flex'
+          emptyEl.textContent = running ? '尚未发现对端，等待连接…' : '暂无节点数据（启动组网后将自动显示）'
+        }
+      }
     }
     window.setInterval(() => {
       void refreshMeshStatus()
@@ -7536,6 +7546,8 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
     })()
   })
 })()
+
+
 
 
 

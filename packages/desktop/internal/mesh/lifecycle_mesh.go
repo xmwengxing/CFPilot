@@ -43,6 +43,11 @@ type meshLifecycle struct {
 	// 握手回调持有 f.mu 时若再拿 m.mu 就会死锁，所以单独一把锁。
 	rxMu     sync.Mutex
 	lastOKRx map[NodeID]time.Time
+	// lastTxData 记录最近一次**成功发出数据帧**的时刻。
+	// 判定会话失效时必须同时看它：只有「我们在发数据、却长时间收不到可解密帧」
+	// 才重置；健康但空闲的会话不能被误拆。
+	txMu       sync.Mutex
+	lastTxData map[NodeID]time.Time
 
 	// wireVersions 记录每个对端的线速版本（ADR-0016）：控制帧与数据帧都按它编码。
 	// 只从能成功解码的入站帧学习，未知对端按 v2。
@@ -98,6 +103,25 @@ func (m *meshLifecycle) sinceOKRx(id NodeID) time.Duration {
 	m.rxMu.Lock()
 	defer m.rxMu.Unlock()
 	if t, ok := m.lastOKRx[id]; ok {
+		return time.Since(t)
+	}
+	return 1 << 62
+}
+
+// markTxData 记录一次成功的数据帧发送（会话活性判据的另一半）。
+func (m *meshLifecycle) markTxData(id NodeID) {
+	m.txMu.Lock()
+	if m.lastTxData != nil {
+		m.lastTxData[id] = time.Now()
+	}
+	m.txMu.Unlock()
+}
+
+// sinceTxData 返回距上次成功发送数据帧的时间；从未发过返回极大值。
+func (m *meshLifecycle) sinceTxData(id NodeID) time.Duration {
+	m.txMu.Lock()
+	defer m.txMu.Unlock()
+	if t, ok := m.lastTxData[id]; ok {
 		return time.Since(t)
 	}
 	return 1 << 62
@@ -199,6 +223,7 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 	// 线速版本登记表：FSM / 探针 / 数据面共用一个实例，保证「学到 v1 后全部降级」。
 	m.wireVersions = NewPeerWireVersions()
 	m.lastOKRx = make(map[NodeID]time.Time)
+	m.lastTxData = make(map[NodeID]time.Time)
 	m.fsm = NewHandshakeFSM(m.cfg.NodeID, network, psk, tunnel)
 	m.fsm.SetWireVersions(m.wireVersions)
 	m.fsm.SetOnEstablished(func(peer NodeID, sess *Session) {
@@ -808,12 +833,25 @@ func (m *meshLifecycle) Status() Status {
 
 	for id, v := range views {
 		p := &v.peer
-		// 会话状态：已建立 / 握手中 / 等待对端
+		// 会话状态：已连接 / 已断开（无响应）/ 握手中 / 未连接（仅配置）
 		if _, ok := m.fsm.Session(id); ok {
-			p.Online = true
-			p.State = "已连接"
+			// 有会话不等于还活着：对端停止组网后我们仍持有旧会话。
+			// 判据：15s 内既没收到可解密帧、也没收到探针 Pong ⇒ 实际已失联。
+			pongAge := time.Duration(1 << 62)
+			if m.probes != nil {
+				pongAge = m.probes.LastPongAge(id)
+			}
+			if m.sinceOKRx(id) < 15*time.Second || pongAge < 15*time.Second {
+				p.Online = true
+				p.State = "已连接"
+			} else {
+				p.Online = false
+				p.State = "已断开（无响应）"
+			}
 		} else if hs := m.fsm.State(id); hs != HSIdle {
 			p.State = "握手中"
+		} else {
+			p.State = "未连接（仅配置）"
 		}
 		// 传输档位：降级到 WSS 时明确标出来（直连假活时用户最需要看这个）
 		if m.degrade != nil && m.degrade.Kind(id) == TransportWSS {
@@ -835,6 +873,7 @@ func (m *meshLifecycle) Status() Status {
 	}
 	return st
 }
+
 
 
 

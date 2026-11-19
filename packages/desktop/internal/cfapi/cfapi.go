@@ -1115,6 +1115,29 @@ func (c *Client) ListDNSRecords(ctx context.Context, zoneID, name string) ([]DNS
 	return out, nil
 }
 
+// CreateDNSRecord 创建一条 DNS 记录（Worker 自定义域名的占位记录用）。
+//
+// Worker 自定义域名要求 zone 里已有对应主机名（惯例是**已代理的 AAAA 100::**）：
+// 否则「绑定」只是受理，域名仍无解析，后续 https://域名/auth/setup 会
+// `dial tcp: lookup ...: no such host`（真机踩到）。
+func (c *Client) CreateDNSRecord(
+	ctx context.Context, zoneID, name, recType, content string, proxied bool,
+) (*DNSRecord, error) {
+	body := map[string]any{
+		"type":    recType,
+		"name":    name,
+		"content": content,
+		"ttl":     1, // 1 = automatic
+		"proxied": proxied,
+	}
+	var out DNSRecord
+	if err := c.doJSON(ctx, http.MethodPost,
+		fmt.Sprintf("/zones/%s/dns_records", url.PathEscape(zoneID)), body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // DeleteDNSRecord 删除一条 DNS 记录（需要 Zone / DNS / Edit）。
 func (c *Client) DeleteDNSRecord(ctx context.Context, zoneID, recordID string) error {
 	return c.doJSON(ctx, http.MethodDelete,

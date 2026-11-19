@@ -5364,6 +5364,7 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
       relayRoom: ($('meshRelayRoom')?.value || '').trim(),
       relayConnectIp: ($('meshRelayConnectIp')?.value || '').trim(),
       enableDegrade: ($('meshEnableDegrade') as HTMLInputElement | null)?.checked !== false,
+      disablePunch: ($('meshEnablePunch') as HTMLInputElement | null)?.checked === false,
       // 云监测台上报：*monitor* 键与输入框 id 对应（本地保存后能按命名约定恢复）；
       // *monitoring* 是交给 Go mesh.Config 的字段名（默认关闭，留空即不上报）。
       monitorEndpoint: ($('meshMonitorEndpoint')?.value || '').trim(),
@@ -7557,6 +7558,7 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
     })()
   })
 })()
+
 
 
 

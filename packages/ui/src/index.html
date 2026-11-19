@@ -1874,7 +1874,14 @@
                       <span class="sw-title has-tip" data-tip="【可选】开启后，UDP 直连质量差时（连续 3 窗丢包>20% 或 RTT>300ms）自动切到 WSS 中继，恢复后自动回切。默认勾选；没部署盲中继时保持勾选也无害。&#10;示例：保持默认勾选">启用 UDP→WSS 自动降级 ⓘ</span>
                       <span class="sw-desc">链路劣化时自动切到盲中继，恢复后回切</span>
                     </span>
-                    <input type="checkbox" id="meshEnableDegrade" checked />
+                    <input type="checkbox" id="meshEnableDegrade" checked />                    <span class="switch"></span>
+                  </label>
+                  <label class="switch-box">
+                    <span class="sw-info">
+                      <span class="sw-title has-tip" data-tip="【可选】会话经盲中继建立后，自动尝试 UDP 打洞，成功后直连、失败保持中继。默认启用；直连本来可用时不会触发。">启用 NAT 打洞（经中继时升级直连）ⓘ</span>
+                      <span class="sw-desc">依赖 STUN 候选；打洞失败或超时会自动继续走中继</span>
+                    </span>
+                    <input type="checkbox" id="meshEnablePunch" checked />
                     <span class="switch"></span>
                   </label>
                 </div>
@@ -3060,6 +3067,7 @@
   <script src="./renderer.js"></script>
 </body>
 </html>
+
 
 
 

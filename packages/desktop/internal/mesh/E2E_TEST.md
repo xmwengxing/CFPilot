@@ -103,10 +103,13 @@ curl -X POST http://127.0.0.1:19727/api/mesh/start \
 - WSS 降级路径（EnableDegrade）不在本手册覆盖范围，需要另配盲中继后单独验证。
 - **NAT 穿透正在补齐**：P2 已实现 STUN 探测（复用 UdpHub 同一 socket、
   XOR-MAPPED-ADDRESS、映射一致性判定 NAT3/NAT4，保守不做 CHANGE-REQUEST 细分）；
-  Punch 编排与中继注册仍待实现（P3）。因此「跨 NAT 的 P2P」尚未可用，
-  当前只有「对端地址本身可达」
+  Punch 编排（P3）已补最小子集：经中继会话建立后自动发 PunchRequest/Reply、
+  双方按 100ms 向候选喷洒 PunchProbe、收到 PunchAck 才升级直连；
+  失败保持中继。**尚未在真实 NAT 环境验收**（缺两台去覆盖网的机器）。
+  当前可用形态：对端地址本身可达时直连；跨 NAT 走中继（WSS）；打洞是尽力而为的升级。
   （同一局域网、公网 IP+端口映射、或覆盖网）时才能直连。通过 easytier 跑通不等于有 P2P
   能力 —— 那是覆盖网提供了可达地址。要验证真实 P2P，必须去掉覆盖网，
   在两台真实机器上测试（同 LAN 或公网端口映射）。
+
 
 

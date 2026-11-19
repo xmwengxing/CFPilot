@@ -39,6 +39,9 @@ type Config struct {
 	RelayConnectIP string
 	// EnableDegrade 打开 UDP→WSS 降级 / WSS→UDP 回切控制器。
 	EnableDegrade bool
+	// DisablePunch 关闭打洞升级（默认 false=启用）。
+	// 只在「会话经中继建立」时尝试：直连本来可用就不会触发。
+	DisablePunch bool
 	// TunName 是 TUN 设备名（多节点同机时必须不同）；留空 = cfpilot0。
 	TunName string
 
@@ -151,6 +154,7 @@ func (c *Config) tunnelKey() (noise.DHKey, error) {
 	// 随机生成
 	return cs.GenerateKeypair(nil)
 }
+
 
 
 

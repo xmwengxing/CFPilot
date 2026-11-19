@@ -49,6 +49,13 @@ type meshLifecycle struct {
 	txMu       sync.Mutex
 	lastTxData map[NodeID]time.Time
 
+	// STUN 探测结果（启动后后台异步更新；不阻断组网）。
+	natMu sync.Mutex
+	nat   NatAssessment
+	// P3 打洞编排状态（每个对端一份）。
+	punchMu sync.Mutex
+	punch   map[NodeID]*punchRun
+
 	// wireVersions 记录每个对端的线速版本（ADR-0016）：控制帧与数据帧都按它编码。
 	// 只从能成功解码的入站帧学习，未知对端按 v2。
 	wireVersions *PeerWireVersions
@@ -224,11 +231,17 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 	m.wireVersions = NewPeerWireVersions()
 	m.lastOKRx = make(map[NodeID]time.Time)
 	m.lastTxData = make(map[NodeID]time.Time)
+	m.punch = make(map[NodeID]*punchRun)
+	m.punch = make(map[NodeID]*punchRun)
 	m.fsm = NewHandshakeFSM(m.cfg.NodeID, network, psk, tunnel)
 	m.fsm.SetWireVersions(m.wireVersions)
 	m.fsm.SetOnEstablished(func(peer NodeID, sess *Session) {
 		m.hsOK.Add(1)
 		m.markOKRx(peer)
+		// 经中继建立的会话：立刻尝试打洞升级为直连（P3）。
+		if link, ok := m.links[peer]; ok && link.IsRelayed() {
+			go m.startPunch(peer, link)
+		}
 		if m.cfg.Verbose {
 			log.Printf("[mesh] 握手建立 peer=%x vip=%s epoch=%x", peer[:4], m.cfg.VirtualIP, sess.EpochID())
 		}
@@ -297,9 +310,17 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 	onIncoming = func(id NodeID, addr *net.UDPAddr) {
 		m.mu.Lock()
 		isNew := false
-		if _, ok := m.links[id]; !ok {
+		if cur, ok := m.links[id]; !ok {
 			m.links[id] = m.hub.LinkTo(addr)
 			isNew = true
+		} else if cur.IsRelayed() {
+			// 收到来自该对端**新地址**的帧，证明直连可达（打洞/NAT 重绑定）：
+			// 把中继腿换成这个 hubLink，recv 循环会随 m.links 自动重建。
+			m.links[id] = m.hub.LinkTo(addr)
+			isNew = true
+			if m.cfg.Verbose {
+				log.Printf("[mesh] 对端 %x 直连地址可达，从中继切换：%s", id[:4], addr)
+			}
 		}
 		link := m.links[id]
 		m.mu.Unlock()
@@ -332,6 +353,27 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 	m.wg.Add(2)
 	go m.tunToPeersLoop(runCtx)
 	go m.peersToTunLoop(runCtx)
+
+	// 6.0a STUN 探测（后台异步，失败只记状态）：跨 NAT 的第一步。
+	// 必须复用 m.hub 的 socket —— 换 socket 会拿到不同 NAT 映射，打洞端口对不上。
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		if len(m.cfg.StunServers) == 0 {
+			m.natMu.Lock()
+			m.nat = NatAssessment{Type: "Unknown"}
+			m.natMu.Unlock()
+			return
+		}
+		timeout := time.Duration(m.cfg.StunProbeTimeoutMS) * time.Millisecond
+		a := DiscoverNat(runCtx, m.hub, m.cfg.StunServers, timeout)
+		m.natMu.Lock()
+		m.nat = a
+		m.natMu.Unlock()
+		if m.cfg.Verbose {
+			log.Printf("[mesh] STUN 探测完成 nat=%s reflexive=%s", a.Type, a.Reflexive)
+		}
+	}()
 
 	// UdpProbe (0x08) 由 UdpHub.demux 直接交探针跟踪器（对齐 observe_probes），
 	// 不进普通 peer 队列 —— 降级后 active=WSS 时 UDP 探针仍能被接收。
@@ -655,6 +697,10 @@ func (m *meshLifecycle) startRecvLoop(ctx context.Context, id NodeID, link PeerL
 			m.rxFrames.Add(1)
 			// 解码成功才学习版本（v1 已过 buf[5]==0 校验）；伪造帧最多让本机降级。
 			m.learnWireVersion(parsed.Src, parsed.Version)
+			if parsed.Type == MsgHolePunch {
+				m.handlePunch(parsed.Src, parsed, link)
+				continue
+			}
 			if parsed.Type == MsgHandshake {
 				if _, err := m.fsm.OnFrame(frame); err != nil && m.cfg.Verbose {
 					log.Printf("[mesh] 握手帧处理失败: %v", err)
@@ -784,8 +830,13 @@ func (m *meshLifecycle) cleanupLocked() error {
 func (m *meshLifecycle) Status() Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.natMu.Lock()
+	nat := m.nat
+	m.natMu.Unlock()
 	st := Status{
 		Running:     m.running,
+		NatType:     nat.Type,
+		Reflexive:   nat.Reflexive,
 		Network:     m.cfg.NetworkName,
 		VirtualIP:   m.cfg.VirtualIP,
 		NodeID:      fmt.Sprintf("%x", m.cfg.NodeID[:]),
@@ -873,6 +924,9 @@ func (m *meshLifecycle) Status() Status {
 	}
 	return st
 }
+
+
+
 
 
 

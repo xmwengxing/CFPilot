@@ -1853,23 +1853,30 @@
             <div class="card">
               <h2><span class="dot"></span>⚙️ 组网配置</h2>
               <p class="desc">
-                配置会由 <code>+mesh</code> 版读取。部署盲中继后，可在「部署」页点
-                <b>「填入组网配置」</b> 自动带入 WSS 地址与房间名；其余字段需手动填写。
+                只填上面几项必填即可组网。部署盲中继后，可在「部署」页点
+                <b>「填入组网配置」</b> 自动带入盲中继域名与房间名。
+                监听端口、打洞、服务器中继、监测台、手动添加对端等都在下方「高级选项」里。
               </p>
               <div class="pair-grid">
                 <div class="pair"><label for="meshNodeId" class="has-tip" data-tip="【自动生成】本机在网络里的身份证，16 位十六进制，由本地身份密钥派生，无需填写。各节点天然不同；字典序小的作为握手发起方。若克隆了配置导致 ID 冲突，软件会自动重新生成。">本节点 ID（自动生成）ⓘ</label><input type="text" id="meshNodeId" readonly style="opacity:.75;cursor:default" placeholder="启动后自动生成" /></div>
                 <div class="pair"><label for="meshNetwork" class="has-tip" data-tip="【必填】同一网络所有节点的网络名必须完全相同，用来派生网络密钥，写错就连不上。&#10;示例：my-home（建议简单英文）">网络名 ⓘ</label><input type="text" id="meshNetwork" placeholder="如 my-network" /></div>
                 <div class="pair"><label for="meshPsk" class="has-tip" data-tip="【必填】网络共享密钥（进网密码），所有节点必须完全相同。&#10;建议：16 位以上随机字符串；泄漏则网络不再私密">网络密钥 PSK ⓘ</label><input type="text" id="meshPsk" placeholder="网络共享密钥" /></div>
                 <div class="pair"><label for="meshVirtualIp" class="has-tip" data-tip="【必填】本机在组网内的虚拟 IP，各节点互 ping 用。&#10;【必须】所有节点在**同一网段**（前三段相同），只有最后一段不同；不同网段默认无法互通。&#10;【建议】选不常见的网段（如 10.97.0.x），避免与真实局域网冲突。&#10;示例：A 用 10.97.0.1，B 用 10.97.0.2">本节点虚拟 IP ⓘ</label><input type="text" id="meshVirtualIp" placeholder="如 10.97.0.1" /></div>
-                <div class="pair"><label for="meshListen" class="has-tip" data-tip="【可选】本机接收对端数据的 UDP 端口，默认 0.0.0.0:51820。同机多节点要改不同端口；有防火墙时放行该 UDP 端口。&#10;示例：0.0.0.0:51831">UDP 监听 ⓘ</label><input type="text" id="meshListen" placeholder="如 0.0.0.0:51820" /></div>
-                <div class="pair"><label for="meshTunName" class="has-tip" data-tip="【可选】虚拟网卡名，留空=cfpilot0。同机多节点必须不同（如 cfpilotA / cfpilotB），否则冲突。&#10;示例：cfpilotA">TUN 网卡名 ⓘ</label><input type="text" id="meshTunName" placeholder="留空 = cfpilot0" /></div>
+                <div class="pair"><label for="meshRelayDomain" class="has-tip" data-tip="【必填】WSS 盲中继域名。跨 NAT 场景下没有它基本连不上（直连往往不可达）。&#10;先在「部署」页部署盲中继，再点「填入组网配置」自动带入。&#10;示例：relay.example.com">盲中继域名 ⓘ</label><input type="text" id="meshRelayDomain" placeholder="部署盲中继后自动填入" /></div>
+                <div class="pair"><label for="meshRelayRoom" class="has-tip" data-tip="【必填】盲中继房间名，8-64 位十六进制。同一网络所有节点填同一个房间才能互通，由「填入组网配置」自动带入。&#10;示例：0123456789abcdef">房间名（8-64 hex）ⓘ</label><input type="text" id="meshRelayRoom" placeholder="部署盲中继后自动填入" /></div>
               </div>
+
               <details class="fold">
-                <summary>盲中继（WSS 降级目标，可选）</summary>
+                <summary>高级选项（监听 / 打洞 / 服务器中继 / 监测台 / 对端）</summary>
                 <div class="fold-body">
+                  <div class="dim" style="margin:4px 0 8px;font-weight:600">监听</div>
                   <div class="pair-grid">
-                    <div class="pair"><label for="meshRelayDomain" class="has-tip" data-tip="【可选】WSS 降级兜底的盲中继域名。先在「部署」页部署盲中继，再点「填入组网配置」自动带入。不填也能用（仅 UDP 直连，无中继兜底）。&#10;示例：relay.example.com">盲中继域名 ⓘ</label><input type="text" id="meshRelayDomain" placeholder="部署盲中继后自动填入" /></div>
-                    <div class="pair"><label for="meshRelayRoom" class="has-tip" data-tip="【可选】盲中继房间名，8-64 位十六进制，同一网络所有节点填同一个房间才能互通，由「填入组网配置」自动带入。&#10;示例：0123456789abcdef">房间名（8-64 hex）ⓘ</label><input type="text" id="meshRelayRoom" placeholder="部署盲中继后自动填入" /></div>
+                    <div class="pair"><label for="meshListen" class="has-tip" data-tip="【可选】本机接收对端数据的 UDP 端口，默认 0.0.0.0:51820。同机多节点要改不同端口；有防火墙时放行该 UDP 端口。&#10;示例：0.0.0.0:51831">UDP 监听 ⓘ</label><input type="text" id="meshListen" placeholder="如 0.0.0.0:51820" /></div>
+                    <div class="pair"><label for="meshTunName" class="has-tip" data-tip="【可选】虚拟网卡名，留空=cfpilot0。同机多节点必须不同（如 cfpilotA / cfpilotB），否则冲突。&#10;示例：cfpilotA">TUN 网卡名 ⓘ</label><input type="text" id="meshTunName" placeholder="留空 = cfpilot0" /></div>
+                  </div>
+
+                  <div class="dim" style="margin:14px 0 8px;font-weight:600">盲中继微调</div>
+                  <div class="pair-grid">
                     <div class="pair"><label for="meshRelayConnectIp" class="has-tip" data-tip="【可选】盲中继 WSS 的优选入口 IP（如从「入口优选」里取一个 Cloudflare IP）。&#10;填了就连这个 IP，TLS SNI/Host 仍是上面的盲中继域名，证书校验不变。&#10;用途：域名解析被污染或延迟高时换到指定边缘 IP；留空=按域名解析（默认行为）。&#10;示例：104.16.123.45">WSS 入口 IP（可选）ⓘ</label><input type="text" id="meshRelayConnectIp" placeholder="留空=按域名解析" /></div>
                     <div class="pair"><label for="meshRelayIpPick" class="has-tip" data-tip="【可选】直接复用已有优选结果作为 WSS 入口，不用重新测速。&#10;入口优选 = Cloudflare 边缘 IP（一条直连，延迟最低）；反代优选 = 第三方中继入口（可绕过域名/IP 被阻断，但多一跳）。&#10;选完会填入上面的「WSS 入口 IP」；留空则按盲中继域名解析。">从优选结果选择 ⓘ</label><select id="meshRelayIpPick"><option value="">— 手动输入 / 留空按域名解析 —</option></select></div>
                   </div>
@@ -1889,13 +1896,9 @@
                     <input type="checkbox" id="meshEnablePunch" checked />
                     <span class="switch"></span>
                   </label>
-                </div>
-              </details>
 
-              <details class="fold">
-                <summary>服务器中继（可选，兜底）</summary>
-                <div class="fold-body">
-                  <p class="hint" style="line-height:1.8">
+                  <div class="dim" style="margin:14px 0 8px;font-weight:600">服务器中继（兜底）</div>
+                  <p class="hint" style="line-height:1.8;margin-bottom:8px">
                     专用 UDP 中继（如部署在云服务器的 <code>mobihop-relay</code>），直连与盲中继都不可达时兜底。
                     节点启动后自动注册并维持心跳；令牌只以 BLAKE3 摘要上线，原文不落盘。
                   </p>
@@ -1905,16 +1908,11 @@
                     <div class="pair"><label for="meshRelayServerToken" class="has-tip" data-tip="【必填其一】中继准入令牌，与节点 PSK 分离。只以 BLAKE3 摘要上线，原文不写日志/不落盘。">中继准入令牌 ⓘ</label><input type="password" id="meshRelayServerToken" placeholder="中继 token" /></div>
                   </div>
                   <p class="tip">三项都填才会启用；留空则不使用服务器中继（只用直连 + 盲中继 WSS）。</p>
-                </div>
-              </details>
 
-              <details class="fold">
-                <summary>云监测台上报（可选，默认关闭）</summary>
-                <div class="fold-body">
-                  <p class="hint" style="line-height:1.8">
+                  <div class="dim" style="margin:14px 0 8px;font-weight:600">云监测台上报</div>
+                  <p class="hint" style="line-height:1.8;margin-bottom:8px">
                     部署「盲中继 / 云监测台」后，节点可定期把自身状态上报给 Worker，监测台据此展示设备列表。
-                    <b>默认关闭</b>：地址或令牌留空就完全不上报（虚拟 IP / 版本 / 在线状态都不会外发）。
-                    需要上报时，先部署监测台，再点上方「填入组网配置」自动带入地址与令牌。
+                    <b>默认关闭</b>：地址或令牌留空就完全不上报。
                   </p>
                   <div class="pair-grid">
                     <div class="pair"><label for="meshMonitorEndpoint" class="has-tip" data-tip="【可选】云监测台的上报地址（Worker 根地址）。留空=不上报。&#10;示例：https://cfpilot-relay.xxx.workers.dev">上报地址 ⓘ</label><input type="text" id="meshMonitorEndpoint" placeholder="部署监测台后自动填入" /></div>
@@ -1922,11 +1920,8 @@
                     <div class="pair"><label for="meshMonitorInterval" class="has-tip" data-tip="【可选】上报间隔（秒），范围 5–3600，默认 30。&#10;太短会增加 Worker 请求量与 D1 写入；太长监测台会显示离线（判定阈值约 90 秒）。&#10;示例：30">上报间隔（秒）ⓘ</label><input type="number" id="meshMonitorInterval" min="5" max="3600" placeholder="30" /></div>
                     <div class="pair"><label for="meshMonitorAlias" class="has-tip" data-tip="【可选】监测台上显示的设备名，便于区分多台机器。留空则用主机名。&#10;示例：home-nas">设备名 ⓘ</label><input type="text" id="meshMonitorAlias" placeholder="留空=主机名" /></div>
                   </div>
-                </div>
-              </details>
-              <details class="fold">
-                <summary>对端节点（seed，手动添加）</summary>
-                <div class="fold-body">
+
+                  <div class="dim" style="margin:14px 0 8px;font-weight:600">对端节点（手动添加）</div>
                   <div class="pair-grid">
                     <div class="pair"><label for="peerNodeId" class="has-tip" data-tip="【添加对端时必填】对方节点 ID（16 位 hex），就是对方「本节点 ID」的值。两端要互相添加对方。&#10;示例：0200000000000002">对端 ID（16 hex）ⓘ</label><input type="text" id="peerNodeId" placeholder="如 0200000000000002" /></div>
                     <div class="pair"><label for="peerAddr" class="has-tip" data-tip="【添加对端时必填】对方可达的 IP:端口。同机测试用 127.0.0.1:端口；异地用对方公网 IP/域名；端口是对方的「UDP 监听」端口。&#10;示例：10.0.0.2:51820">对端地址（IP:端口）ⓘ</label><input type="text" id="peerAddr" placeholder="如 10.0.0.2:51820" /></div>

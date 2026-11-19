@@ -5038,6 +5038,23 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
     })
 
     // 保存配置到本地（localStorage）
+    // 组网按钮状态机：
+    //   - 启停进行中（in-flight）：主按钮禁用并显示「处理中…」，防止连点导致重启；
+    //   - 已运行：「启动组网」→「重启组网」，用户一眼看出已经起来了，
+    //     想重启是明确的第二次动作，不再是「以为没启动成功」的误触；
+    //   - 未运行：恢复「启动组网」，停止按钮禁用。
+    let meshRunning = false
+    let meshBusy = false
+    const applyMeshButtons = (): void => {
+      const start = $('btnMeshStart') as HTMLButtonElement | null
+      const stop = $('btnMeshStop') as HTMLButtonElement | null
+      if (start) {
+        start.textContent = meshBusy ? '处理中…' : meshRunning ? '重启组网' : '启动组网'
+        start.disabled = meshBusy
+      }
+      if (stop) stop.disabled = meshBusy || !meshRunning
+    }
+
     $('btnMeshSave')?.addEventListener('click', () => {
       const cfg = collectMeshConfig()
       try {
@@ -5087,8 +5104,8 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
         }
       }
       const cfg = collectMeshConfig()
-      const btn = $('btnMeshStart') as HTMLButtonElement
-      if (btn) btn.disabled = true
+      meshBusy = true
+      applyMeshButtons()
       try {
         // 启动前刷新身份：带对端 ID 检测冲突（克隆密钥导致 ID 相同时自动重生），
         // 并用最新身份覆盖配置（NodeId / 隧道私钥）
@@ -5109,8 +5126,7 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
         const data = await resp.json().catch(() => ({}))
         if (resp.ok && data.ok !== false) {
           log('组网已启动（提权服务已创建虚拟网卡）', 'ok')
-          const stop = $('btnMeshStop') as HTMLButtonElement
-          if (stop) stop.disabled = false
+          meshRunning = true
         } else {
           let msg = data.error || data.message || `HTTP ${resp.status}`
           // 旧版 meshd 的典型特征：JSON 解码 NodeID 失败。
@@ -5125,20 +5141,22 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
       } catch (err) {
         log('启动失败：' + (err instanceof Error ? err.message : String(err)), 'err')
       } finally {
-        if (btn) btn.disabled = false
+        meshBusy = false
+        applyMeshButtons()
       }
     })
 
     // 停止组网
     $('btnMeshStop')?.addEventListener('click', async () => {
-      const btn = $('btnMeshStop') as HTMLButtonElement
-      if (btn) btn.disabled = true
+      meshBusy = true
+      applyMeshButtons()
       try {
         const resp = await fetch('/api/mesh/stop', {
           method: 'POST', credentials: 'same-origin',
         })
         if (resp.ok) {
           log('组网已停止', 'ok')
+          meshRunning = false
         } else {
           const data = await resp.json().catch(() => ({}))
           log('停止失败：' + (data.error || `HTTP ${resp.status}`), 'err')
@@ -5146,7 +5164,8 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
       } catch (err) {
         log('停止失败：' + (err instanceof Error ? err.message : String(err)), 'err')
       } finally {
-        if (btn) btn.disabled = true // 停止后保持禁用，直到再次启动
+        meshBusy = false
+        applyMeshButtons()
       }
     })
 
@@ -5246,6 +5265,9 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
         return
       }
       put('meshStatRunning', data.running ? '运行中' : '未运行')
+      // 以服务端状态为准同步按钮（启停进行中时不动，避免闪烁）。
+      meshRunning = Boolean(data.running)
+      if (!meshBusy) applyMeshButtons()
       put('meshStatNode', data.nodeId || '—')
       put('meshStatVip', data.virtualIp || '—')
       put('meshStatListen', data.listen || '—')

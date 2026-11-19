@@ -1856,6 +1856,8 @@
                   <div class="pair-grid">
                     <div class="pair"><label for="meshRelayDomain" class="has-tip" data-tip="【可选】WSS 降级兜底的盲中继域名。先在「部署」页部署盲中继，再点「填入组网配置」自动带入。不填也能用（仅 UDP 直连，无中继兜底）。&#10;示例：relay.example.com">盲中继域名 ⓘ</label><input type="text" id="meshRelayDomain" placeholder="部署盲中继后自动填入" /></div>
                     <div class="pair"><label for="meshRelayRoom" class="has-tip" data-tip="【可选】盲中继房间名，8-64 位十六进制，同一网络所有节点填同一个房间才能互通，由「填入组网配置」自动带入。&#10;示例：0123456789abcdef">房间名（8-64 hex）ⓘ</label><input type="text" id="meshRelayRoom" placeholder="部署盲中继后自动填入" /></div>
+                    <div class="pair"><label for="meshRelayConnectIp" class="has-tip" data-tip="【可选】盲中继 WSS 的优选入口 IP（如从「入口优选」里取一个 Cloudflare IP）。&#10;填了就连这个 IP，TLS SNI/Host 仍是上面的盲中继域名，证书校验不变。&#10;用途：域名解析被污染或延迟高时换到指定边缘 IP；留空=按域名解析（默认行为）。&#10;示例：104.16.123.45">WSS 入口 IP（可选）ⓘ</label><input type="text" id="meshRelayConnectIp" placeholder="留空=按域名解析" /></div>
+                    <div class="pair"><label for="meshRelayIpPick" class="has-tip" data-tip="【可选】直接复用已有优选结果作为 WSS 入口，不用重新测速。&#10;入口优选 = Cloudflare 边缘 IP（一条直连，延迟最低）；反代优选 = 第三方中继入口（可绕过域名/IP 被阻断，但多一跳）。&#10;选完会填入上面的「WSS 入口 IP」；留空则按盲中继域名解析。">从优选结果选择 ⓘ</label><select id="meshRelayIpPick"><option value="">— 手动输入 / 留空按域名解析 —</option></select></div>
                   </div>
                   <label class="switch-box">
                     <span class="sw-info">
@@ -3051,4 +3053,6 @@
   <script src="./renderer.js"></script>
 </body>
 </html>
+
+
 

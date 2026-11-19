@@ -72,7 +72,6 @@ func TestSensitiveWarning(t *testing.T) {
 	}
 }
 
-
 // 建议对端虚拟 IP 必须落在**同一 /24**（生链接时自动顺延最后一段）。
 // 这条守护「不同网段」的错误模型不再回来：TUN 固定 /24，跨网段默认不可达。
 func TestBuildInviteSuggestsSameSubnet(t *testing.T) {
@@ -140,3 +139,26 @@ func TestBuildInviteReplacesWildcardAddr(t *testing.T) {
 	}
 }
 
+func TestInviteCarriesMonitorConfig(t *testing.T) {
+	p := InvitePayload{
+		Network: "n", PSK: "s", VirtualIP: "10.97.0.1",
+		MonitorEndpoint:   "https://monitor.example.com",
+		MonitorToken:      "monitor-token-123",
+		MonitorIntervalMS: 15000,
+		MonitorAlias:      "joined-node",
+	}
+	uri, err := BuildInvite(p, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseInvite(uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MonitorEndpoint != p.MonitorEndpoint || got.MonitorToken != p.MonitorToken {
+		t.Errorf("监测地址/令牌未随邀请链接传递: %+v", got)
+	}
+	if got.MonitorIntervalMS != 15000 || got.MonitorAlias != "joined-node" {
+		t.Errorf("监测间隔/设备名未传递: %+v", got)
+	}
+}

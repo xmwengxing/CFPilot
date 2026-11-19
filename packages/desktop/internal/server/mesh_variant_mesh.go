@@ -114,7 +114,12 @@ func (s *Server) handleMeshInviteParse(w http.ResponseWriter, r *http.Request) {
 		"peerNodeId": p.NodeID, "peerAddr": p.Addr,
 		"peerPub": p.TunnelPub, "peerVip": p.VirtualIP,
 		"suggestedIp": p.Suggested,
-		"warning":     mesh.SensitiveWarning(),
+		// 云监测配置（A 生成链接时带上；B 解析后自动填入）
+		"monitoringEndpoint":   p.MonitorEndpoint,
+		"monitoringToken":      p.MonitorToken,
+		"monitoringIntervalMs": p.MonitorIntervalMS,
+		"monitorAlias":         p.MonitorAlias,
+		"warning":              mesh.SensitiveWarning(),
 	})
 }
 
@@ -150,3 +155,4 @@ func (s *Server) handleMeshEnabled(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"enabled": true})
 }
+

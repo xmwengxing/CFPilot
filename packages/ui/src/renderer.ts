@@ -4891,7 +4891,10 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
         meshTopo.setData(nodes)
         const empty = document.getElementById('topoEmpty')
         if (empty) empty.hidden = true
-        onMeshPageShow = () => meshTopo?.refresh()
+        onMeshPageShow = () => {
+          meshTopo?.refresh()
+          void refreshRelayIpPick()
+        }
       } catch (err) {
         log('拓扑动画初始化失败：' + (err instanceof Error ? err.message : String(err)), 'warn')
       }
@@ -4927,6 +4930,11 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
         tunnel_pub: localStorage.getItem('cfpilot-mesh-tunnel-pub') || '',
         virtual_ip: ($('meshVirtualIp')?.value || '').trim(),
         suggested: '',
+        // 把本机的云监测配置一起带上：被邀请方入网后自动上报，无需手抄
+        monitoring_endpoint: ($('meshMonitorEndpoint')?.value || '').trim(),
+        monitoring_token: ($('meshMonitorToken')?.value || '').trim(),
+        monitoring_interval_ms: Math.max(5, Number($('meshMonitorInterval')?.value || 30)) * 1000,
+        monitor_alias: ($('meshMonitorAlias')?.value || '').trim(),
       }
       if (!payload.network || !payload.psk) {
         log('请先填写网络名与 PSK 再生成邀请链接', 'warn')
@@ -5041,6 +5049,13 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
           const put = (elId: string, v: string) => { const el = $(elId); if (el && v) el.value = v }
           put('meshNetwork', id.network || '')
           put('meshPsk', id.psk || '')
+          // 监测配置随邀请链接带入（B 无需再手抄地址/令牌）
+          put('meshMonitorEndpoint', id.monitoringEndpoint || '')
+          put('meshMonitorToken', id.monitoringToken || '')
+          if (id.monitoringIntervalMs) {
+            const el = $('meshMonitorInterval'); if (el) el.value = String(Math.max(5, Math.round(Number(id.monitoringIntervalMs) / 1000)))
+          }
+          put('meshMonitorAlias', id.monitorAlias || '')
           // 建议虚拟 IP 自动填入本机（若未填）
           if (id.suggestedIp && !($('meshVirtualIp')?.value || '').trim()) put('meshVirtualIp', id.suggestedIp)
           // 把发起方加为对端（若尚未添加）
@@ -5117,6 +5132,52 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
         if (btn) btn.disabled = true // 停止后保持禁用，直到再次启动
       }
     })
+
+    /**
+     * 用现有优选结果填充「WSS 入口 IP」下拉。
+     *
+     * 不重新造一个 IP 优选：直接复用
+     *   - 入口优选：本机扫描历史里最近的 CF 边缘 IP（直连、延迟最低）
+     *   - 反代优选：本次会话反代体检的入选项（第三方入口，能绕过域名/IP 被阻断）
+     * 两者的 IP 都可以作为 TCP 目标，TLS SNI/Host 仍是盲中继域名。
+     */
+    async function refreshRelayIpPick(): Promise<void> {
+      // $() 的返回类型是 HTMLInputElement，这里实际是 <select>，需要经 unknown 断言
+      const sel = $('meshRelayIpPick') as unknown as HTMLSelectElement | null
+      const inp = $('meshRelayConnectIp')
+      if (!sel) return
+      const keep = sel.value
+      sel.innerHTML = '<option value="">— 手动输入 / 留空按域名解析 —</option>'
+      const add = (ip: string, group: string, note: string): void => {
+        if (!ip) return
+        const opt = document.createElement('option')
+        opt.value = ip
+        opt.textContent = group + ' · ' + ip + (note ? '（' + note + '）' : '')
+        sel.append(opt)
+      }
+      try {
+        const res = await window.cfpilot.getScanHistory()
+        const sessions = (res && res.sessions) || []
+        const latest = sessions[0]
+        if (latest) {
+          const seen = new Set<string>()
+          for (const e of latest.entries.slice(0, 30)) {
+            if (!e.ip || seen.has(e.ip)) continue
+            seen.add(e.ip)
+            const where = e.colo || e.city || ''
+            const ms = Math.round(Number(e.latency) || 0)
+            add(e.ip, '入口优选', [where, ms ? ms + 'ms' : ''].filter(Boolean).join(' '))
+          }
+        }
+      } catch {
+        /* 历史不可用不阻断选择器 */
+      }
+      for (const ip of relayPicked.slice(0, 20)) add(ip, '反代优选', '')
+      if (keep) sel.value = keep
+      sel.onchange = () => {
+        if (inp) inp.value = sel.value
+      }
+    }
 
     // ---- 组网状态（真实数据，每 2 秒刷新）----
     // 早前界面完全没有轮询：启动后用户只能看着拓扑动画干等，
@@ -5261,6 +5322,8 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
         }
       }
     } catch { /* 忽略损坏的本地配置 */ }
+
+    void refreshRelayIpPick()
   }
 
   function collectMeshConfig(): Record<string, unknown> {
@@ -5278,6 +5341,7 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
       tunName: ($('meshTunName')?.value || '').trim(),
       relayDomain: ($('meshRelayDomain')?.value || '').trim(),
       relayRoom: ($('meshRelayRoom')?.value || '').trim(),
+      relayConnectIp: ($('meshRelayConnectIp')?.value || '').trim(),
       enableDegrade: ($('meshEnableDegrade') as HTMLInputElement | null)?.checked !== false,
       // 云监测台上报：*monitor* 键与输入框 id 对应（本地保存后能按命名约定恢复）；
       // *monitoring* 是交给 Go mesh.Config 的字段名（默认关闭，留空即不上报）。
@@ -7472,5 +7536,8 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
     })()
   })
 })()
+
+
+
 
 

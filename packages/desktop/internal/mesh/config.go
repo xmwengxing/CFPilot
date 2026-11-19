@@ -32,6 +32,11 @@ type Config struct {
 	// RelayDomain / RelayRoom 是盲中继 WSS 地址（降级目标）；留空则禁用降级。
 	RelayDomain string // 如 relay.example.com
 	RelayRoom   string // 8-64 位小写 hex（房间名）
+	// RelayConnectIP 是 WSS 盲中继的**优选入口 IP**（可选）。
+	// 填了就连这个 IP，TLS SNI / HTTP Host 仍是 RelayDomain ——
+	// 用来避开被污染的域名解析、或换到延迟更低的 Cloudflare 边缘 IP。
+	// 留空 = 按域名解析（行为与之前一致）。
+	RelayConnectIP string
 	// EnableDegrade 打开 UDP→WSS 降级 / WSS→UDP 回切控制器。
 	EnableDegrade bool
 	// TunName 是 TUN 设备名（多节点同机时必须不同）；留空 = cfpilot0。
@@ -125,4 +130,5 @@ func (c *Config) tunnelKey() (noise.DHKey, error) {
 	// 随机生成
 	return cs.GenerateKeypair(nil)
 }
+
 

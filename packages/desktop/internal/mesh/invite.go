@@ -25,6 +25,15 @@ type InvitePayload struct {
 	VirtualIP string `json:"virtual_ip"`          // 发起方虚拟 IP
 	Suggested string `json:"suggested,omitempty"` // 建议对端虚拟 IP
 	Exp       int64  `json:"exp,omitempty"`       // 过期时间 Unix 秒，0=永久
+
+	// 云监测台上报参数（可选）：让被邀请方入网后**自动上报**，
+	// 不必再手工抄 Worker 地址与令牌。
+	// 注意：这与 PSK 同属敏感信息（令牌泄露 = 他人可伪造上报），
+	// 所以和 PSK 一样只 base64、明文警示勿公开分享。
+	MonitorEndpoint     string `json:"monitoring_endpoint,omitempty"`
+	MonitorToken        string `json:"monitoring_token,omitempty"`
+	MonitorIntervalMS   int64  `json:"monitoring_interval_ms,omitempty"`
+	MonitorAlias        string `json:"monitor_alias,omitempty"`
 }
 
 // ReachableListenAddr 把「监听地址」换成对端**可直连**的地址。
@@ -172,3 +181,4 @@ func SensitiveWarning() string {
 	return "邀请链接里包含明文的网络密钥（仅 base64 编码，非加密）。" +
 		"泄露=他人可加入你的网络，只能全网轮换 PSK。请勿发到公开群/日志/issue。"
 }
+

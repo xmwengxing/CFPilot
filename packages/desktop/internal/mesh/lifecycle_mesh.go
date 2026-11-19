@@ -243,7 +243,7 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 		for id, link := range m.links {
 			m.udpLinks[id] = link
 		}
-		m.degrade = NewDegradeController(m.cfg.NodeID, m.probes, m.cfg.RelayDomain, m.cfg.RelayRoom, nil, m.cfg.Verbose)
+		m.degrade = NewDegradeController(m.cfg.NodeID, m.probes, m.cfg.RelayDomain, m.cfg.RelayRoom, m.cfg.RelayConnectIP, nil, m.cfg.Verbose)
 		for _, p := range m.cfg.Peers {
 			m.degrade.AddPeer(p.NodeID, p.Addr)
 		}
@@ -835,6 +835,7 @@ func (m *meshLifecycle) Status() Status {
 	}
 	return st
 }
+
 
 
 

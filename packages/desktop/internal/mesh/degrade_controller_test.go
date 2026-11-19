@@ -52,7 +52,7 @@ func TestDegradeControllerLifecycle(t *testing.T) {
 	}
 	defer hub.Close()
 	probes := NewProbeTracker(hub, nodeID(0))
-	c := NewDegradeController(nodeID(0), probes, "", "", nil, false)
+	c := NewDegradeController(nodeID(0), probes, "", "", "", nil, false)
 	c.AddPeer(nodeID(1), "127.0.0.1:12345")
 	c.SetSwitchFn(func(NodeID, PeerLink, TransportKind) {})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -159,3 +159,5 @@ func TestUdpHubProbeBypass(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 }
+
+

@@ -26,7 +26,10 @@ type DegradeController struct {
 	probes      *ProbeTracker
 	relayDomain string
 	relayRoom   string
-	rootCAs     *x509.CertPool
+	// relayConnectIP 非空时，WSS 的 TCP 目标换成该 IP（SNI/Host 仍用域名），
+	// 即「优选入口 IP」能力（WsUrl.ConnectIP）。
+	relayConnectIP string
+	rootCAs        *x509.CertPool
 	verbose     bool
 
 	// switchFn 执行链路切换（由 Lifecycle 注入：(peer, link, kind)）
@@ -48,15 +51,16 @@ type ctrlPeer struct {
 	activeKind TransportKind
 }
 
-func NewDegradeController(selfID NodeID, probes *ProbeTracker, relayDomain, relayRoom string, rootCAs *x509.CertPool, verbose bool) *DegradeController {
+func NewDegradeController(selfID NodeID, probes *ProbeTracker, relayDomain, relayRoom, relayConnectIP string, rootCAs *x509.CertPool, verbose bool) *DegradeController {
 	return &DegradeController{
-		selfID:      selfID,
-		peers:       make(map[NodeID]*ctrlPeer),
-		policy:      NewDegradePolicy(),
-		probes:      probes,
-		relayDomain: relayDomain,
-		relayRoom:   relayRoom,
-		rootCAs:     rootCAs,
+		selfID:         selfID,
+		peers:          make(map[NodeID]*ctrlPeer),
+		policy:         NewDegradePolicy(),
+		probes:         probes,
+		relayDomain:    relayDomain,
+		relayRoom:      relayRoom,
+		relayConnectIP: relayConnectIP,
+		rootCAs:        rootCAs,
 		verbose:     verbose,
 		graceTicks:  lossWindowTicks, // 覆盖整个探针窗口滚出时间（真机启动瞬态防护）
 	}
@@ -197,6 +201,10 @@ func (c *DegradeController) switchToWSS(ctx context.Context, id NodeID) error {
 	if err != nil {
 		return err
 	}
+	// 优选入口 IP：只换 TCP 目标，SNI/Host 仍是 relayDomain（证书校验照旧）。
+	if c.relayConnectIP != "" {
+		parsed = parsed.WithConnectIP(c.relayConnectIP)
+	}
 	conn, err := DialWss(ctx, parsed, c.rootCAs)
 	if err != nil {
 		return err
@@ -263,3 +271,4 @@ func (c *DegradeController) Kind(id NodeID) TransportKind {
 	}
 	return TransportUDP
 }
+

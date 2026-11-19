@@ -44,9 +44,10 @@ type Options struct {
 	DashboardProject  string
 	WithDashboard     bool
 	ZoneID            string
-	// AutoDNS 在绑定 Worker 自定义域名**之前**，先在 Zone 里创建占位 DNS 记录
-	// （已代理的 AAAA 100::）。否则「绑定」只是受理、域名仍无解析，
-	// 后续 https://域名/auth/setup 必然 no such host。
+	// AutoDNS：绑定失败（409/100117，同名主机名已有「外部管理」的 DNS 记录）时，
+	// 清理**我们自己的旧占位记录**（已代理 AAAA 100:: / CNAME→workers.dev|pages.dev）
+	// 后重试绑定。注意：Worker 自定义域名应由 Workers 自动创建 DNS 记录，
+	// **不要**在绑定前预建记录 —— 那会被判成 externally managed 而失败。
 	AutoDNS bool
 	WindowMs          string
 	MaxBytesPerWindow string
@@ -98,28 +99,35 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
-// ensurePlaceholderDNS 确保 zone 里有一条「已代理的 AAAA 100::」记录。
+// cleanupPlaceholderDNS 在 Worker 自定义域名绑定被 100117 拒绝时，清理**可识别的**
+// 旧占位记录（已代理 AAAA 100::，或指向 workers.dev / pages.dev 的 CNAME）。
 //
-// 这是 Worker 自定义域名的标准占位：没有它，绑定只是受理、域名无解析，
-// 后面的 https://域名/auth/setup 会 no such host。
-// 已存在时直接复用；存在同名的**未代理**记录时先删掉（否则绑定会被拒）。
-func ensurePlaceholderDNS(ctx context.Context, client *cfapi.Client, zoneID, domain string) error {
+// 遇到用户自己的其它记录（例如真实 A 记录、指向自有域名的 CNAME）时返回错误，
+// 由调用方提示用户手动处理 —— 部署工具不擅自删除用户 DNS。
+func cleanupPlaceholderDNS(ctx context.Context, client *cfapi.Client, zoneID, domain string) error {
 	records, err := client.ListDNSRecords(ctx, zoneID, domain)
 	if err != nil {
 		return err
 	}
+	removed := 0
 	for _, r := range records {
-		if strings.EqualFold(r.Name, domain) && r.Proxied {
-			return nil // 已有可用记录
+		if !strings.EqualFold(r.Name, domain) {
+			continue
 		}
-	}
-	for _, r := range records {
-		if strings.EqualFold(r.Name, domain) && !r.Proxied {
-			_ = client.DeleteDNSRecord(ctx, zoneID, r.ID)
+		isPlaceholder := (r.Type == "AAAA" && r.Content == "100::") ||
+			(r.Type == "CNAME" && (strings.Contains(r.Content, ".workers.dev") || strings.Contains(r.Content, ".pages.dev")))
+		if !isPlaceholder {
+			return fmt.Errorf("同名记录 %s %s 不是占位记录，请手动删除或换子域", r.Type, r.Content)
 		}
+		if derr := client.DeleteDNSRecord(ctx, zoneID, r.ID); derr != nil {
+			return derr
+		}
+		removed++
 	}
-	_, err = client.CreateDNSRecord(ctx, zoneID, domain, "AAAA", "100::", true)
-	return err
+	if removed == 0 {
+		return fmt.Errorf("未找到可清理的占位记录（可能仍被其它记录占用）")
+	}
+	return nil
 }
 
 // waitDomainResolvable 轮询直到域名可解析（DNS 生效通常要几秒到几十秒）。
@@ -204,10 +212,25 @@ func Deploy(ctx context.Context, client *cfapi.Client, raw Options) (*Result, er
 	opt.Progress("步骤 1/5：创建监测数据库（D1）")
 	db, err := client.CreateD1Database(ctx, opt.AccountID, d1Name)
 	if err != nil {
-		return nil, fmt.Errorf("创建 D1 失败：%w", err)
+		// 重试部署时 D1 已存在：按名字复用，而不是直接失败。
+		var reused bool
+		if list, lerr := client.ListD1Databases(ctx, opt.AccountID); lerr == nil {
+			for i := range list {
+				if list[i].Name == d1Name {
+					db = &list[i]
+					reused = true
+					break
+				}
+			}
+		}
+		if db == nil {
+			return nil, fmt.Errorf("创建 D1 失败：%w", err)
+		}
+		opt.Progress("D1 已存在，复用：" + d1Name)
+		_ = reused
 	}
 	statements := splitSQL(string(schemaSQL))
-	opt.Progress(fmt.Sprintf("D1 已创建：%s，初始化 schema（%d 条）", db.Name, len(statements)))
+	opt.Progress(fmt.Sprintf("D1 已就绪：%s，初始化 schema（%d 条）", db.Name, len(statements)))
 	for _, sql := range statements {
 		if err := client.QueryD1(ctx, opt.AccountID, db.UUID, sql); err != nil {
 			return nil, fmt.Errorf("D1 schema 初始化失败（%s…）：%w", firstN(sql, 40), err)
@@ -237,17 +260,20 @@ func Deploy(ctx context.Context, client *cfapi.Client, raw Options) (*Result, er
 	workerURL := "https://" + opt.Domain
 	wss := "wss://" + opt.Domain + "/mesh/<network_hash>?peer_id=<16hex>"
 
-	// 3. 域名（先建 DNS 占位记录 → 再绑定 → 再等解析生效）
+	// 3. 域名（由 Workers 自己创建 DNS 记录 → 等解析生效）
 	if opt.ZoneID != "" {
-		if opt.AutoDNS {
-			opt.Progress("步骤 3/5：创建域名 DNS 占位记录 " + opt.Domain)
-			if err := ensurePlaceholderDNS(ctx, client, opt.ZoneID, opt.Domain); err != nil {
-				return nil, fmt.Errorf("创建 DNS 记录失败：%w", err)
-			}
-		}
 		opt.Progress("步骤 3/5：绑定自定义域名 " + opt.Domain)
-		if _, err := client.AttachWorkerDomain(ctx, opt.AccountID, opt.Domain, opt.WorkerName, opt.ZoneID); err != nil {
-			return nil, fmt.Errorf("绑定域名失败：%w", err)
+		_, attachErr := client.AttachWorkerDomain(ctx, opt.AccountID, opt.Domain, opt.WorkerName, opt.ZoneID)
+		if attachErr != nil && opt.AutoDNS {
+			// 409/100117：同名主机名已有「外部管理」的记录（通常是我们上一轮预建的占位）。
+			// 清理**可识别的占位记录**后重试；遇到用户自己的真实记录则明确报错，不擅自删。
+			if cerr := cleanupPlaceholderDNS(ctx, client, opt.ZoneID, opt.Domain); cerr != nil {
+				return nil, fmt.Errorf("绑定域名失败：%w；且无法自动清理：%v", attachErr, cerr)
+			}
+			_, attachErr = client.AttachWorkerDomain(ctx, opt.AccountID, opt.Domain, opt.WorkerName, opt.ZoneID)
+		}
+		if attachErr != nil {
+			return nil, fmt.Errorf("绑定域名失败：%w（若同名主机名已有其他 DNS 记录，请先删除或换一个子域）", attachErr)
 		}
 	} else {
 		if opt.AutoDNS {
@@ -351,6 +377,7 @@ func firstN(s string, n int) string {
 
 // ZoneNameFromDomain 暴露给 server 层用于自动查 zone。
 func ZoneNameFromDomain(domain string) string { return zoneNameFromDomain(domain) }
+
 
 
 

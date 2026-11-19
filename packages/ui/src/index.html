@@ -1471,8 +1471,8 @@
                   <p class="tip">选域名所在 zone 后，工具会尝试自动绑定；留空则只部署 Worker，域名需手动绑。</p>
                   <label class="switch-box" style="margin-top:8px">
                     <span class="sw-info">
-                      <span class="sw-title">自动创建域名 DNS 记录</span>
-                      <span class="sw-desc">绑定前先在 Zone 里建占位记录（已代理 AAAA 100::），并等解析生效再设置监测台密码</span>
+                      <span class="sw-title">绑定失败时自动清理旧占位记录</span>
+                      <span class="sw-desc">DNS 由 Workers 绑定自动创建；勾选时仅清理同名的旧占位记录（AAAA 100:: / CNAME workers.dev），并等解析生效再设密码</span>
                     </span>
                     <input type="checkbox" id="edgeAutoDns" checked />
                     <span class="switch"></span>
@@ -3073,6 +3073,7 @@
   <script src="./renderer.js"></script>
 </body>
 </html>
+
 
 
 

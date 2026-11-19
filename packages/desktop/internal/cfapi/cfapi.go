@@ -1166,6 +1166,16 @@ type DoMigration struct {
 	DeletedClasses   []string `json:"deleted_classes,omitempty"`
 }
 
+// ListD1Databases 列出账号下的 D1 数据库（重试部署时按名字复用，避免「已存在」报错）。
+func (c *Client) ListD1Databases(ctx context.Context, accountID string) ([]D1Database, error) {
+	var out []D1Database
+	if err := c.doJSON(ctx, http.MethodGet,
+		fmt.Sprintf("/accounts/%s/d1/database?per_page=100", url.PathEscape(accountID)), nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CreateD1Database 动态创建 D1 数据库（POST /accounts/{id}/d1/database）。
 func (c *Client) CreateD1Database(ctx context.Context, accountID, name string) (*D1Database, error) {
 	var out D1Database
@@ -1280,3 +1290,4 @@ func (c *Client) DeployPagesStatic(ctx context.Context, accountID, project strin
 		fmt.Sprintf("/accounts/%s/pages/projects/%s/deployments", url.PathEscape(accountID), url.PathEscape(project)),
 		formFiles, map[string]string{"branch": "main", "manifest": "{}"}, &out)
 }
+

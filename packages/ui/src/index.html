@@ -1905,9 +1905,18 @@
                   <div class="pair-grid">
                     <div class="pair"><label for="meshRelayServerId" class="has-tip" data-tip="【必填其一】中继节点 ID，16 位十六进制，由中继服务提供。&#10;示例：aabbccddeeff0011">中继节点 ID ⓘ</label><input type="text" id="meshRelayServerId" placeholder="如 aabbccddeeff0011" /></div>
                     <div class="pair"><label for="meshRelayServerAddr" class="has-tip" data-tip="【必填其一】中继的 UDP 地址 IP:端口。&#10;示例：203.0.113.10:51830">中继地址（IP:端口）ⓘ</label><input type="text" id="meshRelayServerAddr" placeholder="如 1.2.3.4:51830" /></div>
-                    <div class="pair"><label for="meshRelayServerToken" class="has-tip" data-tip="【必填其一】中继准入令牌，与节点 PSK 分离。只以 BLAKE3 摘要上线，原文不写日志/不落盘。">中继准入令牌 ⓘ</label><input type="password" id="meshRelayServerToken" placeholder="中继 token" /></div>
+                    <div class="pair"><label for="meshRelayServerToken" class="has-tip" data-tip="【令牌中继必填】中继准入令牌，与节点 PSK 分离。只以 BLAKE3 摘要上线，原文不写日志/不落盘。&#10;点「生成服务器部署命令」会自动生成并把同一令牌写进服务器命令。">中继准入令牌 ⓘ</label><input type="password" id="meshRelayServerToken" placeholder="点生成自动生成，或粘贴服务器 init 输出" /></div>
                   </div>
-                  <p class="tip">三项都填才会启用；留空则不使用服务器中继（只用直连 + 盲中继 WSS）。</p>
+                  <p class="tip">令牌中继需要三项；零知识盲中继只需节点 ID + 地址（令牌留空）。地址留空则不使用服务器中继。</p>
+                  <div class="pair-grid">
+                    <div class="pair"><label for="meshRelayServerMode" class="has-tip" data-tip="【二选一】令牌中继：中继持有准入令牌，注册时必须出示 BLAKE3 摘要。&#10;零知识盲中继：mobihop-relay --relay-only，不带令牌、按 PSK 派生的房间标签分房。">准入模式 ⓘ</label><select id="meshRelayServerMode"><option value="token">令牌中继（需要令牌）</option><option value="blind">零知识盲中继（--relay-only）</option></select></div>
+                  </div>
+                  <div class="btn-row">
+                    <button class="btn btn-ghost" id="btnMeshRelayDeployCmd">生成服务器部署命令</button>
+                    <button class="btn btn-ghost" id="btnMeshRelayFillFromInit">粘贴部署输出回填</button>
+                  </div>
+                  <textarea id="meshRelayDeployOut" readonly hidden placeholder="点「生成服务器部署命令」后显示：整段粘到服务器 root shell 执行" style="width:100%;min-height:150px;margin-top:8px;font-family:monospace;font-size:11px"></textarea>
+                  <textarea id="meshRelayInitOut" placeholder="把服务器上 mobihop-relay --init 的输出整段粘到这里，点「粘贴部署输出回填」自动填 NodeId / 地址 / 令牌" style="width:100%;min-height:80px;margin-top:8px;font-family:monospace;font-size:11px"></textarea>
 
                   <div class="dim" style="margin:14px 0 8px;font-weight:600">云监测台上报</div>
                   <p class="hint" style="line-height:1.8;margin-bottom:8px">
@@ -2660,6 +2669,8 @@
                   ○ <b>盲中继域名 / 房间</b>：由「填入组网配置」带入，UDP 无法直连时兜底，可选但建议。<br><br>
 				  <b>组网流程</b>
                   1.（可选）部署盲中继：见上方「① 盲中继部署」，部署后点「填入组网配置」自动带入 WSS 信息。<br>
+                  1.5（可选）自建服务器中继：在「高级选项 → 服务器中继」填服务器公网地址，点
+                  「生成服务器部署命令」后在服务器执行，再把输出粘回「粘贴部署输出回填」，NodeId / 地址 / 令牌自动填好。<br>
                   2. 设备A 填写「网络名 / 密钥 PSK / 本节点虚拟 IP」，展开「邀请链接」点
                   「生成邀请链接」后复制链接，点「启动组网」。<b>链接含明文密钥 PSK，勿公开</b>。<br>
                   3. 设备B 在「邀请链接」输入框粘贴邀请链接 → 点「启动组网」。<br>

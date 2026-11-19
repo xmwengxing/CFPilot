@@ -12,6 +12,7 @@ import {
   taskStatusText,
 } from './task-rows'
 import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
+import { buildRelayDeployScript, parseRelayInitOutput, randomRelayToken } from './meshRelayDeploy'
 
 (function () {
   'use strict'
@@ -5633,7 +5634,7 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
       enableDegrade: 'meshEnableDegrade', disablePunch: 'meshEnablePunch',
       monitorEndpoint: 'meshMonitorEndpoint', monitorToken: 'meshMonitorToken',
       relayServerId: 'meshRelayServerId', relayServerAddr: 'meshRelayServerAddr',
-      relayServerToken: 'meshRelayServerToken',
+      relayServerToken: 'meshRelayServerToken', relayServerMode: 'meshRelayServerMode',
       monitorInterval: 'meshMonitorInterval', monitorAlias: 'meshMonitorAlias',
       inviteUri: 'meshInviteInput',
     }
@@ -5678,6 +5679,62 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
     }
 
     void refreshRelayIpPick()
+
+    // ---- 服务器中继（UDP）部署闭环 ----
+    // 面板生成服务器端安装命令（令牌先在这里生成，服务器 --init 原样复用），
+    // 再把服务器 --init 的输出整段粘回来，自动回填 NodeId / 地址 / 令牌。
+    // 这样「面板里的三项」与「服务器上的实际配置」不可能对不上。
+    $('btnMeshRelayDeployCmd')?.addEventListener('click', () => {
+      const mode = ($sel('meshRelayServerMode')?.value || 'token') === 'blind' ? 'blind' : 'token'
+      const addr = ($('meshRelayServerAddr')?.value || '').trim()
+      try {
+        let token = ($('meshRelayServerToken')?.value || '').trim()
+        if (mode === 'token' && token.length < 8) {
+          token = randomRelayToken()
+          const el = $('meshRelayServerToken')
+          if (el) el.value = token
+        }
+        const script = buildRelayDeployScript({ mode, addr, token })
+        const out = document.getElementById('meshRelayDeployOut') as HTMLTextAreaElement | null
+        if (out) {
+          out.value = script
+          out.hidden = false
+        }
+        log('已生成服务器部署命令：粘到服务器 root shell 执行，再把输出里的 NodeId 粘回「粘贴部署输出回填」', 'ok')
+        autoSaveMesh()
+      } catch (err) {
+        log('生成部署命令失败：' + (err instanceof Error ? err.message : String(err)), 'warn')
+      }
+    })
+
+    $('btnMeshRelayFillFromInit')?.addEventListener('click', () => {
+      const src = (document.getElementById('meshRelayInitOut') as HTMLTextAreaElement | null)?.value || ''
+      const parsed = parseRelayInitOutput(src)
+      if (!parsed.nodeId && !parsed.addr && parsed.token === undefined) {
+        log('没解析到 MOBIHOP_RELAY_NODE_ID=… 行：请把服务器上 --init 的输出整段粘过来', 'warn')
+        return
+      }
+      if (parsed.nodeId) { const el = $('meshRelayServerId'); if (el) el.value = parsed.nodeId }
+      if (parsed.addr) { const el = $('meshRelayServerAddr'); if (el) el.value = parsed.addr }
+      if (parsed.token !== undefined) { const el = $('meshRelayServerToken'); if (el) el.value = parsed.token }
+      log(
+        '已回填中继配置：' +
+          (parsed.nodeId ? ' 节点 ID ' + parsed.nodeId : '') +
+          (parsed.addr ? ' 地址 ' + parsed.addr : '') +
+          (parsed.token !== undefined ? ' 令牌' : '') +
+          '（保存后重新启动组网生效）',
+        'ok'
+      )
+      autoSaveMesh()
+    })
+
+    $sel('meshRelayServerMode')?.addEventListener('change', () => {
+      const blind = ($sel('meshRelayServerMode')?.value || 'token') === 'blind'
+      // 盲中继不带令牌：禁用而不是清空，切回令牌模式时用户填过的值还在。
+      const el = $('meshRelayServerToken')
+      if (el) el.disabled = blind
+      autoSaveMesh()
+    })
   }
 
   function collectMeshConfig(): Record<string, unknown> {
@@ -5712,10 +5769,14 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
       relayServerId: ($('meshRelayServerId')?.value || '').trim(),
       relayServerAddr: ($('meshRelayServerAddr')?.value || '').trim(),
       relayServerToken: ($('meshRelayServerToken')?.value || '').trim(),
+      relayServerMode: ($sel('meshRelayServerMode')?.value || 'token'),
       relayServers: (() => {
         const id = ($('meshRelayServerId')?.value || '').trim()
         const addr = ($('meshRelayServerAddr')?.value || '').trim()
         const token = ($('meshRelayServerToken')?.value || '').trim()
+        const blind = ($sel('meshRelayServerMode')?.value || 'token') === 'blind'
+        // 盲中继只需 ID + 地址（令牌留空）：Go 侧 RelayServerConfig.Blind 会让注册改带 room_tag。
+        if (blind) return id && addr ? [{ nodeId: id, addr, blind: true }] : []
         return id && addr && token ? [{ nodeId: id, addr, token }] : []
       })(),
       peers: meshPeers,

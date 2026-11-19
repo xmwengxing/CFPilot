@@ -122,6 +122,21 @@ sudo ip netns exec n1 /tmp/cfpilot-meshd
 结论：数据面与握手在不依赖覆盖网的真实内核栈上可用；这条证据**只覆盖同 LAN 直连**，
 不代表跨 NAT 打洞已验收（后者需要真实 NAT + 中继信令）。
 
+### 6.2 P4：两台真实机器（Windows 主机 ↔ Ubuntu VM，VMware LAN）
+
+`win` 主机（192.168.107.1）与 Ubuntu VM（192.168.107.128）在同一 VMware 网段，
+数据路径不经 easytier（对端地址直接用 LAN IP）：
+
+| 项 | 结果（latest meshd，含 STUN/Punch） |
+|---|---|
+| Windows → Ubuntu `ping 10.97.0.2` | 9/10（首包在握手窗口丢失），之后 0% |
+| Ubuntu → Windows `ping 10.97.0.1` | **10/10，0% 丢包，RTT 0.63–0.92ms** |
+| 两端状态 | `已连接`、`via=udp`、`addr=192.168.107.x`、`handshakeOk≥1`、`natType=Unknown` |
+| 计数 | tx/rx 随 ping 增长，Ubuntu 侧 txDropped/rxDropped 0 |
+
+`natType=Unknown` 是因为两台机器都在 VMware NAT 后面、公共 STUN 端点不可达
+（不是实现故障）；真实跨 NAT 打洞需要能访问公网 STUN + 中继信令的环境。
+
 ## 7. 已知限制（不是 bug）
 
 - 握手窗口内的第一个 IP 包会被丢弃（未实现拨号期排队），表现为新建会话时首包丢失。
@@ -136,6 +151,7 @@ sudo ip netns exec n1 /tmp/cfpilot-meshd
   （同一局域网、公网 IP+端口映射、或覆盖网）时才能直连。通过 easytier 跑通不等于有 P2P
   能力 —— 那是覆盖网提供了可达地址。要验证真实 P2P，必须去掉覆盖网，
   在两台真实机器上测试（同 LAN 或公网端口映射）。
+
 
 
 

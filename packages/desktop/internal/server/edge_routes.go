@@ -111,9 +111,26 @@ func (s *Server) handleEdgeDeploy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请填写盲中继域名"})
 		return
 	}
-	token, accountID, err := s.edgeActiveToken()
+	token, err := s.activeTokenOnly()
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	// 账号 ID：优先用已保存的；没存就用 Token 自动探测（不让用户卡在「请先自动检测账号」）。
+	accountID := ""
+	if profile, perr := s.store.Active(); perr == nil && profile != nil {
+		accountID = strings.TrimSpace(profile.AccountID)
+	}
+	if accountID == "" {
+		if accounts, aerr := s.newCFClient(token).ListAccounts(r.Context()); aerr == nil && len(accounts) > 0 {
+			accountID = accounts[0].ID
+			s.logf("[盲中继] 已从 Token 自动识别账号 ID：" + accountID)
+		}
+	}
+	if accountID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "无法确定 Cloudflare 账号 ID（Token 也读不到账号列表）。请在「账户配置」点「自动检测账号」后重试。",
+		})
 		return
 	}
 
@@ -200,6 +217,7 @@ func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"zones": out})
 }
+
 
 
 

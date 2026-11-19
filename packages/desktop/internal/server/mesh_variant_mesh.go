@@ -38,6 +38,65 @@ func (s *Server) registerMeshControlRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mesh/invite/parse", s.guard(s.handleMeshInviteParse))
 	// 组网入口优选：对候选做「盲中继专用」WSS 探测（打房间路径、一次性 peer_id）。
 	mux.HandleFunc("/api/mesh/relay-scan", s.guard(s.handleMeshRelayScan))
+	// 组网候选源：内置清单 + 按 URL 拉取第三方优选 IP 清单（保留端口）。
+	mux.HandleFunc("/api/mesh/entry-sources", s.guard(s.handleMeshEntrySources))
+	mux.HandleFunc("/api/mesh/entry-fetch", s.guard(s.handleMeshEntryFetch))
+}
+
+// handleMeshEntrySources 返回内置的组网候选源清单。
+func (s *Server) handleMeshEntrySources(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "仅支持 GET"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sources": scan.BuiltinMeshEntrySources()})
+}
+
+// handleMeshEntryFetch 拉取一份第三方清单并解析成候选（可传内置源 id 或任意 HTTPS URL）。
+//
+// 只用于「组网入口」：清单里的反代入口（非 CF 网段、非 443 端口）不会进外部数据源池，
+// 但恰恰是盲中继最有用的候选。拉回来的只是**候选**，仍须探测 101 才算可用。
+func (s *Server) handleMeshEntryFetch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "仅支持 POST"})
+		return
+	}
+	var req struct {
+		SourceID string `json:"sourceId"`
+		URL      string `json:"url"`
+		Max      int    `json:"max"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体不是合法 JSON"})
+		return
+	}
+	target := strings.TrimSpace(req.URL)
+	if target == "" {
+		for _, src := range scan.BuiltinMeshEntrySources() {
+			if src.ID == strings.TrimSpace(req.SourceID) {
+				target = src.URL
+				break
+			}
+		}
+	}
+	if target == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请选择内置候选源或填写清单地址"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 40*time.Second)
+	defer cancel()
+	list, err := scan.FetchMeshEntryCandidates(ctx, target, 20*time.Second, req.Max)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":         true,
+		"url":        target,
+		"candidates": list,
+		"count":      len(list),
+		"text":       strings.Join(list, "\n"),
+	})
 }
 
 // handleMeshRelayScan 对候选入口做盲中继专用探测。

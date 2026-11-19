@@ -2295,10 +2295,19 @@
                   <input type="number" id="meshScanTimeout" value="6000" min="1500" max="15000" step="500" />
                 </div>
               </div>
-              <div class="field">
-                <label title="留空则使用最近一次「入口优选」历史的 IP。支持 IP、IP:端口、[IPv6]:端口。">候选入口（留空 = 取入口优选历史）</label>
-                <textarea id="meshScanCandidates" placeholder="每行一个，例如&#10;104.16.1.1&#10;1.2.3.4:2053"></textarea>
-              </div>
+                <div class="field">
+                  <label title="第三方清单只作候选来源，不代表可用；必须实测 101 才算数。内置源按地区分文件，含带端口的反代入口。">候选来源</label>
+                  <div class="field-inline">
+                    <select id="meshScanSource"><option value="">— 内置候选源 —</option></select>
+                    <button class="btn btn-ghost" id="btnMeshScanFetchSource">拉取到候选框</button>
+                    <button class="btn btn-ghost" id="btnMeshScanImport">导入文件</button>
+                  </div>
+                </div>
+                <div class="field">
+                  <label title="留空则使用最近一次「入口优选」历史的 IP。支持 IP、IP:端口、[IPv6]:端口，也可以直接粘贴第三方清单原文。">候选入口（留空 = 取入口优选历史）</label>
+                  <textarea id="meshScanCandidates" placeholder="每行一个，例如&#10;104.16.1.1&#10;146.56.223.6:8443"></textarea>
+                </div>
+                <input type="file" id="meshScanFile" accept=".txt,.csv,text/plain" hidden />
               <div class="btn-row">
                 <button class="btn btn-primary" id="btnMeshScanRun">开始探测</button>
                 <button class="btn btn-ghost" id="btnMeshScanApply" disabled>填入组网配置</button>

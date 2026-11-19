@@ -5313,6 +5313,85 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
       else log('已从组网配置读取盲中继域名与房间名', 'ok')
     })
 
+    // 内置候选源：拉回来只是候选，仍须探测 101 才算可用。
+    const loadMeshEntrySources = async (): Promise<void> => {
+      const sel = $('meshScanSource') as unknown as HTMLSelectElement | null
+      if (!sel) return
+      try {
+        const resp = await fetch('/api/mesh/entry-sources', { credentials: 'same-origin' })
+        const data = await resp.json().catch(() => ({}))
+        const list = (data.sources || []) as Array<{
+          id: string
+          name: string
+          region?: string
+        }>
+        for (const src of list) {
+          const opt = document.createElement('option')
+          opt.value = src.id
+          opt.textContent = src.region ? `${src.name}（${src.region}）` : src.name
+          sel.append(opt)
+        }
+      } catch {
+        /* 端点不可用时不阻断手动输入 */
+      }
+    }
+
+    document.getElementById('btnMeshScanFetchSource')?.addEventListener('click', async () => {
+      const sel = $('meshScanSource') as unknown as HTMLSelectElement | null
+      const sourceId = sel?.value || ''
+      if (!sourceId) {
+        log('请先选择内置候选源', 'warn')
+        return
+      }
+      const status = document.getElementById('meshScanStatus')
+      if (status) status.textContent = '正在拉取候选清单…'
+      try {
+        const resp = await fetch('/api/mesh/entry-fetch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ sourceId }),
+        })
+        const data = await resp.json().catch(() => ({}))
+        if (!resp.ok || data.ok === false) {
+          const msg = String(data.error || `HTTP ${resp.status}`)
+          if (status) status.textContent = '拉取失败：' + msg
+          log('拉取候选清单失败：' + msg, 'err')
+          return
+        }
+        const area = document.getElementById('meshScanCandidates') as HTMLTextAreaElement | null
+        if (area) area.value = String(data.text || '')
+        if (status) {
+          status.textContent = `已拉取 ${data.count} 个候选（第三方清单，须实测 101 才算可用）`
+        }
+        log(`已拉取 ${data.count} 个候选到候选框`, 'ok')
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (status) status.textContent = '拉取失败：' + msg
+        log('拉取候选清单失败：' + msg, 'err')
+      }
+    })
+
+    document.getElementById('btnMeshScanImport')?.addEventListener('click', () => {
+      ;(document.getElementById('meshScanFile') as HTMLInputElement | null)?.click()
+    })
+
+    document.getElementById('meshScanFile')?.addEventListener('change', () => {
+      const input = document.getElementById('meshScanFile') as HTMLInputElement | null
+      const file = input?.files?.[0]
+      if (!file) return
+      const reader = new FileReader()
+      reader.onload = () => {
+        const area = document.getElementById('meshScanCandidates') as HTMLTextAreaElement | null
+        if (area) area.value = String(reader.result || '')
+        log(`已导入文件：${file.name}`, 'ok')
+        if (input) input.value = ''
+      }
+      reader.readAsText(file)
+    })
+
+    void loadMeshEntrySources()
+
     document.getElementById('btnMeshScanApply')?.addEventListener('click', () => {
       const btn = document.getElementById('btnMeshScanApply') as HTMLButtonElement | null
       const ip = btn?.dataset.ip || ''

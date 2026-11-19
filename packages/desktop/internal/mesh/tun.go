@@ -69,6 +69,9 @@ type Status struct {
 	NodeID    string `json:"nodeId,omitempty"`
 	VirtualIP string `json:"virtualIp,omitempty"`
 	Network   string `json:"network,omitempty"`
+	// NatType / Reflexive 是 STUN 探测结果（Unknown / NAT3 / NAT4 + 公网映射）。
+	NatType   string `json:"natType,omitempty"`
+	Reflexive string `json:"reflexive,omitempty"`
 	// Listen 是 UDP 监听地址；排查「对端连不到我」时第一眼看它。
 	Listen    string `json:"listen,omitempty"`
 	Peers     []Peer `json:"peers,omitempty"`
@@ -101,3 +104,4 @@ type Peer struct {
 
 // ErrStub 表示调用到了 Phase 3b 才实现的方法（骨架阶段显式报错，不静默成功）。
 var ErrStub = fmt.Errorf("mesh: 协议实现待 Phase 3b，当前为工程骨架")
+

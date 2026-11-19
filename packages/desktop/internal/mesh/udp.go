@@ -30,6 +30,9 @@ type UdpHub struct {
 	onIncoming func(NodeID, *net.UDPAddr)
 	// UdpProbe 帧回调（0x08 不进普通队列，直接交探针跟踪器 —— 对齐 observe_probes）
 	onProbe func([]byte)
+	// 非 32B 帧的原始报文回调（STUN 响应用）。
+	// STUN 与打洞必须复用**同一个 socket**，否则 NAT 映射不同、打洞端口对不上。
+	onRaw func([]byte)
 }
 
 // NewUdpHub 绑定 UDP socket 并启动 demux 循环。
@@ -86,8 +89,25 @@ func (h *UdpHub) SetProbeHandler(fn func([]byte)) {
 	h.mu.Unlock()
 }
 
+// SetRawHandler 设置「非 MobiHop 帧」的原始报文回调（STUN 响应用）。
+func (h *UdpHub) SetRawHandler(fn func([]byte)) {
+	h.mu.Lock()
+	h.onRaw = fn
+	h.mu.Unlock()
+}
+
 // dispatch 把帧按源地址投进对应队列；新地址则建链路并上报。
 func (h *UdpHub) dispatch(remote *net.UDPAddr, frame []byte) {
+	// 不是 MobiHop 帧（首字节不是 magic）⇒ 交给原始回调（STUN 等）。
+	if len(frame) < 3 || frame[0] != MagicByte {
+		h.mu.RLock()
+		raw := h.onRaw
+		h.mu.RUnlock()
+		if raw != nil {
+			raw(frame)
+		}
+		return
+	}
 	// 0x08 UdpProbe 直接交探针跟踪器（对齐 UdpHub.observe_probes），不进 peer 队列，
 	// 这样降级后 active link 为 WSS 时 UDP 探针仍能被接收。
 	if len(frame) >= 3 && frame[0] == MagicByte && frame[2] == byte(MsgUdpProbe) {
@@ -223,3 +243,4 @@ func (l *hubLink) Close() error {
 	l.hub.Forget(l.addr)
 	return nil
 }
+

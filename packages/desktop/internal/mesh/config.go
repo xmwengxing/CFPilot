@@ -55,6 +55,13 @@ type Config struct {
 	MonitoringAlias string
 	// ClientVersion 上报给监测台的客户端版本；留空由 meshd/移动端填。
 	ClientVersion string
+
+	// ---- 跨 NAT：STUN 探测（对齐 MobiHop stun.rs）----
+	// StunServers 是公共 STUN 服务器池（host:port）。nil = 用默认四家；
+	// **显式空数组 = 关闭主动探测**（与 MobiHop 语义一致）。
+	StunServers []string
+	// StunProbeTimeoutMS 单轮探测超时（毫秒，默认 1500，范围 100..30000）。
+	StunProbeTimeoutMS int64
 }
 
 // PeerConfig 是静态对端（seed）配置。
@@ -85,6 +92,20 @@ func (c *Config) Validate() error {
 	if c.MTU <= 0 {
 		c.MTU = 1400
 	}
+	// STUN：nil 用默认池；显式空数组表示关闭探测。
+	if c.StunServers == nil {
+		c.StunServers = append([]string(nil), DefaultStunServers...)
+	}
+	if c.StunProbeTimeoutMS <= 0 {
+		c.StunProbeTimeoutMS = DefaultStunProbeMS
+	}
+	if c.StunProbeTimeoutMS < MinStunProbeMS {
+		c.StunProbeTimeoutMS = MinStunProbeMS
+	}
+	if c.StunProbeTimeoutMS > MaxStunProbeMS {
+		c.StunProbeTimeoutMS = MaxStunProbeMS
+	}
+
 	// 云监测台上报间隔归一化（对齐 MobiHop：默认 30s、最低 5s）
 	if c.MonitoringIntervalMS <= 0 {
 		c.MonitoringIntervalMS = DefaultMonitorIntervalMS
@@ -130,5 +151,6 @@ func (c *Config) tunnelKey() (noise.DHKey, error) {
 	// 随机生成
 	return cs.GenerateKeypair(nil)
 }
+
 
 

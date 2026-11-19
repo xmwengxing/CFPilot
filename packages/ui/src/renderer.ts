@@ -5198,6 +5198,8 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
       virtualIp?: string
       listen?: string
       uptimeSec?: number
+      natType?: string
+      reflexive?: string
       handshakeOk?: number
       txFrames?: number
       rxFrames?: number
@@ -5244,6 +5246,8 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
       put('meshStatHs', String(data.handshakeOk || 0))
       put('meshStatFrames', `${data.txFrames || 0} / ${data.rxFrames || 0}`)
       put('meshStatDrop', `${data.txDropped || 0} / ${data.rxDropped || 0}`)
+      put('meshStatNat', data.natType || '—')
+      put('meshStatReflex', data.reflexive || '—')
       put('meshStatNote', data.note || (data.running ? '运行中：等待对端或已在线' : ''))
 
       const tbody = document.getElementById('meshLivePeers')
@@ -7553,6 +7557,7 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
     })()
   })
 })()
+
 
 
 

@@ -96,6 +96,32 @@ curl -X POST http://127.0.0.1:19727/api/mesh/start \
    面板一点启动就 400。现在同时接受 hex 与 base64。
 7. **网络名静默丢失**：UI 键名 `network` 与 Go 字段 `NetworkName` 不匹配 → 恒为空。
 
+### 6.1 P4-lite：去覆盖网的真实内核验证（netns LAN，2026-11-19 实测）
+
+在 Ubuntu 上用两个 network namespace + veth 组成直连 LAN（**不经过 easytier**），
+每个 netns 内跑真实 meshd + TUN：
+
+```bash
+sudo ip netns add n1; sudo ip netns add n2
+sudo ip link add v1 type veth peer name v2
+sudo ip link set v1 netns n1; sudo ip link set v2 netns n2
+sudo ip netns exec n1 ip addr add 192.168.50.1/24 dev v1; sudo ip netns exec n1 ip link set v1 up
+sudo ip netns exec n2 ip addr add 192.168.50.2/24 dev v2; sudo ip netns exec n2 ip link set v2 up
+# 每个 netns 内启动 meshd 并 POST 对应配置（对端地址填 192.168.50.x:51820）
+sudo ip netns exec n1 /tmp/cfpilot-meshd
+```
+
+实测（2026-11-19）：
+
+| 项 | 结果 |
+|---|---|
+| `ping 10.97.0.2`（n1→n2） | **10/10，0% 丢包，RTT 0.36–0.57ms** |
+| 状态 | 两端 `已连接`、`via=udp`、`addr=192.168.50.x`、`handshakeOk=1` |
+| 计数 | tx/rx 随 ping 增长，txDropped/rxDropped 0 |
+
+结论：数据面与握手在不依赖覆盖网的真实内核栈上可用；这条证据**只覆盖同 LAN 直连**，
+不代表跨 NAT 打洞已验收（后者需要真实 NAT + 中继信令）。
+
 ## 7. 已知限制（不是 bug）
 
 - 握手窗口内的第一个 IP 包会被丢弃（未实现拨号期排队），表现为新建会话时首包丢失。
@@ -110,6 +136,7 @@ curl -X POST http://127.0.0.1:19727/api/mesh/start \
   （同一局域网、公网 IP+端口映射、或覆盖网）时才能直连。通过 easytier 跑通不等于有 P2P
   能力 —— 那是覆盖网提供了可达地址。要验证真实 P2P，必须去掉覆盖网，
   在两台真实机器上测试（同 LAN 或公网端口映射）。
+
 
 
 

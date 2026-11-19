@@ -201,6 +201,9 @@ func (m *meshLifecycle) handlePunch(peer NodeID, parsed *Frame, link PeerLink) {
 
 // beginProbe 向对端候选喷洒 PunchProbe（窗口 3s、间隔 100ms）。
 func (m *meshLifecycle) beginProbe(peer NodeID, cands []Candidate, nonce uint64) {
+	if m.hub == nil {
+		return // 未启动/UDP 通道不可用（单元测试或半初始化状态）
+	}
 	// 只取 IPv4 候选（本机子集的 UDP 通道只跑 IPv4）
 	targets := make([]*net.UDPAddr, 0, len(cands))
 	for _, c := range cands {
@@ -231,7 +234,7 @@ func (m *meshLifecycle) beginProbe(peer NodeID, cands []Candidate, nonce uint64)
 //
 // 只有「当前是中继腿」时才替换：直连已经可用时不做无谓切换。
 func (m *meshLifecycle) upgradeToDirect(peer NodeID, addr *net.UDPAddr) {
-	if addr == nil {
+	if addr == nil || m.hub == nil {
 		return
 	}
 	m.mu.Lock()
@@ -246,3 +249,4 @@ func (m *meshLifecycle) upgradeToDirect(peer NodeID, addr *net.UDPAddr) {
 		log.Printf("[mesh] 打洞成功：%x 升级为直连 %s", peer[:4], addr)
 	}
 }
+

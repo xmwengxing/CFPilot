@@ -52,6 +52,11 @@ type meshLifecycle struct {
 	// STUN 探测结果（启动后后台异步更新；不阻断组网）。
 	natMu sync.Mutex
 	nat   NatAssessment
+	// 专用服务器中继心跳状态（独立锁，避免与 m.mu 交叉）。
+	relayCtx       context.Context
+	relayHbMu      sync.Mutex
+	relayHbStarted map[string]bool
+
 	// P3 打洞编排状态（每个对端一份）。
 	punchMu sync.Mutex
 	punch   map[NodeID]*punchRun
@@ -232,7 +237,9 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 	m.lastOKRx = make(map[NodeID]time.Time)
 	m.lastTxData = make(map[NodeID]time.Time)
 	m.punch = make(map[NodeID]*punchRun)
+	m.relayHbStarted = make(map[string]bool)
 	m.punch = make(map[NodeID]*punchRun)
+	m.relayHbStarted = make(map[string]bool)
 	m.fsm = NewHandshakeFSM(m.cfg.NodeID, network, psk, tunnel)
 	m.fsm.SetWireVersions(m.wireVersions)
 	m.fsm.SetOnEstablished(func(peer NodeID, sess *Session) {
@@ -412,6 +419,27 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 		}
 		_, _ = m.probes.OnProbeFrame(runCtx, frame)
 	})
+
+	// 控制帧（HolePunch / RelayMgmt）的独立入站观察通道：在 demux 分流前按真实源地址处理，
+	// 与活跃链路无关（MobiHop hub.rs:386-393 / CROSS_PROJECT_SYNC §11.5）。
+	// 这是打洞探测与中继注册应答能被处理的关键 —— 之前塞在活跃 link 的 recv 队列里，
+	// 切 WSS 后 UDP 探测就没人读了。
+	m.hub.SetControlHandler(func(remote *net.UDPAddr, frame []byte) {
+		parsed, derr := Decode(frame)
+		if derr != nil {
+			return
+		}
+		m.learnWireVersion(parsed.Src, parsed.Version)
+		switch parsed.Type {
+		case MsgHolePunch:
+			m.handlePunch(parsed.Src, parsed, remote)
+		case MsgRelayMgmt:
+			m.handleRelayMgmt(parsed, remote)
+		}
+	})
+
+	// 服务器中继：启动注册 + 心跳（兜底链路，独立于盲中继 WSS）。
+	spawnRelayClients(runCtx, m.hub, m.cfg.NodeID, m.cfg.RelayServers, m.cfg.Verbose)
 
 	// 6a. 启动即主动握手：UDP 无连接，双方都只「等对方先发包」就会永远无事发生。
 	// 小 NodeId 一方作为发起方直接发 Init（对齐 FSM 的破对称角色），
@@ -732,8 +760,9 @@ func (m *meshLifecycle) startRecvLoop(ctx context.Context, id NodeID, link PeerL
 			m.rxFrames.Add(1)
 			// 解码成功才学习版本（v1 已过 buf[5]==0 校验）；伪造帧最多让本机降级。
 			m.learnWireVersion(parsed.Src, parsed.Version)
-			if parsed.Type == MsgHolePunch {
-				m.handlePunch(parsed.Src, parsed, link)
+			// HolePunch / RelayMgmt 已由 UdpHub 的独立观察通道（onControl）处理，
+			// 不再走活跃 link 的 recv 队列 —— 对齐 MobiHop hub.rs:386-393（§11.5）。
+			if parsed.Type == MsgHolePunch || parsed.Type == MsgRelayMgmt {
 				continue
 			}
 			if parsed.Type == MsgHandshake {
@@ -959,20 +988,3 @@ func (m *meshLifecycle) Status() Status {
 	}
 	return st
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

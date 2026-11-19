@@ -166,6 +166,21 @@ sudo ip netns exec n1 /tmp/cfpilot-meshd
 接收，但当前接收循环绑在 WssLink 上，来自 UDP 候选地址的探测帧未被处理
 （待下一轮在 dispatch/recv-loop 层对齐）。此状态**不算跨 NAT P2P 已验收**。
 
+### 6.5 按 CROSS_PROJECT_SYNC 2026-11-19 追加节对齐
+
+MobiHop 在干净环境（去 easytier）实测确认：同 LAN 双向 20/20、盲中继 WSS 20/20、
+公共 STUN 可用（NAT3）；打洞失败是 netlab 装置语义（端口受限 masquerade）所致，
+不是本体缺陷。wire 层无需变更，需对齐三个语义：
+
+1. **HolePunch/RelayMgmt 走独立入站观察通道**：UdpHub.dispatch 在分流前按真实源地址
+   交给 onControl，不进活跃 link 的 recv 队列（MobiHop hub.rs:386-393）。
+   Go 侧 handlePunch 改为接收 remote 地址，Ack 直接回 remote。
+2. **专用服务器中继（兜底）**：Config.RelayServers（node_id/addr/token），
+   启动注册（RelayMessage.Register，token_hash=BLAKE3(token)）、收 AuthAccept 后心跳；
+   与盲中继 WSS 独立，属于「直连/WSS 都不可达」的最后兜底。
+3. `via` 映射：MobiHop 只有 direct/relay；CFPilot 的 wss 作为链路类型保留，
+   但打洞判据不再依赖 via（观察通道与链路无关）。
+
 ## 7. 已知限制（不是 bug）
 
 - 握手窗口内的第一个 IP 包会被丢弃（未实现拨号期排队），表现为新建会话时首包丢失。
@@ -180,6 +195,7 @@ sudo ip netns exec n1 /tmp/cfpilot-meshd
   （同一局域网、公网 IP+端口映射、或覆盖网）时才能直连。通过 easytier 跑通不等于有 P2P
   能力 —— 那是覆盖网提供了可达地址。要验证真实 P2P，必须去掉覆盖网，
   在两台真实机器上测试（同 LAN 或公网端口映射）。
+
 
 
 

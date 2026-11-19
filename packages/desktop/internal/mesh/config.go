@@ -42,6 +42,14 @@ type Config struct {
 	// DisablePunch 关闭打洞升级（默认 false=启用）。
 	// 只在「会话经中继建立」时尝试：直连本来可用就不会触发。
 	DisablePunch bool
+
+	// ---- 专用服务器中继（兜底，对齐 MobiHop [[relays]] + mobihop-relay）----
+	//
+	// 与「盲中继 WSS」不同：这是**有准入令牌的专用 UDP 中继**（如部署在阿里云 ECS 的
+	// mobihop-relay），节点启动后向它注册并维持心跳，直连不可达时经它转发密文。
+	// 注册只上传 BLAKE3(token) 摘要，令牌原文不落盘、不进日志。
+	// 留空/条目不完整则不启用。
+	RelayServers []RelayServerConfig
 	// TunName 是 TUN 设备名（多节点同机时必须不同）；留空 = cfpilot0。
 	TunName string
 
@@ -68,6 +76,12 @@ type Config struct {
 }
 
 // PeerConfig 是静态对端（seed）配置。
+// RelayServerConfig 是一台专用中继服务器的接入参数（对齐 MobiHop [[relays]]）。
+type RelayServerConfig struct {
+	NodeID string // 中继节点 ID（16 hex）
+	Addr   string // 中继 UDP 地址，如 203.0.113.10:51830
+	Token  string // 准入令牌（只用于计算 BLAKE3 摘要，不写日志/不落盘）
+}
 type PeerConfig struct {
 	NodeID    NodeID
 	Addr      string // "host:port"
@@ -122,6 +136,20 @@ func (c *Config) Validate() error {
 	if len(c.IdentitySeed) > 0 && len(c.IdentitySeed) != 32 {
 		return fmt.Errorf("mesh config: IdentitySeed 必须 32 字节，实际 %d", len(c.IdentitySeed))
 	}
+	// 专用中继条目：NodeID 必须是 16 hex，Addr 必须是 host:port；token 可空（盲中继除外）
+	for i, r := range c.RelayServers {
+		if r.Addr == "" {
+			return fmt.Errorf("mesh config: RelayServers[%d].Addr 为空", i)
+		}
+		if _, _, err := net.SplitHostPort(r.Addr); err != nil {
+			return fmt.Errorf("mesh config: RelayServers[%d].Addr 非法: %w", i, err)
+		}
+		if r.NodeID != "" {
+			if _, err := ParseNodeIDHex(r.NodeID); err != nil {
+				return fmt.Errorf("mesh config: RelayServers[%d].NodeID 非法: %w", i, err)
+			}
+		}
+	}
 	for i, p := range c.Peers {
 		if p.Addr == "" {
 			return fmt.Errorf("mesh config: Peers[%d].Addr 为空", i)
@@ -154,6 +182,7 @@ func (c *Config) tunnelKey() (noise.DHKey, error) {
 	// 随机生成
 	return cs.GenerateKeypair(nil)
 }
+
 
 
 

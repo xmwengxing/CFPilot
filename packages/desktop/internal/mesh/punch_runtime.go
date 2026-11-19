@@ -148,11 +148,11 @@ func (m *meshLifecycle) startPunch(peer NodeID, via PeerLink) {
 	}
 }
 
-// handlePunch 处理 0x05 帧（recv loop 调用）。
+// handlePunch 处理 0x05 帧（由 UdpHub 的独立观察通道调用，与活跃链路无关）。
 //
-// link 是**收到该帧的链路**：经中继时 PeerAddr 为 nil（回帧仍走链路）；
-// 直连探测时 PeerAddr 就是候选地址（回 PunchAck 要发回该地址）。
-func (m *meshLifecycle) handlePunch(peer NodeID, parsed *Frame, link PeerLink) {
+// remote 是**真实源地址**：回 PunchAck 必须发给它（而不是活跃 link 的 PeerAddr，
+// 后者在切 WSS 时为 nil）。对齐 MobiHop hub.rs 的 observer 语义（CROSS_PROJECT_SYNC §11.5）。
+func (m *meshLifecycle) handlePunch(peer NodeID, parsed *Frame, remote *net.UDPAddr) {
 	if m.cfg.DisablePunch {
 		return
 	}
@@ -160,14 +160,19 @@ func (m *meshLifecycle) handlePunch(peer NodeID, parsed *Frame, link PeerLink) {
 	if err != nil {
 		return
 	}
+	// 回信令的链路：中继阶段经中继链路回；有 remote 时探测类直接回 remote。
+	var replyLink PeerLink
+	m.mu.Lock()
+	replyLink = m.links[peer]
+	m.mu.Unlock()
 	switch {
 	case msg.PunchReq != nil:
 		req := msg.PunchReq
 		reply := &PunchMessage{PunchReply: &PunchReply{
 			From: m.cfg.NodeID, Candidates: m.localCandidates(), Nonce: req.Nonce,
 		}}
-		if frame, e := m.encodePunchFrame(peer, reply); e == nil {
-			_ = link.Send(context.Background(), frame)
+		if frame, e := m.encodePunchFrame(peer, reply); e == nil && replyLink != nil {
+			_ = replyLink.Send(context.Background(), frame)
 		}
 		m.beginProbe(peer, req.Candidates, req.Nonce)
 	case msg.PunchReply != nil:
@@ -181,21 +186,19 @@ func (m *meshLifecycle) handlePunch(peer NodeID, parsed *Frame, link PeerLink) {
 		m.beginProbe(peer, reply.Candidates, reply.Nonce)
 	case msg.PunchProbe != nil:
 		probe := msg.PunchProbe
-		addr := link.PeerAddr()
-		if addr == nil {
-			return // 经中继收到探测没有源地址，无法回 Ack
+		if remote == nil {
+			return // 没有真实源地址，无法回 Ack
 		}
 		ack := &PunchMessage{PunchAck: &PunchAck{From: m.cfg.NodeID, Nonce: probe.Nonce}}
 		if frame, e := m.encodePunchFrame(peer, ack); e == nil {
-			_ = m.hub.SendProbeTo(context.Background(), addr, frame)
+			_ = m.hub.SendProbeTo(context.Background(), remote, frame)
 		}
-		m.upgradeToDirect(peer, addr)
+		m.upgradeToDirect(peer, remote)
 	case msg.PunchAck != nil:
-		addr := link.PeerAddr()
-		if addr == nil {
+		if remote == nil {
 			return
 		}
-		m.upgradeToDirect(peer, addr)
+		m.upgradeToDirect(peer, remote)
 	}
 }
 
@@ -249,4 +252,3 @@ func (m *meshLifecycle) upgradeToDirect(peer NodeID, addr *net.UDPAddr) {
 		log.Printf("[mesh] 打洞成功：%x 升级为直连 %s", peer[:4], addr)
 	}
 }
-

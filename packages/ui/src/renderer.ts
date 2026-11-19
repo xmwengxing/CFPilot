@@ -5349,6 +5349,8 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
       relayConnectIp: 'meshRelayConnectIp',
       enableDegrade: 'meshEnableDegrade', disablePunch: 'meshEnablePunch',
       monitorEndpoint: 'meshMonitorEndpoint', monitorToken: 'meshMonitorToken',
+      relayServerId: 'meshRelayServerId', relayServerAddr: 'meshRelayServerAddr',
+      relayServerToken: 'meshRelayServerToken',
       monitorInterval: 'meshMonitorInterval', monitorAlias: 'meshMonitorAlias',
       inviteUri: 'meshInviteInput',
     }
@@ -5423,6 +5425,16 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
       monitoringToken: ($('meshMonitorToken')?.value || '').trim(),
       monitoringIntervalMs: Math.max(5, Number($('meshMonitorInterval')?.value || 30)) * 1000,
       monitoringAlias: ($('meshMonitorAlias')?.value || '').trim(),
+      // 服务器中继（兜底）：三项齐全才启用；Go 字段 RelayServers。
+      relayServerId: ($('meshRelayServerId')?.value || '').trim(),
+      relayServerAddr: ($('meshRelayServerAddr')?.value || '').trim(),
+      relayServerToken: ($('meshRelayServerToken')?.value || '').trim(),
+      relayServers: (() => {
+        const id = ($('meshRelayServerId')?.value || '').trim()
+        const addr = ($('meshRelayServerAddr')?.value || '').trim()
+        const token = ($('meshRelayServerToken')?.value || '').trim()
+        return id && addr && token ? [{ nodeId: id, addr, token }] : []
+      })(),
       peers: meshPeers,
     }
   }

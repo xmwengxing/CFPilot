@@ -33,6 +33,13 @@ type UdpHub struct {
 	// 非 32B 帧的原始报文回调（STUN 响应用）。
 	// STUN 与打洞必须复用**同一个 socket**，否则 NAT 映射不同、打洞端口对不上。
 	onRaw func([]byte)
+	// 控制帧的独立入站观察回调（HolePunch 0x05 / RelayMgmt 0x06）。
+	//
+	// 对齐 MobiHop hub.rs:386-393：demux 在**分流之前**把 (真实源地址, 帧副本)
+	// 交给 observer，不管该地址有没有链路、活跃链路是不是 WSS。
+	// CFPilot 曾把这些帧塞进活跃 link 的 recv 队列，切 WSS 后 UDP 打洞探测无人处理
+	// （真机 txFrames 暴涨、rxFrames 不涨）—— CROSS_PROJECT_SYNC §11.5 指出这是移植 bug。
+	onControl func(*net.UDPAddr, []byte)
 }
 
 // NewUdpHub 绑定 UDP socket 并启动 demux 循环。
@@ -96,6 +103,14 @@ func (h *UdpHub) SetRawHandler(fn func([]byte)) {
 	h.mu.Unlock()
 }
 
+// SetControlHandler 设置控制帧的独立入站观察回调（HolePunch / RelayMgmt）。
+// 这些帧在 demux 分流之前、按真实源地址交给 observer，与活跃链路无关。
+func (h *UdpHub) SetControlHandler(fn func(*net.UDPAddr, []byte)) {
+	h.mu.Lock()
+	h.onControl = fn
+	h.mu.Unlock()
+}
+
 // dispatch 把帧按源地址投进对应队列；新地址则建链路并上报。
 func (h *UdpHub) dispatch(remote *net.UDPAddr, frame []byte) {
 	// 不是 MobiHop 帧（首字节不是 magic）⇒ 交给原始回调（STUN 等）。
@@ -107,6 +122,18 @@ func (h *UdpHub) dispatch(remote *net.UDPAddr, frame []byte) {
 			raw(frame)
 		}
 		return
+	}
+	// 控制帧（HolePunch 0x05 / RelayMgmt 0x06）：**分流之前**无条件交观察通道，
+	// 与「该地址有没有链路、活跃链路是不是 WSS」无关（MobiHop hub.rs:386-393）。
+	// 这样切 WSS 后，来自 UDP 候选地址的打洞探测/中继应答仍能被处理。
+	if len(frame) >= 3 && frame[0] == MagicByte &&
+		(frame[2] == byte(MsgHolePunch) || frame[2] == byte(MsgRelayMgmt)) {
+		h.mu.RLock()
+		ctrl := h.onControl
+		h.mu.RUnlock()
+		if ctrl != nil {
+			ctrl(remote, frame)
+		}
 	}
 	// 0x08 UdpProbe 直接交探针跟踪器（对齐 UdpHub.observe_probes），不进 peer 队列，
 	// 这样降级后 active link 为 WSS 时 UDP 探针仍能被接收。
@@ -243,4 +270,3 @@ func (l *hubLink) Close() error {
 	l.hub.Forget(l.addr)
 	return nil
 }
-

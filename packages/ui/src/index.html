@@ -1893,6 +1893,22 @@
               </details>
 
               <details class="fold">
+                <summary>服务器中继（可选，兜底）</summary>
+                <div class="fold-body">
+                  <p class="hint" style="line-height:1.8">
+                    专用 UDP 中继（如部署在云服务器的 <code>mobihop-relay</code>），直连与盲中继都不可达时兜底。
+                    节点启动后自动注册并维持心跳；令牌只以 BLAKE3 摘要上线，原文不落盘。
+                  </p>
+                  <div class="pair-grid">
+                    <div class="pair"><label for="meshRelayServerId" class="has-tip" data-tip="【必填其一】中继节点 ID，16 位十六进制，由中继服务提供。&#10;示例：aabbccddeeff0011">中继节点 ID ⓘ</label><input type="text" id="meshRelayServerId" placeholder="如 aabbccddeeff0011" /></div>
+                    <div class="pair"><label for="meshRelayServerAddr" class="has-tip" data-tip="【必填其一】中继的 UDP 地址 IP:端口。&#10;示例：203.0.113.10:51830">中继地址（IP:端口）ⓘ</label><input type="text" id="meshRelayServerAddr" placeholder="如 1.2.3.4:51830" /></div>
+                    <div class="pair"><label for="meshRelayServerToken" class="has-tip" data-tip="【必填其一】中继准入令牌，与节点 PSK 分离。只以 BLAKE3 摘要上线，原文不写日志/不落盘。">中继准入令牌 ⓘ</label><input type="password" id="meshRelayServerToken" placeholder="中继 token" /></div>
+                  </div>
+                  <p class="tip">三项都填才会启用；留空则不使用服务器中继（只用直连 + 盲中继 WSS）。</p>
+                </div>
+              </details>
+
+              <details class="fold">
                 <summary>云监测台上报（可选，默认关闭）</summary>
                 <div class="fold-body">
                   <p class="hint" style="line-height:1.8">

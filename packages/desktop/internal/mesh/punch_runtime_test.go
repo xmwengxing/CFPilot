@@ -159,7 +159,7 @@ func TestHandlePunchRequestReplies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lc.handlePunch(peer, parsed, link)
+	lc.handlePunch(peer, parsed, link.addr)
 	if len(link.sent) == 0 {
 		t.Fatal("应回 PunchReply")
 	}
@@ -211,7 +211,7 @@ func TestHandlePunchProbeAcksToSourceAddr(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lc.handlePunch(peer, parsed, link)
+	lc.handlePunch(peer, parsed, link.addr)
 
 	// 等待 Ack 到达监听端
 	_ = listener.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -236,3 +236,4 @@ func TestHandlePunchProbeAcksToSourceAddr(t *testing.T) {
 		t.Fatal("收到探测后应升级为直连 hubLink")
 	}
 }
+

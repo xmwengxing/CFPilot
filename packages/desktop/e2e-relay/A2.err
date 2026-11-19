@@ -1,0 +1,20 @@
+2026/11/19 17:20:54.947262 [meshd] 启动（版本 0.50.0，windows/amd64）
+2026/11/19 17:20:54.982532 [meshd] 本地 API 就绪: http://127.0.0.1:19727
+2026/11/19 17:20:57.861049 [mesh] 专用服务器中继已启用（1 台）
+2026/11/19 17:20:57.889104 [mesh] 节点已启动 node=83561adb vip=10.97.0.1 listen=0.0.0.0:51820 peers=1
+2026/11/19 17:20:57.974581 [meshd] 组网已启动 node=83561adb398fd87f vip=10.97.0.1
+2026/11/19 17:21:00.889471 [mesh] stats tx=0 rx=0 txDrop=0 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=2,pong=0,rtt=0,loss=0.00,samples=2,bad=0,good=0,cool=0,kind=?
+2026/11/19 17:21:01.277506 [mesh] 丢弃出站包：目的 10.97.0.255 不在虚拟 IP 表
+2026/11/19 17:21:03.889710 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=6,pong=0,rtt=0,loss=1.00,samples=6,bad=0,good=0,cool=0,kind=?
+2026/11/19 17:21:06.889498 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=9,pong=0,rtt=0,loss=1.00,samples=9,bad=0,good=0,cool=0,kind=?
+2026/11/19 17:21:09.889314 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=12,pong=0,rtt=0,loss=1.00,samples=12,bad=0,good=0,cool=0,kind=?
+2026/11/19 17:21:12.889363 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=14,pong=0,rtt=0,loss=1.00,samples=14,bad=0,good=0,cool=0,kind=?
+2026/11/19 17:21:15.889676 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=17,pong=0,rtt=0,loss=1.00,samples=17,bad=0,good=0,cool=0,kind=?
+2026/11/19 17:21:18.889334 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=21,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=?
+2026/11/19 17:21:21.889481 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=24,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=?
+2026/11/19 17:21:22.744188 [mesh] STUN 探测完成 nat=Unknown reflexive=
+2026/11/19 17:21:24.889683 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=26,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=?
+2026/11/19 17:21:27.889465 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=30,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=?
+2026/11/19 17:21:30.889583 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=32,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=?
+2026/11/19 17:21:33.890072 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=35,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=?
+2026/11/19 17:21:36.889275 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=39,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=?

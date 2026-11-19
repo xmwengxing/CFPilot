@@ -1,0 +1,37 @@
+{
+  "NodeID": "1eed29b1654fbca9",
+  "NetworkName": "e2e-net",
+  "PSK": "e2e-psk-1234567890",
+  "TunnelPrivate": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+  "IdentitySeed": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+  "Listen": "0.0.0.0:51820",
+  "VirtualIP": "10.97.0.2",
+  "MTU": 1400,
+  "Peers": [
+    {
+      "nodeId": "83561adb398fd87f",
+      "addr": "192.168.31.19:51820",
+      "staticPub": "7b4e909bbe7ffe44c465a220037d608ee35897d31ef972f07f74892cb0f73f13",
+      "virtualIp": "10.97.0.1"
+    }
+  ],
+  "RelayConnectIP": "",
+  "TunName": "",
+  "MonitoringEndpoint": "",
+  "MonitoringToken": "",
+  "MonitoringIntervalMS": 30000,
+  "MonitoringAlias": "",
+  "ClientVersion": "",
+  "StunServers": [
+    "stun.cloudflare.com:3478",
+    "stun.l.google.com:19302",
+    "stun.miwifi.com:3478",
+    "stun.qq.com:3478"
+  ],
+  "StunProbeTimeoutMS": 1500,
+  "relayDomain": "edge.shijingtian.dpdns.org",
+  "relayRoom": "0123456789abcdef",
+  "enableDegrade": true,
+  "disablePunch": false,
+  "verbose": true
+}

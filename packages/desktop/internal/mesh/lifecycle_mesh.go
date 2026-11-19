@@ -275,6 +275,10 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 		m.probes.SetPeer(p.NodeID, addr)
 	}
 
+	// runCtx 统一在函数顶部创建：switchFn 回调与接收循环共用同一个 ctx，
+	// 避免两处 runCtx 导致「停止时新循环仍绑在旧 ctx」的幽灵循环。
+	runCtx, cancel := context.WithCancel(ctx)
+	m.cancel = cancel
 	// 阶段 2：降级控制器（仅 EnableDegrade 时）
 	if m.cfg.EnableDegrade {
 		m.udpLinks = make(map[NodeID]PeerLink, len(m.links))
@@ -288,7 +292,6 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 		// switchFn：切换 active link（nil kind=UDP 表示恢复原始 UDP link）
 		m.degrade.SetSwitchFn(func(peer NodeID, link PeerLink, kind TransportKind) {
 			m.mu.Lock()
-			defer m.mu.Unlock()
 			if kind == TransportWSS {
 				if link != nil {
 					m.links[peer] = link
@@ -297,6 +300,24 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 				if udp, ok := m.udpLinks[peer]; ok {
 					m.links[peer] = udp
 				}
+			}
+			active := m.links[peer]
+			m.mu.Unlock()
+			if active == nil {
+				return
+			}
+			// ⚠️ 关键：切换链路后必须**重启该 peer 的接收循环**，否则旧循环还绑在
+			// 原来的 UDP link 上，WSS 上收到的握手帧永远没人读（handshakeOK 恒 0）。
+			m.stopRecvLoop(peer)
+			m.startRecvLoop(runCtx, peer, active)
+			// 新链路上重发 Init（打洞/中继建立后双方都需要重新握手）。
+			if _, ok := m.fsm.Session(peer); !ok {
+				if cfg := m.peerConfig(peer); cfg != nil {
+					_ = m.fsm.StartOutboundForce(peer, cfg.StaticPub)
+				}
+			}
+			if m.cfg.Verbose {
+				log.Printf("[mesh] 链路切换完成 peer=%x kind=%v，接收循环已重启", peer[:4], kind)
 			}
 		})
 		m.degrade.SetCloseWssFn(func(peer NodeID) {
@@ -348,8 +369,6 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 	}
 
 	// 6. 起收发循环
-	runCtx, cancel := context.WithCancel(ctx)
-	m.cancel = cancel
 	m.wg.Add(2)
 	go m.tunToPeersLoop(runCtx)
 	go m.peersToTunLoop(runCtx)
@@ -669,6 +688,16 @@ func (m *meshLifecycle) syncRecvLoops(ctx context.Context) {
 	}
 }
 
+// peerConfig 按 NodeID 查静态对端配置（用于链路切换后重发握手）。
+func (m *meshLifecycle) peerConfig(id NodeID) *PeerConfig {
+	for i := range m.cfg.Peers {
+		if m.cfg.Peers[i].NodeID == id {
+			return &m.cfg.Peers[i]
+		}
+	}
+	return nil
+}
+
 func (m *meshLifecycle) startRecvLoop(ctx context.Context, id NodeID, link PeerLink) {
 	loopCtx, cancel := context.WithCancel(ctx)
 	loop := &recvLoop{link: link, cancel: cancel, done: make(chan struct{})}
@@ -924,6 +953,10 @@ func (m *meshLifecycle) Status() Status {
 	}
 	return st
 }
+
+
+
+
 
 
 

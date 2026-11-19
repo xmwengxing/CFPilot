@@ -1,0 +1,27 @@
+2026/11/19 14:33:09.615219 [meshd] 启动（版本 0.50.0，windows/amd64）
+2026/11/19 14:33:09.671387 [meshd] 本地 API 就绪: http://127.0.0.1:19727
+2026/11/19 14:33:12.452670 [mesh] 降级控制器已启动 relay=edge.shijingtian.dpdns.org room=0123456789abcdef
+2026/11/19 14:33:12.466432 [mesh] 节点已启动 node=83561adb vip=10.97.0.1 listen=0.0.0.0:51820 peers=1
+2026/11/19 14:33:12.499134 [meshd] 组网已启动 node=83561adb398fd87f vip=10.97.0.1
+2026/11/19 14:33:15.466917 [mesh] stats tx=0 rx=0 txDrop=0 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=6,pong=6,rtt=0,loss=0.33,samples=6,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:33:15.757442 [mesh] 丢弃出站包：目的 10.97.0.255 不在虚拟 IP 表
+2026/11/19 14:33:18.466720 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=12,pong=12,rtt=0,loss=0.42,samples=12,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:33:21.466522 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=18,pong=18,rtt=0,loss=0.44,samples=18,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:33:24.466927 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=24,pong=24,rtt=0,loss=0.50,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:33:27.466657 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=30,pong=30,rtt=0,loss=0.50,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:33:30.467280 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=36,pong=36,rtt=2,loss=0.50,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:33:33.466535 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=42,pong=42,rtt=1,loss=0.50,samples=20,bad=0,good=0,cool=9,kind=udp
+2026/11/19 14:33:35.665194 [mesh] 发现对端 1eed29b1654fbca9 → 10.97.0.2
+2026/11/19 14:33:36.466576 [mesh] stats tx=0 rx=1 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=48,pong=48,rtt=1,loss=0.50,samples=20,bad=0,good=0,cool=6,kind=udp
+2026/11/19 14:33:39.466921 [mesh] stats tx=0 rx=1 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=54,pong=54,rtt=0,loss=0.50,samples=20,bad=0,good=0,cool=3,kind=udp
+2026/11/19 14:33:42.466615 [mesh] stats tx=0 rx=2 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=60,pong=60,rtt=1,loss=0.50,samples=20,bad=0,good=0,cool=0,kind=udp
+2026/11/19 14:33:44.601975 [mesh] STUN 探测完成 nat=Unknown reflexive=
+panic: assignment to entry in nil map
+
+goroutine 40 [running]:
+github.com/xmwengxing/cfpilot/packages/desktop/internal/mesh.(*DegradeController).tick(0xef0f3e48000, {0x7ff64c4e0380, 0xef0f3e44050})
+	github.com/xmwengxing/cfpilot/packages/desktop/internal/mesh/degrade_controller.go:186 +0x6a5
+github.com/xmwengxing/cfpilot/packages/desktop/internal/mesh.(*DegradeController).controlLoop(0xef0f3e48000, {0x7ff64c4e0380, 0xef0f3e44050})
+	github.com/xmwengxing/cfpilot/packages/desktop/internal/mesh/degrade_controller.go:141 +0xc5
+created by github.com/xmwengxing/cfpilot/packages/desktop/internal/mesh.(*DegradeController).Start in goroutine 7
+	github.com/xmwengxing/cfpilot/packages/desktop/internal/mesh/degrade_controller.go:97 +0x1b8

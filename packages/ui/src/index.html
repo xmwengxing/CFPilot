@@ -1468,15 +1468,6 @@
                 <div class="pair">
                   <label for="edgeZone" class="has-tip" data-tip="【可选】选域名所在 zone 后工具自动绑定；留空也会按域名后缀自动匹配账号下的 zone。&#10;读取失败时可在下方填写手动 Zone ID。">Cloudflare Zone ⓘ</label>
                   <select id="edgeZone"><option value="">— 不自动绑定（手动）/ 加载失败 —</option></select>
-                  
-                  <label class="switch-box" style="margin-top:8px">
-                    <span class="sw-info">
-                      <span class="sw-title has-tip" data-tip="【默认勾选】DNS 由 Workers 绑定自动创建，不要预先手动建记录。&#10;若同名主机名已有旧占位记录（AAAA 100:: 或 CNAME→workers.dev/pages.dev），勾选后会自动清理再重试；用户自己的真实记录不会被删除。">绑定失败时自动清理旧占位记录 ⓘ</span>
-                      <span class="sw-desc">清理旧占位记录后重试绑定</span>
-                    </span>
-                    <input type="checkbox" id="edgeAutoDns" checked />
-                    <span class="switch"></span>
-                  </label>
                 </div>
                 <div class="pair">
                   <label for="edgeZoneId" class="has-tip" data-tip="【可选】域名下拉读取失败时，直接粘贴 Zone ID（Cloudflare 控制台域名详情页可见）。&#10;不选 Zone 时工具会按域名后缀自动匹配；两者都为空才报错。">手动 Zone ID ⓘ</label>
@@ -1484,6 +1475,14 @@
                   
                 </div>
               </div>
+
+              <label class="switch-box">
+                <span class="sw-info">
+                  <span class="sw-title has-tip" data-tip="【默认勾选】DNS 由 Workers 绑定自动创建，不要预先手动建记录。&#10;若同名主机名已有旧占位记录（AAAA 100:: 或 CNAME→workers.dev/pages.dev），勾选后会自动清理再重试；用户自己的真实记录不会被删除。">自动清理旧记录 ⓘ</span>
+                </span>
+                <input type="checkbox" id="edgeAutoDns" checked />
+                <span class="switch"></span>
+              </label>
 
               <div class="pair-grid">
                 <div class="pair">
@@ -3073,6 +3072,8 @@
   <script src="./renderer.js"></script>
 </body>
 </html>
+
+
 
 
 

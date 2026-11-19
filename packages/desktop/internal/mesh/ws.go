@@ -80,7 +80,16 @@ func (w *WsUrl) tcpTarget() string {
 type WsConn struct {
 	conn *websocket.Conn
 	url  *WsUrl
+	// gorilla/websocket 在一次 ReadMessage 失败后**再次读取会直接 panic**
+	// （"repeated read on failed websocket connection"）。
+	// 降级到 WSS 后如果连接被中继关闭，recv 循环会不断重试 Recv，
+	// 于是第二次读取就把整个 meshd 进程打崩。这里记住永久失败状态，
+	// 之后所有 Recv/Send 都直接返回错误，不再触碰底层连接。
+	failed bool
 }
+
+// failedErr 是连接失败后的固定错误（recv 循环会按错误退出/回退，而不是重试死循环）。
+var errWsFailed = fmt.Errorf("mesh ws: 连接已失败，不再读写")
 
 // DialWss 建立 WSS 连接（契约 §6.1-6.2，ws.rs:502-527）。
 //
@@ -133,8 +142,12 @@ func (c *WsConn) SendFrame(ctx context.Context, data []byte) error {
 	if len(data) > MaxFrame {
 		return fmt.Errorf("mesh ws: 帧 %d 字节超过 %d", len(data), MaxFrame)
 	}
+	if c.failed || c.conn == nil {
+		return errWsFailed
+	}
 	_ = c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if err := c.conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+		c.failed = true
 		return fmt.Errorf("mesh ws: 发送失败: %w", err)
 	}
 	return nil
@@ -143,15 +156,22 @@ func (c *WsConn) SendFrame(ctx context.Context, data []byte) error {
 // RecvFrame 接收一帧（契约 §6.3）。
 // Text 视为协议错误；Ping/Pong 由 gorilla 自动处理；Close/EOF 报错。
 func (c *WsConn) RecvFrame(ctx context.Context) ([]byte, error) {
+	if c.failed || c.conn == nil {
+		return nil, errWsFailed
+	}
 	_ = c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	typ, data, err := c.conn.ReadMessage()
 	if err != nil {
+		// 永久失败：gorilla 不允许在失败连接上再次 ReadMessage（会 panic）。
+		c.failed = true
 		return nil, fmt.Errorf("mesh ws: 接收失败: %w", err)
 	}
 	if typ != websocket.BinaryMessage {
+		c.failed = true
 		return nil, fmt.Errorf("mesh ws: 非 Binary 消息（type=%d）", typ)
 	}
 	if len(data) > MaxFrame {
+		c.failed = true
 		return nil, fmt.Errorf("mesh ws: 帧 %d 字节超过 %d", len(data), MaxFrame)
 	}
 	return data, nil

@@ -1,0 +1,58 @@
+2026/11/19 13:36:42.720752 [meshd] 启动（版本 0.50.0，windows/amd64）
+2026/11/19 13:36:42.734673 [meshd] 本地 API 就绪: http://127.0.0.1:19727
+2026/11/19 13:36:45.663152 [mesh] 降级控制器已启动 relay=edge.shijingtian.dpdns.org room=0123456789abcdef
+2026/11/19 13:36:45.684792 [mesh] 节点已启动 node=83561adb vip=10.97.0.1 listen=0.0.0.0:51820 peers=1
+2026/11/19 13:36:45.718143 [meshd] 组网已启动 node=83561adb398fd87f vip=10.97.0.1
+2026/11/19 13:36:48.689813 [mesh] stats tx=0 rx=0 txDrop=0 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=4,pong=0,rtt=0,loss=0.00,samples=4,bad=0,good=0,cool=10,kind=udp
+2026/11/19 13:36:48.744114 [mesh] 丢弃出站包：目的 10.97.0.255 不在虚拟 IP 表
+2026/11/19 13:36:51.684934 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=12,pong=0,rtt=0,loss=1.00,samples=12,bad=0,good=0,cool=10,kind=udp
+2026/11/19 13:36:54.685225 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=18,pong=0,rtt=0,loss=1.00,samples=18,bad=0,good=0,cool=10,kind=udp
+2026/11/19 13:36:57.685412 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=24,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 13:37:00.684921 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=30,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 13:37:03.685334 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=36,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 13:37:06.685756 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=42,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=9,kind=udp
+2026/11/19 13:37:09.685001 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=48,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=6,kind=udp
+2026/11/19 13:37:12.685083 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=54,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=3,kind=udp
+2026/11/19 13:37:15.685285 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=60,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=udp
+2026/11/19 13:37:18.113332 [mesh] STUN 探测完成 nat=Unknown reflexive=
+2026/11/19 13:37:18.687312 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=66,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 13:37:20.379828 [mesh] 降级到 WSS peer=1eed29b1: UDP 连续 3 窗丢包 > 20%
+2026/11/19 13:37:21.685379 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=70,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=7,kind=wss
+2026/11/19 13:37:24.685170 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=73,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=4,kind=wss
+2026/11/19 13:37:27.687147 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=76,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=1,kind=wss
+2026/11/19 13:37:30.685071 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=79,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=wss
+2026/11/19 13:37:33.685270 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=82,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=wss
+2026/11/19 13:37:36.685364 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=85,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=wss
+2026/11/19 13:37:39.685398 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=88,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=wss
+2026/11/19 13:37:42.684838 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=91,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=wss
+2026/11/19 13:37:45.685406 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=94,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=wss
+2026/11/19 13:37:48.685276 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=97,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=wss
+2026/11/19 13:37:51.685314 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=100,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=wss
+2026/11/19 13:37:54.686007 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=103,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=wss
+2026/11/19 13:37:57.685075 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=106,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=wss
+2026/11/19 13:38:00.685264 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=109,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=wss
+2026/11/19 13:38:03.685260 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=112,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=wss
+2026/11/19 13:38:06.685120 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=115,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=wss
+2026/11/19 13:38:09.687408 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=118,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=wss
+2026/11/19 13:38:12.684967 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=121,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=wss
+2026/11/19 13:38:15.685132 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=124,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=wss
+2026/11/19 13:38:18.684900 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=127,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=wss
+2026/11/19 13:38:21.684963 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=130,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=wss
+2026/11/19 13:38:24.685015 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=133,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=wss
+2026/11/19 13:38:27.684834 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=136,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=wss
+2026/11/19 13:38:30.686133 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=139,pong=0,rtt=0,loss=1.00,samples=20,bad=0,good=0,cool=0,kind=wss
+panic: repeated read on failed websocket connection
+
+goroutine 24 [running]:
+github.com/gorilla/websocket.(*Conn).NextReader(0xbc105a2e580)
+	github.com/gorilla/websocket@v1.5.3/conn.go:1030 +0x1fb
+github.com/gorilla/websocket.(*Conn).ReadMessage(0xc2b7c0c4c3eeeab4?)
+	github.com/gorilla/websocket@v1.5.3/conn.go:1093 +0x13
+github.com/xmwengxing/cfpilot/packages/desktop/internal/mesh.(*WsConn).RecvFrame(0xbc105a061b0, {0x0?, 0x0?})
+	github.com/xmwengxing/cfpilot/packages/desktop/internal/mesh/ws.go:147 +0x59
+github.com/xmwengxing/cfpilot/packages/desktop/internal/mesh.(*WssLink).Recv(0x989680?, {0x7ff729b30190?, 0xbc1059c2140?})
+	github.com/xmwengxing/cfpilot/packages/desktop/internal/mesh/wss_link.go:43 +0x25
+github.com/xmwengxing/cfpilot/packages/desktop/internal/mesh.(*meshLifecycle).startRecvLoop.func1()
+	github.com/xmwengxing/cfpilot/packages/desktop/internal/mesh/lifecycle_mesh.go:686 +0xe8
+created by github.com/xmwengxing/cfpilot/packages/desktop/internal/mesh.(*meshLifecycle).startRecvLoop in goroutine 35
+	github.com/xmwengxing/cfpilot/packages/desktop/internal/mesh/lifecycle_mesh.go:678 +0x20f

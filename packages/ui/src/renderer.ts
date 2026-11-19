@@ -4867,6 +4867,9 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
           wssEndpoint: result.wssEndpoint,
           monitorToken: result.monitorToken,
         }
+        try {
+          localStorage.setItem('cfpilot-mesh-edge-deploy', JSON.stringify(lastEdgeDeploy))
+        } catch { /* 存储不可用不阻断 */ }
         const fillBtn = $('btnFillMeshConfig') as HTMLButtonElement | null
         if (fillBtn) fillBtn.disabled = false
         log('盲中继 / 云监测台部署完成（结果见下方框，请立即保存令牌与密码）', 'ok')
@@ -4958,6 +4961,8 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
         if (resp.ok && data.uri) {
           const out = document.getElementById('meshInviteOut') as HTMLTextAreaElement | null
           if (out) out.value = data.uri
+          // 邀请链接含 PSK/令牌，刷新后不该重新生成；落盘方便 B 端重试。
+          try { localStorage.setItem('cfpilot-mesh-invite', data.uri) } catch { /* 忽略 */ }
           log('邀请链接已生成（注意：含明文 PSK，勿公开分享）', 'ok')
         } else {
           log('生成邀请链接失败：' + (data.error || `HTTP ${resp.status}`), 'err')
@@ -5334,17 +5339,58 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
     }, 2000)
     void refreshMeshStatus()
 
-    // 恢复本地配置
+    // 恢复本地配置（显式键→元素映射，不能靠「mesh+首字母大写」猜）
+    // 旧实现对 networkName / virtualIp 等拼出 meshNetworkName 这种不存在的 id，
+    // 结果刷新后大部分字段恢复不了；且只有点过「保存配置」才有内容，用户没点就全丢。
+    const MESH_FIELD_IDS: Record<string, string> = {
+      networkName: 'meshNetwork', psk: 'meshPsk', virtualIp: 'meshVirtualIp',
+      listen: 'meshListen', tunName: 'meshTunName',
+      relayDomain: 'meshRelayDomain', relayRoom: 'meshRelayRoom',
+      relayConnectIp: 'meshRelayConnectIp',
+      enableDegrade: 'meshEnableDegrade', disablePunch: 'meshEnablePunch',
+      monitorEndpoint: 'meshMonitorEndpoint', monitorToken: 'meshMonitorToken',
+      monitorInterval: 'meshMonitorInterval', monitorAlias: 'meshMonitorAlias',
+      inviteUri: 'meshInviteInput',
+    }
+    const applyMeshSaved = (saved: Record<string, unknown>): void => {
+      for (const [k, v] of Object.entries(saved)) {
+        const id = MESH_FIELD_IDS[k]
+        if (!id || typeof v !== 'string' && typeof v !== 'boolean') continue
+        const el = document.getElementById(id)
+        if (!el) continue
+        if (el instanceof HTMLInputElement && el.type === 'checkbox') el.checked = v === true
+        else (el as HTMLInputElement | HTMLTextAreaElement).value = String(v)
+      }
+      // 恢复对端列表（独立于表单字段）
+      if (Array.isArray(saved.peers)) {
+        meshPeers = (saved.peers as typeof meshPeers).filter((p) => p && typeof p.nodeId === 'string')
+        renderMeshPeers()
+      }
+    }
     try {
       const saved = localStorage.getItem('cfpilot-mesh-config')
-      if (saved) {
-        const cfg = JSON.parse(saved) as Record<string, string>
-        for (const [k, v] of Object.entries(cfg)) {
-          const el = document.getElementById('mesh' + k.charAt(0).toUpperCase() + k.slice(1))
-          if (el && typeof v === 'string') (el as HTMLInputElement).value = v
-        }
+      if (saved) applyMeshSaved(JSON.parse(saved) as Record<string, unknown>)
+      const edge = localStorage.getItem('cfpilot-mesh-edge-deploy')
+      if (edge) lastEdgeDeploy = JSON.parse(edge) as typeof lastEdgeDeploy
+      const invite = localStorage.getItem('cfpilot-mesh-invite')
+      if (invite) {
+        const inviteOut = $('meshInviteOut') as unknown as HTMLTextAreaElement | null
+      if (inviteOut) inviteOut.value = invite
       }
     } catch { /* 忽略损坏的本地配置 */ }
+
+    // 表单任一改动即自动保存：用户不必记得点「保存配置」，刷新也不丢。
+    const autoSaveMesh = (): void => {
+      try {
+        const cfg = collectMeshConfig()
+        localStorage.setItem('cfpilot-mesh-config', JSON.stringify({ ...cfg, peers: meshPeers }))
+      } catch { /* 存储不可用不阻断 */ }
+    }
+    const meshContent = $('meshContent')
+    if (meshContent) {
+      meshContent.addEventListener('input', autoSaveMesh)
+      meshContent.addEventListener('change', autoSaveMesh)
+    }
 
     void refreshRelayIpPick()
   }

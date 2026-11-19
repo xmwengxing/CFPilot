@@ -18,6 +18,10 @@ import (
 //   - 回切：WSS 期 UdpProbe 连续 3 窗好 → replace_link(active=UDP) → 关旧 WSS
 //
 // 切换只换 PeerLink，不动 Session（node.rs:2429）。
+// switchSettleTime 是链路切换后的稳定期：探针窗口（20 样本 × 1s）需要这么久
+// 才能完全反映新链路，期间禁止反向切换，避免 WSS↔UDP 来回震荡（真机踩到）。
+const switchSettleTime = 12 * time.Second
+
 type DegradeController struct {
 	mu          sync.Mutex
 	selfID      NodeID
@@ -30,7 +34,7 @@ type DegradeController struct {
 	// 即「优选入口 IP」能力（WsUrl.ConnectIP）。
 	relayConnectIP string
 	rootCAs        *x509.CertPool
-	verbose     bool
+	verbose        bool
 
 	// switchFn 执行链路切换（由 Lifecycle 注入：(peer, link, kind)）
 	switchFn func(peer NodeID, link PeerLink, kind TransportKind)
@@ -41,6 +45,9 @@ type DegradeController struct {
 	// graceTicks 启动宽限：前 N 个 tick 只发探针建立窗口、不判据，
 	// 避免启动瞬态丢包（对端未就绪）误触发降级（真机暴露）。
 	graceTicks uint32
+	// lastSwitch 记录最近一次链路切换时刻：切换后 probe 窗口里残留的丢包
+	// 不代表新链路质量，立刻允许反向切换会造成 WSS↔UDP 来回震荡（真机踩到）。
+	lastSwitch map[NodeID]time.Time
 }
 
 type ctrlPeer struct {
@@ -61,8 +68,9 @@ func NewDegradeController(selfID NodeID, probes *ProbeTracker, relayDomain, rela
 		relayRoom:      relayRoom,
 		relayConnectIP: relayConnectIP,
 		rootCAs:        rootCAs,
-		verbose:     verbose,
-		graceTicks:  lossWindowTicks, // 覆盖整个探针窗口滚出时间（真机启动瞬态防护）
+		verbose:        verbose,
+		graceTicks:     lossWindowTicks, // 覆盖整个探针窗口滚出时间（真机启动瞬态防护）
+		lastSwitch:     make(map[NodeID]time.Time),
 	}
 }
 
@@ -163,6 +171,10 @@ func (c *DegradeController) tick(ctx context.Context) {
 	}
 
 	for _, id := range ids {
+		// 切换后 12 秒稳定期：等探针窗口完全刷新再允许反向切换。
+		if last, ok := c.lastSwitch[id]; ok && time.Since(last) < switchSettleTime {
+			continue
+		}
 		loss, samples, rtt := c.probes.Measurement(id)
 		c.mu.Lock()
 		p := c.peers[id]
@@ -172,6 +184,7 @@ func (c *DegradeController) tick(ctx context.Context) {
 		d := c.policy.Observe(id, kind, loss, samples, rtt)
 		switch d.Kind {
 		case DecisionToWSS:
+			c.lastSwitch[id] = time.Now()
 			if err := c.switchToWSS(ctx, id); err != nil {
 				if c.verbose {
 					log.Printf("[mesh] 降级失败 peer=%x: %v", id[:4], err)
@@ -180,6 +193,7 @@ func (c *DegradeController) tick(ctx context.Context) {
 				log.Printf("[mesh] 降级到 WSS peer=%x: %s", id[:4], d.Reason)
 			}
 		case DecisionToUDP:
+			c.lastSwitch[id] = time.Now()
 			c.switchToUDP(id)
 			if c.verbose {
 				log.Printf("[mesh] 回切 UDP peer=%x: %s", id[:4], d.Reason)
@@ -274,5 +288,3 @@ func (c *DegradeController) Kind(id NodeID) TransportKind {
 	}
 	return TransportUDP
 }
-
-

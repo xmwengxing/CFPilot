@@ -32,3 +32,74 @@
 2026/11/19 14:38:00.308339 [mesh] 回切 UDP peer=1eed29b1: UDP 探针连续 3 窗良好（丢包 <5% 且 RTT ≤150ms）
 2026/11/19 14:38:02.877512 [mesh] stats tx=0 rx=12 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=97,pong=83,rtt=0,loss=0.15,samples=20,bad=0,good=0,cool=10,kind=udp
 2026/11/19 14:38:05.877628 [mesh] stats tx=0 rx=12 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=103,pong=89,rtt=1,loss=0.30,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:38:08.877859 [mesh] stats tx=0 rx=12 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=109,pong=95,rtt=1,loss=0.45,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:38:11.877415 [mesh] stats tx=0 rx=13 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=115,pong=101,rtt=0,loss=0.50,samples=20,bad=0,good=0,cool=9,kind=udp
+2026/11/19 14:38:14.877280 [mesh] stats tx=0 rx=13 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=121,pong=107,rtt=0,loss=0.50,samples=20,bad=0,good=0,cool=6,kind=udp
+2026/11/19 14:38:17.878035 [mesh] stats tx=0 rx=14 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=127,pong=113,rtt=0,loss=0.45,samples=20,bad=0,good=0,cool=3,kind=udp
+2026/11/19 14:38:20.877357 [mesh] stats tx=1 rx=15 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=133,pong=119,rtt=0,loss=0.45,samples=20,bad=0,good=0,cool=0,kind=udp
+2026/11/19 14:38:23.877547 [mesh] stats tx=1 rx=15 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=139,pong=125,rtt=0,loss=0.45,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:38:26.877473 [mesh] stats tx=2 rx=16 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=142,pong=128,rtt=1,loss=0.40,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:38:29.877351 [mesh] stats tx=2 rx=16 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=145,pong=131,rtt=0,loss=0.35,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:38:32.191567 [mesh] 链路切换完成 peer=1eed29b1 kind=1，接收循环已重启
+2026/11/19 14:38:32.192072 [mesh] 降级到 WSS peer=1eed29b1: UDP 连续 3 窗丢包 > 20%
+2026/11/19 14:38:32.877231 [mesh] stats tx=3 rx=17 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=149,pong=135,rtt=1,loss=0.25,samples=20,bad=0,good=0,cool=10,kind=wss
+2026/11/19 14:38:35.877907 [mesh] stats tx=4 rx=18 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=152,pong=138,rtt=0,loss=0.20,samples=20,bad=0,good=0,cool=9,kind=wss
+2026/11/19 14:38:38.877894 [mesh] stats tx=4 rx=18 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=155,pong=141,rtt=0,loss=0.10,samples=20,bad=0,good=0,cool=6,kind=wss
+2026/11/19 14:38:41.877409 [mesh] stats tx=5 rx=19 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=158,pong=144,rtt=2,loss=0.05,samples=20,bad=0,good=0,cool=3,kind=wss
+2026/11/19 14:38:44.877264 [mesh] stats tx=5 rx=19 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=161,pong=147,rtt=0,loss=0.00,samples=20,bad=0,good=0,cool=0,kind=wss
+2026/11/19 14:38:47.884800 [mesh] stats tx=6 rx=20 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=165,pong=151,rtt=1,loss=0.00,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:38:49.868418 [mesh] 链路切换完成 peer=1eed29b1 kind=0，接收循环已重启
+2026/11/19 14:38:49.881763 [mesh] 回切 UDP peer=1eed29b1: UDP 探针连续 3 窗良好（丢包 <5% 且 RTT ≤150ms）
+2026/11/19 14:38:50.877955 [mesh] stats tx=7 rx=20 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=170,pong=156,rtt=1,loss=0.00,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:38:53.877239 [mesh] stats tx=7 rx=20 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=176,pong=162,rtt=1,loss=0.15,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:38:56.877602 [mesh] stats tx=8 rx=20 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=182,pong=168,rtt=2,loss=0.25,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:38:59.877450 [mesh] stats tx=8 rx=20 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=188,pong=174,rtt=1,loss=0.35,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:39:02.877354 [mesh] stats tx=11 rx=24 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=194,pong=180,rtt=0,loss=0.40,samples=20,bad=0,good=0,cool=7,kind=udp
+2026/11/19 14:39:05.877176 [mesh] stats tx=13 rx=27 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=200,pong=186,rtt=2,loss=0.40,samples=20,bad=0,good=0,cool=4,kind=udp
+2026/11/19 14:39:08.879726 [mesh] stats tx=13 rx=27 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=206,pong=192,rtt=1,loss=0.45,samples=20,bad=0,good=0,cool=1,kind=udp
+2026/11/19 14:39:11.878174 [mesh] stats tx=13 rx=28 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=212,pong=198,rtt=0,loss=0.45,samples=20,bad=2,good=0,cool=0,kind=udp
+2026/11/19 14:39:13.795057 [mesh] 链路切换完成 peer=1eed29b1 kind=1，接收循环已重启
+2026/11/19 14:39:13.798062 [mesh] 降级到 WSS peer=1eed29b1: UDP 连续 3 窗丢包 > 20%
+2026/11/19 14:39:14.877449 [mesh] stats tx=13 rx=28 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=216,pong=202,rtt=2,loss=0.35,samples=20,bad=0,good=0,cool=10,kind=wss
+2026/11/19 14:39:17.877244 [mesh] stats tx=13 rx=29 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=219,pong=205,rtt=0,loss=0.30,samples=20,bad=0,good=0,cool=10,kind=wss
+2026/11/19 14:39:20.878410 [mesh] stats tx=13 rx=30 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=222,pong=207,rtt=2,loss=0.30,samples=20,bad=0,good=0,cool=10,kind=wss
+2026/11/19 14:39:23.883432 [mesh] stats tx=13 rx=30 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=224,pong=210,rtt=4,loss=0.20,samples=20,bad=0,good=0,cool=10,kind=wss
+2026/11/19 14:39:26.887856 [mesh] stats tx=13 rx=31 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=228,pong=213,rtt=9,loss=0.15,samples=20,bad=0,good=0,cool=7,kind=wss
+2026/11/19 14:39:29.910388 [mesh] stats tx=13 rx=31 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=231,pong=216,rtt=1,loss=0.10,samples=20,bad=0,good=0,cool=4,kind=wss
+2026/11/19 14:39:32.880570 [mesh] stats tx=13 rx=32 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=234,pong=220,rtt=2,loss=0.00,samples=20,bad=0,good=0,cool=1,kind=wss
+2026/11/19 14:39:35.877477 [mesh] stats tx=13 rx=33 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=237,pong=223,rtt=1,loss=0.00,samples=20,bad=0,good=2,cool=0,kind=wss
+2026/11/19 14:39:38.857266 [mesh] 链路切换完成 peer=1eed29b1 kind=0，接收循环已重启
+2026/11/19 14:39:38.861961 [mesh] 回切 UDP peer=1eed29b1: UDP 探针连续 3 窗良好（丢包 <5% 且 RTT ≤150ms）
+2026/11/19 14:39:38.877323 [mesh] stats tx=13 rx=33 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=241,pong=227,rtt=1,loss=0.00,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:39:41.877315 [mesh] stats tx=13 rx=33 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=247,pong=233,rtt=0,loss=0.10,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:39:44.877834 [mesh] stats tx=13 rx=33 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=253,pong=239,rtt=1,loss=0.20,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:39:47.877620 [mesh] stats tx=13 rx=34 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=259,pong=245,rtt=3,loss=0.35,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:39:50.877348 [mesh] stats tx=13 rx=35 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=265,pong=251,rtt=1,loss=0.45,samples=20,bad=0,good=0,cool=8,kind=udp
+2026/11/19 14:39:53.877602 [mesh] stats tx=13 rx=35 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=271,pong=257,rtt=2,loss=0.50,samples=20,bad=0,good=0,cool=5,kind=udp
+2026/11/19 14:39:56.877850 [mesh] stats tx=13 rx=36 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=277,pong=263,rtt=0,loss=0.50,samples=20,bad=0,good=0,cool=2,kind=udp
+2026/11/19 14:39:59.878957 [mesh] stats tx=13 rx=36 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=283,pong=269,rtt=2,loss=0.50,samples=20,bad=1,good=0,cool=0,kind=udp
+2026/11/19 14:40:02.422425 [mesh] 链路切换完成 peer=1eed29b1 kind=1，接收循环已重启
+2026/11/19 14:40:02.424486 [mesh] 降级到 WSS peer=1eed29b1: UDP 连续 3 窗丢包 > 20%
+2026/11/19 14:40:02.879308 [mesh] stats tx=13 rx=37 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=288,pong=274,rtt=0,loss=0.45,samples=20,bad=0,good=0,cool=10,kind=wss
+2026/11/19 14:40:05.877559 [mesh] stats tx=13 rx=38 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=291,pong=277,rtt=1,loss=0.35,samples=20,bad=0,good=0,cool=10,kind=wss
+2026/11/19 14:40:08.877270 [mesh] stats tx=13 rx=38 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=294,pong=280,rtt=0,loss=0.30,samples=20,bad=0,good=0,cool=10,kind=wss
+2026/11/19 14:40:11.877335 [mesh] stats tx=13 rx=39 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=297,pong=283,rtt=1,loss=0.20,samples=20,bad=0,good=0,cool=10,kind=wss
+2026/11/19 14:40:14.877477 [mesh] stats tx=13 rx=39 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=300,pong=286,rtt=4,loss=0.15,samples=20,bad=0,good=0,cool=9,kind=wss
+2026/11/19 14:40:17.880765 [mesh] stats tx=13 rx=40 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=303,pong=289,rtt=4,loss=0.05,samples=20,bad=0,good=0,cool=6,kind=wss
+2026/11/19 14:40:20.878016 [mesh] stats tx=13 rx=41 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=306,pong=292,rtt=0,loss=0.00,samples=20,bad=0,good=0,cool=3,kind=wss
+2026/11/19 14:40:23.877572 [mesh] stats tx=13 rx=41 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=309,pong=295,rtt=0,loss=0.00,samples=20,bad=0,good=0,cool=0,kind=wss
+2026/11/19 14:40:26.877174 [mesh] stats tx=13 rx=42 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=312,pong=298,rtt=0,loss=0.00,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:40:28.855744 [mesh] 链路切换完成 peer=1eed29b1 kind=0，接收循环已重启
+2026/11/19 14:40:28.857268 [mesh] 回切 UDP peer=1eed29b1: UDP 探针连续 3 窗良好（丢包 <5% 且 RTT ≤150ms）
+2026/11/19 14:40:29.877340 [mesh] stats tx=13 rx=42 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=317,pong=303,rtt=0,loss=0.05,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:40:32.877723 [mesh] stats tx=13 rx=42 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=323,pong=309,rtt=1,loss=0.20,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:40:35.877587 [mesh] stats tx=13 rx=43 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=329,pong=315,rtt=0,loss=0.35,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:40:38.877556 [mesh] stats tx=13 rx=43 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=335,pong=321,rtt=0,loss=0.50,samples=20,bad=0,good=0,cool=9,kind=udp
+2026/11/19 14:40:41.879226 [mesh] stats tx=13 rx=44 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=341,pong=327,rtt=1,loss=0.45,samples=20,bad=0,good=0,cool=6,kind=udp
+2026/11/19 14:40:44.877363 [mesh] stats tx=13 rx=44 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=347,pong=333,rtt=0,loss=0.40,samples=20,bad=0,good=0,cool=3,kind=udp
+2026/11/19 14:40:47.877521 [mesh] stats tx=13 rx=45 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=353,pong=339,rtt=1,loss=0.40,samples=20,bad=0,good=0,cool=0,kind=udp
+2026/11/19 14:40:50.877259 [mesh] stats tx=13 rx=46 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=359,pong=345,rtt=0,loss=0.45,samples=20,bad=0,good=0,cool=10,kind=udp
+2026/11/19 14:40:51.521105 [mesh] 链路切换完成 peer=1eed29b1 kind=1，接收循环已重启
+2026/11/19 14:40:51.521105 [mesh] 降级到 WSS peer=1eed29b1: UDP 连续 3 窗丢包 > 20%
+2026/11/19 14:40:53.878106 [mesh] stats tx=13 rx=46 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=362,pong=348,rtt=1,loss=0.40,samples=20,bad=0,good=0,cool=10,kind=wss
+2026/11/19 14:40:56.877415 [mesh] stats tx=13 rx=47 txDrop=12 rxDrop=0 handshakeOK=1 probe[1eed29b1]:sent=365,pong=351,rtt=3,loss=0.35,samples=20,bad=0,good=0,cool=10,kind=wss

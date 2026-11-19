@@ -1,67 +1,61 @@
 import { describe, expect, it } from 'vitest'
 
-// 出厂固定落地 / 固定反代入口的合并语义（2026-11-14）。
+// 出厂 pinnedHosts 的合并语义（2026-11-19 调整后）。
 //
-// 守护的行为：内核内置的 x.com / cloudflare.com 出厂修复，
-// 不能被用户在面板写的其它站点映射整体顶掉 —— 否则所有只配了自己
-// 站点的用户会静默退回「x.com 时好时坏 / cloudflare.com 无法访问」。
+// 早前内置了 `x.com=151.101.194.146` 与 `cloudflare.com=r:45.76.246.192`
+// 两条固定值，但这类 IP 会失效 —— 失效后被 pin 的域名完全断掉
+// （真机：cloudflare.com 无法访问）。现已移除，改由内置反代池处理。
+//
+// 保留的 3 条 `r:` 通配是手机 app 子域的实测修复（api.x.com 等解析到 CF 网段，
+// 直连被 TCP Loop 拒绝并拖超时），不属于被移除的「两个网址」。
 
 import { DEFAULT_CONFIG, configFromEnv, mergeConfig } from '../src/config'
 import { pinnedIpsFor, pinnedRelaysFor } from '../src/outbound/pinned'
 
-describe('出厂 pinnedHosts 默认值', () => {
-  it('默认值含 x.com 直连与 cloudflare.com 反代入口', () => {
-    expect(pinnedIpsFor(DEFAULT_CONFIG.pinnedHosts, 'x.com', 443)).toEqual([
-      { ip: '151.101.194.146', port: 443 },
-    ])
-    expect(pinnedRelaysFor(DEFAULT_CONFIG.pinnedHosts, 'cloudflare.com', 443)).toEqual([
-      { ip: '45.76.246.192', port: 443 },
-    ])
+describe('出厂 pinnedHosts 默认值（两个固定值已移除）', () => {
+  it('x.com 裸域不再固定落地 IP，由内置反代池处理', () => {
+    expect(pinnedIpsFor(DEFAULT_CONFIG.pinnedHosts, 'x.com', 443)).toEqual([])
+    expect(DEFAULT_CONFIG.pinnedHosts).not.toContain('151.101.194.146')
   })
 
-  it('app 子域走 r: 固定反代（跳过重拨竞速），裸域仍走 Fastly 固定落地', () => {
-    // ⚠️ 不能用「固定落地 IP 通配」覆盖 app 子域 —— Fastly 不服务 API，
-    // 会把 app 请求全打到 404（2026-11-15 实测事故）。必须是 r: 反代形态。
+  it('cloudflare.com 不再固定反代 IP，由内置反代池处理', () => {
+    expect(pinnedRelaysFor(DEFAULT_CONFIG.pinnedHosts, 'cloudflare.com', 443)).toEqual([])
+    expect(DEFAULT_CONFIG.pinnedHosts).not.toContain('45.76.246.192')
+  })
+
+  it('app 子域的 r: 固定反代仍保留（手机 app 实测修复）', () => {
     expect(pinnedRelaysFor(DEFAULT_CONFIG.pinnedHosts, 'api.x.com', 443)).toEqual([
       { ip: '155.248.181.189', port: 443 },
     ])
     expect(pinnedRelaysFor(DEFAULT_CONFIG.pinnedHosts, 'pbs.twimg.com', 443)).toEqual([
       { ip: '155.248.181.189', port: 443 },
     ])
-    expect(pinnedIpsFor(DEFAULT_CONFIG.pinnedHosts, 'x.com', 443)).toEqual([
-      { ip: '151.101.194.146', port: 443 },
-    ])
-    // 出厂值里绝不能再出现「固定落地 IP 通配」那条有害配置
+  })
+
+  it('出厂值里绝不能再出现「固定落地 IP 通配」那条有害配置', () => {
     expect(DEFAULT_CONFIG.pinnedHosts).not.toContain('*.x.com=151.101.194.146')
   })
 
-  it('configFromEnv 未设 PINNED_HOSTS 时保留出厂值', () => {
+  it('configFromEnv 未设 PINNED_HOSTS 时保留出厂值（app 子域 r:）', () => {
     const cfg = configFromEnv({})
-    expect(pinnedIpsFor(cfg.pinnedHosts, 'x.com', 443)).toHaveLength(1)
+    expect(pinnedRelaysFor(cfg.pinnedHosts, 'api.x.com', 443)).toHaveLength(1)
   })
 })
 
 describe('pinnedHosts 按域名合并（用户条目优先）', () => {
   const base = DEFAULT_CONFIG.pinnedHosts
 
-  it('用户没配置 → 出厂值原样生效', () => {
+  it('用户没配置 → 出厂值（app 子域）原样生效', () => {
     const merged = mergeConfig({ ...DEFAULT_CONFIG }, { pinnedHosts: '' })
-    expect(pinnedIpsFor(merged.pinnedHosts, 'x.com', 443)).toEqual([
-      { ip: '151.101.194.146', port: 443 },
-    ])
+    expect(pinnedRelaysFor(merged.pinnedHosts, 'api.x.com', 443)).toHaveLength(1)
   })
 
-  it('用户只配别的站点 → 出厂修复仍然生效', () => {
+  it('用户只配别的站点 → 出厂 app 子域修复仍生效', () => {
     const merged = mergeConfig({ ...DEFAULT_CONFIG, pinnedHosts: base }, { pinnedHosts: 'jable.tv=159.60.146.82' })
     expect(pinnedIpsFor(merged.pinnedHosts, 'jable.tv', 443)).toEqual([
       { ip: '159.60.146.82', port: 443 },
     ])
-    expect(pinnedIpsFor(merged.pinnedHosts, 'x.com', 443)).toEqual([
-      { ip: '151.101.194.146', port: 443 },
-    ])
-    expect(pinnedRelaysFor(merged.pinnedHosts, 'cloudflare.com', 443)).toEqual([
-      { ip: '45.76.246.192', port: 443 },
-    ])
+    expect(pinnedRelaysFor(merged.pinnedHosts, 'api.x.com', 443)).toHaveLength(1)
   })
 
   it('用户覆盖同域名条目 → 以用户为准，不再带出厂条目', () => {
@@ -69,32 +63,15 @@ describe('pinnedHosts 按域名合并（用户条目优先）', () => {
     expect(pinnedIpsFor(merged.pinnedHosts, 'x.com', 443)).toEqual([
       { ip: '203.0.113.9', port: 443 },
     ])
-    // 出厂值里只有 x.com 与 cloudflare.com：x.com 被用户接管，cloudflare.com 保留
-    expect(pinnedRelaysFor(merged.pinnedHosts, 'cloudflare.com', 443)).toEqual([
-      { ip: '45.76.246.192', port: 443 },
-    ])
   })
 
-  it('用户覆盖同域名反代条目 → 用户反代优先，出厂反代不再保留', () => {
+  it('用户覆盖同域名反代条目 → 用户反代优先，出厂 r: 不再保留', () => {
     const merged = mergeConfig(
       { ...DEFAULT_CONFIG, pinnedHosts: base },
-      { pinnedHosts: 'cloudflare.com=r:198.51.100.7' }
+      { pinnedHosts: 'api.x.com=r:198.51.100.7' }
     )
-    expect(pinnedRelaysFor(merged.pinnedHosts, 'cloudflare.com', 443)).toEqual([
+    expect(pinnedRelaysFor(merged.pinnedHosts, 'api.x.com', 443)).toEqual([
       { ip: '198.51.100.7', port: 443 },
-    ])
-  })
-
-  it('直连形态与反代形态是不同条目键：用户改为直连形态时出厂反代兜底保留', () => {
-    const merged = mergeConfig(
-      { ...DEFAULT_CONFIG, pinnedHosts: base },
-      { pinnedHosts: 'cloudflare.com=203.0.113.77' }
-    )
-    expect(pinnedIpsFor(merged.pinnedHosts, 'cloudflare.com', 443)).toEqual([
-      { ip: '203.0.113.77', port: 443 },
-    ])
-    expect(pinnedRelaysFor(merged.pinnedHosts, 'cloudflare.com', 443)).toEqual([
-      { ip: '45.76.246.192', port: 443 },
     ])
   })
 
@@ -135,17 +112,41 @@ describe('出厂 relayPool（反代入口池）', () => {
 
 describe('用户删除的条目不得复活（jable.tv 回归）', () => {
   it('用户删掉自己的条目保存后，出厂兜底补充但它不会回来', () => {
-    // KV 用户层原为「jable.tv + x.com」（用户先填过），现在面板删掉 jable.tv 只剩 x.com
-    const merged = mergeConfig(DEFAULT_CONFIG, { pinnedHosts: 'x.com=151.101.194.146' })
+    // KV 用户层原为「jable.tv + api.x.com」（用户先填过），现在面板删掉 jable.tv
+    const merged = mergeConfig(DEFAULT_CONFIG, { pinnedHosts: 'api.x.com=r:155.248.181.189' })
     expect(merged.pinnedHosts).not.toContain('jable.tv')
-    expect(merged.pinnedHosts).toContain('x.com=151.101.194.146')
-    // 出厂兜底仍在
-    expect(merged.pinnedHosts).toContain('cloudflare.com=r:45.76.246.192')
+    expect(merged.pinnedHosts).toContain('api.x.com=r:155.248.181.189')
+    // 出厂兜底仍在（app 子域 r:）
+    expect(merged.pinnedHosts).toContain('*.twimg.com=r:155.248.181.189')
   })
 
   it('relayPool 同理：删掉的旧条目不复活', () => {
     const merged = mergeConfig(DEFAULT_CONFIG, { relayPool: 'my-relay.example.com:443' })
     expect(merged.relayPool).toContain('my-relay.example.com:443')
     expect(merged.relayPool).toContain('155.248.181.189')
+  })
+})
+
+describe('旧用户 KV 残留的失效固定值必须被清理', () => {
+  it('mergeConfig 剔除用户 KV 里残留的两条失效出厂 pin', () => {
+    const merged = mergeConfig(DEFAULT_CONFIG, {
+      pinnedHosts: 'x.com=151.101.194.146\ncloudflare.com=r:45.76.246.192\njable.tv=159.60.146.82',
+    })
+    expect(merged.pinnedHosts).not.toContain('151.101.194.146')
+    expect(merged.pinnedHosts).not.toContain('45.76.246.192')
+    expect(merged.pinnedHosts).toContain('jable.tv=159.60.146.82')
+    expect(pinnedIpsFor(merged.pinnedHosts, 'x.com', 443)).toEqual([])
+    expect(pinnedRelaysFor(merged.pinnedHosts, 'cloudflare.com', 443)).toEqual([])
+  })
+
+  it('configFromEnv 从环境变量读到的失效固定值也剔除', () => {
+    const cfg = configFromEnv({ PINNED_HOSTS: 'x.com=151.101.194.146\ncloudflare.com=r:45.76.246.192' } as never)
+    expect(cfg.pinnedHosts).not.toContain('151.101.194.146')
+    expect(cfg.pinnedHosts).not.toContain('45.76.246.192')
+  })
+
+  it('用户主动配的其它域名固定值不受影响', () => {
+    const cfg = configFromEnv({ PINNED_HOSTS: 'my.site=203.0.113.9' } as never)
+    expect(cfg.pinnedHosts).toContain('my.site=203.0.113.9')
   })
 })

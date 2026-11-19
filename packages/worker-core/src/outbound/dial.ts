@@ -648,6 +648,57 @@ export const RELAY_CONNECT_TIMEOUT_MS = 2500
 export const PINNED_RELAY_CONNECT_TIMEOUT_MS = 1200
 
 /**
+ * 反代入口的「按域名成功记忆」：hostname → 上次真正成功的入口。
+ *
+ * ## 为什么需要
+ *
+ * 出厂不再内置固定入口后，某域名走的是 `stableRelayIndex()` 的**哈希**选路，
+ * 选中的入口对它的 SNI 未必可用（第三方反代入口的 SNI 策略各不相同）。
+ * 结果是升级后原本能打开的站点突然打不开 —— 即使池里另有一个能用。
+ *
+ * 记下真正成功过的入口并优先复用，就能达到「固定出口」的效果：
+ *   - 不共享单点（每个域名各记各的，而不是全网共用一个出厂 IP）；
+ *   - 不需要发版（自学习）；
+ *   - 入口失效时由 endpoint-health 熔断，自动重新学一个。
+ *
+ * isolate 级内存、上限 128 条；冷启动重置（换 isolate 会重新学一遍）。
+ */
+const RELAY_SUCCESS_MEMORY = new Map<string, { ip: string; port: number }>()
+const RELAY_SUCCESS_MEMORY_MAX = 128
+
+/** 记录某域名的反代成功入口（同时刷新「最近使用」顺序）。 */
+function rememberRelaySuccess(hostname: string, ip: string, port: number): void {
+  if (!hostname || !ip || !port) return
+  RELAY_SUCCESS_MEMORY.delete(hostname)
+  RELAY_SUCCESS_MEMORY.set(hostname, { ip, port })
+  while (RELAY_SUCCESS_MEMORY.size > RELAY_SUCCESS_MEMORY_MAX) {
+    const oldest = RELAY_SUCCESS_MEMORY.keys().next().value
+    if (oldest === undefined) break
+    RELAY_SUCCESS_MEMORY.delete(oldest)
+  }
+}
+
+/** 取某域名的反代成功记忆。 */
+function relaySuccessFor(hostname: string): { ip: string; port: number } | undefined {
+  return RELAY_SUCCESS_MEMORY.get(hostname)
+}
+
+/** 清空成功记忆（测试用）。 */
+export function clearRelaySuccessMemory(): void {
+  RELAY_SUCCESS_MEMORY.clear()
+}
+
+/** 从 `ip:port` / `[v6]:port` 形式的 endpoint 里取出入口地址。 */
+function relayEntryFromEndpoint(endpoint: string): { ip: string; port: number } | undefined {
+  const i = String(endpoint ?? '').lastIndexOf(':')
+  if (i <= 0) return undefined
+  const ip = endpoint.slice(0, i).replace(/^\[/, '').replace(/\]$/, '')
+  const port = Number(endpoint.slice(i + 1))
+  if (!ip || !Number.isFinite(port) || port <= 0) return undefined
+  return { ip, port }
+}
+
+/**
  * 单条错误信息里最多展开多少条失败原因。
  *
  * 失败证据不能丢（会进 `/__diag`），但也不能无限膨胀 ——
@@ -1253,13 +1304,15 @@ export async function dial(options: DialOptions): Promise<DialResult> {
     for (const p of pinnedRelays) {
       if (isEndpointCooled(endpointKey('relay', p.ip, p.port), Date.now())) continue
       try {
-        return await attemptOf({
+        const res = await attemptOf({
           source: 'relay',
           host: p.ip,
           port: p.port,
           label: `固定反代 ${p.ip}:${p.port}`,
           timeoutMs: PINNED_RELAY_CONNECT_TIMEOUT_MS,
         })()
+        rememberRelaySuccess(options.hostname, p.ip, p.port)
+        return res
       } catch {
         /* 固定入口失败 → 试下一个固定入口，再回退常规池 */
       }
@@ -1270,6 +1323,31 @@ export async function dial(options: DialOptions): Promise<DialResult> {
       restRelay = await collectRelay([], { ...options.relayPool, deadline })
     }
     if (restRelay.length === 0) return null
+
+    // 「上次成功的入口」优先：哈希选路可能为这个域名选到一个对它无效的入口，
+    // 复用真正成功过的那个，升级后就不会「突然打不开」。
+    // 记忆的入口这次失败则走常规选路（health 已记录失败，冷却后自然换一个）。
+    const remembered = relaySuccessFor(options.hostname)
+    if (remembered) {
+      const rememberedKey = endpointKey('relay', remembered.ip, remembered.port)
+      const inPool = restRelay.some(
+        (r) => r.ip === remembered.ip && r.port === remembered.port
+      )
+      if (inPool && !isEndpointCooled(rememberedKey, Date.now())) {
+        try {
+          const res = await attemptOf({
+            source: 'relay',
+            host: remembered.ip,
+            port: remembered.port,
+            label: `反代 ${remembered.ip}:${remembered.port}`,
+          })()
+          rememberRelaySuccess(options.hostname, remembered.ip, remembered.port)
+          return res
+        } catch {
+          /* 记忆失效 → 继续常规选路 */
+        }
+      }
+    }
 
     // 粘性首选：同一目标在全球任意 isolate 都落到同一个反代入口，
     // 避免「竞速挑最快」让同一会话的请求从不同出口 IP 出去被目标站风控。
@@ -1287,12 +1365,14 @@ export async function dial(options: DialOptions): Promise<DialResult> {
       if (alt) sticky = alt
     }
     try {
-      return await attemptOf({
+      const res = await attemptOf({
         source: 'relay',
         host: sticky.ip,
         port: sticky.port,
         label: `反代 ${sticky.label}`,
       })()
+      rememberRelaySuccess(options.hostname, sticky.ip, sticky.port)
+      return res
     } catch {
       // 兜底列表按健康做**稳定排序**：冷却中的排后，但不删任何候选
       // （窗口化 ≠ 截断，§1.31）。
@@ -1301,7 +1381,12 @@ export async function dial(options: DialOptions): Promise<DialResult> {
         (r) => endpointKey('relay', r.ip, r.port),
         Date.now()
       )
-      return await tryRelayWithWindow(rest, attemptOf, concurrent)
+      const res = await tryRelayWithWindow(rest, attemptOf, concurrent)
+      if (res) {
+        const entry = relayEntryFromEndpoint(res.endpoint)
+        if (entry) rememberRelaySuccess(options.hostname, entry.ip, entry.port)
+      }
+      return res
     }
   }
 
@@ -1405,4 +1490,5 @@ export async function dial(options: DialOptions): Promise<DialResult> {
     throw directErr
   }
 }
+
 

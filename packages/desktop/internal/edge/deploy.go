@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -130,22 +131,69 @@ func cleanupPlaceholderDNS(ctx context.Context, client *cfapi.Client, zoneID, do
 	return nil
 }
 
-// waitDomainResolvable 轮询直到域名可解析（DNS 生效通常要几秒到几十秒）。
+// waitDomainResolvable 轮询直到域名可解析。
+//
+// 判据放宽为「本地 DNS 或公共 DoH 任一能解析即通过」：
+// 部署进程（Windows 服务 / 后台）的 DNS 可能比浏览器慢，或只返回 IPv6
+// （net.LookupHost 仍算成功）。旧版 60s 内一直失败就整单失败，太脆弱。
 func waitDomainResolvable(ctx context.Context, domain string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	var lastErr error
 	for {
-		if _, err := net.LookupHost(domain); err == nil {
+		if ips, err := net.LookupHost(domain); err == nil && len(ips) > 0 {
 			return nil
+		} else if err != nil {
+			lastErr = err
+		}
+		// 备用：DoH 查询（绕开本机 DNS 缓存/超时）
+		if ok, derr := resolveViaDoH(ctx, domain); ok {
+			return nil
+		} else if derr != nil {
+			lastErr = derr
 		}
 		if time.Now().After(deadline) {
+			if lastErr != nil {
+				return fmt.Errorf("DNS 未生效（最后错误：%v）", lastErr)
+			}
 			return fmt.Errorf("DNS 未生效")
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(3 * time.Second):
+		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+// resolveViaDoH 用公共 DNS-over-HTTPS 查询 A 记录，作为本地解析失败时的备用判据。
+func resolveViaDoH(ctx context.Context, domain string) (bool, error) {
+	url := "https://223.5.5.5/resolve?name=" + url.QueryEscape(domain) + "&type=A"
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Status  int `json:"Status"`
+		Answer  []struct{ Type int `json:"type"` } `json:"Answer"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return false, err
+	}
+	if out.Status != 0 {
+		return false, nil
+	}
+	for _, a := range out.Answer {
+		if a.Type == 1 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // zoneNameFromDomain 从 relay.example.com 推 example.com（仅用于提示）。
@@ -282,12 +330,17 @@ func Deploy(ctx context.Context, client *cfapi.Client, raw Options) (*Result, er
 		opt.Progress("步骤 3/5：跳过域名绑定（请到控制台手动绑定 " + opt.Domain + "）")
 	}
 
-	// 3b. 等域名真正可解析：绑定是「受理」，DNS 生效需要时间。
-	// 不等就会在 /auth/setup 处报 lookup no such host（真机踩到）。
-	opt.Progress("步骤 3/5：等待域名解析生效 " + opt.Domain)
-	if err := waitDomainResolvable(ctx, opt.Domain, 60*time.Second); err != nil {
-		return nil, fmt.Errorf("域名 %s 在 60 秒内仍无法解析：%w。请确认 DNS 记录已创建（或勾选「自动创建 DNS 记录」）后重试",
-			opt.Domain, err)
+	// 3b. 尝试等域名解析（非阻塞）：绑定已成功、DNS 记录在控制台可见即可继续。
+	// 旧版把「等待解析」做成**硬性失败**（60s 超时就整单失败），但真机上遇到：
+	// 浏览器/控制台能看到 A 记录、本机 nslookup 也通，部署进程内 net.LookupHost 却一直失败
+	// （后台服务 DNS 环境不同）。既然 /auth/setup 会自己发起 HTTPS 请求验证连通性，
+	// 这里只做提示，不再阻断部署。
+	opt.Progress("步骤 3/5：检查域名解析 " + opt.Domain)
+	if err := waitDomainResolvable(ctx, opt.Domain, 8*time.Second); err != nil {
+		opt.Progress("提示：部署进程暂时无法解析 " + opt.Domain + "（" + err.Error() +
+			"），继续执行；若后续设置密码失败，请检查本机 DNS 或 hosts 配置")
+	} else {
+		opt.Progress("域名解析正常")
 	}
 
 	// 4. /auth/setup
@@ -377,6 +430,8 @@ func firstN(s string, n int) string {
 
 // ZoneNameFromDomain 暴露给 server 层用于自动查 zone。
 func ZoneNameFromDomain(domain string) string { return zoneNameFromDomain(domain) }
+
+
 
 
 

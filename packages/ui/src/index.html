@@ -1461,27 +1461,27 @@
 
               <div class="pair-grid">
                 <div class="pair">
-                  <label for="edgeDomain">盲中继域名 <span class="badge info">必填</span></label>
+                  <label for="edgeDomain" class="has-tip" data-tip="【必填】*.workers.dev 国内被污染，必须绑定自定义域名。&#10;可在下方选 Zone 自动绑定，或部署后到控制台手动绑定。&#10;示例：relay.example.com">盲中继域名 ⓘ <span class="badge info">必填</span></label>
                   <input type="text" id="edgeDomain" placeholder="如 relay.example.com" />
-                  <p class="tip">*.workers.dev 国内被污染，必须绑定自定义域名；可在下方选 zone 自动绑定，或部署后到控制台手动绑定。</p>
+                  
                 </div>
                 <div class="pair">
-                  <label for="edgeZone">Cloudflare Zone（自动绑定用）</label>
+                  <label for="edgeZone" class="has-tip" data-tip="【可选】选域名所在 zone 后工具自动绑定；留空也会按域名后缀自动匹配账号下的 zone。&#10;读取失败时可在下方填写手动 Zone ID。">Cloudflare Zone ⓘ</label>
                   <select id="edgeZone"><option value="">— 不自动绑定（手动）/ 加载失败 —</option></select>
-                  <p class="tip">选域名所在 zone 后，工具会尝试自动绑定；留空则只部署 Worker，域名需手动绑。</p>
+                  
                   <label class="switch-box" style="margin-top:8px">
                     <span class="sw-info">
-                      <span class="sw-title">绑定失败时自动清理旧占位记录</span>
-                      <span class="sw-desc">DNS 由 Workers 绑定自动创建；勾选时仅清理同名的旧占位记录（AAAA 100:: / CNAME workers.dev），并等解析生效再设密码</span>
+                      <span class="sw-title has-tip" data-tip="【默认勾选】DNS 由 Workers 绑定自动创建，不要预先手动建记录。&#10;若同名主机名已有旧占位记录（AAAA 100:: 或 CNAME→workers.dev/pages.dev），勾选后会自动清理再重试；用户自己的真实记录不会被删除。">绑定失败时自动清理旧占位记录 ⓘ</span>
+                      <span class="sw-desc">清理旧占位记录后重试绑定</span>
                     </span>
                     <input type="checkbox" id="edgeAutoDns" checked />
                     <span class="switch"></span>
                   </label>
                 </div>
                 <div class="pair">
-                  <label for="edgeZoneId">手动 Zone ID（可选）</label>
+                  <label for="edgeZoneId" class="has-tip" data-tip="【可选】域名下拉读取失败时，直接粘贴 Zone ID（Cloudflare 控制台域名详情页可见）。&#10;不选 Zone 时工具会按域名后缀自动匹配；两者都为空才报错。">手动 Zone ID ⓘ</label>
                   <input type="text" id="edgeZoneId" class="mono" placeholder="下拉读取失败时可直接粘贴 Zone ID（控制台域名页可见）" />
-                  <p class="tip">不选 Zone 时，工具也会按域名后缀自动匹配账号下的 zone；两者都为空才会报错。</p>
+                  
                 </div>
               </div>
 
@@ -1498,11 +1498,11 @@
 
               <div class="pair-grid">
                 <div class="pair">
-                  <label for="edgePassword">监测台初始密码 <span class="badge info">≥8 位</span></label>
+                  <label for="edgePassword" class="has-tip" data-tip="【可选】监测台登录密码，至少 8 位。&#10;留空会自动生成 16 位随机密码，并在部署结果中回显，请立即保存。">监测台初始密码 ⓘ <span class="badge info">≥8 位</span></label>
                   <input type="password" id="edgePassword" placeholder="留空则自动生成（日志显示）" />
                 </div>
                 <div class="pair">
-                  <label for="edgeMonitorToken">上报令牌（MONITOR_TOKEN）</label>
+                  <label for="edgeMonitorToken" class="has-tip" data-tip="【可选】节点上报心跳时使用的令牌，需与 Worker 环境变量 MONITOR_TOKEN 一致。&#10;留空自动生成并写入 Worker；部署后可在「组网」页「填入组网配置」自动带入。">上报令牌 ⓘ</label>
                   <input type="text" id="edgeMonitorToken" placeholder="留空则自动生成" />
                 </div>
               </div>
@@ -3073,6 +3073,7 @@
   <script src="./renderer.js"></script>
 </body>
 </html>
+
 
 
 

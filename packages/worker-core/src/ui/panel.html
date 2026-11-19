@@ -789,7 +789,8 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
         <div class="field">
           <label>固定落地 IP / 固定反代入口</label>
           <textarea id="cfgPinnedHosts" class="mono" rows="3" placeholder="example.com=203.0.113.10&#10;cloudflare.com=r:198.51.100.7"></textarea>
-          <p class="tip">按域名写死落地地址，r: 前缀 = 固定反代入口（Cloudflare 网段站点用）；留空时内核自带 x.com / cloudflare.com 出厂优化，你写的条目按域名合并、同域名以这里为准。</p>
+          <p class="tip">按域名写死落地地址，<code>r:</code> 前缀 = 固定反代入口（只能把 TLS 按 SNI 转给 Cloudflare 承载的域名）。<b>默认不固定任何域名</b>：留空时完全走 DoH 优选与内置反代池。固定入口是单点，失效 IP 现在会熔断（连续失败 2 次进冷却、直接走池，冷却到期自动重试），但每次请求仍可能多等一次短超时，所以只建议在确有实测收益时填。</p>
+          <button class="ghost" type="button" id="btnPinnedSuggest">填入建议值</button>
         </div>
       </div>
 
@@ -1568,6 +1569,22 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
     });
 
     $('btnRefresh').addEventListener('click', function () { loadAll(); toast('状态已刷新'); });
+// 固定入口建议值（**默认不生效**）：与 packages/worker-core/src/config.ts 的
+// SUGGESTED_PINNED_HOSTS 保持一致 —— 改一处必须同步另一处。
+// 只放 CF 承载的域名：pbs.twimg.com 在 Fastly，r: 转发给 CF 不可能生效。
+;(function bindPinnedSuggest() {
+  const btn = $('btnPinnedSuggest');
+  const SUGGESTED_PINNED_HOSTS =
+    '*.x.com=r:155.248.181.189\n*.twitter.com=r:155.248.181.189';
+  if (!btn) return;
+  btn.addEventListener('click', function () {
+    const el = $('cfgPinnedHosts');
+    if (!el) return;
+    el.value = el.value.trim()
+      ? el.value.trim() + '\n' + SUGGESTED_PINNED_HOSTS
+      : SUGGESTED_PINNED_HOSTS;
+  });
+})();
     $('btnLogout').addEventListener('click', function () {
       api('/api/v1/logout', { method: 'POST' }).finally(function () { showLogin(); });
     });

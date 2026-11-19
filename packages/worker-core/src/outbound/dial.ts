@@ -639,6 +639,15 @@ export const MAX_SIMULTANEOUS_CONNECTS = 6
 export const RELAY_CONNECT_TIMEOUT_MS = 2500
 
 /**
+ * 「固定反代入口（pin）」的单独连接超时。
+ *
+ * 比常规反代更短：pin 是单点，失效时必须**快速回落**到池，把总预算
+ * （dialBudgetMs 默认 15s）留给后续批次。早前 pin 共用 2.5s，
+ * 配上多条 pin 就能吃掉大半预算，导致兜底池还没被尝试就先超预算。
+ */
+export const PINNED_RELAY_CONNECT_TIMEOUT_MS = 1200
+
+/**
  * 单条错误信息里最多展开多少条失败原因。
  *
  * 失败证据不能丢（会进 `/__diag`），但也不能无限膨胀 ——
@@ -913,9 +922,15 @@ export async function dial(options: DialOptions): Promise<DialResult> {
   const pinned = options.pinnedIps ?? []
   const pinnedActive = pinned.length > 0
   const optimized = pinnedActive ? [...pinned] : [...(options.optimizedIps ?? [])]
+  // 固定落地 IP 若**全部处于冷却**（连续失败过），说明已知失效：
+  // 此时不能再「只用这批 IP」——否则每次请求都先失败一轮。改为正常做 DoH
+  // 拿真实落点追加在后面（pinned 仍排最前，冷却到期后会自动回到首选）。
+  const pinnedAllCooled =
+    pinnedActive &&
+    pinned.every((p) => isEndpointCooled(endpointKey('direct', p.ip, p.port), Date.now()))
   /** 是否成功解析出目标域名（用于判断「域名直连」是否值得优先） */
   let resolvedTarget = pinnedActive
-  if (options.resolvePreferred && !pinnedActive) {
+  if (options.resolvePreferred && (!pinnedActive || pinnedAllCooled)) {
     try {
       // ⚠️ 两个关键约束（首包延迟治理，见 DOH_FAST_BUDGET_MS 注释）：
       //  1. 独立短预算：超时就放弃解析，直接用域名直连候选，不让整条
@@ -1029,7 +1044,9 @@ export async function dial(options: DialOptions): Promise<DialResult> {
       candidate.source === 'relay'
         ? Math.min(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, RELAY_CONNECT_TIMEOUT_MS)
         : options.timeoutMs ?? DEFAULT_TIMEOUT_MS
-    const connectTimeout = Math.max(200, Math.min(baseTimeout, remaining))
+    // 候选级上限（固定 pin 用更短超时）：同样只缩短不放宽。
+    const cappedTimeout = candidate.timeoutMs ? Math.min(baseTimeout, candidate.timeoutMs) : baseTimeout
+    const connectTimeout = Math.max(200, Math.min(cappedTimeout, remaining))
     // 本次尝试的绝对截止：连接 / TLS / 代理握手 / NAT64 重试共用它，
     // 避免一个候选把「剩余预算」按阶段重复吃掉（见 DialOptions.deadline）。
     const attemptOptions: DialOptions = {
@@ -1227,14 +1244,21 @@ export async function dial(options: DialOptions): Promise<DialResult> {
   const dialRelay = async (): Promise<DialResult | null> => {
     // 固定反代入口（`域名=r:IP`）优先于一切：用户为该域名实测后写死的入口，
     // 不参与粘性哈希与分批竞速；全部失败才回退到常规反代池。
+    //
+    // ⚠️ pin 必须参与健康记忆（P2 #14 的 endpoint-health）：
+    // 早前这里无条件逐条尝试，坏掉的 pin 会在**每个请求**上白等一次完整反代超时
+    // 且永不冷却 —— 用户侧表现为「app 一直转圈」，即使兜底池其实是好的。
+    // 现在：冷却中直接跳过（用池），冷却到期后自动重试（半开），恢复即回到 pin。
     const pinnedRelays = options.pinnedRelays ?? []
     for (const p of pinnedRelays) {
+      if (isEndpointCooled(endpointKey('relay', p.ip, p.port), Date.now())) continue
       try {
         return await attemptOf({
           source: 'relay',
           host: p.ip,
           port: p.port,
           label: `固定反代 ${p.ip}:${p.port}`,
+          timeoutMs: PINNED_RELAY_CONNECT_TIMEOUT_MS,
         })()
       } catch {
         /* 固定入口失败 → 试下一个固定入口，再回退常规池 */
@@ -1381,3 +1405,4 @@ export async function dial(options: DialOptions): Promise<DialResult> {
     throw directErr
   }
 }
+

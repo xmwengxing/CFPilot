@@ -152,6 +152,13 @@ export interface RouteCandidate {
    * 放在候选列表末尾（仅当没有别的选择时才试），避免每次拨号都白等一次超时。
    */
   deprioritized?: boolean
+  /**
+   * 该候选专用的连接超时上限（ms），只缩短不放宽（仍受 dial 预算约束）。
+   *
+   * 用于「固定反代入口（pin）」：pin 失效时必须快速失败把预算留给常规池，
+   * 否则每个请求都要先白等一次完整反代超时（真机：app 表现为一直转圈）。
+   */
+  timeoutMs?: number
   /** 代理候选：目标主机与端口（由代理负责转发） */
   via?: {
     kind: ProxyKind

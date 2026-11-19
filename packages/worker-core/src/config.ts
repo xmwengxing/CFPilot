@@ -76,20 +76,25 @@ export const DEFAULT_CONFIG: UserConfig = {
   // 这 7 个是逐个实测确认「POST api.x.com/graphql 能到达 X 后端」的入口，
   // 与用户配置的 relayPool **按行合并**（用户条目优先，出厂条目补充）。
   relayPool: '155.248.181.189\n64.181.255.215\n23.144.20.184\n137.184.228.85\n159.60.146.82\n216.195.213.76\n107.174.42.185\n216.36.82.11\n216.195.213.107\n216.167.16.112\n216.195.213.132\n23.144.4.243\n38.244.150.113\n151.244.201.207\n194.87.62.139\n192.18.136.255',
-  // 出厂固定反代入口（2026-11-19 调整）：
-  // 早前这里 pin 了 `x.com=151.101.194.146`（固定落地）与
-  // `cloudflare.com=r:45.76.246.192`（固定反代），但这两个 IP 会失效 ——
-  // 一旦失效，被 pin 的域名就完全断掉（真机：cloudflare.com 无法访问）。
-  // 现在**移除这两条固定值**，让 x.com / cloudflare.com 走内置反代池
-  // （relayPool + useBuiltinRelay），池里多条入口可自动轮换，单点失效不再致命。
+  // 出厂**不再内置**任何固定落地 / 固定反代入口（2026-11-19）。
   //
-  // ⚠️ 下面 3 条 `r:` 通配仍保留：手机 app 的 API / 图片域名
-  // （api.x.com、api.twitter.com、pbs.twimg.com 等）解析到 Cloudflare 网段 →
-  // 直连被 TCP Loop 拒绝 → 触发假活检测 + 反代重拨竞速，实测首请求累积
-  // 10~18 秒，超过 app 的网络超时，表现为一直转圈。
-  // `r:` 固定反代入口让这些域名第一条路径就直接按 SNI 转发，跳过整套竞速。
-  // 与用户配置的 pinnedHosts 按域名合并（用户条目优先，见 mergeConfig）。
-  pinnedHosts: '*.x.com=r:155.248.181.189\n*.twitter.com=r:155.248.181.189\n*.twimg.com=r:155.248.181.189',
+  // 早前这里写死了 5 条，其中 3 条是手机 app 的 `r:` 通配
+  // （`*.x.com` / `*.twitter.com` / `*.twimg.com` = r:155.248.181.189）。
+  // 把它们做成出厂默认有两个致命问题：
+  //   1. **全用户共享单点**：IP 一失效，所有部署同时受影响，只能等发新版；
+  //      而客户端 app 的网络超时约 10~15s，每次请求先白等一次 pin 超时
+  //      就足以表现为「一直转圈 / 打不开」。
+  //   2. **其中至少一条本来就不成立**：`pbs.twimg.com` 解析到 Fastly
+  //      （146.75.x），而 `r:` 是把 TLS 按 SNI 转给 **Cloudflare**，
+  //      CF 无法服务 Fastly 承载的域名 —— 这条 pin 无论如何都不会生效。
+  //
+  // 现在改为**建议值**（见 SUGGESTED_PINNED_HOSTS）：默认不生效，
+  // 面板里作为可选推荐展示，用户确认后才写入。这样失效只影响
+  // 「自己填了这条」的用户，且随时可删。
+  //
+  // 另外，pin 现在已纳入熔断（dial.ts）：即使填了失效的 pin，
+  // 连续失败 2 次后进入冷却、直接走池，冷却到期自动半开重试。
+  pinnedHosts: '',
   useBuiltinRelay: true,
   enableTrojan: true,
   enableXhttp: true,
@@ -220,8 +225,7 @@ export function configFromEnv(env: Env): UserConfig {
     resolvePreferred: bool(env.RESOLVE_PREFERRED, DEFAULT_CONFIG.resolvePreferred),
     aggressiveRedial: bool(env.AGGRESSIVE_REDIAL, DEFAULT_CONFIG.aggressiveRedial),
     relayPool: text(env.RELAY_POOL, ''),
-    // 环境变量里若仍带着已移除的失效出厂固定值，同样剔除。
-    pinnedHosts: dropStaleFactoryPins(text(env.PINNED_HOSTS, DEFAULT_CONFIG.pinnedHosts)),
+    pinnedHosts: text(env.PINNED_HOSTS, DEFAULT_CONFIG.pinnedHosts),
     useBuiltinRelay: bool(env.USE_BUILTIN_RELAY, DEFAULT_CONFIG.useBuiltinRelay),
     enableTrojan: bool(env.ENABLE_TROJAN ?? env.TROJAN, DEFAULT_CONFIG.enableTrojan),
     enableXhttp: bool(env.ENABLE_XHTTP ?? env.XHTTP, DEFAULT_CONFIG.enableXhttp),
@@ -274,7 +278,27 @@ function mergeLineList(fallback: string, user: string): string {
  */
 // 已移除的出厂固定值（IP 失效会导致被 pin 域名完全断掉，2026-11-19）。
 // 旧用户的 KV 里可能仍存着它们，读取时主动剔除，避免继续 pin 到失效 IP。
-const STALE_FACTORY_PINS = new Set(['x.com=151.101.194.146', 'cloudflare.com=r:45.76.246.192'])
+const STALE_FACTORY_PINS = new Set([
+  // 2026-11-19 起出厂不再 pin 任何入口；下列是历史出厂值，
+  // 旧用户 KV 里可能仍残留（面板保存时写入过合并值），读取时统一剔除。
+  'x.com=151.101.194.146',
+  'cloudflare.com=r:45.76.246.192',
+  '*.x.com=r:155.248.181.189',
+  '*.twitter.com=r:155.248.181.189',
+  '*.twimg.com=r:155.248.181.189',
+])
+
+/**
+ * 建议值（**默认不生效**）：面板里作为可选推荐展示，用户确认后才写入。
+ *
+ * 为什么不做出厂默认：固定入口是单点，IP 失效即全网受影响，且客户端
+ * 每次请求都要先等一次 pin 超时（表现为 app 一直转圈）。
+ * 实测（2026-11-19）：`pbs.twimg.com` 解析到 Fastly，而 `r:` 只能把 TLS
+ * 按 SNI 转给 Cloudflare，这条对 twimg 的建议本身不成立，只适合
+ * **CF 承载**的域名（如 api.x.com）。
+ */
+export const SUGGESTED_PINNED_HOSTS =
+  '*.x.com=r:155.248.181.189\n*.twitter.com=r:155.248.181.189'
 
 function dropStaleFactoryPins(text: string): string {
   return String(text ?? '')
@@ -285,9 +309,10 @@ function dropStaleFactoryPins(text: string): string {
 }
 
 function mergePinnedHosts(fallback: string, user: string): string {
-  // 先剔除用户 KV 里残留的失效出厂固定值（旧版本内置、后来移除）。
-  const userText = dropStaleFactoryPins(user).trim()
-  if (!userText) return dropStaleFactoryPins(fallback)
+  // ⚠️ 这里**不做**历史出厂值剔除：剔除放在 loadConfig 的一次性迁移里。
+  // 否则用户永远无法把「建议值」重新填回来（会被当成残留删掉）。
+  const userText = String(user ?? '').trim()
+  if (!userText) return String(fallback ?? '')
   const fallbackText = String(fallback ?? '').trim()
   if (!fallbackText) return userText
   const entryKey = (e: { host: string; relay: boolean }): string =>
@@ -402,6 +427,18 @@ export async function loadConfig(store: Store, env: Env): Promise<UserConfig> {
   const config = mergeConfig(fromEnv, stored)
 
   let dirty = false
+  // 一次性迁移：旧版本会把出厂固定入口**合并进用户 KV**（面板保存过就会写入），
+  // 而出厂已不再 pin 任何入口。这里把残留的历史出厂值清掉并写回一次；
+  // 之后用户手动填同样条目不会再被删（merge 层已不做剔除）。
+  // 只在值真的变化时才写入，避免无谓的 KV 写配额消耗。
+  if (raw && typeof stored.pinnedHosts === 'string') {
+    const migrated = dropStaleFactoryPins(stored.pinnedHosts)
+    if (migrated !== stored.pinnedHosts.trim()) {
+      stored = { ...stored, pinnedHosts: migrated }
+      config.pinnedHosts = migrated
+      dirty = true
+    }
+  }
   // ⚠️ 只有**持久化存储（KV）**才允许自动生成凭据并写回：
   // 生产上未绑定 KV 时 `createStore` 每个请求都 `new MemoryStore()`，
   // 「生成并写回」等于每个请求/每个隔离体都得到不同的随机 UUID ——
@@ -604,3 +641,5 @@ export async function saveDomainLibrary(store: Store, domains: string[]): Promis
   }
   await store.put(POOL_DOMAIN_KEY, cleaned.join('\n'))
 }
+
+

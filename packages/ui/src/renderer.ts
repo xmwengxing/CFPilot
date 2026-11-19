@@ -4767,7 +4767,7 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
   /* ------------------------------------------------------------------ */
 
   /** 当前选中的优选方向 */
-  let scanTab: 'entry' | 'relay' | 'task' = 'entry'
+  let scanTab: 'entry' | 'relay' | 'mesh' | 'task' = 'entry'
   /** 候选来源：默认（网段采样 / 内置清单）或自定义列表 */
   let sourceMode: 'default' | 'custom' = 'default'
   /** 反代体检「全通可取」的 IP（回填按钮用） */
@@ -5169,6 +5169,184 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
       }
     })
 
+    // ---- 组网入口优选（盲中继专用探测）----
+    //
+    // 与「入口优选」共用一套探测原语，但目标是盲中继域名 + Worker 房间路径，
+    // 判据是「能否 101」+ 握手 RTT。结果只用于组网的 WSS 入口，不进订阅。
+    type MeshScanRow = {
+      ip: string
+      port: number
+      ok: boolean
+      latencyMs: number
+      colo?: string
+      status?: number
+      attempts: number
+      successes: number
+      error?: string
+    }
+    let meshScanRows: MeshScanRow[] = []
+    let meshScanBusy = false
+
+    const meshScanKey = (r: MeshScanRow): string => (r.port === 443 ? r.ip : `${r.ip}:${r.port}`)
+
+    const renderMeshScanTable = (): void => {
+      const table = document.getElementById('meshScanTable') as HTMLTableElement | null
+      const body = document.getElementById('meshScanBody')
+      if (!table || !body) return
+      body.textContent = ''
+      if (meshScanRows.length === 0) {
+        table.hidden = true
+        return
+      }
+      table.hidden = false
+      meshScanRows.forEach((r, i) => {
+        const tr = document.createElement('tr')
+        const cells = [
+          String(i + 1),
+          meshScanKey(r),
+          r.colo || '—',
+          r.ok ? String(r.latencyMs) : '—',
+          `${r.successes}/${r.attempts}`,
+          r.ok ? '可用' : r.status ? `HTTP ${r.status}` : r.error || '失败',
+        ]
+        cells.forEach((text, idx) => {
+          const td = document.createElement('td')
+          td.textContent = text
+          if (idx === 5 && !r.ok) td.style.color = 'var(--muted)'
+          tr.append(td)
+        })
+        body.append(tr)
+      })
+      const best = meshScanRows.find((r) => r.ok)
+      const apply = document.getElementById('btnMeshScanApply') as HTMLButtonElement | null
+      if (apply) {
+        apply.disabled = !best
+        apply.dataset.ip = best ? meshScanKey(best) : ''
+      }
+    }
+
+    const runMeshScan = async (): Promise<void> => {
+      if (meshScanBusy) return
+      const domain = ($('meshScanDomain')?.value || '').trim()
+      const room = ($('meshScanRoom')?.value || '').trim()
+      const status = document.getElementById('meshScanStatus')
+      if (!domain) {
+        log('请先填写盲中继域名', 'warn')
+        return
+      }
+      if (!/^[0-9a-fA-F]{8,64}$/.test(room)) {
+        log('房间名需为 8-64 位十六进制', 'warn')
+        return
+      }
+      const rawCandidates =
+        (document.getElementById('meshScanCandidates') as HTMLTextAreaElement | null)?.value || ''
+      const candidates = rawCandidates
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean)
+      const btn = document.getElementById('btnMeshScanRun') as HTMLButtonElement | null
+      meshScanBusy = true
+      if (btn) {
+        btn.disabled = true
+        btn.textContent = '探测中…'
+      }
+      if (status) status.textContent = '正在探测：每个候选都会真实进一次房间（一次性标识），请稍候…'
+      try {
+        const resp = await fetch('/api/mesh/relay-scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({
+            candidates,
+            relayDomain: domain,
+            room,
+            attempts: Number($('meshScanAttempts')?.value || 1),
+            maxCandidates: Number($('meshScanMax')?.value || 20),
+            timeoutMs: Number($('meshScanTimeout')?.value || 6000),
+          }),
+        })
+        const data = await resp.json().catch(() => ({}))
+        if (!resp.ok || data.ok === false) {
+          const msg = String(data.error || `HTTP ${resp.status}`)
+          if (status) status.textContent = '探测失败：' + msg
+          log('组网入口探测失败：' + msg, 'err')
+          return
+        }
+        meshScanRows = (data.results || []) as MeshScanRow[]
+        renderMeshScanTable()
+        const summary = `可用 ${data.usable} / ${data.total}，耗时 ${Math.round(Number(data.elapsedMs) || 0)}ms`
+        if (status) status.textContent = summary
+        log('组网入口探测完成：' + summary, 'ok')
+        try {
+          localStorage.setItem(
+            'cfpilot-mesh-entry-scan',
+            JSON.stringify({ at: Date.now(), domain, room, rows: meshScanRows })
+          )
+        } catch {
+          /* 存储不可用不阻断 */
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (status) status.textContent = '探测失败：' + msg
+        log('组网入口探测失败：' + msg, 'err')
+      } finally {
+        meshScanBusy = false
+        if (btn) {
+          btn.disabled = false
+          btn.textContent = '开始探测'
+        }
+      }
+    }
+
+    document.getElementById('btnMeshScanRun')?.addEventListener('click', () => {
+      void runMeshScan()
+    })
+
+    document.getElementById('btnMeshScanFillFromConfig')?.addEventListener('click', () => {
+      const d = ($('meshRelayDomain')?.value || '').trim()
+      const r = ($('meshRelayRoom')?.value || '').trim()
+      const de = $('meshScanDomain')
+      const re = $('meshScanRoom')
+      if (de && d) de.value = d
+      if (re && r) re.value = r
+      if (!d || !r) log('组网页还没填盲中继域名或房间名', 'warn')
+      else log('已从组网配置读取盲中继域名与房间名', 'ok')
+    })
+
+    document.getElementById('btnMeshScanApply')?.addEventListener('click', () => {
+      const btn = document.getElementById('btnMeshScanApply') as HTMLButtonElement | null
+      const ip = btn?.dataset.ip || ''
+      if (!ip) return
+      const el = $('meshRelayConnectIp')
+      if (el) el.value = ip
+      const sel = $('meshRelayIpPick') as unknown as HTMLSelectElement | null
+      if (sel) sel.value = ip
+      log('已填入组网配置的 WSS 入口 IP：' + ip, 'ok')
+    })
+
+    // 恢复上次探测结果；没有历史时用当前组网配置预填目标，省一次手动输入
+    try {
+      const rawScan = localStorage.getItem('cfpilot-mesh-entry-scan')
+      if (rawScan) {
+        const saved = JSON.parse(rawScan) as { domain?: string; room?: string; rows?: MeshScanRow[] }
+        const de = $('meshScanDomain')
+        const re = $('meshScanRoom')
+        if (de && saved.domain) de.value = saved.domain
+        if (re && saved.room) re.value = saved.room
+        meshScanRows = Array.isArray(saved.rows) ? saved.rows : []
+        renderMeshScanTable()
+      } else {
+        const de = $('meshScanDomain')
+        const re = $('meshScanRoom')
+        const d = ($('meshRelayDomain')?.value || '').trim()
+        const r = ($('meshRelayRoom')?.value || '').trim()
+        if (de && d) de.value = d
+        if (re && r) re.value = r
+      }
+    } catch {
+      /* 忽略损坏的本地结果 */
+    }
+
     /**
      * 用现有优选结果填充「WSS 入口 IP」下拉。
      *
@@ -5191,6 +5369,10 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
         opt.textContent = group + ' · ' + ip + (note ? '（' + note + '）' : '')
         sel.append(opt)
       }
+      // 组网入口探测结果优先：这是唯一对盲中继口径真实的数据（真的打房间路径 + 101 + RTT）
+      for (const r of meshScanRows.filter((x) => x.ok).slice(0, 20)) {
+        add(meshScanKey(r), '组网入口', [r.colo, `${r.latencyMs}ms`].filter(Boolean).join(' '))
+      }
       try {
         const res = await window.cfpilot.getScanHistory()
         const sessions = (res && res.sessions) || []
@@ -5202,7 +5384,7 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
             seen.add(e.ip)
             const where = e.colo || e.city || ''
             const ms = Math.round(Number(e.latency) || 0)
-            add(e.ip, '入口优选', [where, ms ? ms + 'ms' : ''].filter(Boolean).join(' '))
+            add(e.ip, '通用入口', [where, ms ? ms + 'ms' : '', '非盲中继实测'].filter(Boolean).join(' '))
           }
         }
       } catch {
@@ -5489,8 +5671,14 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
       ) as HTMLButtonElement | null
       if (!btn) return
       const raw = btn.dataset.scanTab
-      const next: 'entry' | 'relay' | 'task' =
-        raw === 'relay' ? 'relay' : raw === 'task' ? 'task' : 'entry'
+      const next: 'entry' | 'relay' | 'mesh' | 'task' =
+        raw === 'relay'
+          ? 'relay'
+          : raw === 'mesh'
+            ? 'mesh'
+            : raw === 'task'
+              ? 'task'
+              : 'entry'
       if (next === scanTab) return
       scanTab = next
       for (const b of nav.querySelectorAll('button[data-scan-tab]')) {
@@ -5498,16 +5686,18 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
       }
       const entryPanel = document.getElementById('scanPanelEntry')
       const relayPanel = document.getElementById('scanPanelRelay')
+      const meshPanel = document.getElementById('scanPanelMesh')
       const taskPanel = document.getElementById('scanPanelTask')
       if (entryPanel) entryPanel.hidden = next !== 'entry'
       if (relayPanel) relayPanel.hidden = next !== 'relay'
+      if (meshPanel) meshPanel.hidden = next !== 'mesh'
       if (taskPanel) taskPanel.hidden = next !== 'task'
 
       // 「① 数据面与候选来源」在**定时任务页签**下隐藏：
       // 定时任务自己会从账号的部署清单取数据面域名与 WS 路径，
       // 让用户在这里填一遍只会误导（填了也不生效）。
       const sourceCard = document.getElementById('sourceCard')
-      if (sourceCard) sourceCard.hidden = next === 'task'
+      if (sourceCard) sourceCard.hidden = next === 'task' || next === 'mesh'
 
       // 入口方向的两张产物卡（结果 / 自适应对照）在反代页签下**收起**：
       // 它们只跟入口优选有关，留在反代页里既占地方又容易看错。
@@ -7632,14 +7822,26 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
         const fillBtn = $('btnFillMeshConfig')
         // 「填入组网配置」仅 +mesh 版有意义（普通版部署盲中继也不组网）
         if (fillBtn && !enabled) fillBtn.hidden = true
+        // 「组网入口」页签同理由：普通版没有 /api/mesh/relay-scan
+        const meshScanTab = document.querySelector(
+          'button[data-scan-tab="mesh"]'
+        ) as HTMLElement | null
+        if (meshScanTab) meshScanTab.hidden = !enabled
       } catch {
         /* 端点不可用时（旧版外壳）保守隐藏组网入口 */
         const navBtn = document.querySelector('#nav button[data-page="mesh"]') as HTMLElement | null
         if (navBtn) navBtn.hidden = true
+        const meshScanTab = document.querySelector(
+          'button[data-scan-tab="mesh"]'
+        ) as HTMLElement | null
+        if (meshScanTab) meshScanTab.hidden = true
       }
     })()
   })
 })()
+
+
+
 
 
 

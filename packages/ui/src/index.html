@@ -1980,6 +1980,7 @@
           <div class="subtabs" id="scanTabs">
             <button type="button" class="active" data-scan-tab="entry">入口优选</button>
             <button type="button" data-scan-tab="relay">反代优选</button>
+            <button type="button" data-scan-tab="mesh">组网入口</button>
             <button type="button" data-scan-tab="task">定时优选任务</button>
           </div>
 
@@ -2254,6 +2255,63 @@
             </div>
           </div>
           </div><!-- /scanPanelEntry -->
+
+          <!--
+            组网入口优选（盲中继专用）
+            与「入口优选」的区别不是候选来源，而是**探测目标与判据**：
+              · 目标是盲中继域名 + Worker 房间路径 /mesh/<room>?peer_id=…
+              · 判据是「能否 101」+ 握手 RTT（组网是长连接信令，延迟比带宽重要）
+            每个候选都用一次性 peer_id 进房间，不会把正在运行的节点踢下线。
+          -->
+          <div id="scanPanelMesh" hidden>
+            <div class="card">
+              <h2><span class="dot"></span>🛰️ 组网入口优选（盲中继专用）</h2>
+              <p class="desc">
+                对候选入口做<b>盲中继真实探测</b>：TLS（SNI 为盲中继域名）→ WebSocket 升级到 Worker 房间路径，
+                只保留能 101 且握手最快的入口。每个候选使用一次性探测标识，不影响正在运行的组网。
+              </p>
+              <div class="grid">
+                <div class="field span-2">
+                  <label title="与「组网」页填的盲中继域名保持一致，TLS SNI 与 Host 都用它。">盲中继域名</label>
+                  <div class="field-inline">
+                    <input type="text" id="meshScanDomain" placeholder="如 edge.example.com" />
+                    <button class="btn btn-ghost" id="btnMeshScanFillFromConfig">从组网配置读取</button>
+                  </div>
+                </div>
+                <div class="field">
+                  <label title="8-64 位十六进制，必须与组网页填的房间名一致，否则 Worker 会把连接放到别的房间。">房间名</label>
+                  <input type="text" id="meshScanRoom" placeholder="如 0123456789abcdef" />
+                </div>
+                <div class="field">
+                  <label title="每个候选测几轮。大于 1 可以看出稳定性（偶发失败的入口不要选）。">每候选尝试次数</label>
+                  <input type="number" id="meshScanAttempts" value="1" min="1" max="5" />
+                </div>
+                <div class="field">
+                  <label title="每个候选都会真的进一次房间，不要设太大，避免给 Worker 和房间制造压力。">候选上限</label>
+                  <input type="number" id="meshScanMax" value="20" min="1" max="40" />
+                </div>
+                <div class="field">
+                  <label title="单条候选的总超时。跨境链路通常 2~8 秒。">单条超时(ms)</label>
+                  <input type="number" id="meshScanTimeout" value="6000" min="1500" max="15000" step="500" />
+                </div>
+              </div>
+              <div class="field">
+                <label title="留空则使用最近一次「入口优选」历史的 IP。支持 IP、IP:端口、[IPv6]:端口。">候选入口（留空 = 取入口优选历史）</label>
+                <textarea id="meshScanCandidates" placeholder="每行一个，例如&#10;104.16.1.1&#10;1.2.3.4:2053"></textarea>
+              </div>
+              <div class="btn-row">
+                <button class="btn btn-primary" id="btnMeshScanRun">开始探测</button>
+                <button class="btn btn-ghost" id="btnMeshScanApply" disabled>填入组网配置</button>
+              </div>
+              <p class="tip" id="meshScanStatus">尚未探测</p>
+              <table id="meshScanTable" hidden>
+                <thead>
+                  <tr><th>#</th><th>入口</th><th>机房</th><th>握手 RTT(ms)</th><th>成功/尝试</th><th>状态</th></tr>
+                </thead>
+                <tbody id="meshScanBody"></tbody>
+              </table>
+            </div>
+          </div>
 
           <!-- ============ 反代优选（出站链路体检） ============ -->
           <div id="scanPanelRelay" hidden>
@@ -3083,6 +3141,7 @@
   <script src="./renderer.js"></script>
 </body>
 </html>
+
 
 
 

@@ -68,9 +68,16 @@ func (w *WsUrl) WithConnectIP(ip string) *WsUrl {
 }
 
 // tcpTarget 返回 TCP 连接目标（connect_ip 优先）。
+//
+// connect_ip 允许带端口：第三方反代入口常监听 2053 / 8443 / 2096 等非 443 端口，
+// 只接受裸 IP 会让这些入口无法使用（旧实现硬拼 443，填 IP:port 会拼出非法地址）。
+// 裸 IP / IPv6 字面量仍按 w.Port 处理；IPv6 要带端口时必须写成 [addr]:port。
 func (w *WsUrl) tcpTarget() string {
 	host := w.Host
 	if w.ConnectIP != "" {
+		if h, p, err := net.SplitHostPort(w.ConnectIP); err == nil && h != "" && p != "" {
+			return net.JoinHostPort(h, p)
+		}
 		host = w.ConnectIP
 	}
 	return net.JoinHostPort(host, strconv.Itoa(w.Port))

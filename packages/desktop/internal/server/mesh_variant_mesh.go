@@ -3,6 +3,7 @@
 package server
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/mesh"
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/scan"
 )
 
 // meshdAddr 是提权守护进程的本地 API 地址（安装时注册为服务）。
@@ -34,6 +36,99 @@ func (s *Server) registerMeshControlRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mesh/identity", s.guard(s.handleMeshIdentity))
 	mux.HandleFunc("/api/mesh/invite/build", s.guard(s.handleMeshInviteBuild))
 	mux.HandleFunc("/api/mesh/invite/parse", s.guard(s.handleMeshInviteParse))
+	// 组网入口优选：对候选做「盲中继专用」WSS 探测（打房间路径、一次性 peer_id）。
+	mux.HandleFunc("/api/mesh/relay-scan", s.guard(s.handleMeshRelayScan))
+}
+
+// handleMeshRelayScan 对候选入口做盲中继专用探测。
+//
+// 与「入口优选」的区别：目标是盲中继域名 + Worker 房间路径 /mesh/<room>?peer_id=…，
+// 判据是「能否 101」+ 握手 RTT。候选留空时取最近一次入口优选历史的 IP。
+//
+// 注意：每个候选都会真的向 Worker 发起一次 WS 升级（用一次性 peer_id，不碰真实节点），
+// 所以候选数有上限（默认 20）、并发有限（默认 4）。
+func (s *Server) handleMeshRelayScan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "仅支持 POST"})
+		return
+	}
+	var req struct {
+		Candidates    []string `json:"candidates"`
+		RelayDomain   string   `json:"relayDomain"`
+		Room          string   `json:"room"`
+		Port          int      `json:"port"`
+		TimeoutMs     int      `json:"timeoutMs"`
+		MaxCandidates int      `json:"maxCandidates"`
+		Attempts      int      `json:"attempts"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请求体不是合法 JSON"})
+		return
+	}
+	if strings.TrimSpace(req.RelayDomain) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请先填写盲中继域名"})
+		return
+	}
+
+	candidates := req.Candidates
+	if len(candidates) == 0 {
+		// 缺省候选：最近一次「入口优选」历史里的 IP（跳过组网入口自己）
+		if sessions, err := s.historyStore().Load(); err == nil {
+			for _, sess := range sessions {
+				if sess.Source == "mesh" {
+					continue
+				}
+				for _, e := range sess.Entries {
+					if e.IP != "" {
+						candidates = append(candidates, e.IP)
+					}
+					if len(candidates) >= 30 {
+						break
+					}
+				}
+				if len(candidates) > 0 {
+					break
+				}
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "没有候选入口：请先跑一次「入口优选」，或在候选框里手动粘贴 IP",
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 150*time.Second)
+	defer cancel()
+	sum, err := scan.RunMeshEntry(ctx, scan.MeshEntryOptions{
+		Candidates:    candidates,
+		RelayDomain:   strings.TrimSpace(req.RelayDomain),
+		Room:          strings.TrimSpace(req.Room),
+		DefaultPort:   req.Port,
+		TimeoutMs:     req.TimeoutMs,
+		MaxCandidates: req.MaxCandidates,
+		Attempts:      req.Attempts,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	ok := 0
+	for _, it := range sum.Results {
+		if it.OK {
+			ok++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":        true,
+		"results":   sum.Results,
+		"relayHost": sum.RelayHost,
+		"room":      sum.Room,
+		"elapsedMs": sum.ElapsedMs,
+		"usable":    ok,
+		"total":     len(sum.Results),
+	})
 }
 
 // handleMeshIdentity 读取/生成本机 mesh 身份（NodeId + 隧道公钥），持久化到数据目录。
@@ -158,5 +253,3 @@ func (s *Server) handleMeshEnabled(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"enabled": true})
 }
-
-

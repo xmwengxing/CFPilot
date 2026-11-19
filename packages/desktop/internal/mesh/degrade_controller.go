@@ -193,7 +193,10 @@ func (c *DegradeController) switchToWSS(ctx context.Context, id NodeID) error {
 	if c.relayDomain == "" || c.relayRoom == "" {
 		return fmt.Errorf("未配置盲中继域名/房间，无法降级")
 	}
-	url, err := RelayRoomURL(c.relayDomain, c.relayRoom, fmt.Sprintf("%016x", id))
+	// ⚠️ peer_id 必须是**本机** NodeID：它标识「这条 WS 连接是谁」。
+	// 早前写成对端 id，两端会用同一个 peer_id 入房 ⇒ Worker 的「同 peer 踢旧连」
+	// 会互相踢掉，中继永远不稳定。帧的目标由 32B 头里的 dst 决定，不靠入房 id。
+	url, err := RelayRoomURL(c.relayDomain, c.relayRoom, fmt.Sprintf("%016x", c.selfID))
 	if err != nil {
 		return err
 	}
@@ -271,4 +274,5 @@ func (c *DegradeController) Kind(id NodeID) TransportKind {
 	}
 	return TransportUDP
 }
+
 

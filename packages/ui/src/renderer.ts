@@ -4938,6 +4938,10 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
         monitoring_token: ($('meshMonitorToken')?.value || '').trim(),
         monitoring_interval_ms: Math.max(5, Number($('meshMonitorInterval')?.value || 30)) * 1000,
         monitor_alias: ($('meshMonitorAlias')?.value || '').trim(),
+        // 盲中继配置：跨 NAT 必需，随链接带给 B
+        relay_domain: ($('meshRelayDomain')?.value || '').trim(),
+        relay_room: ($('meshRelayRoom')?.value || '').trim(),
+        relay_connect_ip: ($('meshRelayConnectIp')?.value || '').trim(),
       }
       if (!payload.network || !payload.psk) {
         log('请先填写网络名与 PSK 再生成邀请链接', 'warn')
@@ -5059,6 +5063,9 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
             const el = $('meshMonitorInterval'); if (el) el.value = String(Math.max(5, Math.round(Number(id.monitoringIntervalMs) / 1000)))
           }
           put('meshMonitorAlias', id.monitorAlias || '')
+          put('meshRelayDomain', id.relayDomain || '')
+          put('meshRelayRoom', id.relayRoom || '')
+          put('meshRelayConnectIp', id.relayConnectIp || '')
           // 建议虚拟 IP 自动填入本机（若未填）
           if (id.suggestedIp && !($('meshVirtualIp')?.value || '').trim()) put('meshVirtualIp', id.suggestedIp)
           // 把发起方加为对端（若尚未添加）
@@ -7546,6 +7553,7 @@ import { MeshTopology, type TopoNode, type TopoPulse } from './mesh-topology'
     })()
   })
 })()
+
 
 
 

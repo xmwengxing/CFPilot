@@ -119,6 +119,9 @@ func (s *Server) handleMeshInviteParse(w http.ResponseWriter, r *http.Request) {
 		"monitoringToken":      p.MonitorToken,
 		"monitoringIntervalMs": p.MonitorIntervalMS,
 		"monitorAlias":         p.MonitorAlias,
+		"relayDomain":          p.RelayDomain,
+		"relayRoom":            p.RelayRoom,
+		"relayConnectIp":       p.RelayConnectIP,
 		"warning":              mesh.SensitiveWarning(),
 	})
 }
@@ -155,4 +158,5 @@ func (s *Server) handleMeshEnabled(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"enabled": true})
 }
+
 

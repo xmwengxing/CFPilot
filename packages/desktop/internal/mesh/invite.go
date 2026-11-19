@@ -34,6 +34,12 @@ type InvitePayload struct {
 	MonitorToken        string `json:"monitoring_token,omitempty"`
 	MonitorIntervalMS   int64  `json:"monitoring_interval_ms,omitempty"`
 	MonitorAlias        string `json:"monitor_alias,omitempty"`
+
+	// 盲中继配置（可选）：跨 NAT 时对端需要知道同一条中继与房间，
+	// 否则只能直连。邀请链接一并带上，B 无需手抄。
+	RelayDomain    string `json:"relay_domain,omitempty"`
+	RelayRoom      string `json:"relay_room,omitempty"`
+	RelayConnectIP string `json:"relay_connect_ip,omitempty"`
 }
 
 // ReachableListenAddr 把「监听地址」换成对端**可直连**的地址。
@@ -181,4 +187,5 @@ func SensitiveWarning() string {
 	return "邀请链接里包含明文的网络密钥（仅 base64 编码，非加密）。" +
 		"泄露=他人可加入你的网络，只能全网轮换 PSK。请勿发到公开群/日志/issue。"
 }
+
 

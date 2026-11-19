@@ -181,27 +181,28 @@ MobiHop 在干净环境（去 easytier）实测确认：同 LAN 双向 20/20、�
 3. `via` 映射：MobiHop 只有 direct/relay；CFPilot 的 wss 作为链路类型保留，
    但打洞判据不再依赖 via（观察通道与链路无关）。
 
-### 6.6 服务器中继（专用 UDP 中继）验证
+### 6.6 服务器中继（专用 UDP 中继）验证 — 最终结论
 
-在阿里云 ECS（47.104.173.139，内网 172.30.171.192）上启动
-`mobihop-relay --listen 0.0.0.0:51820 --token ...`（Token 模式，
-node_id=`8ea88f9c44e6e219`），本机 A 配置 `RelayServers` 后，逐层排查：
+**CFPilot 发的 Register 帧完全合法，问题在 ECS 上的 mobihop-relay 程序本身。**
+
+逐层铁证（2026-11-19）：
 
 | 层 | 结果 |
 |---|---|
-| 本机配置解析 | `专用服务器中继已启用（1 台）` — 正常 |
-| 阿里云安全组 | 用户确认已放行 TCP/UDP 51820（0.0.0.0） |
-| ECS 系统 firewalld | 已放行 51820/udp；手工插入的 ACCEPT 规则命中 7 包 |
-| **tcpdump（ECS any）** | **抓到了**本机 UDP 51820 包（源 124.72.58.142 → 172.30.171.192），包确实到达 ECS 网卡 |
-| **中继 socket** | `rx_packets=0`、`reject_parse=0` — 包过了 iptables 却没交付 socket |
-| rp_filter / 路由 | 全 0 / 正常；51820 只有中继进程监听 |
+| 本机配置 | 正式 meshd 日志「专用服务器中继已启用（1 台）」— 正常 |
+| 安全组 / 公网 | tcpdump 在 ECS 抓到本机 UDP 51820 包 — 通 |
+| **Python listener 绑定 51820** | **收到** CFPilot 正式编码器发出的完整 Register 帧（379B/3 帧），帧头 `4d 02 06 00 10 00 00 61`（magic/version2/RelayMgmt/ttl16/payload97），payload 为 named MessagePack `{"Register":{...}}` — **格式完全正确** |
+| **mobihop-relay 绑定同一 51820** | `rx_packets=0`、`control_rx_packets=0`、`reject_parse=0` — **完全没收到** |
 
-结论：安全组、公网路径、iptables 都通（抓包证实包到网卡），但包未交付中继 socket。
-这台 ECS 同时跑着 Docker 网桥、easytier tun0、多个 netns 网桥与 firewalld rich rules，
-是该**测试机复杂网络环境**导致，非 CFPilot 代码问题（注册帧字段与 token 摘要有单测，
-本机发包到达 ECS 网卡已抓包证实）。
+关键对照：**同一个端口、同一台 ECS、同样的包，Python socket 能收到，mobihop-relay 收不到。**
+⇒ 这排除了 CFPilot 代码、帧格式、安全组、系统防火墙、路由等所有因素，
+唯一差异是 mobihop-relay 这个二进制在此环境的收包路径（其 UdpHub/ingress filter/
+tokio runtime 或该二进制与当前环境不匹配）。
 
-⇒ 服务器中继端到端验收需换**干净单网卡环境**部署中继；CFPilot 代码路径已完备。
+⇒ 对照用户反馈「easytier 在这台 ECS 能通、MobiHop 之前测试成功」：easytier 是不同程序、
+不同端口/机制，其成功不能证明 mobihop-relay 在此实例可用。CFPilot 已按 MobiHop wire
+格式逐字段对齐并抓包验证发出的帧合法；要让服务器中继端到端跑通，需换一个
+mobihop-relay 能正常收包的部署环境，或排查该 mobihop-relay 二进制（版本/runtime）。
 ## 7. 已知限制（不是 bug）
 
 - 握手窗口内的第一个 IP 包会被丢弃（未实现拨号期排队），表现为新建会话时首包丢失。
@@ -216,6 +217,7 @@ node_id=`8ea88f9c44e6e219`），本机 A 配置 `RelayServers` 后，逐层排�
   （同一局域网、公网 IP+端口映射、或覆盖网）时才能直连。通过 easytier 跑通不等于有 P2P
   能力 —— 那是覆盖网提供了可达地址。要验证真实 P2P，必须去掉覆盖网，
   在两台真实机器上测试（同 LAN 或公网端口映射）。
+
 
 
 

@@ -167,7 +167,6 @@ func srvForRemote(servers []RelayServerConfig, remote *net.UDPAddr) RelayServerC
 	return RelayServerConfig{}
 }
 
-// spawnRelayClients 后台启动所有中继的注册/心跳循环。返回是否至少启用了一台。
 func spawnRelayClients(ctx context.Context, hub *UdpHub, selfID NodeID, servers []RelayServerConfig, verbose bool) bool {
 	if hub == nil || len(servers) == 0 {
 		return false

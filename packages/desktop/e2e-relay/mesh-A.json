@@ -1,0 +1,44 @@
+{
+  "NodeID": "83561adb398fd87f",
+  "NetworkName": "e2e-net",
+  "PSK": "e2e-psk-1234567890",
+  "TunnelPrivate": "ERERERERERERERERERERERERERERERERERERERERERE=",
+  "IdentitySeed": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+  "Listen": "0.0.0.0:51820",
+  "VirtualIP": "10.97.0.1",
+  "MTU": 1400,
+  "Peers": [
+    {
+      "nodeId": "1eed29b1654fbca9",
+      "addr": "192.168.31.139:51820",
+      "staticPub": "0faa684ed28867b97f4a6a2dee5df8ce974e76b7018e3f22a1c4cf2678570f20",
+      "virtualIp": "10.97.0.2"
+    }
+  ],
+  "RelayDomain": "",
+  "RelayRoom": "",
+  "RelayConnectIP": "",
+  "EnableDegrade": false,
+  "DisablePunch": false,
+  "TunName": "",
+  "MonitoringEndpoint": "",
+  "MonitoringToken": "",
+  "MonitoringIntervalMS": 30000,
+  "MonitoringAlias": "",
+  "ClientVersion": "",
+  "StunServers": [
+    "stun.cloudflare.com:3478",
+    "stun.l.google.com:19302",
+    "stun.miwifi.com:3478",
+    "stun.qq.com:3478"
+  ],
+  "StunProbeTimeoutMS": 1500,
+  "relayServers": [
+    {
+      "addr": "47.104.173.139:51820",
+      "token": "cfpilot-e2e-token",
+      "nodeId": "8ea88f9c44e6e219"
+    }
+  ],
+  "verbose": true
+}

@@ -1,0 +1,8 @@
+2026/11/19 17:59:44.245808 [meshd] 启动（版本 0.50.0，windows/amd64）
+2026/11/19 17:59:44.421323 [meshd] 本地 API 就绪: http://127.0.0.1:19727
+2026/11/19 17:59:46.882718 [mesh] 专用服务器中继已启用（1 台）
+2026/11/19 17:59:46.927602 [mesh] 节点已启动 node=83561adb vip=10.97.0.1 listen=0.0.0.0:51820 peers=1
+2026/11/19 17:59:47.123392 [meshd] 组网已启动 node=83561adb398fd87f vip=10.97.0.1
+2026/11/19 17:59:49.938126 [mesh] stats tx=0 rx=0 txDrop=0 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=2,pong=0,rtt=0,loss=0.00,samples=2,bad=0,good=0,cool=0,kind=?
+2026/11/19 17:59:50.268521 [mesh] 丢弃出站包：目的 10.97.0.255 不在虚拟 IP 表
+2026/11/19 17:59:52.952479 [mesh] stats tx=0 rx=0 txDrop=12 rxDrop=0 handshakeOK=0 probe[1eed29b1]:sent=5,pong=0,rtt=0,loss=1.00,samples=5,bad=0,good=0,cool=0,kind=?

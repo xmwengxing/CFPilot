@@ -25,8 +25,8 @@ const requestedTargets = (process.env.CFPILOT_MESH_BUILD_TARGETS || 'windows,lin
   .map((target) => target.trim())
   .filter(Boolean)
 
-function has(cmd) {
-  try { execFileSync(cmd, ['--version'], { stdio: 'ignore' }); return true } catch { return false }
+function has(cmd, args = ['--version']) {
+  try { execFileSync(cmd, args, { stdio: 'ignore' }); return true } catch { return false }
 }
 
 function hasDpkgDeb() {
@@ -73,10 +73,13 @@ function buildDeb(debRoot, debOut) {
 
 /** 找 makensis：PATH → 常见安装路径（Windows）。找不到返回 null。 */
 function findMakensis() {
-  if (has('makensis')) return 'makensis'
+  // NSIS 3.x 的版本参数是 -VERSION（单横线大写），不是 --version；
+  // Linux 下传 --version 返回非零退出码，会误判未找到 makensis。
+  if (has('makensis', ['-VERSION']) || has('makensis', ['/VERSION'])) return 'makensis'
   for (const p of [
-    'C:\\Program Files (x86)\\NSIS\\makensis.exe',
-    'C:\\Program Files\\NSIS\\makensis.exe',
+    '/usr/bin/makensis',
+    'C:/Program Files (x86)/NSIS/makensis.exe',
+    'C:/Program Files/NSIS/makensis.exe',
   ]) {
     if (existsSync(p)) return p
   }

@@ -8,7 +8,7 @@ RequestExecutionLevel admin
 
 ; 内置简体中文语言文件（不依赖系统 NSIS 是否带 Contrib/Language files，
 ; Ubuntu apt 的 nsis 包路径与 Windows 不同，内置后 CI/本机行为一致）。
-!addincludedir "${__FILEDIR__}\nsis-lang"
+!addincludedir "${__FILEDIR__}/nsis-lang"
 !include "MUI2.nsh"
 
 !define APP_NAME "CFPilot Mesh"

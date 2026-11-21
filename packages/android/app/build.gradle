@@ -24,7 +24,9 @@ android {
         versionName new groovy.json.JsonSlurper()
                 .parseText(new File(rootDir, '../../package.json').text)
                 .version
-        versionCode Integer.parseInt(versionName.replaceAll('[^0-9]', '').padLeft(6, '0'))
+        // 只取主版本三段数字生成 versionCode（兼容 0.60.0-beta.1 等预发布后缀，避免拼成超范围整数）
+        def verCore = (versionName =~ /^(\d+)\.(\d+)\.(\d+)/)
+        versionCode verCore ? (verCore[0][1].toInteger() * 10000 + verCore[0][2].toInteger() * 100 + verCore[0][3].toInteger()) : 1
     }
 
     // ⚠️ 这里**不声明** ndk { abiFilters } / ndkVersion。

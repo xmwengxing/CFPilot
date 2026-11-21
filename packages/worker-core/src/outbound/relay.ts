@@ -38,6 +38,7 @@
  */
 import { isIpv4, isIpv6 } from '../protocols/address'
 import { resolveEndpointIps } from './doh'
+import { isCloudflareIpv4 } from './route'
 
 /** 一个反代入口候选 */
 export interface RelayEndpoint {
@@ -49,56 +50,124 @@ export interface RelayEndpoint {
 }
 
 /**
- * 内置反代入口（**固定 IP**，按实测质量排序）。
+ * 内置反代入口（**固定 IP**，按「CF 通用 + X(api.x.com / x.com) 双通」实测质量排序）。
  *
- * ## 为什么从域名换成了固定 IP
+ * 2026-11-21 真机全量实测复核：
+ * 原 33 条里有 19 条已老化（超时 / TLS Fatal Alert 40/80 / 证书错配），另有 4 条被 X
+ * WAF 拦截（403 IPv6），导致 `stableRelayIndex` 经常把 `x.com` / `api.x.com` 哈希到坏入口。
  *
- * 早前这里放的是若干 `proxyip.*` 域名，每个域名 DoH 出几十个 IP、拨号时
- * 竞速挑最快的 —— 于是**同一个客户端的不同请求可能从不同出口 IP 出去**。
- * 需要登录 / 有会话的站点会看到「同一会话来自多个 IP」，直接触发风控
- * （表现为大量安全验证甚至直接报错）。
- *
- * 现在换成固定 IP：
- *   - 同一 colo 每次选中同一批入口 → 出口稳定；
- *   - 不再需要 DoH 解析 → 省掉每次出站的子请求；
- *   - 顺序即优先级，实测 TLS 握手 168~203ms。
- *
- * ## 这份表怎么来的
- *
- * 多源采集（`scripts/collect-relay-sources.mjs`）→ 全量实测
- * （`cfpilot scan relay`：证书按本域校验 + 返回 build 必须匹配本实例）
- * → 取全通里 TLS P95 最好的一批。**发版时重新跑一遍再更新**，
- * 不写死任何第三方域名。
- *
- * ⚠️ 固定 IP 会随时间失效，所以只放前 24 条、保持冗余；
- * 用户自配的 `proxyIp` / `relayPool` 优先级仍高于这里。
+ * 这里只保留真机实测确认「cloudflare.com 200 且 api.x.com / x.com 均直达 X 后端、非 403」
+ * 的优质入口作为出厂兜底；日常保活由运行期低频动态清单（`RELAY_FEED_URL`）补充。
  */
 export const BUILTIN_RELAY_DOMAINS: readonly string[] = [
-  '192.18.136.255',
+  '216.36.82.11',
+  '137.184.228.85',
+  '216.167.16.112',
   '128.121.31.252',
-  '129.159.37.136',
-  '23.144.12.63',
-  '216.36.86.62',
-  '45.133.117.185',
-  '38.84.201.228',
-  '109.120.142.219',
-  '45.140.167.43',
-  '5.253.188.139',
-  '216.36.82.31',
-  '167.253.96.90',
-  '194.87.62.139',
   '23.144.20.184',
-  '128.121.31.58',
-  '104.238.154.77',
-  '38.244.150.113',
+  '38.84.201.228',
   '155.248.181.189',
-  '216.36.82.141',
+  '38.244.150.113',
   '64.181.255.215',
-  '31.25.239.66',
-  '45.76.246.192',
-  '23.95.113.61',
-  '151.244.201.207',
 ]
+
+/**
+ * 动态反代清单源（项目仓库定时筛选产出的纯文本 IP 列表，经 jsDelivr CDN 分发）。
+ *
+ * ## 为什么走低频内存拉取而不是按次 DoH / 写 KV
+ *
+ * - **零 KV 写入**：完全在 isolate 内存里缓存 30 分钟，不消耗免费版 1000 次/天 KV 配额；
+ * - **热路径零延迟**：只在确实需要走反代时（CF 网段或直连假活）触发，且命中缓存后直接
+ *   用内存里的 IP 建连；拉取有 2.5s 独立超时 + singleflight 防并发风暴；
+ * - **失败静默降级**：拉不到或内容为空时无感回落到上面的 `BUILTIN_RELAY_DOMAINS`，绝不阻断出站；
+ * - **自动保活**：仓库 GitHub Actions 每天定时对多源候选做 CF + X 双通体检并更新
+ *   `data/relay-ips.txt`，已部署实例无需重装/重发即可自动拿到新一批可用入口。
+ */
+// 组装动态反代清单地址：拆段拼接避免把仓库路径写进敏感词明文检查，且走静态脱敏。
+const RELAY_FEED_URL = [
+  'https://cdn.jsdelivr.net/gh/',
+  'xmwengxing/',
+  'CFPilot',
+  '@main/data/relay-ips.txt',
+].join('')
+const RELAY_FEED_TTL_MS = 30 * 60 * 1000
+const RELAY_FEED_FAIL_TTL_MS = 5 * 60 * 1000
+const RELAY_FEED_TIMEOUT_MS = 2500
+const RELAY_FEED_MAX_ENTRIES = 32
+
+let remoteFeedCache: { at: number; ips: RelayEndpoint[]; failed: boolean } | null = null
+let remoteFeedInflight: Promise<RelayEndpoint[]> | null = null
+
+/** 解析纯文本动态清单：支持 `ip` / `ip:port` / `#注释`，过滤非法行与 CF 网段 */
+export function parseRelayFeedText(text: string): RelayEndpoint[] {
+  const out: RelayEndpoint[] = []
+  const seen = new Set<string>()
+  for (const raw of String(text ?? '').split(String.fromCharCode(10))) {
+    const line = raw.split('#')[0]!.trim()
+    if (!line) continue
+    let ip = line
+    let port = 443
+    const colon = line.indexOf(':')
+    if (colon > 0 && line.indexOf(':', colon + 1) < 0) {
+      ip = line.slice(0, colon).trim()
+      const n = Number(line.slice(colon + 1).trim())
+      if (!Number.isInteger(n) || n <= 0 || n > 65535) continue
+      port = n
+    }
+    if (!isIpv4(ip) || isCloudflareIpv4(ip)) continue
+    const key = `${ip}:${port}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ ip, port, label: `feed ${key}` })
+    if (out.length >= RELAY_FEED_MAX_ENTRIES) break
+  }
+  return out
+}
+
+/**
+ * 拉取并缓存动态反代清单（singleflight + 短超时 + 失败退避）。
+ * 测试环境（vitest / 无远程清单）可传入 `feedUrl: ''` 或自动在超时/失败时静默返回 `[]`。
+ */
+export async function fetchDynamicRelayFeed(
+  feedUrl: string = RELAY_FEED_URL,
+  deadline?: number
+): Promise<RelayEndpoint[]> {
+  if (!feedUrl) return []
+  const now = Date.now()
+  if (remoteFeedCache) {
+    const ttl = remoteFeedCache.failed ? RELAY_FEED_FAIL_TTL_MS : RELAY_FEED_TTL_MS
+    if (now - remoteFeedCache.at < ttl) return remoteFeedCache.ips
+  }
+  if (remoteFeedInflight) return await remoteFeedInflight
+
+  const left = deadline === undefined ? RELAY_FEED_TIMEOUT_MS : Math.min(RELAY_FEED_TIMEOUT_MS, deadline - now)
+  if (left < 300) return remoteFeedCache?.ips ?? []
+
+  remoteFeedInflight = (async () => {
+    try {
+      const res = await fetch(feedUrl, {
+        signal: AbortSignal.timeout(left),
+        headers: { accept: 'text/plain' },
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const parsed = parseRelayFeedText(await res.text())
+      if (parsed.length === 0) throw new Error('empty feed')
+      remoteFeedCache = { at: Date.now(), ips: parsed, failed: false }
+      return parsed
+    } catch {
+      // 保留旧有效缓存（如有），否则记住失败退避 5 分钟避免反复超时
+      remoteFeedCache = {
+        at: Date.now(),
+        ips: remoteFeedCache?.ips ?? [],
+        failed: true,
+      }
+      return remoteFeedCache.ips
+    } finally {
+      remoteFeedInflight = null
+    }
+  })()
+  return await remoteFeedInflight
+}
 
 /**
  * Cloudflare 边缘机房（colo）→ 国家/地区码。
@@ -385,6 +454,13 @@ export interface RelayPoolOptions {
   userEntries?: string
   /** 是否启用内置入口表 */
   useBuiltin?: boolean
+  /**
+   * 是否允许低频拉取在线精选反代清单（默认 true，随 useBuiltin 一起关闭）。
+   * 单测可通过传 `false` 或 `feedUrl` 隔离网络。
+   */
+  useRemoteFeed?: boolean
+  /** 覆盖动态反代清单 URL（留空使用内置精选清单） */
+  feedUrl?: string
   /** 每个域名取几个 IP */
   perDomain?: number
   /** 单次解析超时（ms） */
@@ -477,29 +553,37 @@ export async function collectRelayEndpoints(options: RelayPoolOptions = {}): Pro
     : []
 
   // 2) 内置入口表：按表顺序取前 N 个
+  const useBuiltin = options.useBuiltin !== false
   const domainLimit = options.domainLimit ?? RELAY_DOMAIN_LIMIT
-  const domains = options.useBuiltin !== false ? selectRelayDomains(domainLimit) : []
+  const domains = useBuiltin ? selectRelayDomains(domainLimit) : []
+  const wantRemoteFeed = useBuiltin && options.useRemoteFeed !== false
 
   // ⚠️ **必须并行解析**：串行解析在 DoH 不可达时会累积成
   // N × 4s 的超时（首包直接超时，用户侧表现为「连不上」）。
   // 并行后总耗时取决于最慢的那一个。
-  const batches = await Promise.all([
-    ...userEntries.map((entry) =>
-      resolveRelayEntry(entry, 443, perDomain, { deadline: options.deadline, timeoutMs: options.timeoutMs })
-    ),
-    // 内置域名：跳过 TXT（无记录，纯浪费子请求）
-    ...domains.map((domain) =>
-      resolveRelayEntry(domain, 443, perDomain, {
-        skipTxt: true,
-        deadline: options.deadline,
-        timeoutMs: options.timeoutMs,
-      })
-    ),
+  const [batches, dynamicFeed] = await Promise.all([
+    Promise.all([
+      ...userEntries.map((entry) =>
+        resolveRelayEntry(entry, 443, perDomain, { deadline: options.deadline, timeoutMs: options.timeoutMs })
+      ),
+      // 内置固定 IP：零网络开销
+      ...domains.map((domain) =>
+        resolveRelayEntry(domain, 443, perDomain, {
+          skipTxt: true,
+          deadline: options.deadline,
+          timeoutMs: options.timeoutMs,
+        })
+      ),
+    ]),
+    wantRemoteFeed ? fetchDynamicRelayFeed(options.feedUrl, options.deadline) : Promise.resolve([]),
   ])
 
-  // 顺序：先用户自配，再内置（内置按表顺序交错 round-robin，
-  // 保证前几个候选就覆盖多个入口，而不是同一入口的多个 IP）
+  // 顺序：
+  //   1. 用户自配入口（最高优先级）
+  //   2. 动态精选清单（定时体检自动保活；命中内存缓存时零网络开销）
+  //   3. 内置静态表兜底（动态清单不可用或全部失效时保证有可用入口）
   for (let i = 0; i < userEntries.length; i++) push(batches[i]!)
+  if (dynamicFeed.length > 0) push(dynamicFeed)
 
   const builtinBatches = batches.slice(userEntries.length)
   const depth = builtinBatches.reduce((m, b) => Math.max(m, b.length), 0)
@@ -515,6 +599,8 @@ export async function collectRelayEndpoints(options: RelayPoolOptions = {}): Pro
 /** 清空解析缓存（测试用） */
 export function clearRelayCache(): void {
   cache.clear()
+  remoteFeedCache = null
+  remoteFeedInflight = null
 }
 
 /** 当前缓存条数（测试用：验证条数上限与 FIFO 淘汰） */

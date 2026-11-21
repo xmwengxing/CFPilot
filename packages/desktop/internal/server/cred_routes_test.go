@@ -11,6 +11,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/store"
@@ -256,6 +257,59 @@ func TestProfileUpdateMissing(t *testing.T) {
 	})
 	if code != http.StatusBadRequest {
 		t.Errorf("应 400，实际 %d (%v)", code, body)
+	}
+}
+
+// 新增两个账户后按 profileId 分别检测账号，必须各自用自己的 Token 且互不串写。
+func TestAccountDetectByProfileID(t *testing.T) {
+	cf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		switch auth {
+		case "Bearer token_one":
+			_, _ = w.Write([]byte(`{"success":true,"result":[{"id":"acct_11111111","name":"Account One"}]}`))
+		case "Bearer token_two":
+			_, _ = w.Write([]byte(`{"success":true,"result":[{"id":"acct_22222222","name":"Account Two"}]}`))
+		default:
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"success":false,"errors":[{"code":10000,"message":"Invalid token"}]}`))
+		}
+	}))
+	defer cf.Close()
+
+	s, base, cookie := newAuthedServer(t)
+	s.SetCFAPIBase(cf.URL)
+
+	code, c1 := postJSON(t, base+"/api/profile/create", cookie, map[string]any{"cfToken": "token_one"})
+	if code != http.StatusOK {
+		t.Fatalf("新建第一个账户失败：%d %v", code, c1)
+	}
+	id1 := c1["profile"].(map[string]any)["id"].(string)
+
+	code, d1 := postJSON(t, base+"/api/account/detect", cookie, map[string]any{"profileId": id1})
+	if code != http.StatusOK || d1["accountId"] != "acct_11111111" {
+		t.Fatalf("第一个账户检测失败：%d %v", code, d1)
+	}
+
+	code, c2 := postJSON(t, base+"/api/profile/create", cookie, map[string]any{"cfToken": "token_two"})
+	if code != http.StatusOK {
+		t.Fatalf("新建第二个账户失败：%d %v", code, c2)
+	}
+	id2 := c2["profile"].(map[string]any)["id"].(string)
+
+	code, d2 := postJSON(t, base+"/api/account/detect", cookie, map[string]any{"profileId": id2})
+	if code != http.StatusOK || d2["accountId"] != "acct_22222222" {
+		t.Fatalf("第二个账户检测失败：%d %v", code, d2)
+	}
+
+	// 两个账户的 accountId 应各自落盘、互不覆盖
+	p1, _ := s.store.Get(id1)
+	p2, _ := s.store.Get(id2)
+	if p1 == nil || p1.AccountID != "acct_11111111" {
+		t.Errorf("第一个账户被串写：%#v", p1)
+	}
+	if p2 == nil || p2.AccountID != "acct_22222222" {
+		t.Errorf("第二个账户未写入：%#v", p2)
 	}
 }
 

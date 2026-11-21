@@ -66,6 +66,7 @@ func (p *PeerConfig) UnmarshalJSON(b []byte) error {
 		Addr      string          `json:"addr"`
 		StaticPub json.RawMessage `json:"staticPub"`
 		VirtualIP string          `json:"virtualIp"`
+		Name      string          `json:"name"`
 	}
 	if err := json.Unmarshal(b, &raw); err != nil {
 		return err
@@ -73,6 +74,7 @@ func (p *PeerConfig) UnmarshalJSON(b []byte) error {
 	p.NodeID = raw.NodeID
 	p.Addr = raw.Addr
 	p.VirtualIP = raw.VirtualIP
+	p.Name = raw.Name
 	if len(raw.StaticPub) > 0 {
 		pub, err := decodeKeyJSON(raw.StaticPub)
 		if err != nil {
@@ -90,7 +92,8 @@ func (p PeerConfig) MarshalJSON() ([]byte, error) {
 		Addr      string `json:"addr"`
 		StaticPub string `json:"staticPub"`
 		VirtualIP string `json:"virtualIp"`
-	}{p.NodeID, p.Addr, hex.EncodeToString(p.StaticPub), p.VirtualIP})
+		Name      string `json:"name,omitempty"`
+	}{p.NodeID, p.Addr, hex.EncodeToString(p.StaticPub), p.VirtualIP, p.Name})
 }
 
 // decodeKeyJSON 解析公钥：64 hex 或 base64（Std / Raw 都试）。

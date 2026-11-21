@@ -30,6 +30,7 @@ type edgeState struct {
 
 func (s *Server) registerEdgeRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/edge/deploy", s.guard(s.handleEdgeDeploy))
+	mux.HandleFunc("/api/edge/check", s.guard(s.handleEdgeCheck))
 	mux.HandleFunc("/api/edge/zones", s.guard(s.handleEdgeZones))
 }
 
@@ -97,6 +98,26 @@ func matchZoneID(zones []cfapi.Zone, domain string) string {
 	return best
 }
 
+// resolveEdgeAccountID 解析本次要用的账号 ID。
+//
+// 优先用已保存的；没存就用 Token 自动探测（不让用户卡在「请先自动检测账号」）。
+// 部署与检测共用同一策略，避免两处行为不一致。
+func (s *Server) resolveEdgeAccountID(ctx context.Context, token string) (string, error) {
+	if profile, err := s.store.Active(); err == nil && profile != nil {
+		if id := strings.TrimSpace(profile.AccountID); id != "" {
+			return id, nil
+		}
+	}
+	accounts, err := s.newCFClient(token).ListAccounts(ctx)
+	if err != nil {
+		return "", fmt.Errorf("无法确定 Cloudflare 账号 ID（Token 读不到账号列表）：%w", err)
+	}
+	if len(accounts) == 0 {
+		return "", fmt.Errorf("无法确定 Cloudflare 账号 ID（Token 下没有可用账号），请先在「账户配置」点「检测账号」")
+	}
+	return accounts[0].ID, nil
+}
+
 func (s *Server) handleEdgeDeploy(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "仅支持 POST"})
@@ -116,21 +137,9 @@ func (s *Server) handleEdgeDeploy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	// 账号 ID：优先用已保存的；没存就用 Token 自动探测（不让用户卡在「请先自动检测账号」）。
-	accountID := ""
-	if profile, perr := s.store.Active(); perr == nil && profile != nil {
-		accountID = strings.TrimSpace(profile.AccountID)
-	}
-	if accountID == "" {
-		if accounts, aerr := s.newCFClient(token).ListAccounts(r.Context()); aerr == nil && len(accounts) > 0 {
-			accountID = accounts[0].ID
-			s.logf("[盲中继] 已从 Token 自动识别账号 ID：" + accountID)
-		}
-	}
-	if accountID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error": "无法确定 Cloudflare 账号 ID（Token 也读不到账号列表）。请在「账户配置」点「自动检测账号」后重试。",
-		})
+	accountID, err := s.resolveEdgeAccountID(r.Context(), token)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
 
@@ -194,6 +203,52 @@ func (s *Server) handleEdgeDeploy(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	writeJSON(w, http.StatusOK, map[string]any{"started": true, "note": "部署已开始，进度通过 SSE 推送"})
+}
+
+// handleEdgeCheck 检测账号下已部署的盲中继 / 云监测台实例（只读）。
+//
+// ⚠️ 只读：只调 GET 类接口 + 对域名做 /health、/auth/status 探测，
+// **永不部署、永不写 KV / DNS / Worker**（与「检测账号」同一条纪律）。
+// 检测期间若正好有部署在跑，返回 deployInProgress 供界面提示，但不阻断。
+func (s *Server) handleEdgeCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "仅支持 GET"})
+		return
+	}
+	token, err := s.activeTokenOnly()
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	accountID, err := s.resolveEdgeAccountID(r.Context(), token)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	// 账号大时每个脚本一次 settings 调用，给足时间但仍要封顶（界面会等这一下）。
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	defer cancel()
+	instances, warnings, derr := edge.Detect(ctx, s.newCFClient(token), accountID, edge.DetectOptions{Probe: true})
+	if derr != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": derr.Error()})
+		return
+	}
+
+	s.edge.mu.Lock()
+	running := s.edge.running
+	s.edge.mu.Unlock()
+
+	if warnings == nil {
+		warnings = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":               true,
+		"accountId":        accountID,
+		"deployInProgress": running,
+		"instances":        instances,
+		"warnings":         warnings,
+	})
 }
 
 func (s *Server) handleEdgeZones(w http.ResponseWriter, r *http.Request) {

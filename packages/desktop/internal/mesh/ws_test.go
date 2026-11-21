@@ -1,6 +1,8 @@
 package mesh
 
 import (
+	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -73,6 +75,24 @@ func TestRelayRoomURL(t *testing.T) {
 	// 非法 peer_id
 	if _, err := RelayRoomURL("x", "0123456789abcdef", "short"); err == nil {
 		t.Error("非法 peer_id 应被拒绝")
+	}
+}
+
+func TestRelayRoomURLFromDeploymentTemplateUsesNetworkDerivedRoom(t *testing.T) {
+	psk := DerivePSK("home", "shared-secret")
+	tag := DeriveRoomTag(psk)
+	expectedHash := hex.EncodeToString(tag[:])
+	gotHash := ResolveRelayRoomHash("<network_hash>", psk)
+	if gotHash != expectedHash {
+		t.Fatalf("template room hash = %q, expected %q", gotHash, expectedHash)
+	}
+	got, err := RelayRoomURL("relay.example.com", gotHash, "0011223344556677")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := fmt.Sprintf("wss://relay.example.com/mesh/%s?peer_id=0011223344556677", expectedHash)
+	if got != expected {
+		t.Fatalf("deployment template URL = %q, expected network-derived room %q", got, expected)
 	}
 }
 

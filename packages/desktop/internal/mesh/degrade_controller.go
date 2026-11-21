@@ -22,6 +22,10 @@ import (
 // 才能完全反映新链路，期间禁止反向切换，避免 WSS↔UDP 来回震荡（真机踩到）。
 const switchSettleTime = 12 * time.Second
 
+type sharedRoomLinkProvider interface {
+	PeerLinkFor(NodeID) PeerLink
+}
+
 type DegradeController struct {
 	mu          sync.Mutex
 	selfID      NodeID
@@ -32,9 +36,11 @@ type DegradeController struct {
 	relayRoom   string
 	// relayConnectIP 非空时，WSS 的 TCP 目标换成该 IP（SNI/Host 仍用域名），
 	// 即「优选入口 IP」能力（WsUrl.ConnectIP）。
-	relayConnectIP string
-	rootCAs        *x509.CertPool
-	verbose        bool
+	relayConnectIP     string
+	rootCAs            *x509.CertPool
+	room               sharedRoomLinkProvider
+	sharedRoomRequired bool
+	verbose            bool
 
 	// switchFn 执行链路切换（由 Lifecycle 注入：(peer, link, kind)）
 	switchFn func(peer NodeID, link PeerLink, kind TransportKind)
@@ -56,6 +62,11 @@ type ctrlPeer struct {
 	wssLink *WssLink
 	// activeKind 当前激活档位
 	activeKind TransportKind
+	// directLocked 表示已通过打洞确认真实 UDP 直连可达。
+	// 锁定后不再因探针窗口的瞬时丢包切回中继：真机上探针拥塞/链路抖动
+	// 会让 UDP↔WSS 来回震荡，已建立的 P2P 通道被中继抢占，表现为
+	// ping 间歇 100% 丢、TCP/SSH 全部超时。只有 P2P 真正不可用时才允许降级。
+	directLocked bool
 }
 
 func NewDegradeController(selfID NodeID, probes *ProbeTracker, relayDomain, relayRoom, relayConnectIP string, rootCAs *x509.CertPool, verbose bool) *DegradeController {
@@ -77,11 +88,81 @@ func NewDegradeController(selfID NodeID, probes *ProbeTracker, relayDomain, rela
 func (c *DegradeController) SetSwitchFn(fn func(NodeID, PeerLink, TransportKind)) { c.switchFn = fn }
 func (c *DegradeController) SetCloseWssFn(fn func(NodeID))                        { c.closeWssFn = fn }
 
+func (c *DegradeController) SetWssRoom(room sharedRoomLinkProvider) {
+	c.mu.Lock()
+	c.room = room
+	c.mu.Unlock()
+}
+
+func (c *DegradeController) SetSharedWssRoomRequired(required bool) {
+	c.mu.Lock()
+	c.sharedRoomRequired = required
+	c.mu.Unlock()
+}
+
 // AddPeer 注册一个对端（初始 UDP 档位）。
 func (c *DegradeController) AddPeer(id NodeID, udpAddr string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.peers[id] = &ctrlPeer{kind: TransportUDP, udpAddr: udpAddr, activeKind: TransportUDP}
+}
+
+func (c *DegradeController) SetActiveKind(id NodeID, kind TransportKind) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	p := c.peers[id]
+	if p == nil {
+		p = &ctrlPeer{}
+		c.peers[id] = p
+	}
+	p.activeKind = kind
+	if kind == TransportWSS {
+		p.directLocked = false
+	}
+}
+
+// LockDirect 把对端标记为已确认 UDP 直连，并锁定该档位。
+func (c *DegradeController) LockDirect(id NodeID) {
+	c.mu.Lock()
+	p := c.peers[id]
+	if p == nil {
+		p = &ctrlPeer{}
+		c.peers[id] = p
+	}
+	p.activeKind = TransportUDP
+	p.directLocked = true
+	c.mu.Unlock()
+	c.policy.BeginCooldown(id)
+}
+
+func (c *DegradeController) IsDirectLocked(id NodeID) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	p := c.peers[id]
+	return p != nil && p.directLocked && p.activeKind == TransportUDP
+}
+
+func (c *DegradeController) AddPeerWithoutUDP(id NodeID, kind TransportKind) {
+	c.mu.Lock()
+	p := c.peers[id]
+	if p == nil {
+		p = &ctrlPeer{}
+		c.peers[id] = p
+	}
+	if p.directLocked && kind == TransportWSS {
+		c.mu.Unlock()
+		return
+	}
+	p.activeKind = kind
+	c.mu.Unlock()
+	c.policy.BeginCooldown(id)
+}
+
+func (c *DegradeController) HasUDPPeer(id NodeID) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	p := c.peers[id]
+	return p != nil && p.udpAddr != ""
 }
 
 // Start 启动测量/控制循环。
@@ -158,6 +239,9 @@ func (c *DegradeController) tick(ctx context.Context) {
 	ids := make([]NodeID, 0, len(c.peers))
 	for id, p := range c.peers {
 		ids = append(ids, id)
+		if p.activeKind == TransportWSS && p.udpAddr == "" {
+			continue
+		}
 		// 每 1s 发链路探针（对齐 MobiHop：UDP 档位发 0x03 Ping 做 RTT/丢包测量，
 		// WSS 档位发 0x08 UdpProbe 做回切验证）。两者共用 ProbeTracker。
 		// ⚠️ 必须在 UDP 档位也发 —— 否则样本恒为 0，降级判据永远不触发（真机暴露）。
@@ -171,6 +255,12 @@ func (c *DegradeController) tick(ctx context.Context) {
 	}
 
 	for _, id := range ids {
+		if !c.HasUDPPeer(id) {
+			continue
+		}
+		if c.IsDirectLocked(id) {
+			continue
+		}
 		// 切换后 12 秒稳定期：等探针窗口完全刷新再允许反向切换。
 		if last, ok := c.lastSwitch[id]; ok && time.Since(last) < switchSettleTime {
 			continue
@@ -204,6 +294,25 @@ func (c *DegradeController) tick(ctx context.Context) {
 
 // switchToWSS 建 WSS 连盲中继房间并切换（node.rs:2403-2445）。
 func (c *DegradeController) switchToWSS(ctx context.Context, id NodeID) error {
+	c.mu.Lock()
+	room := c.room
+	sharedRoomRequired := c.sharedRoomRequired
+	c.mu.Unlock()
+	if room != nil {
+		link := room.PeerLinkFor(id)
+		c.AddPeerWithoutUDP(id, TransportWSS)
+		c.mu.Lock()
+		switchFn := c.switchFn
+		c.mu.Unlock()
+		c.policy.BeginCooldown(id)
+		if switchFn != nil {
+			switchFn(id, link, TransportWSS)
+		}
+		return nil
+	}
+	if sharedRoomRequired {
+		return fmt.Errorf("盲中继共享房间尚未连接")
+	}
 	if c.relayDomain == "" || c.relayRoom == "" {
 		return fmt.Errorf("未配置盲中继域名/房间，无法降级")
 	}

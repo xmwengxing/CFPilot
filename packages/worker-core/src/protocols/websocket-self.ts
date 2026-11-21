@@ -29,6 +29,12 @@ import { concatBytes, DownlinkPacer, normalizeWsMessage } from '../protocols/str
 import { canSwitchToBuiltinRelay } from './relay-guard'
 import { UplinkQueue } from './uplink-queue'
 import { dial, type DialResult } from '../outbound/dial'
+import {
+  confirmRelaySuccess,
+  endpointKey,
+  penalizeRelayEndpoint,
+  sortByEndpointHealth,
+} from '../outbound/endpoint-health'
 import { buildDialOptions } from '../outbound/dial-options'
 import { TrafficMeter } from '../budget'
 import { truncate } from '../util'
@@ -67,6 +73,32 @@ const REDIAL_DIAL_TIMEOUT_MS = 3000
  * （下限 400ms）—— 那是「已知上一个入口假活」后的确认，不该再等满全程。
  * 全部可在 KV / 环境变量里调整，无需改源码发版。
  */
+
+/**
+ * 判断首块下行字节是否为 **TLS Fatal Alert**（7 字节：`15 03 0x 00 02 02 <desc>`）。
+ *
+ * ## 为什么要识别它（2026-11-21 真机定位）
+ *
+ * 实测大量老化反代入口在收到目标站 SNI 的 ClientHello 后，不是超时/断连，
+ * 而是由反代自己的 TLS 栈直接回 7 字节 Fatal Alert：
+ *   - `alert 40`（handshake_failure）：反代不识别该 SNI 或证书不匹配；
+ *   - `alert 80`（internal_error）：反代后端转发失败；
+ *   - `alert 112`（unrecognized_name）：反代拒绝该 SNI。
+ *
+ * 若不识别这 7 字节，下行泵会把它们当成「首字节确认」直接转发给客户端并
+ * 清空重放缓冲 —— 既不触发假活换入口，又把该坏反代锁进「成功记忆」，
+ * 导致 x.com / api.x.com / cloudflare.com 每次请求都秒败。
+ */
+export function isTlsFatalAlert(chunk: Uint8Array): boolean {
+  return (
+    chunk.byteLength >= 7 &&
+    chunk[0] === 0x15 &&
+    chunk[1] === 0x03 &&
+    chunk[3] === 0x00 &&
+    chunk[4] === 0x02 &&
+    chunk[5] === 0x02
+  )
+}
 
 /** 握手头最大长度 */
 const MAX_HEADER_BYTES = 64 * 1024
@@ -820,8 +852,30 @@ export async function handleWebSocket(
         if (done) break
         if (value && value.byteLength > 0) {
           const firstByte = downlinkBytes === 0
+          // 反代首包直接回 TLS Fatal Alert（如 7 字节 alert 40/80/112）：
+          // 说明该反代入口自身无法按此 SNI 转发，绝不能当成「通路确认」发给客户端 ——
+          // 必须保留 retained 缓冲、熔断该坏反代，并在剩余重拨配额内立即切换下一个入口。
+          if (
+            firstByte &&
+            dialed?.isRelay &&
+            retainedBytes > 0 &&
+            isTlsFatalAlert(value) &&
+            relayRedialCount < config.relayRedialMax &&
+            !redialStarted
+          ) {
+            if (target?.hostname && dialed.endpoint) {
+              penalizeRelayEndpoint(target.hostname, dialed.endpoint, true)
+            }
+            void redialViaRelay('alert')
+            return
+          }
           downlinkBytes += value.byteLength
-          if (firstByte) clearRetained() // 通路确认，释放重放留存
+          if (firstByte) {
+            clearRetained() // 通路确认，释放重放留存
+            if (dialed?.isRelay && target?.hostname && dialed.endpoint) {
+              confirmRelaySuccess(target.hostname, dialed.endpoint)
+            }
+          }
           // 流量熔断：超限立即结束，不再把这块数据发给客户端
           if (traffic.add(value.byteLength)) {
             cutByTraffic()
@@ -1279,7 +1333,7 @@ export async function handleWebSocket(
    * TLS ClientHello / HTTP 首包不会丢。（此前 buffer 被 establish 提前清空，
    * 重放恒为空 —— 是 2026-10-27 代码核实确认的致命缺陷。）
    */
-  const redialViaRelay = async (trigger: 'stall' | 'eof'): Promise<void> => {
+  const redialViaRelay = async (trigger: 'stall' | 'eof' | 'alert'): Promise<void> => {
     // 幂等：静默定时器与 EOF 分支可能几乎同时命中，只允许一个重放流程在跑。
     // ⚠️ 这不是「一次性闩锁」：流程结束会在 finally 里复位，允许下一轮
     // 在「新入口也假活」时接着换入口。旧实现置 true 后永不复位，
@@ -1302,6 +1356,11 @@ export async function handleWebSocket(
       )
       closeWith(1011, '出站无数据：该域名已禁止自动切换反代入口')
       return
+    }
+    // 当前这条失败连接若是反代入口，立刻从成功记忆清除并拉入熔断冷却，
+    // 防止下一条并发连接继续命中同一个坏反代（即便已到本次重拨上限也要记账）。
+    if (dialed?.isRelay && dialed.endpoint) {
+      penalizeRelayEndpoint(targetInfo.hostname, dialed.endpoint, true)
     }
     if (relayEndpointsTried >= config.relayRedialMax) {
       // 反代入口也试够了，仍然假活 —— 明确告知客户端，不要静默挂起
@@ -1340,7 +1399,9 @@ export async function handleWebSocket(
       [],
       trigger === 'stall'
         ? '下行静默无数据，改走反代入口'
-        : '出站零下行即 EOF/Reset，立即改走反代入口'
+        : trigger === 'alert'
+          ? '反代入口返回 TLS 致命告警，立即切换下一个反代入口'
+          : '出站零下行即 EOF/Reset，立即改走反代入口'
     )
 
     // 收反代入口候选：用户自配优先，其次内置表（按表顺序取前 N 个）
@@ -1355,8 +1416,12 @@ export async function handleWebSocket(
     }
     // 当前这条假活连接若本身就是反代入口，先记入已试集合，避免重拨时原地重试。
     if (dialed?.endpoint) triedRelays.add(dialed.endpoint)
-    // 过滤已试过的，避免同一入口反复重试
-    const fresh = endpoints.filter((e) => !triedRelays.has(`${e.ip}:${e.port}`))
+    // 过滤已试过的，再按健康记忆排序（把已被冷却的坏反代压到末尾）
+    const fresh = sortByEndpointHealth(
+      endpoints.filter((e) => !triedRelays.has(`${e.ip}:${e.port}`)),
+      (e) => endpointKey('relay', e.ip, e.port),
+      Date.now()
+    )
     if (fresh.length === 0) {
       closeWith(1011, '出站无数据：无反代入口可用')
       return
@@ -1413,6 +1478,8 @@ export async function handleWebSocket(
           )
         )
         if (!socket) continue
+        // 标记为反代连接：这样若它继续假活或回 TLS Fatal Alert，下一轮重拨才会熔断它
+        socket.isRelay = true
         // 拨号期间客户端已断开：这条入口的 Socket 也不能留（同 establish 的收口）。
         if (closed) {
           closeDialResult(socket)

@@ -1,0 +1,35 @@
+name: Update Relay IP Feed
+
+on:
+  schedule:
+    # 每天 UTC 03:00（北京时间 11:00）自动体检更新反代入口清单
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-relay-feed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 双通体检更新 data/relay-ips.txt
+        run: node scripts/update-relay-feed.mjs --max 24 --limit 180 --concurrency 16 --out data/relay-ips.txt
+
+      - name: 变更时自动提交
+        run: |
+          if git diff --quiet data/relay-ips.txt; then
+            echo "data/relay-ips.txt 无变化"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/relay-ips.txt
+          git commit -m "chore(relay): 定时更新 CF+X 双通反代入口清单"
+          git push

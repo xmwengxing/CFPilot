@@ -42,13 +42,26 @@ func TestHandleMeshRelayScanValidation(t *testing.T) {
 		}
 	})
 
-	t.Run("房间名非法拒绝", func(t *testing.T) {
+	t.Run("旧版显式房间名非法拒绝", func(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/api/mesh/relay-scan",
 			strings.NewReader(`{"relayDomain":"r.example.com","room":"zz","candidates":["1.2.3.4"]}`))
 		s.handleMeshRelayScan(rec, req)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("状态 = %d, 期望 400", rec.Code)
+		}
+	})
+
+	t.Run("未提供房间和网络凭据拒绝", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/mesh/relay-scan",
+			strings.NewReader(`{"relayDomain":"r.example.com","candidates":["1.2.3.4"]}`))
+		s.handleMeshRelayScan(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("状态 = %d, 期望 400", rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "网络名与网络密钥") {
+			t.Errorf("应提示补充网络凭据，实际 %s", rec.Body.String())
 		}
 	})
 }

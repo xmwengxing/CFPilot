@@ -90,6 +90,9 @@ func TestUpgradeToDirectOnlyFromRelay(t *testing.T) {
 	if lc.links[peer].IsRelayed() {
 		t.Fatal("应从中继升级为直连 hubLink")
 	}
+	if state, _ := lc.punchState(peer); state != "direct" {
+		t.Fatalf("升级直连后 punchState=%q, want direct", state)
+	}
 	// 已是直连时不做无谓切换（保持原对象）
 	direct := lc.links[peer]
 	lc.upgradeToDirect(peer, addr)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"time"
 )
@@ -25,15 +26,17 @@ type InvitePayload struct {
 	VirtualIP string `json:"virtual_ip"`          // 发起方虚拟 IP
 	Suggested string `json:"suggested,omitempty"` // 建议对端虚拟 IP
 	Exp       int64  `json:"exp,omitempty"`       // 过期时间 Unix 秒，0=永久
+	// Alias 是发起方设备名（监测台 alias / 主机名），让加入方节点列表能显示对端设备名。
+	Alias string `json:"alias,omitempty"`
 
 	// 云监测台上报参数（可选）：让被邀请方入网后**自动上报**，
 	// 不必再手工抄 Worker 地址与令牌。
 	// 注意：这与 PSK 同属敏感信息（令牌泄露 = 他人可伪造上报），
 	// 所以和 PSK 一样只 base64、明文警示勿公开分享。
-	MonitorEndpoint     string `json:"monitoring_endpoint,omitempty"`
-	MonitorToken        string `json:"monitoring_token,omitempty"`
-	MonitorIntervalMS   int64  `json:"monitoring_interval_ms,omitempty"`
-	MonitorAlias        string `json:"monitor_alias,omitempty"`
+	MonitorEndpoint   string `json:"monitoring_endpoint,omitempty"`
+	MonitorToken      string `json:"monitoring_token,omitempty"`
+	MonitorIntervalMS int64  `json:"monitoring_interval_ms,omitempty"`
+	MonitorAlias      string `json:"monitor_alias,omitempty"`
 
 	// 盲中继配置（可选）：跨 NAT 时对端需要知道同一条中继与房间，
 	// 否则只能直连。邀请链接一并带上，B 无需手抄。
@@ -46,7 +49,9 @@ type InvitePayload struct {
 //
 // 邀请链接里的 addr 如果照抄面板默认的 `0.0.0.0:51820`，对端根本连不上
 // 0.0.0.0（UDP 发往通配地址会被丢弃），表现为「握手一直不成功」。
-// 这里在生链接时换成本机第一个非回环 IPv4（优先私网段），端口保持不变。
+// 这里在生链接时换成本机真实网卡地址：优先全球 IPv6（免 NAT），再选物理
+// 网卡的私网 IPv4；EasyTier / TUN / 虚拟网卡必须排除，否则会把虚拟 IP
+// 当对端地址发出去，形成隧道自环。
 //
 // 返回原值时说明没有做替换（要么本来就可直连，要么找不到可用网卡）。
 func ReachableListenAddr(listen string) string {
@@ -64,8 +69,21 @@ func ReachableListenAddr(listen string) string {
 	if port == "" {
 		port = "51820"
 	}
-	if ip := pickReachableIPv4(localIPv4s()); ip != "" {
-		return net.JoinHostPort(ip, port)
+	ips := reachableInterfaceIPs()
+	var physicalV4 string
+	for _, ip := range ips {
+		if !reachableInterface(ip) {
+			continue
+		}
+		if ip.To4() == nil {
+			return net.JoinHostPort(ip.String(), port)
+		}
+		if physicalV4 == "" {
+			physicalV4 = ip.String()
+		}
+	}
+	if physicalV4 != "" {
+		return net.JoinHostPort(physicalV4, port)
 	}
 	return listen
 }
@@ -75,44 +93,69 @@ func isWildcardHost(host string) bool {
 	return ip == nil || ip.IsUnspecified()
 }
 
-// localIPv4s 收集本机所有非回环 IPv4（冒烟环境可能为空）。
-func localIPv4s() []string {
-	addrs, err := net.InterfaceAddrs()
+// reachableInterface 排除不能作为 UDP 对端地址的地址类型。
+func reachableInterface(ip net.IP) bool {
+	if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return false
+	}
+	if v4 := ip.To4(); v4 != nil {
+		// 100.64.0.0/10 是运营商 CGNAT，不可作为对端地址。
+		if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
+			return false
+		}
+	}
+	return true
+}
+
+// reachableInterfaceName 排除常见虚拟网卡 / TUN / VPN 接口（Windows / Linux / macOS）。
+func reachableInterfaceName(name string) bool {
+	lower := strings.ToLower(name)
+	for _, prefix := range []string{
+		"cfpilot", "mobihop", "easytier", "tap", "tun", "wintun", "wsl", "veth",
+		"vmnet", "virtualbox", "vmware", "hyper-v", "vswitch", "docker", "lo", "utun",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			return false
+		}
+	}
+	return true
+}
+
+// reachableInterfaceIPs 按接口逐个收集可用地址，供邀请生成时排除虚拟 NIC。
+func reachableInterfaceIPs() []net.IP {
+	ifs, err := net.Interfaces()
 	if err != nil {
 		return nil
 	}
-	out := make([]string, 0, len(addrs))
-	for _, a := range addrs {
-		ipnet, ok := a.(*net.IPNet)
-		if !ok {
+	out := make([]net.IP, 0, len(ifs))
+	for _, iface := range ifs {
+		if !reachableInterfaceName(iface.Name) {
 			continue
 		}
-		ip := ipnet.IP.To4()
-		if ip == nil || ip.IsLoopback() {
+		addrs, err := iface.Addrs()
+		if err != nil {
 			continue
 		}
-		out = append(out, ip.String())
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok || !reachableInterface(ipnet.IP) {
+				continue
+			}
+			out = append(out, ipnet.IP)
+		}
 	}
 	return out
 }
 
-// pickReachableIPv4 从候选里优先选私网地址（同局域网最可能直达），
-// 其次任意公网 IPv4。纯函数，便于单测。
-func pickReachableIPv4(candidates []string) string {
-	var fallback string
-	for _, raw := range candidates {
-		ip := net.ParseIP(raw)
-		if ip == nil || ip.To4() == nil {
-			continue
-		}
-		if ip.IsPrivate() {
-			return ip.String()
-		}
-		if fallback == "" {
-			fallback = ip.String()
+// localIPv4s 收集本机所有非回环 IPv4（冒烟环境可能为空）。
+func localIPv4s() []string {
+	out := make([]string, 0, 4)
+	for _, ip := range reachableInterfaceIPs() {
+		if v4 := ip.To4(); v4 != nil {
+			out = append(out, v4.String())
 		}
 	}
-	return fallback
+	return out
 }
 
 // BuildInvite 生成邀请链接。
@@ -121,6 +164,12 @@ func BuildInvite(p InvitePayload, ttlSeconds int64) (string, error) {
 	if strings.TrimSpace(p.Network) == "" || p.PSK == "" {
 		return "", fmt.Errorf("生成邀请链接需要网络名与 PSK")
 	}
+	if strings.TrimSpace(p.Alias) == "" {
+		if host, err := os.Hostname(); err == nil {
+			p.Alias = strings.TrimSpace(host)
+		}
+	}
+	p.Alias = printableAlias(p.Alias)
 	p.V = 1
 	// 监听地址若是通配（0.0.0.0 / ::），换成对端能直连的本机 IPv4。
 	p.Addr = ReachableListenAddr(p.Addr)
@@ -146,6 +195,17 @@ func BuildInvite(p InvitePayload, ttlSeconds int64) (string, error) {
 		return "", err
 	}
 	return InviteURIPrefix + base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func printableAlias(raw string) string {
+	var out strings.Builder
+	for _, r := range raw {
+		if r < 32 || r == 127 || r == 0xfffd {
+			continue
+		}
+		out.WriteRune(r)
+	}
+	return strings.TrimSpace(out.String())
 }
 
 // ParseInvite 解析并校验邀请链接。
@@ -187,5 +247,3 @@ func SensitiveWarning() string {
 	return "邀请链接里包含明文的网络密钥（仅 base64 编码，非加密）。" +
 		"泄露=他人可加入你的网络，只能全网轮换 PSK。请勿发到公开群/日志/issue。"
 }
-
-

@@ -1,3 +1,210 @@
+// ../edge-relay/cf-worker-relay/dashboard.html
+var dashboard_default = `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MobiHop \u4E91\u76D1\u6D4B\u53F0</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, sans-serif; background:#0b1220; color:#e2e8f0; }
+  header { padding:16px 24px; border-bottom:1px solid #1e293b; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; }
+  h1 { margin:0; font-size:18px; }
+  .sub { color:#64748b; font-size:13px; }
+  main { padding:24px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; margin-bottom:20px; }
+  .card { background:#111a2e; border:1px solid #1e293b; border-radius:10px; padding:14px; }
+  .card .label { color:#64748b; font-size:12px; }
+  .card .val { font-size:24px; font-weight:600; margin-top:4px; }
+  .table-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:10px; }
+  table { width:100%; min-width:720px; border-collapse:collapse; background:#111a2e; border:1px solid #1e293b; }
+  th,td { padding:10px 12px; text-align:left; font-size:13px; border-bottom:1px solid #1e293b; white-space:nowrap; }
+  th { color:#94a3b8; background:#0f172a; font-weight:500; }
+  tr:last-child td { border-bottom:none; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
+  .dot.on { background:#22c55e; box-shadow:0 0 6px #22c55e; }
+  .dot.off { background:#475569; }
+  .mono { font-family: ui-monospace, monospace; font-size:12px; }
+  .err { color:#f87171; padding:12px; }
+  .cfg { font-size:12px; color:#64748b; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  input { background:#0f172a; border:1px solid #334155; color:#e2e8f0; padding:6px 10px; border-radius:6px; font-size:13px; }
+  button { background:#2563eb; color:#fff; border:none; padding:6px 12px; border-radius:6px; cursor:pointer; font-size:13px; }
+  button:hover { background:#1d4ed8; }
+  button.ghost { background:#1e293b; }
+  button.ghost:hover { background:#334155; }
+  .auth-box { max-width:420px; margin:40px auto; background:#111a2e; border:1px solid #1e293b; border-radius:12px; padding:24px; }
+  .auth-box h2 { margin:0 0 6px; font-size:18px; }
+  .auth-box p { color:#64748b; font-size:13px; margin:0 0 16px; }
+  .auth-box label { display:block; font-size:12px; color:#94a3b8; margin:12px 0 4px; }
+  .auth-box input { width:100%; }
+  .auth-box .row { display:flex; gap:8px; margin-top:16px; }
+  .auth-box .row button { flex:1; }
+  .modal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.6); display:flex; align-items:center; justify-content:center; z-index:50; }
+  .modal { background:#111a2e; border:1px solid #1e293b; border-radius:12px; padding:24px; width:90%; max-width:420px; }
+  .modal h3 { margin:0 0 12px; font-size:16px; }
+  .modal label { display:block; font-size:12px; color:#94a3b8; margin:10px 0 4px; }
+  .modal input { width:100%; }
+  .modal .row { display:flex; gap:8px; margin-top:16px; justify-content:flex-end; }
+  @media (max-width: 640px) {
+    header { padding:12px 16px; }
+    main { padding:16px; }
+    .cfg input { width:100%; }
+    h1 { font-size:16px; }
+    .card .val { font-size:20px; }
+  }
+</style>
+</head>
+<body>
+<header id="hdr" style="display:none">
+  <div>
+    <h1>MobiHop \u4E91\u76D1\u6D4B\u53F0</h1>
+    <div class="sub">\u53EA\u8BFB\u76D1\u6D4B \xB7 \u8282\u70B9\u5FC3\u8DF3 \xB7 \u514D\u8D39\u6258\u7BA1</div>
+  </div>
+  <div class="cfg">
+    API: <input id="api" /> <button onclick="saveApi()">\u4FDD\u5B58</button>
+    <button class="ghost" onclick="openChangePw()">\u4FEE\u6539\u5BC6\u7801</button>
+    <button class="ghost" onclick="logout()">\u9000\u51FA</button>
+  </div>
+</header>
+<main>
+  <div id="view-setup" class="auth-box" style="display:none">
+    <h2>\u672A\u914D\u7F6E\u5BC6\u7801</h2>
+    <p>\u76D1\u6D4B\u53F0\u5BC6\u7801\u5C1A\u672A\u521D\u59CB\u5316\u3002\u8BF7\u901A\u8FC7\u90E8\u7F72\u811A\u672C\uFF08deploy-cf.ps1\uFF09\u8BBE\u7F6E\u767B\u5F55\u5BC6\u7801\uFF0C\u6216\u8054\u7CFB\u7BA1\u7406\u5458\u3002</p>
+    <p id="setup-err" class="err"></p>
+  </div>
+  <div id="view-login" class="auth-box" style="display:none">
+    <h2>\u767B\u5F55</h2>
+    <p>\u8BF7\u8F93\u5165\u76D1\u6D4B\u53F0\u5BC6\u7801\u3002</p>
+    <label>\u5BC6\u7801</label>
+    <input id="login-pw" type="password" onkeydown="if(event.key==='Enter')doLogin()" />
+    <div class="row"><button onclick="doLogin()">\u767B\u5F55</button></div>
+    <p id="login-err" class="err"></p>
+  </div>
+  <div id="view-app" style="display:none">
+    <div class="grid">
+      <div class="card"><div class="label">\u8BBE\u5907\u603B\u6570</div><div class="val" id="total">\u2014</div></div>
+      <div class="card"><div class="label">\u5728\u7EBF</div><div class="val" id="online">\u2014</div></div>
+      <div class="card"><div class="label">\u79BB\u7EBF</div><div class="val" id="offline">\u2014</div></div>
+      <div class="card"><div class="label">\u6700\u540E\u5237\u65B0</div><div class="val" id="refresh" style="font-size:14px">\u2014</div></div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>\u72B6\u6001</th><th>\u8BBE\u5907</th><th>Node ID</th><th>\u865A\u62DF IP</th><th>\u7248\u672C</th><th>\u6700\u540E IP</th><th>\u6700\u540E\u5FC3\u8DF3</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="7" style="text-align:center;color:#64748b">\u52A0\u8F7D\u4E2D\u2026</td></tr></tbody>
+      </table>
+    </div>
+    <p id="err" class="err"></p>
+  </div>
+</main>
+<div id="modal" style="display:none"></div>
+<script>
+  const DEFAULT_API = location.origin;
+  const apiInput = document.getElementById('api');
+  if (apiInput) apiInput.value = localStorage.getItem('monitor_api') || DEFAULT_API;
+  function saveApi(){ if(apiInput) localStorage.setItem('monitor_api', apiInput.value); load(); }
+  function apiUrl(){ const el=document.getElementById('api'); const v = el? el.value : (localStorage.getItem('monitor_api')||DEFAULT_API); return (v||DEFAULT_API).replace(/\\/+$/,''); }
+  function token(){ return localStorage.getItem('monitor_session') || ''; }
+  function setToken(t){ if(t) localStorage.setItem('monitor_session', t); else localStorage.removeItem('monitor_session'); }
+  function fmtTime(ms){ if(!ms) return '\u2014'; return new Date(ms).toLocaleString('zh-CN',{hour12:false}); }
+  function show(id){ ['view-setup','view-login','view-app'].forEach(v=>{ const e=document.getElementById(v); if(e) e.style.display = v===id?'block':'none'; }); const hdr=document.getElementById('hdr'); if(hdr) hdr.style.display = id==='view-app'?'flex':'none'; }
+  async function apiFetch(path, opts){ opts=opts||{}; opts.headers = Object.assign({'Content-Type':'application/json'}, opts.headers||{}); const t=token(); if(t) opts.headers['Authorization']='Bearer '+t; const r=await fetch(apiUrl()+path, opts); return r; }
+
+  async function init(){
+    try {
+      const r = await fetch(apiUrl()+'/auth/status');
+      const d = await r.json();
+      if (d.setupRequired) { show('view-setup'); }
+      else if (!token()) { show('view-login'); }
+      else { show('view-app'); load(); }
+    } catch(e){ document.getElementById('login-err').textContent='\u8FDE\u63A5\u5931\u8D25: '+e.message; show('view-login'); }
+  }
+
+  async function doSetup(){ /* disabled: password must be set via deploy script */ }
+
+  async function doLogin(){
+    const pw=document.getElementById('login-pw').value;
+    const err=document.getElementById('login-err');
+    err.textContent='';
+    try {
+      const r=await fetch(apiUrl()+'/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});
+      const d=await r.json();
+      if(!r.ok){ err.textContent=d.message||'\u767B\u5F55\u5931\u8D25'; return; }
+      setToken(d.token); show('view-app'); load();
+    } catch(e){ err.textContent='\u5931\u8D25: '+e.message; }
+  }
+
+  async function logout(){
+    try { await apiFetch('/auth/logout',{method:'POST'}); } catch(e){}
+    setToken(''); show('view-login');
+  }
+
+  function openChangePw(){
+    const m=document.getElementById('modal');
+    m.style.display='flex';
+    m.innerHTML = \`<div class="modal">
+      <h3>\u4FEE\u6539\u5BC6\u7801</h3>
+      <label>\u65E7\u5BC6\u7801</label><input id="cp-old" type="password" />
+      <label>\u65B0\u5BC6\u7801\uFF08\u81F3\u5C11 8 \u4F4D\uFF09</label><input id="cp-new" type="password" />
+      <label>\u786E\u8BA4\u65B0\u5BC6\u7801</label><input id="cp-new2" type="password" />
+      <p id="cp-err" class="err"></p>
+      <div class="row"><button class="ghost" onclick="closeModal()">\u53D6\u6D88</button><button onclick="doChangePw()">\u786E\u8BA4</button></div>
+    </div>\`;
+  }
+  function closeModal(){ const m=document.getElementById('modal'); m.style.display='none'; m.innerHTML=''; }
+  async function doChangePw(){
+    const oldPw=document.getElementById('cp-old').value;
+    const newPw=document.getElementById('cp-new').value;
+    const newPw2=document.getElementById('cp-new2').value;
+    const err=document.getElementById('cp-err');
+    err.textContent='';
+    if(newPw.length<8){ err.textContent='\u65B0\u5BC6\u7801\u81F3\u5C11 8 \u4F4D'; return; }
+    if(newPw!==newPw2){ err.textContent='\u4E24\u6B21\u65B0\u5BC6\u7801\u4E0D\u4E00\u81F4'; return; }
+    try {
+      const r=await apiFetch('/auth/change-password',{method:'POST',body:JSON.stringify({oldPassword:oldPw,newPassword:newPw})});
+      const d=await r.json();
+      if(!r.ok){ err.textContent=d.message||'\u4FEE\u6539\u5931\u8D25'; return; }
+      closeModal();
+      alert('\u5BC6\u7801\u5DF2\u4FEE\u6539\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55');
+      logout();
+    } catch(e){ err.textContent='\u5931\u8D25: '+e.message; }
+  }
+
+  async function load(){
+    const err = document.getElementById('err');
+    err.textContent = '';
+    try {
+      const r = await apiFetch('/devices');
+      if(r.status===401){ setToken(''); show('view-login'); return; }
+      if(!r.ok) throw new Error('HTTP ' + r.status);
+      const data = await r.json();
+      const devs = data.devices || [];
+      document.getElementById('total').textContent = devs.length;
+      const on = devs.filter(d=>d.online).length;
+      document.getElementById('online').textContent = on;
+      document.getElementById('offline').textContent = devs.length - on;
+      document.getElementById('refresh').textContent = fmtTime(data.generatedAtMs);
+      const tbody = document.getElementById('rows');
+      if(devs.length===0){ tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#64748b">\u6682\u65E0\u8BBE\u5907\u3002\u8282\u70B9\u9700\u914D\u7F6E monitoring \u4E0A\u62A5\u3002</td></tr>'; return; }
+      tbody.innerHTML = devs.map(d => \`<tr>
+        <td><span class="dot \${d.online?'on':'off'}"></span>\${d.online?'\u5728\u7EBF':'\u79BB\u7EBF'}</td>
+        <td>\${d.alias||'\u2014'}</td>
+        <td class="mono">\${d.nodeId}</td>
+        <td class="mono">\${d.virtualIpv4||'\u2014'}</td>
+        <td>\${d.version||'\u2014'}</td>
+        <td class="mono">\${d.lastIp||'\u2014'}</td>
+        <td>\${fmtTime(d.lastSeenMs)}</td>
+      </tr>\`).join('');
+    } catch(e){ err.textContent = '\u52A0\u8F7D\u5931\u8D25: ' + e.message; }
+  }
+
+  init();
+  setInterval(()=>{ if(document.getElementById('view-app').style.display!=='none') load(); }, 15000);
+</script>
+</body>
+</html>
+`;
+
 // ../edge-relay/cf-worker-relay/src/proto.ts
 var MAGIC = 77;
 var VERSION = 2;
@@ -410,6 +617,14 @@ var index_default = {
     }
     if (path === "/health" && request.method === "GET") {
       return json({ ok: true });
+    }
+    if (path === "/" && request.method === "GET" && !isWebSocketUpgrade(request)) {
+      return new Response(dashboard_default, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store"
+        }
+      });
     }
     if (path === "/auth/status" && request.method === "GET") {
       try {

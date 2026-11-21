@@ -25,7 +25,7 @@ type Config struct {
 	// IdentitySeed 是 Ed25519 身份私钥种子（32 字节原始字节），用于描述符签名。
 	// 由面板从本地身份传入；留空则用 TunnelPrivate 派生（兼容旧配置/CLI）。
 	IdentitySeed []byte
-	Listen        string // UDP 监听，如 "0.0.0.0:51820"
+	Listen       string // UDP 监听，如 "0.0.0.0:51820"
 	// DisableListenDual 关闭双栈监听（默认 false = 开启）。
 	//
 	// 具体行为：`Listen` 是未指定地址（0.0.0.0 / :: / 空）时优先绑 `[::]:port`
@@ -36,10 +36,10 @@ type Config struct {
 	// 公网 IPv6 这类「STUN 看不准但确实可达」的场景。填了就按**固定端口**
 	// 注入候选并排在候选表最前（不按偏移展开、不参与端口校准）。
 	// 留空 = 完全按 STUN/网卡推导。
-	PublicAddr    string
-	VirtualIP     string // 本节点虚拟 IP，如 "10.93.0.1"
-	MTU           int    // TUN MTU，默认 1400
-	Peers         []PeerConfig
+	PublicAddr string
+	VirtualIP  string // 本节点虚拟 IP，如 "10.93.0.1"
+	MTU        int    // TUN MTU，默认 1400
+	Peers      []PeerConfig
 	// Verbose 打开关键节点日志（通过 log.Printf 输出）。
 	Verbose bool
 	// RelayDomain / RelayRoom 是盲中继 WSS 地址（降级目标）；留空则禁用降级。
@@ -103,6 +103,7 @@ type PeerConfig struct {
 	Addr      string // "host:port"
 	StaticPub []byte // X25519 静态公钥（32 字节）；IK 握手需预知
 	VirtualIP string // 对端虚拟 IP（如 "10.96.0.2"），用于 IP 包→NodeID 查表
+	Name      string `json:"name,omitempty"` // 设备名/别名，仅用于面板展示
 }
 
 // ParsePublicAddr 解析 `public_addr`，同时接受 `1.2.3.4:51820`、`[240e::1]:51820`
@@ -258,8 +259,3 @@ func (c *Config) tunnelKey() (noise.DHKey, error) {
 	// 随机生成
 	return cs.GenerateKeypair(nil)
 }
-
-
-
-
-

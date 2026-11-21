@@ -43,9 +43,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/config"
-	"time"
 )
 
 // Profile 是一份账户配置。
@@ -131,7 +132,10 @@ type file struct {
 // Store 是凭据库。
 //
 // Dir 可注入，便于测试用临时目录隔离（绝不碰真实用户目录）。
+// mu 串行化对 secrets.json 的所有读写，防止并发请求同时写 secrets.json.tmp
+// 导致 rename 失败或互相覆盖。
 type Store struct {
+	mu  sync.Mutex
 	Dir string
 }
 
@@ -267,6 +271,8 @@ func (s *Store) writeFile(f *file) error {
 
 // List 返回全部 profile（原始结构，供内部使用）。
 func (s *Store) List() ([]Profile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	f, err := s.readFile()
 	if err != nil {
 		return nil, err
@@ -289,6 +295,8 @@ func (s *Store) ListViews() ([]ProfileView, error) {
 
 // ActiveID 返回当前激活的 profile id。
 func (s *Store) ActiveID() (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	f, err := s.readFile()
 	if err != nil {
 		return "", err
@@ -298,6 +306,8 @@ func (s *Store) ActiveID() (string, error) {
 
 // Active 返回当前激活的 profile（没有则 nil）。
 func (s *Store) Active() (*Profile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	f, err := s.readFile()
 	if err != nil {
 		return nil, err
@@ -313,6 +323,8 @@ func (s *Store) Active() (*Profile, error) {
 
 // Get 按 id 取 profile。
 func (s *Store) Get(id string) (*Profile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	f, err := s.readFile()
 	if err != nil {
 		return nil, err
@@ -328,6 +340,8 @@ func (s *Store) Get(id string) (*Profile, error) {
 
 // Create 新建一份 profile 并设为激活。
 func (s *Store) Create(name string, init *Profile) (*Profile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	f, err := s.readFile()
 	if err != nil {
 		return nil, err
@@ -373,6 +387,8 @@ type Patch struct {
 
 // Update 更新指定 profile。id 不存在时返回错误。
 func (s *Store) Update(id string, patch Patch) (*Profile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	f, err := s.readFile()
 	if err != nil {
 		return nil, err
@@ -424,6 +440,8 @@ func (s *Store) Update(id string, patch Patch) (*Profile, error) {
 //
 // 允许删到 0 份（用户可能想完全清空）；删掉激活项时顺延到下一个。
 func (s *Store) Delete(id string) (deleted bool, activeID string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	f, err := s.readFile()
 	if err != nil {
 		return false, "", err
@@ -453,6 +471,8 @@ func (s *Store) Delete(id string) (deleted bool, activeID string, err error) {
 
 // SetActive 切换激活的 profile。
 func (s *Store) SetActive(id string) (bool, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	f, err := s.readFile()
 	if err != nil {
 		return false, "", err
@@ -471,6 +491,8 @@ func (s *Store) SetActive(id string) (bool, string, error) {
 //
 // 这是 Electron 版 `saveSecrets()` 的对应实现，供「保存 Token」按钮使用。
 func (s *Store) SaveActive(patch Patch) (*Profile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	f, err := s.readFile()
 	if err != nil {
 		return nil, err
@@ -533,6 +555,8 @@ func (s *Store) SaveActive(patch Patch) (*Profile, error) {
 // 优先移动到 `.bak` 而不是直接删：误点也能找回。
 // 只有 `.bak` 已存在时才真正删掉旧备份。
 func (s *Store) Clear() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	path := s.path()
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		return nil

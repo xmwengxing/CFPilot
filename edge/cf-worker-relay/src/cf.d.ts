@@ -6,6 +6,11 @@
 //
 // 只声明本项目真正使用到的成员，避免与 DOM lib 的 WebSocket / Response 等重复冲突。
 
+declare module "*.html" {
+  const content: string;
+  export default content;
+}
+
 interface DurableObjectState {
   /** Hibernation API：接受一个 WebSocket 并登记标签（标签可在 `getWebSockets(tag)` 取回）。 */
   acceptWebSocket(ws: WebSocket, tags?: string[]): void;

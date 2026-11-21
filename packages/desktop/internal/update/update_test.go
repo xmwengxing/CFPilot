@@ -591,5 +591,26 @@ func TestDefaultDownloadPath(t *testing.T) {
 	}
 }
 
+// 同一 Release 同时包含 +mesh 安装包与普通版时，pickAsset 不应误选 +mesh 安装包。
+func TestPickAssetPrefersStandardOverMesh(t *testing.T) {
+	standardName := "cfpilot-0.60.0-beta.1-" + runtime.GOOS + "-" + runtime.GOARCH
+	meshName := "cfpilot-0.60.0-beta.1+mesh-" + runtime.GOOS + "-" + runtime.GOARCH
+	if runtime.GOOS == "windows" {
+		standardName += ".exe"
+		meshName += "-setup.exe"
+	} else {
+		meshName += ".deb"
+	}
+	// 故意把 +mesh 排在前面（GitHub 字母序里 `+` < `-`，+mesh 确实排在普通版之前！）
+	assets := []Asset{
+		{Name: meshName, URL: "https://example.com/" + meshName},
+		{Name: standardName, URL: "https://example.com/" + standardName},
+	}
+	got := pickAsset(assets)
+	if got == nil || got.Name != standardName {
+		t.Fatalf("应选中普通版 %q，实际 %#v", standardName, got)
+	}
+}
+
 // 保证 time 被引用（超时相关）
 var _ = time.Second

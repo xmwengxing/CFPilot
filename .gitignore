@@ -47,6 +47,7 @@ packages/worker-core/src/route-profile.generated.ts
 
 # 开发过程文档（不入库，内容已整合进 README / 本地 HANDOVER.md）
 /docs/*.md
+!/docs/DEVICES.md
 /docs/*.ini
 /docs/tist.ini
 # 反代 IP 的**实测产物**不入库：它是特定网络、特定时刻的快照，

@@ -14,7 +14,9 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {
+  CloudflareError,
   CloudflareClient,
+  type D1Database,
   type ScriptBinding,
   type DoMigration,
 } from '../deploy/cf-api'
@@ -22,6 +24,10 @@ import { EDGE_RELAY_SCHEMAS, splitSchemaSql } from '../deploy/edge-relay-schema'
 
 const EDGE_RELAY_COMPAT_DATE = '2026-01-01'
 const DEFAULT_DO_CLASS = 'MeshRoom'
+const D1_READY_TIMEOUT_MS = 90_000
+const D1_RETRY_INITIAL_DELAY_MS = 500
+const D1_RETRY_MAX_DELAY_MS = 5_000
+const MONITOR_SETUP_TIMEOUT_MS = 90_000
 
 export interface EdgeDeployOptions {
   accountId: string
@@ -99,6 +105,98 @@ export function zoneNameFromDomain(domain: string): string {
   return parts.length >= 2 ? parts.slice(-2).join('.') : domain
 }
 
+function isTransientD1Error(err: unknown): boolean {
+  if (err instanceof CloudflareError) {
+    if (err.status === 408 || err.status === 425 || err.status === 429 || err.status >= 500) return true
+    return /(?:d1|database).*(?:not found|not ready|not available|unavailable|provision)/i.test(err.message)
+  }
+  if (err instanceof TypeError) return true
+  return err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+function isTransientHttpStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status >= 500
+}
+
+async function setupMonitorPasswordWithRetry(
+  workerUrl: string,
+  password: string,
+  report: (message: string) => void
+): Promise<boolean> {
+  const deadline = Date.now() + MONITOR_SETUP_TIMEOUT_MS
+  let delayMs = D1_RETRY_INITIAL_DELAY_MS
+  let attempts = 0
+  let lastError = ''
+  while (Date.now() < deadline) {
+    attempts += 1
+    try {
+      const setupResp = await fetch(`${workerUrl}/auth/setup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+        signal: AbortSignal.timeout(Math.min(15_000, Math.max(1, deadline - Date.now()))),
+      })
+      if (setupResp.ok) {
+        return false
+      }
+      if (setupResp.status === 409) {
+        return true
+      }
+      const text = await setupResp.text().catch(() => '')
+      lastError = `HTTP ${setupResp.status}: ${text.slice(0, 300)}`
+      if (!isTransientHttpStatus(setupResp.status)) {
+        throw new Error(`设置监测台密码失败（${lastError}）`)
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith('设置监测台密码失败（')) throw err
+      lastError = errorMessage(err)
+    }
+    const remainingMs = deadline - Date.now()
+    if (remainingMs <= 0) break
+    const waitMs = Math.min(delayMs, remainingMs)
+    report(`Worker/D1 尚未就绪，${(waitMs / 1000).toFixed(waitMs % 1000 === 0 ? 0 : 1)} 秒后重试监测台初始化（第 ${attempts + 1} 次）`)
+    await new Promise<void>((resolve) => setTimeout(resolve, waitMs))
+    delayMs = Math.min(delayMs * 2, D1_RETRY_MAX_DELAY_MS)
+  }
+  throw new Error(`设置监测台密码在 ${MONITOR_SETUP_TIMEOUT_MS / 1000} 秒内未完成（已尝试 ${attempts} 次）：${lastError}`)
+}
+
+async function queryD1WithRetry(
+  client: CloudflareClient,
+  accountId: string,
+  databaseId: string,
+  sql: string,
+  deadline: number,
+  operation: string,
+  report: (message: string) => void
+): Promise<void> {
+  let delayMs = D1_RETRY_INITIAL_DELAY_MS
+  let attempts = 0
+  while (true) {
+    attempts += 1
+    try {
+      await client.queryD1(accountId, databaseId, sql)
+      return
+    } catch (err) {
+      if (!isTransientD1Error(err)) {
+        throw new Error(`${operation}失败：${errorMessage(err)}`)
+      }
+      const remainingMs = deadline - Date.now()
+      if (remainingMs <= 0) {
+        throw new Error(`${operation}在 ${D1_READY_TIMEOUT_MS / 1000} 秒内未完成（已重试 ${attempts - 1} 次）：${errorMessage(err)}`)
+      }
+      const waitMs = Math.min(delayMs, remainingMs)
+      report(`D1 暂不可用，${(waitMs / 1000).toFixed(waitMs % 1000 === 0 ? 0 : 1)} 秒后重试${operation}（第 ${attempts + 1} 次）`)
+      await new Promise<void>((resolve) => setTimeout(resolve, waitMs))
+      delayMs = Math.min(delayMs * 2, D1_RETRY_MAX_DELAY_MS)
+    }
+  }
+}
+
 export async function deployEdgeRelay(
   client: CloudflareClient,
   opts: EdgeDeployOptions
@@ -116,15 +214,32 @@ export async function deployEdgeRelay(
 
   // ---- 1. 动态创建 D1 + 执行 schema ----
   report('步骤 1/5：创建监测数据库（D1）')
-  const db = await client.createD1Database(accountId, d1Name)
+  let db: D1Database | undefined
+  try {
+    db = await client.createD1Database(accountId, d1Name)
+  } catch (createError) {
+    const existing = await client.listD1Databases(accountId, d1Name).catch(() => [])
+    db = existing.find((candidate) => candidate.name === d1Name)
+    if (!db) throw createError
+    report(`D1 已存在，复用：${db.name} (${db.uuid.slice(0, 8)}…)`)
+  }
+  if (!db) throw new Error(`创建或复用 D1 失败：${d1Name}`)
   report(`D1 已创建：${db.name} (${db.uuid.slice(0, 8)}…)，初始化 schema`)
+  const d1Deadline = Date.now() + D1_READY_TIMEOUT_MS
+  report('等待 D1 就绪')
+  await queryD1WithRetry(client, accountId, db.uuid, 'SELECT 1', d1Deadline, 'D1 就绪检查', report)
+  report('D1 已就绪，开始初始化 schema')
   for (const schema of EDGE_RELAY_SCHEMAS) {
     for (const sql of splitSchemaSql(schema)) {
-      try {
-        await client.queryD1(accountId, db.uuid, sql)
-      } catch (err) {
-        throw new Error(`D1 schema 初始化失败（${sql.slice(0, 40)}…）：${err instanceof Error ? err.message : String(err)}`)
-      }
+      await queryD1WithRetry(
+        client,
+        accountId,
+        db.uuid,
+        sql,
+        d1Deadline,
+        `D1 schema 初始化失败（${sql.slice(0, 40)}…）`,
+        report
+      )
     }
   }
   report('D1 schema 初始化完成（5 条语句）')
@@ -179,18 +294,8 @@ export async function deployEdgeRelay(
 
   // ---- 4. 设置监测台初始密码 ----
   report('步骤 4/5：设置监测台初始密码')
-  const setupResp = await fetch(`${workerUrl}/auth/setup`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password: opts.monitorPassword }),
-    signal: AbortSignal.timeout(15000),
-  })
-  if (!setupResp.ok) {
-    const text = await setupResp.text().catch(() => '')
-    // 已设置过密码（409 conflict）视为幂等成功
-    if (setupResp.status !== 409) {
-      throw new Error(`设置监测台密码失败（HTTP ${setupResp.status}）：${text.slice(0, 300)}`)
-    }
+  const monitorAlreadySetup = await setupMonitorPasswordWithRetry(workerUrl, opts.monitorPassword, report)
+  if (monitorAlreadySetup) {
     report('监测台已有密码，跳过初始化（幂等）')
   } else {
     report('监测台密码已设置')
@@ -204,7 +309,10 @@ export async function deployEdgeRelay(
     // 面板以 ES module Worker 形式部署（Pages Direct Upload 的 manifest/hash 机制复杂，
     // 而面板本质是单页 HTML —— 包成 Worker 复用已验证的 deployPagesWorker，真机可用）。
     let dashWorkerCode = loadAsset('dashboard-worker.js')
-    dashWorkerCode = dashWorkerCode.replace(/const DEFAULT_API = '[^']*'/, `const DEFAULT_API = '${workerUrl}'`)
+    dashWorkerCode = dashWorkerCode.replace(
+      /const DEFAULT_API = (?:'[^']*'|location\.origin)/,
+      `const DEFAULT_API = '${workerUrl}'`
+    )
     await deployDashboard(client, accountId, project, dashWorkerCode, report)
     dashboardUrl = `https://${project}.pages.dev`
     report(`监测面板已部署：${dashboardUrl}`)

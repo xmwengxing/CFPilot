@@ -75,6 +75,26 @@ const checks = [
   ['index.html 有网络环境弹窗', html.includes('envModal')],
   ['index.html 无 adapter 注入（应保持纯净）', !html.includes('adapter.js')],
 
+  // 拓扑 IP 列表 / IPv6 位置 / 点击复制是 0.50.0 之后的关键 UI 改动。
+  // 之前只重建了 renderer.ts 却没重建 dist，装了新包界面完全不变；这里做硬断言，
+  // 让任何后续构建只要漏掉这些元素就直接失败。
+  ['index.html 有拓扑 IP 列表容器', html.includes('id="topoIpList"')],
+  ['index.html 有拓扑 IPv6 容器', html.includes('id="topoIpv6"')],
+  ['index.html 有点击复制样式', html.includes('copy-ip')],
+  ['renderer.js 有拓扑 IP 列表逻辑', js.includes('topoIpList')],
+  ['renderer.js 有拓扑 IPv6 渲染逻辑', js.includes('topoIpv6')],
+  ['renderer.js 有 IP 点击复制逻辑', js.includes('copy-ip')],
+
+  // 命名网络档案：创建/修改/删除 + 当前网络选择框。
+  ['index.html 有当前网络选择框', html.includes('id="meshProfileSelect"')],
+  ['index.html 有配置名称输入框', html.includes('id="meshProfileName"')],
+  ['index.html 配置名称改为网络配置名称', html.includes('>网络配置名称 ⓘ</label>')],
+  ['index.html 配置名称有悬浮说明', html.includes('data-tip="本机档案名，不是组网网络名"')],
+  ['index.html 有创建网络按钮', html.includes('id="btnMeshProfileCreate"')],
+  ['index.html 有修改网络按钮', html.includes('id="btnMeshProfileEdit"')],
+  ['index.html 有删除网络按钮', html.includes('id="btnMeshProfileDelete"')],
+  ['renderer.js 有网络档案逻辑', js.includes('cfpilot-mesh-profiles')],
+
   // 定时任务清单：编辑只针对**单条**任务。
   //
   // 多选后统一编辑本身是错的 —— 各任务设置可能不同，一个字段填什么值

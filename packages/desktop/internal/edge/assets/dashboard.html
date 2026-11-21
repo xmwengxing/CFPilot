@@ -98,7 +98,7 @@
 </main>
 <div id="modal" style="display:none"></div>
 <script>
-  const DEFAULT_API = 'https://relay.shijingtian.de5.net';
+  const DEFAULT_API = location.origin;
   const apiInput = document.getElementById('api');
   if (apiInput) apiInput.value = localStorage.getItem('monitor_api') || DEFAULT_API;
   function saveApi(){ if(apiInput) localStorage.setItem('monitor_api', apiInput.value); load(); }

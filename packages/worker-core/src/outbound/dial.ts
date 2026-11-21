@@ -38,10 +38,16 @@ import { isIpv4 } from '../protocols/address'
 import { resolveEndpointIps } from './doh'
 import { collectRelayEndpoints, RELAY_BATCH_SIZE, stableRelayIndex, type RelayPoolOptions } from './relay'
 import {
+  clearRelaySuccessMemory,
+  confirmRelaySuccess,
   endpointKey,
   isEndpointCooled,
+  penalizeRelayEndpoint,
   recordEndpointFailure,
   recordEndpointSuccess,
+  relayEntryFromEndpoint,
+  relaySuccessFor,
+  rememberRelaySuccess,
   sortByEndpointHealth,
 } from './endpoint-health'
 import {
@@ -211,6 +217,8 @@ export interface DialResult {
   via: 'direct' | 'nat64' | 'socks5' | 'http' | 'https'
   /** 实际连接到的落地地址（代理场景为代理地址） */
   endpoint: string
+  /** 本次连接是否经过第三方反代入口（用于上层识别 TLS 致命告警 / 假活熔断与成功记忆回写） */
+  isRelay?: boolean
   /**
    * 关闭底层 TCP Socket（可读 + 可写一起关）。
    *
@@ -647,55 +655,13 @@ export const RELAY_CONNECT_TIMEOUT_MS = 2500
  */
 export const PINNED_RELAY_CONNECT_TIMEOUT_MS = 1200
 
-/**
- * 反代入口的「按域名成功记忆」：hostname → 上次真正成功的入口。
- *
- * ## 为什么需要
- *
- * 出厂不再内置固定入口后，某域名走的是 `stableRelayIndex()` 的**哈希**选路，
- * 选中的入口对它的 SNI 未必可用（第三方反代入口的 SNI 策略各不相同）。
- * 结果是升级后原本能打开的站点突然打不开 —— 即使池里另有一个能用。
- *
- * 记下真正成功过的入口并优先复用，就能达到「固定出口」的效果：
- *   - 不共享单点（每个域名各记各的，而不是全网共用一个出厂 IP）；
- *   - 不需要发版（自学习）；
- *   - 入口失效时由 endpoint-health 熔断，自动重新学一个。
- *
- * isolate 级内存、上限 128 条；冷启动重置（换 isolate 会重新学一遍）。
- */
-const RELAY_SUCCESS_MEMORY = new Map<string, { ip: string; port: number }>()
-const RELAY_SUCCESS_MEMORY_MAX = 128
-
-/** 记录某域名的反代成功入口（同时刷新「最近使用」顺序）。 */
-function rememberRelaySuccess(hostname: string, ip: string, port: number): void {
-  if (!hostname || !ip || !port) return
-  RELAY_SUCCESS_MEMORY.delete(hostname)
-  RELAY_SUCCESS_MEMORY.set(hostname, { ip, port })
-  while (RELAY_SUCCESS_MEMORY.size > RELAY_SUCCESS_MEMORY_MAX) {
-    const oldest = RELAY_SUCCESS_MEMORY.keys().next().value
-    if (oldest === undefined) break
-    RELAY_SUCCESS_MEMORY.delete(oldest)
-  }
-}
-
-/** 取某域名的反代成功记忆。 */
-function relaySuccessFor(hostname: string): { ip: string; port: number } | undefined {
-  return RELAY_SUCCESS_MEMORY.get(hostname)
-}
-
-/** 清空成功记忆（测试用）。 */
-export function clearRelaySuccessMemory(): void {
-  RELAY_SUCCESS_MEMORY.clear()
-}
-
-/** 从 `ip:port` / `[v6]:port` 形式的 endpoint 里取出入口地址。 */
-function relayEntryFromEndpoint(endpoint: string): { ip: string; port: number } | undefined {
-  const i = String(endpoint ?? '').lastIndexOf(':')
-  if (i <= 0) return undefined
-  const ip = endpoint.slice(0, i).replace(/^\[/, '').replace(/\]$/, '')
-  const port = Number(endpoint.slice(i + 1))
-  if (!ip || !Number.isFinite(port) || port <= 0) return undefined
-  return { ip, port }
+// 成功记忆与惩罚/确认函数收归 endpoint-health.ts，此处重导出保持既有导出契约不变。
+export {
+  clearRelaySuccessMemory,
+  confirmRelaySuccess,
+  penalizeRelayEndpoint,
+  relayEntryFromEndpoint,
+  rememberRelaySuccess,
 }
 
 /**
@@ -1151,6 +1117,7 @@ export async function dial(options: DialOptions): Promise<DialResult> {
       }
       // 直连 / 优选 IP：换入口地址，但目标（TLS SNI 等）仍是原目标
       const result = await dialDirect({ ...attemptOptions, hostname: candidate.host, port: candidate.port })
+      if (candidate.source === 'relay') result.isRelay = true
       recordEndpointSuccess(healthKey)
       return result
     } catch (err) {
@@ -1311,6 +1278,7 @@ export async function dial(options: DialOptions): Promise<DialResult> {
           label: `固定反代 ${p.ip}:${p.port}`,
           timeoutMs: PINNED_RELAY_CONNECT_TIMEOUT_MS,
         })()
+        res.isRelay = true
         rememberRelaySuccess(options.hostname, p.ip, p.port)
         return res
       } catch {
@@ -1341,6 +1309,7 @@ export async function dial(options: DialOptions): Promise<DialResult> {
             port: remembered.port,
             label: `反代 ${remembered.ip}:${remembered.port}`,
           })()
+          res.isRelay = true
           rememberRelaySuccess(options.hostname, remembered.ip, remembered.port)
           return res
         } catch {
@@ -1371,6 +1340,7 @@ export async function dial(options: DialOptions): Promise<DialResult> {
         port: sticky.port,
         label: `反代 ${sticky.label}`,
       })()
+      res.isRelay = true
       rememberRelaySuccess(options.hostname, sticky.ip, sticky.port)
       return res
     } catch {
@@ -1383,6 +1353,7 @@ export async function dial(options: DialOptions): Promise<DialResult> {
       )
       const res = await tryRelayWithWindow(rest, attemptOf, concurrent)
       if (res) {
+        res.isRelay = true
         const entry = relayEntryFromEndpoint(res.endpoint)
         if (entry) rememberRelaySuccess(options.hostname, entry.ip, entry.port)
       }

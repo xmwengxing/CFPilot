@@ -128,6 +128,33 @@ describe('反代入口成功记忆', () => {
     // 可能先试 GOOD（哈希正好指向它），也可能先 BAD；关键是不能串用 A 的记忆状态
     expect(tried.length).toBeGreaterThan(0)
   })
+
+  it('假活 / TLS 告警惩罚会立即清掉成功记忆并熔断坏入口', async () => {
+    const { penalizeRelayEndpoint, confirmRelaySuccess } = await import('../src/outbound/dial')
+    const host = hostWithStickyZero(2)
+    failHosts = new Set([host])
+
+    // 首次建连：哈希指向 BAD 且 TCP 通（模拟“假活/返回 TLS Alert”的反代）
+    const first = await dial(opts(host))
+    expect(first.endpoint.startsWith(BAD)).toBe(true)
+    expect(first.isRelay).toBe(true)
+
+    // 上层收到 TLS Fatal Alert 或假活无下行 → 立即惩罚 BAD
+    penalizeRelayEndpoint(host, first.endpoint, true)
+
+    // 下一次请求必须跳过已被熔断的 BAD，直接命中 GOOD
+    tried = []
+    const second = await dial(opts(host))
+    expect(second.endpoint.startsWith(GOOD)).toBe(true)
+    expect(tried.filter((h) => h !== host)).toEqual([GOOD])
+
+    // GOOD 真正收到有效下行后确认成功记忆
+    confirmRelaySuccess(host, second.endpoint)
+    tried = []
+    const third = await dial(opts(host))
+    expect(third.endpoint.startsWith(GOOD)).toBe(true)
+    expect(tried.filter((h) => h !== host)).toEqual([GOOD])
+  })
 })
 
 

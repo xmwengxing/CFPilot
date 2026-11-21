@@ -1,6 +1,6 @@
 # CFPilot 桌面版（Go）
 
-一个约 **7 MB** 的 Go 单二进制程序，提供 CFPilot 的图形化部署与优选能力。
+一个 **10.9 MB**（Windows）的 Go 单二进制程序，提供 CFPilot 的图形化部署与优选能力，界面开在**自己的窗口**里。
 
 ## 为什么有 Go 版
 
@@ -12,30 +12,52 @@ Go 版实测对比：
 
 | | Electron 版 | Go 版 |
 |---|---|---|
-| Windows exe | 77.98 MB | **6.92 MB** |
-| Linux | ❌ | 8.90 MB (amd64) / 8.31 MB (arm64) |
-| 内存占用 | ~150 MB | ~25 MB |
-| 启动速度 | 2~4 秒 | < 200 ms |
+| Windows exe | 77.98 MB | **10.88 MB** |
+| Linux | ❌ | 12.68 MB (amd64) / 11.75 MB (arm64) |
+| 内存占用 | ~150 MB | ~25 MB（面板窗口由系统 WebView 进程渲染） |
+| 启动速度 | 2~4 秒 | < 500 ms |
 
-## 架构：不做浏览器，只做壳
+## 架构：窗口只做壳
 
 ```text
-                    ┌─────────────────────────────┐
-                    │  系统浏览器（用户自己的）      │
-                    └──────────────┬──────────────┘
+                    ┌──────────────────────────────┐
+                    │ 应用自己的无边框窗口           │
+                    │ （系统 WebView：WebView2 /     │
+                    │   WebKitGTK，不打包浏览器内核）│
+                    └──────────────┬───────────────┘
                                    │ HTTP (127.0.0.1)
-                    ┌──────────────▼──────────────┐
+                    ┌──────────────▼───────────────┐
                     │  Go 进程                     │
                     │  ├─ 托盘图标 / 菜单           │
                     │  ├─ 本地 HTTP 服务            │
+                    │  ├─ internal/shell  窗口      │
                     │  └─ go:embed 内嵌界面资源     │
-                    └─────────────────────────────┘
+                    └──────────────────────────────┘
 ```
 
-**界面与 Electron 版是同一份源码。**
-`scripts/build-desktop.mjs` 把 `packages/gui/dist/renderer/` 的产物
-拷进 `internal/server/assets/`，再用 `go:embed` 打进二进制。
-这样两个版本永远渲染同一份 HTML/JS，Go 版界面不可能落后。
+**界面源码只有一份**（`packages/ui`）。
+`scripts/build-desktop.mjs` 把 `packages/ui/dist` 的产物拷进
+`internal/server/assets/`，再用 `go:embed` 打进二进制；
+窗口只是用系统 WebView 加载 `127.0.0.1` 上的这份界面，
+所以 Cookie / SSE / `/api` 全部原样复用，Android 与容器也共用同一套。
+
+## 面板窗口（internal/shell）
+
+| | Windows | Linux（`cfp_gui` 构建） |
+|---|---|---|
+| WebView | WebView2（Win10/11 自带） | 系统 WebKitGTK |
+| 标题栏 | 无边框 + 自绘（最小化/最大化/关闭/拖动） | 窗口管理器原生 |
+| 关窗 | 收进托盘，后台任务继续 | 关闭窗口，服务继续在托盘 |
+| 不可用时 | 回退系统浏览器 | 回退系统浏览器 |
+
+- 窗口只加载回环地址（带启动令牌），不新建监听端口；
+- 窗口控制走注入的 JS 桥，不经 HTTP；
+- 外部链接一律交给系统浏览器；
+- `CFPILOT_PANEL=auto|window|browser`，或命令行 `--browser`。
+
+> Linux 的窗口后端用 purego 在运行时 `dlopen` WebKitGTK，
+> 所以**图形产物链接 glibc**；容器（Alpine/musl）用的是另一个
+> 不带 `cfp_gui` 的静态产物，由构建脚本分别产出并校验。
 
 ## 目录
 
@@ -43,12 +65,13 @@ Go 版实测对比：
 packages/desktop/
 ├── go.mod / go.sum
 ├── cmd/cfpilot/
-│   ├── main.go           入口：参数解析、启动服务、打开浏览器
+│   ├── main.go           入口：参数解析、启动服务、面板窗口 / 回退浏览器
 │   ├── msgbox.go         Windows 消息框（无控制台时也能看到错误）
 │   └── msgbox_other.go   非 Windows 的 stderr 版本
 └── internal/
     ├── config/           设置读写（~/.cfpilot-gui/desktop.json）
     ├── server/           本地 HTTP 服务 + 安全校验 + 端口管理
+    ├── shell/            面板窗口（WebView2 / WebKitGTK / 回退）
     └── tray/             托盘图标与菜单
 ```
 
@@ -89,7 +112,7 @@ go run ./cmd/cfpilot --check
 从仓库根目录执行（会先同步界面资源）：
 
 ```bash
-npm run build -w @cfpilot/gui      # 先出界面产物
+npm run build -w @cfpilot/ui       # 先出界面产物
 node scripts/build-desktop.mjs     # 再编三平台
 ```
 
@@ -97,15 +120,22 @@ node scripts/build-desktop.mjs     # 再编三平台
 
 ```
 cfpilot-<版本>-windows-amd64.exe
-cfpilot-<版本>-linux-amd64
+cfpilot-<版本>-linux-amd64        # 带 cfp_gui，有窗口能力
 cfpilot-<版本>-linux-arm64
 ```
+
+同时会另编一份**不带 `cfp_gui` 的静态 Linux 产物**到 `docker/dist/<arch>/cfpilot`，
+供 Alpine 镜像使用。构建脚本会分别校验：
+
+- 图形产物不得链接 `libwebkit*` / `libgtk-*`（必须运行时 dlopen）；
+- 容器产物必须没有 `.dynamic` 段（完全静态）。
 
 ## 命令行参数
 
 ```
 --port <n>       临时指定端口（不写入配置）
---no-browser     启动后不自动打开浏览器
+--browser        用系统浏览器打开面板（不使用内嵌窗口）
+--no-browser     启动后不打开面板（也不开浏览器）
 --no-tray        不启托盘，只跑服务（服务器 / 无桌面环境）
 --console        日志写入配置目录的 cfpilot.log
 --check          只做自检（配置目录 / 端口可用性），不启动

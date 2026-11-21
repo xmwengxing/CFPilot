@@ -144,12 +144,13 @@ jobs:
             echo "修复：本地执行 npm run build -w @cfpilot/worker-core && npm run build -w cfpilot 后提交"
             exit 1
           done
-      - name: 发布 cfpilot
+      - name: 发布 cfpilot 与 cfpilot-mesh
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_USE_STAGE: '1'
         run: |
           node scripts/publish-npm.mjs cfpilot
+          node scripts/publish-npm.mjs cfpilot-mesh
 
       - name: 提示后续操作
         # stage 发布后包还没上线，需要人工批准，所以这里不做版本校验

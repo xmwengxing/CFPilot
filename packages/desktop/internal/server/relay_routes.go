@@ -20,14 +20,24 @@ import (
 
 // relayState 是反代体检的任务状态（同一时刻只允许一个）。
 type relayState struct {
-	mu      sync.Mutex
-	running bool
-	cancel  context.CancelFunc
+	mu       sync.Mutex
+	running  bool
+	cancel   context.CancelFunc
+	hasState bool
+	done     int
+	total    int
+	ip       string
+	lastOK   bool
+	pct      int
+	text     string
+	finished bool
+	resultOK bool
 }
 
 // registerRelayRoutes 挂载反代优选（出站链路体检）相关路由。
 func (s *Server) registerRelayRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/relay/run", s.guard(s.handleRelayRun))
+	mux.HandleFunc("/api/relay/status", s.guard(s.handleRelayStatus))
 	mux.HandleFunc("/api/relay/cancel", s.guard(s.handleRelayCancel))
 	mux.HandleFunc("/api/relay/parse-candidates", s.guard(s.handleRelayParseCandidates))
 	mux.HandleFunc("/api/relay/fetch-candidates", s.guard(s.handleRelayFetchCandidates))
@@ -145,6 +155,14 @@ func (s *Server) handleRelayRun(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.relay.running = true
 	s.relay.cancel = cancel
+	s.relay.hasState = true
+	s.relay.done = 0
+	s.relay.total = len(candidates)
+	s.relay.ip = ""
+	s.relay.pct = 0
+	s.relay.text = "正在启动…"
+	s.relay.finished = false
+	s.relay.resultOK = false
 	s.relay.mu.Unlock()
 
 	timeout := time.Duration(req.TimeoutMs) * time.Millisecond
@@ -180,6 +198,26 @@ func (s *Server) handleRelayRun(w http.ResponseWriter, r *http.Request) {
 			Candidates:  candidates,
 			VerifyHosts: verifyHosts,
 			OnProgress: func(done, total int, ip string, ok bool) {
+				pct := 0
+				if total > 0 {
+					pct = int(float64(done) / float64(total) * 100)
+					if pct > 100 {
+						pct = 100
+					}
+				}
+				mark := " ✗"
+				if ok {
+					mark = " ✓"
+				}
+				s.relay.mu.Lock()
+				s.relay.hasState = true
+				s.relay.done = done
+				s.relay.total = total
+				s.relay.ip = ip
+				s.relay.lastOK = ok
+				s.relay.pct = pct
+				s.relay.text = fmt.Sprintf("进度 %d/%d · %s%s", done, total, ip, mark)
+				s.relay.mu.Unlock()
 				s.events.publish("relay-progress", map[string]any{
 					"done":  done,
 					"total": total,
@@ -189,10 +227,25 @@ func (s *Server) handleRelayRun(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 		if err != nil {
+			s.relay.mu.Lock()
+			s.relay.hasState = true
+			s.relay.finished = true
+			s.relay.resultOK = false
+			s.relay.pct = 0
+			s.relay.text = "未完成"
+			s.relay.mu.Unlock()
 			s.logLevel("反代体检失败："+err.Error(), "err")
 			s.events.publish("relay-result", map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
+
+		s.relay.mu.Lock()
+		s.relay.hasState = true
+		s.relay.finished = true
+		s.relay.resultOK = true
+		s.relay.pct = 100
+		s.relay.text = "已完成"
+		s.relay.mu.Unlock()
 
 		payload := map[string]any{
 			"ok":            true,
@@ -217,6 +270,29 @@ func (s *Server) handleRelayRun(w http.ResponseWriter, r *http.Request) {
 		"started": true,
 		"count":   len(candidates),
 	})
+}
+
+// handleRelayStatus 返回当前或最近一次反代优选的进度状态。
+func (s *Server) handleRelayStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "仅支持 GET/POST"})
+		return
+	}
+	s.relay.mu.Lock()
+	resp := map[string]any{
+		"running":  s.relay.running,
+		"hasState": s.relay.hasState,
+		"done":     s.relay.done,
+		"total":    s.relay.total,
+		"ip":       s.relay.ip,
+		"ok":       s.relay.lastOK,
+		"pct":      s.relay.pct,
+		"text":     s.relay.text,
+		"finished": s.relay.finished,
+		"resultOk": s.relay.resultOK,
+	}
+	s.relay.mu.Unlock()
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleRelayCancel 取消正在进行的反代体检。

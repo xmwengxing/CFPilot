@@ -54,7 +54,7 @@ func StartupMessage(url string, port int, lanMode bool) Message {
 		body += "\n\n已开启局域网访问"
 	}
 	return Message{
-		Title: "CFPilot 部署与维护服务",
+		Title: "CFPilot 部署与网络维护",
 		Body:  body,
 	}
 }

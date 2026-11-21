@@ -1088,6 +1088,29 @@ func (c *Client) ListScripts(ctx context.Context, accountID string) ([]string, e
 	return names, nil
 }
 
+// GetWorkerScriptSettings 读取脚本的 settings（绑定 / 兼容日期 / 可观测性）。
+//
+// 只读，供「检测部署状态」按绑定特征识别自己部署的 Worker
+// （盲中继的 MONITOR_TOKEN + MeshRoom DO / DB 绑定）。
+// 需要 Workers Scripts / Read 权限（Edit 已含）。
+//
+// ⚠️ plain_text 绑定的值可读；secret_text 的值**不会**返回 ——
+// 调用方要把「读到空」当成「不可回填」，而不是「没有这个绑定」。
+func (c *Client) GetWorkerScriptSettings(ctx context.Context, accountID, scriptName string) ([]WorkerBinding, error) {
+	var out struct {
+		Bindings []WorkerBinding `json:"bindings"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet,
+		fmt.Sprintf("/accounts/%s/workers/scripts/%s/settings", accountID, url.PathEscape(scriptName)),
+		nil, &out); err != nil {
+		return nil, err
+	}
+	if out.Bindings == nil {
+		return []WorkerBinding{}, nil
+	}
+	return out.Bindings, nil
+}
+
 // DNSRecord 是 zone 下的一条 DNS 记录。
 type DNSRecord struct {
 	ID      string `json:"id"`

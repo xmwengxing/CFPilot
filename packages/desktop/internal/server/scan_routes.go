@@ -34,15 +34,129 @@ import (
 )
 
 // scanState 记录当前扫描任务状态（同一时刻只允许一个扫描）。
+//
+// 同时保留最近一次优选的进度快照，供界面切换页面、重新打开窗口或刷新后
+// 立即恢复进度条状态（避免切页后进度条消失）。
 type scanState struct {
-	mu      sync.Mutex
-	running bool
-	cancel  context.CancelFunc
+	mu       sync.Mutex
+	running  bool
+	cancel   context.CancelFunc
+	hasState bool
+	host     string
+	pct      int
+	stage    string
+	text     string
+	done     int
+	total    int
+	message  string
+	finished bool
+	ok       bool
+}
+
+// calcScanProgress 按与前端一致的阶段权重把进度消息映射为阶段名与总进度百分比。
+func calcScanProgress(message string, done, total int) (stage string, pct int, text string) {
+	switch {
+	case strings.Contains(message, "粗筛"):
+		stage = "全量粗筛"
+	case strings.Contains(message, "阶段一") || strings.Contains(message, "TCP"):
+		stage = "连通性"
+	case strings.Contains(message, "阶段二") || strings.Contains(message, "TLS") || strings.Contains(message, "101"):
+		stage = "协议验证"
+	case strings.Contains(message, "阶段三") || strings.Contains(message, "测速"):
+		stage = "性能测速"
+	default:
+		stage = "处理中"
+	}
+	local := 0.05
+	if total > 0 {
+		local = float64(done) / float64(total)
+		if local < 0 {
+			local = 0
+		}
+		if local > 1 {
+			local = 1
+		}
+	}
+	base, span := 0.0, 5.0
+	switch stage {
+	case "连通性":
+		base, span = 0, 25
+	case "协议验证":
+		base, span = 25, 20
+	case "全量粗筛":
+		base, span = 45, 10
+	case "性能测速":
+		base, span = 55, 40
+	}
+	pct = int(math.Round(base + local*span))
+	if pct < 1 {
+		pct = 1
+	}
+	if pct > 99 {
+		pct = 99
+	}
+	if total > 0 {
+		text = fmt.Sprintf("%s %d/%d", stage, done, total)
+	} else {
+		text = stage
+	}
+	return stage, pct, text
+}
+
+func (s *Server) setScanProgressStart(host string) {
+	s.scan.mu.Lock()
+	s.scan.hasState = true
+	s.scan.host = host
+	s.scan.pct = 1
+	s.scan.stage = "处理中"
+	s.scan.text = "处理中"
+	s.scan.done = 0
+	s.scan.total = 0
+	s.scan.message = "扫描任务已启动"
+	s.scan.finished = false
+	s.scan.ok = false
+	s.scan.mu.Unlock()
+}
+
+func (s *Server) updateScanProgressState(p scan.Progress, msg string) {
+	stage, pct, text := calcScanProgress(msg, p.Done, p.Total)
+	s.scan.mu.Lock()
+	if s.scan.running {
+		s.scan.hasState = true
+		if pct > s.scan.pct {
+			s.scan.pct = pct
+		}
+		s.scan.stage = stage
+		s.scan.text = text
+		s.scan.done = p.Done
+		s.scan.total = p.Total
+		s.scan.message = msg
+		s.scan.finished = false
+	}
+	s.scan.mu.Unlock()
+}
+
+func (s *Server) finishScanProgressState(ok bool) {
+	s.scan.mu.Lock()
+	s.scan.hasState = true
+	s.scan.finished = true
+	s.scan.ok = ok
+	if ok {
+		s.scan.pct = 100
+		s.scan.stage = "优选完成"
+		s.scan.text = "已完成"
+	} else {
+		s.scan.pct = 0
+		s.scan.stage = "优选未完成"
+		s.scan.text = "未完成"
+	}
+	s.scan.mu.Unlock()
 }
 
 // registerScanRoutes 挂载优选相关路由。
 func (s *Server) registerScanRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/scan/run", s.guard(s.handleScanRun))
+	mux.HandleFunc("/api/scan/status", s.guard(s.handleScanStatus))
 	mux.HandleFunc("/api/scan/cancel", s.guard(s.handleScanCancel))
 	mux.HandleFunc("/api/scan/detect-host", s.guard(s.handleScanDetectHost))
 	mux.HandleFunc("/api/scan/detect-path", s.guard(s.handleScanDetectPath))
@@ -232,6 +346,7 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 	s.scan.running = true
 	s.scan.cancel = cancel
 	s.scan.mu.Unlock()
+	s.setScanProgressStart(host)
 
 	// 进度节流器（见 scan.ProgressThrottle）
 	throttle := scan.NewProgressThrottle()
@@ -292,6 +407,7 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 			if p.Total > 0 {
 				msg = fmt.Sprintf("%s（%d/%d）", p.Message, p.Done, p.Total)
 			}
+			s.updateScanProgressState(p, msg)
 			s.logf(msg)
 		},
 	}
@@ -321,6 +437,7 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 		// 接住 → 记日志（含堆栈）→ 报给界面，进程继续跑。
 		defer func() {
 			if r := safe.Recover("优选扫描"); r != nil {
+				s.finishScanProgressState(false)
 				s.logLevel("优选过程发生内部错误，详情已记入日志（服务继续运行）", "err")
 				s.events.publish("scan-result", map[string]any{
 					"ok":    false,
@@ -331,6 +448,7 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 
 		sum, err := scan.Run(ctx, opt)
 		if err != nil {
+			s.finishScanProgressState(false)
 			s.logLevel("优选失败："+err.Error(), "err")
 			s.events.publish("scan-result", map[string]any{
 				"ok":    false,
@@ -426,6 +544,7 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 		// 实验性：把本轮观测写回网络档案（未开启时不做任何事）。
 		s.saveAdaptive(adaptive)
 
+		s.finishScanProgressState(len(sum.Entries) > 0)
 		s.events.publish("scan-result", payload)
 	}()
 
@@ -474,6 +593,33 @@ func (s *Server) resolveFamily(familyRaw, host string) (string, *scan.IPv6EnvRes
 		return "v4", &env, extra
 	}
 	return family, &env, extra
+}
+
+// handleScanStatus 返回当前或最近一次优选任务的进度状态。
+//
+// 界面切换页面、切换子页签或刷新后调用此接口恢复进度条，
+// 避免任务仍在后台运行但页面上进度条消失。
+func (s *Server) handleScanStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "仅支持 GET/POST"})
+		return
+	}
+	s.scan.mu.Lock()
+	resp := map[string]any{
+		"running":  s.scan.running,
+		"hasState": s.scan.hasState,
+		"host":     s.scan.host,
+		"pct":      s.scan.pct,
+		"stage":    s.scan.stage,
+		"text":     s.scan.text,
+		"done":     s.scan.done,
+		"total":    s.scan.total,
+		"message":  s.scan.message,
+		"finished": s.scan.finished,
+		"ok":       s.scan.ok,
+	}
+	s.scan.mu.Unlock()
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleScanCancel 取消正在进行的扫描。

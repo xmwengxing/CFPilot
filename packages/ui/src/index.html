@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>CFPilot 部署与维护工具</title>
+  <title>CFPilot 部署与网络维护</title>
 
   <!--
     favicon：内联 SVG data URI。
@@ -169,6 +169,12 @@
       display: inline-flex; align-items: center; justify-content: center; gap: 7px;
       transition: all .15s ease;
     }
+    /*
+      hidden 属性必须盖过上面的 display: inline-flex。
+      规格里 [hidden] 的默认样式只有 display:none，任何显式 display 都会盖掉它 ——
+      普通版隐藏「组网」页签时曾因此把页签留在导航里（看着像 +mesh 版）。
+    */
+    nav.tabs button[hidden], .subtabs button[hidden], .btn[hidden] { display: none !important; }
     nav.tabs button:hover { color: var(--text-main); background: var(--bg-hover); }
     nav.tabs button.active {
       background: linear-gradient(135deg, var(--primary), var(--accent));
@@ -948,22 +954,114 @@
       transition: width .25s ease;
     }
 
-    /* 折叠区（details） */
+    /* 折叠区（details）：标题行做凸起斜边、展开内容区做轻凹陷，打开后也能一眼找到标题行收起 */
     .fold {
-      border: 1px solid var(--border); border-radius: var(--radius-md);
-      margin: 14px 0; background: rgba(11, 17, 30, 0.65); overflow: hidden;
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      border-radius: var(--radius-md);
+      margin: 14px 0;
+      background: rgba(11, 17, 30, 0.72);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.26);
+      overflow: hidden;
     }
-    body.light .fold { background: rgba(255, 255, 255, 0.75); }
+    body.light .fold {
+      border-color: rgba(15, 23, 42, 0.16);
+      background: rgba(248, 250, 252, 0.92);
+      box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
+    }
     .fold > summary {
-      cursor: pointer; padding: 11px 16px; font-size: 13px; font-weight: 500;
-      color: var(--text-secondary); list-style: none; user-select: none;
-      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      cursor: pointer;
+      padding: 11px 16px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-main);
+      list-style: none;
+      user-select: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: linear-gradient(180deg, rgba(40, 53, 78, 0.92), rgba(23, 32, 50, 0.95));
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.14),
+        inset 0 -1px 0 rgba(0, 0, 0, 0.45),
+        0 1px 3px rgba(0, 0, 0, 0.28);
+      transition: background .15s ease, box-shadow .15s ease, color .15s ease;
+    }
+    body.light .fold > summary {
+      background: linear-gradient(180deg, #ffffff, #e8eef7);
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.96),
+        inset 0 -1px 0 rgba(15, 23, 42, 0.12),
+        0 1px 2px rgba(15, 23, 42, 0.08);
     }
     .fold > summary::-webkit-details-marker { display: none; }
-    .fold > summary::after { content: '展开 ▾'; font-size: 12px; color: var(--text-muted); font-weight: 400; }
-    .fold[open] > summary::after { content: '收起 ▴'; }
-    .fold > summary:hover { background: var(--bg-hover); color: var(--text-main); }
-    .fold-body { padding: 16px; border-top: 1px solid var(--border); }
+    .fold > summary::after {
+      content: '展开 ▾';
+      font-size: 11.5px;
+      font-weight: 500;
+      color: var(--text-main);
+      padding: 2px 10px;
+      border-radius: 999px;
+      flex: 0 0 auto;
+      background: rgba(15, 23, 42, 0.45);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 1px 2px rgba(0, 0, 0, 0.25);
+    }
+    body.light .fold > summary::after {
+      background: linear-gradient(180deg, #ffffff, #eef2f7);
+      border-color: rgba(15, 23, 42, 0.16);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.95), 0 1px 2px rgba(15, 23, 42, 0.08);
+    }
+    .fold[open] > summary {
+      border-left: 3px solid var(--primary);
+      padding-left: 13px;
+      border-bottom: 1px solid rgba(59, 130, 246, 0.3);
+      background: linear-gradient(180deg, rgba(46, 63, 95, 0.96), rgba(27, 39, 62, 0.96));
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.16),
+        0 3px 8px rgba(0, 0, 0, 0.32);
+    }
+    body.light .fold[open] > summary {
+      border-bottom-color: rgba(37, 99, 235, 0.24);
+      background: linear-gradient(180deg, #f8fbff, #e2ecfb);
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.98),
+        0 2px 6px rgba(15, 23, 42, 0.1);
+    }
+    .fold[open] > summary::after {
+      content: '收起 ▴';
+      background: rgba(59, 130, 246, 0.22);
+      border-color: rgba(96, 165, 250, 0.45);
+      color: #dbeafe;
+    }
+    body.light .fold[open] > summary::after {
+      background: rgba(37, 99, 235, 0.12);
+      border-color: rgba(37, 99, 235, 0.32);
+      color: var(--primary);
+    }
+    .fold > summary:hover {
+      background: linear-gradient(180deg, rgba(50, 66, 98, 0.96), rgba(30, 42, 66, 0.96));
+      color: #ffffff;
+    }
+    body.light .fold > summary:hover {
+      background: linear-gradient(180deg, #ffffff, #dde7f6);
+      color: var(--text-main);
+    }
+    .fold > summary:active {
+      box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.42);
+    }
+    body.light .fold > summary:active {
+      box-shadow: inset 0 2px 4px rgba(15, 23, 42, 0.16);
+    }
+    .fold-body {
+      padding: 16px;
+      background: rgba(7, 11, 20, 0.55);
+      box-shadow: inset 0 3px 8px rgba(0, 0, 0, 0.28);
+    }
+    body.light .fold-body {
+      background: rgba(241, 245, 249, 0.6);
+      box-shadow: inset 0 2px 6px rgba(15, 23, 42, 0.06);
+    }
 
     /* 字段悬浮气泡（纯 CSS，WebView 里比原生 title 可靠） */
     .has-tip { position: relative; cursor: help; border-bottom: 1px dotted var(--text-muted); }
@@ -1095,22 +1193,43 @@
        优选历史（历史留底 / 多选复制 / 二次复测）
        ============================================================== */
     .history-item {
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      margin-bottom: 8px;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      border-radius: 9px;
+      margin-bottom: 10px;
       overflow: hidden;
       background: var(--bg-elevated);
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+    }
+    body.light .history-item {
+      border-color: rgba(15, 23, 42, 0.15);
+      box-shadow: 0 1px 4px rgba(15, 23, 42, 0.07);
     }
     .history-head {
       display: flex;
       align-items: center;
       gap: 10px;
-      padding: 8px 12px;
+      padding: 9px 13px;
       cursor: pointer;
       user-select: none;
+      background: linear-gradient(180deg, rgba(38, 50, 74, 0.88), rgba(22, 31, 49, 0.92));
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.12),
+        inset 0 -1px 0 rgba(0, 0, 0, 0.4);
+      transition: background .15s ease, box-shadow .15s ease;
     }
-    .history-head:hover { background: var(--bg-hover); }
-    .history-head .arrow { color: var(--text-muted); font-size: 12px; width: 14px; }
+    body.light .history-head {
+      background: linear-gradient(180deg, #ffffff, #eaf0f8);
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.96),
+        inset 0 -1px 0 rgba(15, 23, 42, 0.12);
+    }
+    .history-head:hover {
+      background: linear-gradient(180deg, rgba(48, 63, 94, 0.94), rgba(28, 39, 61, 0.95));
+    }
+    body.light .history-head:hover {
+      background: linear-gradient(180deg, #ffffff, #dfe8f6);
+    }
+    .history-head .arrow { color: var(--text-main); font-size: 12px; width: 14px; }
     .history-head .h-at { font-weight: 600; font-size: 13px; }
     .history-head .h-meta {
       color: var(--text-secondary);
@@ -1120,7 +1239,15 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .history-body { padding: 2px 12px 10px; }
+    .history-body {
+      padding: 8px 12px 12px;
+      border-top: 1px solid var(--border);
+      box-shadow: inset 0 3px 8px rgba(0, 0, 0, 0.24);
+    }
+    body.light .history-body {
+      background: rgba(241, 245, 249, 0.55);
+      box-shadow: inset 0 2px 5px rgba(15, 23, 42, 0.06);
+    }
     .history-body table { margin-top: 6px; }
     .history-empty { color: var(--text-muted); font-size: 13px; padding: 4px 2px; }
     .h-del {
@@ -1200,24 +1327,283 @@
     .quality-tip .t-row { display: block; }
     .quality-tip .t-key { color: var(--text-muted); }
 
-    /* 优选流程说明（默认折叠的 details） */
+    /* 优选流程说明（默认折叠的 details，与 .fold 保持统一的凹凸标题行） */
     details.flow-note {
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 8px 12px;
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      border-radius: var(--radius-md);
       margin-top: 12px;
-      background: var(--bg-elevated);
+      background: rgba(11, 17, 30, 0.72);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.24);
+      overflow: hidden;
     }
-    details.flow-note summary {
+    body.light details.flow-note {
+      border-color: rgba(15, 23, 42, 0.16);
+      background: rgba(248, 250, 252, 0.92);
+      box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
+    }
+    details.flow-note > summary {
       cursor: pointer;
-      color: var(--text-secondary);
+      padding: 10px 15px;
+      color: var(--text-main);
       font-size: 13px;
       font-weight: 600;
+      list-style: none;
       user-select: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: linear-gradient(180deg, rgba(40, 53, 78, 0.92), rgba(23, 32, 50, 0.95));
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.14),
+        inset 0 -1px 0 rgba(0, 0, 0, 0.45),
+        0 1px 3px rgba(0, 0, 0, 0.28);
+      transition: background .15s ease, box-shadow .15s ease;
     }
-    details.flow-note summary:hover { color: var(--text-main); }
-    details.flow-note[open] summary { margin-bottom: 8px; }
-    details.flow-note .note { margin: 0; }
+    body.light details.flow-note > summary {
+      background: linear-gradient(180deg, #ffffff, #e8eef7);
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.96),
+        inset 0 -1px 0 rgba(15, 23, 42, 0.12),
+        0 1px 2px rgba(15, 23, 42, 0.08);
+    }
+    details.flow-note > summary::-webkit-details-marker { display: none; }
+    details.flow-note > summary::after {
+      content: '展开 ▾';
+      font-size: 11.5px;
+      font-weight: 500;
+      color: var(--text-main);
+      padding: 2px 10px;
+      border-radius: 999px;
+      flex: 0 0 auto;
+      background: rgba(15, 23, 42, 0.45);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 1px 2px rgba(0, 0, 0, 0.25);
+    }
+    body.light details.flow-note > summary::after {
+      background: linear-gradient(180deg, #ffffff, #eef2f7);
+      border-color: rgba(15, 23, 42, 0.16);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.95), 0 1px 2px rgba(15, 23, 42, 0.08);
+    }
+    details.flow-note > summary:hover {
+      background: linear-gradient(180deg, rgba(50, 66, 98, 0.96), rgba(30, 42, 66, 0.96));
+    }
+    body.light details.flow-note > summary:hover {
+      background: linear-gradient(180deg, #ffffff, #dde7f6);
+    }
+    details.flow-note[open] > summary {
+      border-left: 3px solid var(--primary);
+      padding-left: 12px;
+      border-bottom: 1px solid rgba(59, 130, 246, 0.3);
+      background: linear-gradient(180deg, rgba(46, 63, 95, 0.96), rgba(27, 39, 62, 0.96));
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.16),
+        0 3px 8px rgba(0, 0, 0, 0.32);
+    }
+    body.light details.flow-note[open] > summary {
+      border-bottom-color: rgba(37, 99, 235, 0.24);
+      background: linear-gradient(180deg, #f8fbff, #e2ecfb);
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.98),
+        0 2px 6px rgba(15, 23, 42, 0.1);
+    }
+    details.flow-note[open] > summary::after {
+      content: '收起 ▴';
+      background: rgba(59, 130, 246, 0.22);
+      border-color: rgba(96, 165, 250, 0.45);
+      color: #dbeafe;
+    }
+    body.light details.flow-note[open] > summary::after {
+      background: rgba(37, 99, 235, 0.12);
+      border-color: rgba(37, 99, 235, 0.32);
+      color: var(--primary);
+    }
+    details.flow-note .note {
+      margin: 0;
+      border: none;
+      border-radius: 0;
+      padding: 14px 16px;
+      box-shadow: inset 0 3px 8px rgba(0, 0, 0, 0.24);
+    }
+    body.light details.flow-note .note {
+      box-shadow: inset 0 2px 6px rgba(15, 23, 42, 0.06);
+    }
+
+    /* --------------------------------------------------------------
+       异地组网：拓扑卡 + 节点列表（+mesh 版）
+       -------------------------------------------------------------- */
+    .topo-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 2px 9px; border-radius: 999px;
+      font-size: 11.5px; font-weight: 600; letter-spacing: .02em;
+      color: var(--text-secondary);
+      background: var(--bg-elevated, rgba(148, 163, 184, .12));
+      border: 1px solid var(--border);
+    }
+    .topo-pill.ghost { font-weight: 500; color: var(--text-muted); }
+    .topo-pill.ok {
+      color: #22c55e; border-color: rgba(34, 197, 94, .35);
+      background: rgba(34, 197, 94, .10);
+    }
+    .topo-pill.warn {
+      color: var(--warn); border-color: rgba(245, 158, 11, .35);
+      background: rgba(245, 158, 11, .10);
+    }
+
+    .topo-chips {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 10px; margin: 4px 0 14px;
+    }
+    .topo-chip {
+      min-width: 0; padding: 8px 10px; border-radius: 8px;
+      background: var(--bg-elevated, rgba(148, 163, 184, .06));
+      border: 1px solid var(--border);
+    }
+    .topo-chip .k { display: block; font-size: 11.5px; color: var(--text-muted); margin-bottom: 3px; }
+    .topo-chip .v {
+      display: block; font-size: 12.5px; font-weight: 600; color: var(--text-main);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
+    .topo-stage {
+      position: relative; width: 100%; height: 380px;
+      background:
+        radial-gradient(circle at 50% 52%, rgba(56, 189, 248, .08), transparent 62%),
+        var(--bg-card);
+      border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+    }
+    .topo-stage canvas { display: block; width: 100%; height: 100%; }
+
+    /* 空态浮层：没组网 / 没对端时的说明与快捷入口。
+       有对端后加 .hide 淡出（不用 hidden 属性：display 会被覆盖）。 */
+    .topo-empty {
+      position: absolute; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 12px;
+      padding: 20px; text-align: center; pointer-events: none;
+      transition: opacity .28s ease, visibility .28s ease;
+    }
+    .topo-empty.hide { opacity: 0; visibility: hidden; }
+    .topo-empty-ring {
+      position: relative; width: 74px; height: 74px; border-radius: 50%;
+      border: 1px dashed rgba(56, 189, 248, .45);
+    }
+    .topo-empty-ring::before,
+    .topo-empty-ring::after {
+      content: ''; position: absolute; inset: 12px; border-radius: 50%;
+      border: 1px solid rgba(56, 189, 248, .22);
+    }
+    .topo-empty-ring::after { inset: 26px; }
+    .topo-empty-ring span {
+      position: absolute; left: 50%; top: 50%; width: 12px; height: 12px;
+      margin: -6px 0 0 -6px; border-radius: 50%; background: #38bdf8;
+      box-shadow: 0 0 12px rgba(56, 189, 248, .8);
+      animation: topo-pulse 1.8s ease-in-out infinite;
+    }
+    @keyframes topo-pulse {
+      0%, 100% { transform: scale(.85); opacity: .55; }
+      50% { transform: scale(1.15); opacity: 1; }
+    }
+    .topo-empty-body { max-width: 480px; }
+    .topo-empty-body strong {
+      display: block; font-size: 13.5px; color: var(--text-main); margin-bottom: 4px;
+    }
+    .topo-empty-body p {
+      margin: 0; font-size: 12.5px; line-height: 1.7; color: var(--text-secondary);
+    }
+    .topo-empty-actions {
+      display: flex; align-items: center; justify-content: center; gap: 10px;
+      margin-top: 10px; pointer-events: auto;
+    }
+    .topo-link {
+      background: none; border: 0; padding: 6px 4px; cursor: pointer;
+      color: var(--accent); font-size: 12.5px;
+    }
+    .topo-link:hover { text-decoration: underline; }
+
+    .topo-badge {
+      position: absolute; top: 10px; right: 12px;
+      padding: 3px 9px; border-radius: 999px; font-size: 11.5px;
+      color: var(--text-secondary); background: rgba(15, 23, 42, .55);
+      border: 1px solid var(--border);
+      -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+      pointer-events: auto; cursor: pointer;
+    }
+    body.light .topo-badge { background: rgba(255, 255, 255, .78); }
+
+    .topo-ip-list {
+      position: absolute; top: 38px; right: 12px; z-index: 4;
+      min-width: 190px; max-width: 260px; padding: 8px;
+      border-radius: 8px; background: var(--bg-card);
+      border: 1px solid var(--border);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, .22);
+      font-size: 12px; pointer-events: auto;
+    }
+    .topo-ip-list[hidden] { display: none; }
+    .topo-ip-row {
+      display: flex; justify-content: space-between; gap: 10px;
+      padding: 5px 6px; border-radius: 5px; cursor: pointer;
+      color: var(--text-main); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .topo-ip-row:hover { background: var(--bg-elevated, rgba(148, 163, 184, .12)); }
+    .topo-ip-row .name { color: var(--text-muted); font-family: system-ui, sans-serif; }
+
+    .copy-ip {
+      color: var(--accent); cursor: pointer; text-decoration: underline dotted;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .topo-legend {
+      position: absolute; left: 12px; bottom: 10px;
+      display: flex; align-items: center; gap: 12px;
+      font-size: 11.5px; color: var(--text-muted); pointer-events: none;
+    }
+    .topo-legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .topo-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+
+    .topo-ipv6 {
+      position: absolute; left: 12px; bottom: 30px; max-width: calc(100% - 24px);
+      padding: 2px 6px; border-radius: 5px;
+      color: var(--text-muted); background: rgba(15, 23, 42, .35);
+      font-size: 10.5px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      pointer-events: none;
+    }
+    body.light .topo-ipv6 { background: rgba(255, 255, 255, .7); }
+
+    .topo-metrics {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 10px; margin-top: 14px;
+    }
+    .topo-metric {
+      padding: 9px 11px; border-radius: 8px;
+      background: var(--bg-elevated, rgba(148, 163, 184, .06));
+      border: 1px solid var(--border);
+    }
+    .topo-metric .v {
+      display: block; font-size: 15px; font-weight: 700; color: var(--text-main);
+      font-variant-numeric: tabular-nums;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .topo-metric .k { display: block; margin-top: 2px; font-size: 11.5px; color: var(--text-muted); }
+
+    .topo-peer-empty { color: var(--text-muted); text-align: center; padding: 18px 8px; }
+
+    @media (max-width: 900px) {
+      .topo-stage { height: 300px; }
+      .topo-badge { top: 8px; right: 8px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .topo-empty-ring span { animation: none; }
+    }
+
+    /* 盲中继检测：识别到多个实例时的选择行 */
+    .edge-pick-row {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      margin-top: 10px;
+    }
+    .edge-pick-row label { margin: 0; }
+    .edge-pick-row select { max-width: 420px; }
   </style>
 
   <script>
@@ -1281,8 +1667,8 @@
         <span class="app-version" id="appVersion" title="本程序版本"></span>
       </div>
       <div class="brand">
-        <h1>CFPilot 部署与维护工具</h1>
-        <p class="sub">Pages 双项目部署 · 本地真连接优选</p>
+        <h1>CFPilot 部署与网络维护</h1>
+        <p class="sub">Cloudflare部署 · 本地优选 · 异地组网</p>
       </div>
       <div class="spacer"></div>
       <div class="top-actions">
@@ -1448,17 +1834,8 @@
               <p class="desc">
                 部署独立的 WebSocket 盲中继 Worker（Durable Objects 房间隔离）+ 云监测台 Pages 面板。
                 用于无公网 IP 节点之间的首次发现与保底连通。与上方 CFPilot 代理实例完全独立，互不影响。
+                <br>已经部署过？点下方「检测部署状态」会自动识别账号里的实例并回填域名、Worker 名、监测面板与上报令牌（只读，不会重新部署）。
               </p>
-              <div class="note" style="border-left-color: var(--primary); margin-bottom:14px">
-                <b>需要增加的 Token 权限（基础代理部署不需要）：</b><br>
-                · Developer Platform / <b>Workers Scripts / Edit</b> —— 建/删盲中继 Worker、上传脚本<br>
-                · Developer Platform / <b>Durable Objects / Edit</b> —— 房间隔离（由 migrations 自动创建）<br>
-                · Developer Platform / <b>D1 / Edit</b> —— 动态建监测库并初始化 schema<br>
-                · Developer Platform / <b>Pages / Edit</b> —— 部署监测面板<br>
-                · DNS &amp; Zone / <b>Zone / Edit</b> —— 绑定自定义域名时需要（WSS 域名必填）<br>
-                <span class="muted">令牌在当前账户下需具备以上权限，否则部署会明确报错缺哪一项。</span>
-              </div>
-
               <div class="pair-grid">
                 <div class="pair">
                   <label for="edgeDomain" class="has-tip" data-tip="【必填】*.workers.dev 国内被污染，必须绑定自定义域名。&#10;可在下方选 Zone 自动绑定，或部署后到控制台手动绑定。&#10;示例：relay.example.com">盲中继域名 ⓘ <span class="badge info">必填</span></label>
@@ -1528,13 +1905,41 @@
 
               <div class="btn-row" style="margin-top:12px">
                 <button class="btn btn-primary" id="btnEdgeDeploy">部署盲中继 / 云监测台</button>
-                <button class="btn btn-ghost" id="btnFillMeshConfig" disabled title="部署成功后解锁：把 WSS 地址与房间名填入「组网」页">填入组网配置</button>
+                <button class="btn btn-ghost" id="btnEdgeDetect" title="只读检测：识别账号下已部署的盲中继与监测台，并把信息回填到本页（绝不部署）">检测部署状态</button>
+                <button class="btn btn-ghost" id="btnFillMeshConfig" disabled title="部署成功后解锁：填入盲中继域名与监测台上报信息">填入组网配置</button>
                 <button class="btn btn-ghost" id="btnEdgeRefreshZones">刷新域名列表</button>
               </div>
+              <!--
+                多实例选择器：识别到 ≥2 个实例时才显示。
+                ⚠️ 不能用 hidden 属性：它会被 style 里的 display 覆盖（本项目已踩过），
+                一律直接用 style.display 控制。
+              -->
+              <div id="edgeDetectRow" class="edge-pick-row" style="display:none">
+                <label for="edgeInstancePick">识别到多个实例，选择要回填的那一个：</label>
+                <select id="edgeInstancePick"></select>
+              </div>
+              <div id="edgeDetectHint" class="tip" style="margin-top:8px"></div>
               <pre id="edgeResult" class="chain-out" hidden></pre>
               <p class="tip" style="margin-top:8px">
                 部署结果（WSS 端点 / 上报令牌 / 面板密码）会显示在下方结果框与日志中，请妥善保存——事后无法再读取明文。
               </p>
+
+              <!--
+                Token 权限说明放到页面最底部、默认折叠：
+                用户第一次进来最关心的是「填什么、点哪个按钮」，权限清单是出错时才查的参考资料，
+                放在页首会把真正要填的表单挤下去。
+              -->
+              <details class="fold" style="margin-top:16px">
+                <summary>需要增加的 Token 权限（基础代理部署不需要）</summary>
+                <div class="fold-body">
+                  · Developer Platform / <b>Workers Scripts / Edit</b> —— 建/删盲中继 Worker、上传脚本<br>
+                  · Developer Platform / <b>Durable Objects / Edit</b> —— 房间隔离（由 migrations 自动创建）<br>
+                  · Developer Platform / <b>D1 / Edit</b> —— 动态建监测库并初始化 schema<br>
+                  · Developer Platform / <b>Pages / Edit</b> —— 部署监测面板<br>
+                  · DNS &amp; Zone / <b>Zone / Edit</b> —— 绑定自定义域名时需要（WSS 域名必填）<br>
+                  <span class="muted">令牌在当前账户下需具备以上权限，否则部署会明确报错缺哪一项。</span>
+                </div>
+              </details>
             </div>
           </div>
 
@@ -1806,64 +2211,101 @@
           </div>
 
           <div id="meshContent">
-            <div class="card">
-              <h2><span class="dot"></span>🕸️ 网络拓扑</h2>
-              <p class="desc">实时展示当前 mesh 网络的节点连接与流量。节点未连接时显示本地节点与待发现状态。</p>
-              <div id="topoWrap" style="position:relative;width:100%;height:360px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
-                <canvas id="topoCanvas" style="width:100%;height:100%;display:block"></canvas>
-                <div id="topoEmpty" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:13px;pointer-events:none">
-                  暂无节点数据（启动组网后将自动显示）
+            <div class="card" id="meshTopoCard">
+              <h2>
+                <span class="dot"></span>🕸️ 网络拓扑
+                <span class="topo-pill" id="meshStatRunning">未运行</span>
+              </h2>
+              <p class="desc">
+                画布实时绘制本机与对端链路；IPv6 地址放在画布底部，统计信息在画布下方一行显示。
+                还没组网时画布会显示待连接动画，不再是空白。
+              </p>
+
+              <div id="topoWrap" class="topo-stage">
+                <canvas id="topoCanvas"></canvas>
+                <!--
+                  状态浮层：文案与按钮由 renderer 按「未启动 / 等待对端」切换；
+                  有对端后整块淡出（class 控制，不用 hidden —— 会被 display 覆盖）。
+                -->
+                <div id="topoEmpty" class="topo-empty">
+                  <div class="topo-empty-ring"><span></span></div>
+                  <div class="topo-empty-body">
+                    <strong id="topoEmptyTitle">组网未启动</strong>
+                    <p id="topoEmptyText">填好下方「组网配置」后点「启动组网」，这里会实时画出节点与链路。</p>
+                    <div class="topo-empty-actions">
+                      <button type="button" class="btn btn-ghost" id="btnTopoStart">启动组网</button>
+                      <button type="button" class="topo-link" id="btnTopoConfig">去填配置</button>
+                    </div>
+                  </div>
                 </div>
+                <div class="topo-badge" id="topoBadge" title="点击查看全部在线节点虚拟 IP">待启动</div>
+                <div class="topo-ip-list" id="topoIpList" hidden></div>
+                <div class="topo-legend">
+                  <span><i style="background:#22c55e"></i>直连</span>
+                  <span><i style="background:#f59e0b"></i>中继</span>
+                  <span><i style="background:#475569"></i>离线</span>
+                </div>
+                <div class="topo-ipv6" id="topoIpv6">IPv6：—</div>
               </div>
-              <div class="btn-row" style="margin-top:10px">
-                <span class="tag" style="display:inline-flex;align-items:center;gap:6px"><i style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></i> 直连</span>
-                <span class="tag" style="display:inline-flex;align-items:center;gap:6px"><i style="width:8px;height:8px;border-radius:50%;background:#f59e0b;display:inline-block"></i> 中继</span>
-                <span class="tag" style="display:inline-flex;align-items:center;gap:6px"><i style="width:8px;height:8px;border-radius:50%;background:#475569;display:inline-block"></i> 离线</span>
+
+              <div class="topo-metrics">
+                <div class="topo-metric"><span class="v" id="meshStatFrames">0 / 0</span><span class="k">出站 / 入站帧</span></div>
+                <div class="topo-metric"><span class="v" id="meshStatDrop">0 / 0</span><span class="k">丢弃（出/入）</span></div>
+                <div class="topo-metric"><span class="v" id="meshStatNat">—</span><span class="k">NAT 类型</span></div>
+                <div class="topo-metric"><span class="v" id="meshStatReflex">—</span><span class="k">公网映射</span></div>
               </div>
+              <div id="meshStatNote" class="tip" style="margin-top:10px"></div>
             </div>
 
-            <div class="card">
-              <h2><span class="dot"></span>📡 组网状态</h2>
-              <p class="desc">每 2 秒刷新。启动后如果这里一直显示「等待对端」，按下方提示逐项检查。</p>
-              <div class="pair-grid">
-                <div class="pair"><label>运行状态</label><div id="meshStatRunning" class="mono">未运行</div></div>
-                <div class="pair"><label>本节点 ID</label><div id="meshStatNode" class="mono">—</div></div>
-                <div class="pair"><label>虚拟 IP</label><div id="meshStatVip" class="mono">—</div></div>
-                <div class="pair"><label>UDP 监听</label><div id="meshStatListen" class="mono">—</div></div>
-                <div class="pair"><label>运行时长</label><div id="meshStatUptime" class="mono">—</div></div>
-                <div class="pair"><label>握手成功</label><div id="meshStatHs" class="mono">0</div></div>
-                <div class="pair"><label>出站 / 入站帧</label><div id="meshStatFrames" class="mono">0 / 0</div></div>
-                <div class="pair"><label>丢弃（出/入）</label><div id="meshStatDrop" class="mono">0 / 0</div></div>
-                <div class="pair"><label>NAT 类型（STUN）</label><div id="meshStatNat" class="mono">—</div></div>
-                <div class="pair"><label>公网映射（STUN）</label><div id="meshStatReflex" class="mono">—</div></div>
-              </div>
-              <div id="meshStatNote" class="tip" style="margin-top:8px"></div>
-              <div style="margin-top:10px;overflow-x:auto">
+            <div class="card" id="meshPeerCard">
+              <h2>
+                <span class="dot"></span>📡 节点列表
+                <span class="topo-pill ghost" id="meshPeerBadge">0 个对端</span>
+              </h2>
+              <p class="desc">只列对端节点与链路状态，每 2 秒刷新。为空时按拓扑卡里的排查线索逐项检查。</p>
+              <div style="overflow-x:auto">
                 <table class="tbl" style="width:100%;font-size:13px">
                   <thead>
-                    <tr><th>节点</th><th>虚拟 IP</th><th>对端地址</th><th>状态</th><th>传输</th><th>RTT</th><th>丢包</th></tr>
+                    <tr><th>设备名</th><th>对端虚拟 IP</th><th>传输</th><th>状态 / 打洞</th><th>RTT</th><th title="基于 UDP 探针；经 WSS 中继时 100% 不代表中继链路丢包">UDP 探测丢包</th></tr>
                   </thead>
                   <tbody id="meshLivePeers">
-                    <tr><td colspan="7" style="color:var(--muted)">暂无对端（启动后自动刷新）</td></tr>
+                    <tr><td colspan="6" class="topo-peer-empty">还没有对端节点 —— 在下方「组网配置」添加对端，或粘贴邀请链接后启动组网。</td></tr>
                   </tbody>
                 </table>
               </div>
             </div>
 
-            <div class="card">
+            <div class="card" id="meshProfileCard">
+              <h2><span class="dot"></span>💾 当前网络</h2>
+              <p class="desc">
+                “当前网络”是本机保存的一套配置档案；“组网网络名 / 网络密钥”在下方配置卡里，所有组网设备必须一致。
+                创建/修改后会显示配置卡；点击“启动组网”成功会自动保存并收起配置卡。服务重启后会自动恢复最后启动的网络。
+              </p>
+              <div class="btn-row" style="flex-wrap:wrap;gap:8px;align-items:center">
+                <select id="meshProfileSelect" aria-label="当前网络" style="min-width:220px"><option value="">— 未选择网络 —</option></select>
+                <button class="btn btn-ghost" id="btnMeshProfileCreate">创建网络</button>
+                <button class="btn btn-ghost" id="btnMeshProfileEdit">修改网络</button>
+                <button class="btn btn-ghost" id="btnMeshProfileDelete">删除网络</button>
+              </div>
+              <div class="pair" id="meshProfileNameWrap" hidden style="margin-top:10px;max-width:420px">
+                <label for="meshProfileName" class="has-tip" data-tip="本机档案名，不是组网网络名">网络配置名称 ⓘ</label>
+                <input type="text" id="meshProfileName" placeholder="如：家里-公司、实验室" />
+              </div>
+            </div>
+
+            <div class="card" id="meshConfigCard" hidden>
               <h2><span class="dot"></span>⚙️ 组网配置</h2>
               <p class="desc">
-                只填上面几项必填即可组网。部署盲中继后，可在「部署」页点
-                <b>「填入组网配置」</b> 自动带入盲中继域名与房间名。
-                监听端口、打洞、服务器中继、监测台、手动添加对端等都在下方「高级选项」里。
+                <b>推荐流程</b>：一台设备点「生成邀请链接」，其余设备各粘贴一次并点「启动组网」。
+                发起方也要点「启动组网」。不要双端互贴，否则会把旧对端留在列表里。
+                网络名、PSK 与虚拟 IP 会自动补全；部署盲中继后可一键填入域名。
               </p>
               <div class="pair-grid">
                 <div class="pair"><label for="meshNodeId" class="has-tip" data-tip="【自动生成】本机在网络里的身份证，16 位十六进制，由本地身份密钥派生，无需填写。各节点天然不同；字典序小的作为握手发起方。若克隆了配置导致 ID 冲突，软件会自动重新生成。">本节点 ID（自动生成）ⓘ</label><input type="text" id="meshNodeId" readonly style="opacity:.75;cursor:default" placeholder="启动后自动生成" /></div>
-                <div class="pair"><label for="meshNetwork" class="has-tip" data-tip="【必填】同一网络所有节点的网络名必须完全相同，用来派生网络密钥，写错就连不上。&#10;示例：my-home（建议简单英文）">网络名 ⓘ</label><input type="text" id="meshNetwork" placeholder="如 my-network" /></div>
-                <div class="pair"><label for="meshPsk" class="has-tip" data-tip="【必填】网络共享密钥（进网密码），所有节点必须完全相同。&#10;建议：16 位以上随机字符串；泄漏则网络不再私密">网络密钥 PSK ⓘ</label><input type="text" id="meshPsk" placeholder="网络共享密钥" /></div>
-                <div class="pair"><label for="meshVirtualIp" class="has-tip" data-tip="【必填】本机在组网内的虚拟 IP，各节点互 ping 用。&#10;【必须】所有节点在**同一网段**（前三段相同），只有最后一段不同；不同网段默认无法互通。&#10;【建议】选不常见的网段（如 10.97.0.x），避免与真实局域网冲突。&#10;示例：A 用 10.97.0.1，B 用 10.97.0.2">本节点虚拟 IP ⓘ</label><input type="text" id="meshVirtualIp" placeholder="如 10.97.0.1" /></div>
+                <div class="pair"><label for="meshNetwork" class="has-tip" data-tip="留空时，生成邀请链接会自动创建网络名。所有节点使用同一邀请链接即可保持一致。">网络名</label><input type="text" id="meshNetwork" placeholder="生成邀请链接时自动创建" /></div>
+                <div class="pair"><label for="meshPsk" class="has-tip" data-tip="留空时，生成邀请链接会创建 256 位随机网络密钥。邀请链接含有此密钥，请勿公开分享。">网络密钥</label><input type="password" id="meshPsk" placeholder="生成邀请链接时自动创建" /></div>
+                <div class="pair"><label for="meshVirtualIp" class="has-tip" data-tip="留空时自动分配。所有节点必须在同一 /24 网段。">本机虚拟 IP</label><input type="text" id="meshVirtualIp" placeholder="生成邀请链接时自动分配" /></div>
                 <div class="pair"><label for="meshRelayDomain" class="has-tip" data-tip="【必填】WSS 盲中继域名。跨 NAT 场景下没有它基本连不上（直连往往不可达）。&#10;先在「部署」页部署盲中继，再点「填入组网配置」自动带入。&#10;示例：relay.example.com">盲中继域名 ⓘ</label><input type="text" id="meshRelayDomain" placeholder="部署盲中继后自动填入" /></div>
-                <div class="pair"><label for="meshRelayRoom" class="has-tip" data-tip="【必填】盲中继房间名，8-64 位十六进制。同一网络所有节点填同一个房间才能互通，由「填入组网配置」自动带入。&#10;示例：0123456789abcdef">房间名（8-64 hex）ⓘ</label><input type="text" id="meshRelayRoom" placeholder="部署盲中继后自动填入" /></div>
               </div>
 
               <details class="fold">
@@ -1943,12 +2385,15 @@
               </details>
 
               <details class="fold" id="meshInviteFold" open>
-                <summary>邀请链接（推荐：一端生成，另一端粘贴即可入网）</summary>
+              <summary>邀请链接（推荐：一端生成，每台新设备各粘贴一次）</summary>
                 <div class="fold-body">
                   <p class="hint" style="line-height:1.8">
                     <b>发起方</b>：填好「网络名 / PSK / 本节点虚拟 IP」后点「生成邀请链接」，把链接发给对端。
-                    <b>加入方</b>：把链接粘贴到下方输入框，直接点页面底部的「启动组网」——
+                    <b>加入方</b>：在这台设备上把链接粘贴到下方输入框，点「启动组网」——
                     软件会自动解析链接、填好网络参数与对端并启动，<b>无需手抄 ID/公钥，也无需单独点"添加对端"</b>。
+                    <br><b>不要双端互贴</b>：发起方只需生成并启动；每台新设备各粘贴一次即可。
+                    多设备组网时，后续设备也用同一条链接，彼此之间不需要来回粘贴。
+                    链接里的 PSK 与监测令牌是明文（base64 非加密），只发给你信任的设备。
                   </p>
                   <div class="btn-row" style="margin-top:8px">
                     <button class="btn btn-ghost" id="btnMeshMakeInvite">生成邀请链接</button>
@@ -1965,6 +2410,7 @@
               </details>
 
               <div class="btn-row" style="margin-top:12px">
+                <button class="btn btn-ghost" id="btnMeshReset" title="停止已运行的组网，并清空本机浏览器中的组网表单、对端列表、邀请与临时缓存">清空组网设置</button>
                 <button class="btn btn-ghost" id="btnMeshSave">保存配置</button>
                 <button class="btn btn-primary" id="btnMeshStart">启动组网</button>
                 <button class="btn btn-ghost" id="btnMeshStop" disabled>停止组网</button>
@@ -2286,10 +2732,6 @@
                     <input type="text" id="meshScanDomain" placeholder="如 edge.example.com" />
                     <button class="btn btn-ghost" id="btnMeshScanFillFromConfig">从组网配置读取</button>
                   </div>
-                </div>
-                <div class="field">
-                  <label title="8-64 位十六进制，必须与组网页填的房间名一致，否则 Worker 会把连接放到别的房间。">房间名</label>
-                  <input type="text" id="meshScanRoom" placeholder="如 0123456789abcdef" />
                 </div>
                 <div class="field">
                   <label title="每个候选测几轮。大于 1 可以看出稳定性（偶发失败的入口不要选）。">每候选尝试次数</label>
@@ -2671,8 +3113,8 @@
                   1.（可选）部署盲中继：见上方「① 盲中继部署」，部署后点「填入组网配置」自动带入 WSS 信息。<br>
                   1.5（可选）自建服务器中继：在「高级选项 → 服务器中继」填服务器公网地址，点
                   「生成服务器部署命令」后在服务器执行，再把输出粘回「粘贴部署输出回填」，NodeId / 地址 / 令牌自动填好。<br>
-                  2. 设备A 填写「网络名 / 密钥 PSK / 本节点虚拟 IP」，展开「邀请链接」点
-                  「生成邀请链接」后复制链接，点「启动组网」。<b>链接含明文密钥 PSK，勿公开</b>。<br>
+                  2. 设备A 展开「邀请链接」点「生成邀请链接」后复制链接，点「启动组网」。
+                  空白配置会自动创建网络名、随机密钥与虚拟 IP。<b>链接含明文密钥，勿公开</b>。<br>
                   3. 设备B 在「邀请链接」输入框粘贴邀请链接 → 点「启动组网」。<br>
                   4. AB两端提权服务自动建虚拟网卡并运行，首次运行弹出系统授权框请点「允许」。
                   停止点「停止组网」；托盘右键也能启停、看节点列表。<br>

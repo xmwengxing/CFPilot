@@ -1,6 +1,17 @@
+import groovy.json.JsonSlurper
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+val rootPkg = JsonSlurper().parse(file("../../../package.json")) as Map<*, *>
+val appVersionName = rootPkg["version"].toString()
+val appVersionParts = Regex("""^(\d+)\.(\d+)\.(\d+)""").find(appVersionName)?.groupValues
+val appVersionCode = if (appVersionParts != null) {
+    appVersionParts[1].toInt() * 10000 + appVersionParts[2].toInt() * 100 + appVersionParts[3].toInt()
+} else {
+    1
 }
 
 android {
@@ -11,12 +22,14 @@ android {
         applicationId = "com.cfpilot.mesh"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.50.0"
+        versionCode = appVersionCode
+        versionName = appVersionName
     }
 
     buildTypes {
         release {
+            // 与普通版一致：侧载分发包默认带 debug 签名，避免产出未签名 APK 无法安装
+            signingConfig = signingConfigs.getByName("debug")
             isMinifyEnabled = false
         }
     }

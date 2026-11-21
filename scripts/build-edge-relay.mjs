@@ -37,6 +37,7 @@ const result = await build({
   target: 'es2022',
   minify: false,
   legalComments: 'none',
+  loader: { '.html': 'text' },
 })
 const code = result.outputFiles[0].text
 if (!code.includes('export') || code.length < 2000) {

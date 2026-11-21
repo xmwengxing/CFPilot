@@ -36,6 +36,7 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 		Port:              20001,
 		Host:              "127.0.0.1",
 		KeepRunningInTray: true,
+		PanelMode:         PanelModeAuto,
 	}
 	if err := SaveSettings(want); err != nil {
 		t.Fatalf("保存失败：%v", err)
@@ -95,6 +96,56 @@ func TestLoadSettingsToleratesCorruptFile(t *testing.T) {
 	}
 	if s.Port != DefaultPort {
 		t.Errorf("应回退出厂端口，实际 %d", s.Port)
+	}
+}
+
+func TestNormalizePanelMode(t *testing.T) {
+	cases := map[string]string{
+		"":        PanelModeAuto,
+		"auto":    PanelModeAuto,
+		"window":  PanelModeWindow,
+		"browser": PanelModeBrowser,
+		"WINDOW":  PanelModeAuto, // 大小写不匹配就是非法值
+		"gui":     PanelModeAuto,
+	}
+	for in, want := range cases {
+		if got := NormalizePanelMode(in); got != want {
+			t.Errorf("NormalizePanelMode(%q) = %q，期望 %q", in, got, want)
+		}
+	}
+}
+
+func TestEffectivePanelModeEnvWins(t *testing.T) {
+	t.Setenv(EnvPanel, "browser")
+	if got := EffectivePanelMode(DesktopSettings{PanelMode: PanelModeWindow}); got != PanelModeBrowser {
+		t.Fatalf("环境变量应优先，得到 %q", got)
+	}
+
+	// 非法值不能把用户锁死：退回设置文件里的值。
+	t.Setenv(EnvPanel, "nonsense")
+	if got := EffectivePanelMode(DesktopSettings{PanelMode: PanelModeWindow}); got != PanelModeWindow {
+		t.Fatalf("非法环境变量应被忽略，得到 %q", got)
+	}
+}
+
+func TestLoadSettingsMigratesMissingPanelMode(t *testing.T) {
+	withTempHome(t)
+
+	dir, err := EnsureDir()
+	if err != nil {
+		t.Fatalf("建目录失败：%v", err)
+	}
+	// 旧版本写下的设置文件没有 panelMode 字段。
+	if err := os.WriteFile(filepath.Join(dir, "desktop.json"), []byte(`{"port":19726}`), 0o600); err != nil {
+		t.Fatalf("写设置失败：%v", err)
+	}
+
+	s, err := LoadSettings()
+	if err != nil {
+		t.Fatalf("读取失败：%v", err)
+	}
+	if s.PanelMode != PanelModeAuto {
+		t.Errorf("旧配置应迁移为 auto，实际 %q", s.PanelMode)
 	}
 }
 

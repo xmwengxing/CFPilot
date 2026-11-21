@@ -16,7 +16,9 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -31,25 +33,31 @@ import (
 var assets embed.FS
 
 const (
-	edgeCompatDate = "2026-01-01"
-	doClassName    = "MeshRoom"
+	edgeCompatDate      = "2026-01-01"
+	doClassName         = "MeshRoom"
+	d1ReadyTimeout      = 90 * time.Second
+	d1RetryInitialDelay = 500 * time.Millisecond
+	d1RetryMaximumDelay = 5 * time.Second
+	monitorSetupTimeout = 90 * time.Second
 )
+
+var transientD1ProvisioningRe = regexp.MustCompile(`(?i)(?:d1|database).*(?:not found|not ready|not available|unavailable|provision)`)
 
 // Options 是部署参数（与 CLI EdgeDeployOptions 对齐）。
 type Options struct {
-	AccountID         string
-	Domain            string
-	WorkerName        string
-	MonitorPassword   string
-	MonitorToken      string
-	DashboardProject  string
-	WithDashboard     bool
-	ZoneID            string
+	AccountID        string
+	Domain           string
+	WorkerName       string
+	MonitorPassword  string
+	MonitorToken     string
+	DashboardProject string
+	WithDashboard    bool
+	ZoneID           string
 	// AutoDNS：绑定失败（409/100117，同名主机名已有「外部管理」的 DNS 记录）时，
 	// 清理**我们自己的旧占位记录**（已代理 AAAA 100:: / CNAME→workers.dev|pages.dev）
 	// 后重试绑定。注意：Worker 自定义域名应由 Workers 自动创建 DNS 记录，
 	// **不要**在绑定前预建记录 —— 那会被判成 externally managed 而失败。
-	AutoDNS bool
+	AutoDNS           bool
 	WindowMs          string
 	MaxBytesPerWindow string
 	MaxPackets        string
@@ -179,8 +187,10 @@ func resolveViaDoH(ctx context.Context, domain string) (bool, error) {
 	}
 	defer resp.Body.Close()
 	var out struct {
-		Status  int `json:"Status"`
-		Answer  []struct{ Type int `json:"type"` } `json:"Answer"`
+		Status int `json:"Status"`
+		Answer []struct {
+			Type int `json:"type"`
+		} `json:"Answer"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return false, err
@@ -222,6 +232,100 @@ func splitSQL(sql string) []string {
 		}
 	}
 	return out
+}
+
+func isTransientD1Error(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *cfapi.APIError
+	if errors.As(err, &apiErr) {
+		if apiErr.Status == http.StatusRequestTimeout || apiErr.Status == http.StatusTooEarly ||
+			apiErr.Status == http.StatusTooManyRequests || apiErr.Status >= http.StatusInternalServerError {
+			return true
+		}
+		return transientD1ProvisioningRe.MatchString(apiErr.Message)
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
+}
+
+func waitD1Retry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func queryD1WithRetry(ctx context.Context, client *cfapi.Client, accountID, databaseID, sql string, deadline time.Time, operation string, report func(string)) error {
+	delay := d1RetryInitialDelay
+	attempts := 0
+	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s在 %d 秒内未完成（已重试 %d 次）", operation, int(d1ReadyTimeout.Seconds()), attempts)
+		}
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("%s已取消：%w", operation, err)
+		}
+		attempts++
+		requestCtx, cancel := context.WithDeadline(ctx, deadline)
+		err := client.QueryD1(requestCtx, accountID, databaseID, sql)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s在 %d 秒内未完成（已重试 %d 次）：%w", operation, int(d1ReadyTimeout.Seconds()), attempts-1, err)
+		}
+		if !isTransientD1Error(err) {
+			return fmt.Errorf("%s失败：%w", operation, err)
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("%s在 %d 秒内未完成（已重试 %d 次）：%w", operation, int(d1ReadyTimeout.Seconds()), attempts-1, err)
+		}
+		wait := delay
+		if wait > remaining {
+			wait = remaining
+		}
+		if report != nil {
+			report(fmt.Sprintf("D1 暂不可用，%.1f 秒后重试%s（第 %d 次）", wait.Seconds(), operation, attempts+1))
+		}
+		if waitErr := waitD1Retry(ctx, wait); waitErr != nil {
+			return fmt.Errorf("%s已取消：%w", operation, waitErr)
+		}
+		if delay < d1RetryMaximumDelay {
+			delay *= 2
+			if delay > d1RetryMaximumDelay {
+				delay = d1RetryMaximumDelay
+			}
+		}
+	}
+}
+
+func initializeD1Schema(ctx context.Context, client *cfapi.Client, accountID, databaseID string, statements []string, report func(string)) error {
+	deadline := time.Now().Add(d1ReadyTimeout)
+	workCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	if report != nil {
+		report("等待 D1 就绪")
+	}
+	if err := queryD1WithRetry(workCtx, client, accountID, databaseID, "SELECT 1", deadline, "D1 就绪检查", report); err != nil {
+		return err
+	}
+	if report != nil {
+		report("D1 已就绪，开始初始化 schema")
+	}
+	for _, sql := range statements {
+		if err := queryD1WithRetry(workCtx, client, accountID, databaseID, sql, deadline, fmt.Sprintf("D1 schema 初始化失败（%s…）", firstN(sql, 40)), report); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Deploy 执行完整部署编排。
@@ -278,12 +382,11 @@ func Deploy(ctx context.Context, client *cfapi.Client, raw Options) (*Result, er
 		_ = reused
 	}
 	statements := splitSQL(string(schemaSQL))
-	opt.Progress(fmt.Sprintf("D1 已就绪：%s，初始化 schema（%d 条）", db.Name, len(statements)))
-	for _, sql := range statements {
-		if err := client.QueryD1(ctx, opt.AccountID, db.UUID, sql); err != nil {
-			return nil, fmt.Errorf("D1 schema 初始化失败（%s…）：%w", firstN(sql, 40), err)
-		}
+	opt.Progress(fmt.Sprintf("D1 已创建：%s，等待就绪并初始化 schema（%d 条）", db.Name, len(statements)))
+	if err := initializeD1Schema(ctx, client, opt.AccountID, db.UUID, statements, opt.Progress); err != nil {
+		return nil, err
 	}
+	opt.Progress("D1 schema 初始化完成")
 
 	// 2. Worker（DO migration + D1 绑定 + vars）
 	opt.Progress("步骤 2/5：部署盲中继 Worker（含 Durable Objects 房间）")
@@ -345,7 +448,7 @@ func Deploy(ctx context.Context, client *cfapi.Client, raw Options) (*Result, er
 
 	// 4. /auth/setup
 	opt.Progress("步骤 4/5：设置监测台初始密码")
-	if err := setupMonitorPassword(ctx, workerURL, opt.MonitorPassword); err != nil {
+	if _, err := setupMonitorPassword(ctx, workerURL, opt.MonitorPassword, opt.Progress); err != nil {
 		return nil, err
 	}
 
@@ -395,30 +498,76 @@ func Deploy(ctx context.Context, client *cfapi.Client, raw Options) (*Result, er
 	}, nil
 }
 
-var defaultAPIRe = regexp.MustCompile(`const DEFAULT_API = '[^']*'`)
+var defaultAPIRe = regexp.MustCompile(`const DEFAULT_API = (?:'[^']*'|location\.origin)`)
 
 // replaceDefaultAPI 把面板默认 API 指向本次 Worker（与 CLI 同语义）。
 func replaceDefaultAPI(html, workerURL string) string {
 	return defaultAPIRe.ReplaceAllString(html, "const DEFAULT_API = '"+workerURL+"'")
 }
 
-func setupMonitorPassword(ctx context.Context, workerURL, password string) error {
+func setupMonitorPassword(ctx context.Context, workerURL, password string, report func(string)) (bool, error) {
 	body, _ := json.Marshal(map[string]string{"password": password})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, workerURL+"/auth/setup", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("设置监测台密码失败：%w", err)
+	deadline := time.Now().Add(monitorSetupTimeout)
+	delay := d1RetryInitialDelay
+	attempts := 0
+	var lastErr error
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return false, fmt.Errorf("设置监测台密码已取消：%w", err)
+		}
+		attempts++
+		requestCtx, cancel := context.WithDeadline(ctx, deadline)
+		req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, workerURL+"/auth/setup", bytes.NewReader(body))
+		if err != nil {
+			cancel()
+			return false, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode < 400 {
+				cancel()
+				return false, nil
+			}
+			if resp.StatusCode == http.StatusConflict {
+				cancel()
+				return true, nil
+			}
+			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+			if resp.StatusCode != http.StatusRequestTimeout && resp.StatusCode != http.StatusTooEarly &&
+				resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < http.StatusInternalServerError {
+				cancel()
+				return false, fmt.Errorf("设置监测台密码失败（%w）", lastErr)
+			}
+		} else {
+			lastErr = err
+		}
+		cancel()
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		wait := delay
+		if wait > remaining {
+			wait = remaining
+		}
+		if report != nil {
+			report(fmt.Sprintf("Worker/D1 尚未就绪，%.1f 秒后重试监测台初始化（第 %d 次）", wait.Seconds(), attempts+1))
+		}
+		if err := waitD1Retry(ctx, wait); err != nil {
+			return false, fmt.Errorf("设置监测台密码已取消：%w", err)
+		}
+		if delay < d1RetryMaximumDelay {
+			delay *= 2
+			if delay > d1RetryMaximumDelay {
+				delay = d1RetryMaximumDelay
+			}
+		}
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode >= 400 && resp.StatusCode != 409 {
-		return fmt.Errorf("设置监测台密码失败（HTTP %d）", resp.StatusCode)
-	}
-	return nil // 409 = 已有密码，幂等成功
+	return false, fmt.Errorf("设置监测台密码在 %d 秒内未完成（已尝试 %d 次）：%w", int(monitorSetupTimeout.Seconds()), attempts, lastErr)
 }
 
 func firstN(s string, n int) string {
@@ -430,9 +579,3 @@ func firstN(s string, n int) string {
 
 // ZoneNameFromDomain 暴露给 server 层用于自动查 zone。
 func ZoneNameFromDomain(domain string) string { return zoneNameFromDomain(domain) }
-
-
-
-
-
-

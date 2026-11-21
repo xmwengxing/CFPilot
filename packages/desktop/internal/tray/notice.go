@@ -25,7 +25,7 @@ func (a *App) showStartupNotice() {
 	st := a.srv.Settings()
 	url := a.srv.WelcomeURL()
 
-	title := "CFPilot 部署与维护服务"
+	title := "CFPilot 部署与网络维护"
 	body := fmt.Sprintf("已启动，界面地址：\n%s", displayURL(url))
 	if st.AllowLAN {
 		body += "\n\n已开启局域网访问"
@@ -43,7 +43,7 @@ func (a *App) showStartupNotice() {
 
 // displayURL 去掉 URL 里的启动令牌，避免通知里出现一长串乱码。
 //
-// 令牌仍可点击托盘「打开业务界面」时自动带上，不需要用户看。
+// 令牌仍可点击托盘「打开面板」时自动带上，不需要用户看。
 func displayURL(url string) string {
 	if idx := indexOfByte(url, '?'); idx >= 0 {
 		return url[:idx]

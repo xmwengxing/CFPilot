@@ -65,6 +65,35 @@ func TestDegradeControllerLifecycle(t *testing.T) {
 	}
 }
 
+// TestDegradeControllerDirectLockPreventsFlap 验证打洞确认直连后，
+// 降级控制器不再因探针瞬时丢包把 P2P 链路切回 WSS。
+func TestDegradeControllerDirectLockPreventsFlap(t *testing.T) {
+	hub, err := NewUdpHub("127.0.0.1:0", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	probes := NewProbeTracker(hub, nodeID(0))
+	c := NewDegradeController(nodeID(0), probes, "relay.example", "room", "", nil, false)
+	c.AddPeer(nodeID(1), "127.0.0.1:12345")
+	c.SetSharedWssRoomRequired(true)
+	switches := 0
+	c.SetSwitchFn(func(NodeID, PeerLink, TransportKind) { switches++ })
+	c.LockDirect(nodeID(1))
+	if !c.IsDirectLocked(nodeID(1)) {
+		t.Fatal("LockDirect 后应处于直连锁定状态")
+	}
+	c.graceTicks = 0
+	c.lastSwitch[nodeID(1)] = time.Time{}
+	for i := 0; i < 5; i++ {
+		c.probes.RecordSample(nodeID(1))
+		c.tick(context.Background())
+	}
+	if switches != 0 || c.Kind(nodeID(1)) != TransportUDP {
+		t.Fatalf("直连锁定后不应切换档位，switches=%d kind=%v", switches, c.Kind(nodeID(1)))
+	}
+}
+
 // TestProbePingPong 验证 UdpProbe 的 Ping/Pong 编解码与 RTT 计算。
 func TestProbePingPong(t *testing.T) {
 	ping := &PingMsg{TimestampMS: 1700000000000, Nonce: 42}
@@ -159,5 +188,3 @@ func TestUdpHubProbeBypass(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 }
-
-

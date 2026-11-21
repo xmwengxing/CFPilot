@@ -5,11 +5,20 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.ViewGroup
+import android.webkit.JsPromptResult
+import android.webkit.JsResult
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.TextView
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -34,6 +43,7 @@ class MainActivity : AppCompatActivity() {
     private var webView: WebView? = null
     private var statusView: TextView? = null
     private var container: FrameLayout? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private val pollIntervalMs = 300L
     private val pollTimeoutMs = 20_000L
@@ -70,9 +80,9 @@ class MainActivity : AppCompatActivity() {
      */
     private fun waitForServer() {
         val deadline = System.currentTimeMillis() + pollTimeoutMs
-        val handler = android.os.Handler(android.os.Looper.getMainLooper())
         val tick = object : Runnable {
             override fun run() {
+                if (isFinishing || isDestroyed) return
                 val err = ServerService.error
                 if (err != null) {
                     statusView?.text = "启动失败：$err"
@@ -87,10 +97,10 @@ class MainActivity : AppCompatActivity() {
                     statusView?.text = "启动超时，请重试"
                     return
                 }
-                handler.postDelayed(this, pollIntervalMs)
+                mainHandler.postDelayed(this, pollIntervalMs)
             }
         }
-        handler.post(tick)
+        mainHandler.post(tick)
     }
 
     private fun openPanel(url: String) {
@@ -104,17 +114,116 @@ class MainActivity : AppCompatActivity() {
             settings.domStorageEnabled = true
             settings.useWideViewPort = true
             settings.loadWithOverviewMode = true
+            // 本地回环服务响应均为动态状态（账户列表 / 凭据 / 进度），禁用 WebView 缓存避免读到旧数据。
+            settings.cacheMode = WebSettings.LOAD_NO_CACHE
             webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(
+                    view: WebView?,
+                    request: WebResourceRequest?
+                ): Boolean {
+                    val uri = request?.url ?: return false
+                    val host = uri.host ?: ""
+                    if (host == "127.0.0.1" || host == "localhost" || host == "::1") {
+                        return false
+                    }
+                    if (uri.scheme == "http" || uri.scheme == "https") {
+                        try {
+                            startActivity(Intent(Intent.ACTION_VIEW, uri))
+                            return true
+                        } catch (_: Throwable) {
+                            return false
+                        }
+                    }
+                    return false
+                }
+
                 override fun onPageFinished(view: WebView?, finishedUrl: String?) {
                     super.onPageFinished(view, finishedUrl)
                     // 令牌只在这一跳的地址栏里，换掉之后就没了 ——
                     // 刷新页面时不能把带令牌的地址再放回去（会留在历史里）。
                 }
             }
+            // ⚠️ 必须挂 WebChromeClient 处理 alert / confirm / prompt。
+            // Android WebView 未设置 WebChromeClient 时，window.confirm() 会静默返回 false，
+            // 导致「删除本地账号/凭据」等二次确认操作完全不弹窗、永不触发后端删除。
+            webChromeClient = object : WebChromeClient() {
+                override fun onJsAlert(
+                    view: WebView?,
+                    url: String?,
+                    message: String?,
+                    result: JsResult?
+                ): Boolean {
+                    if (isFinishing || isDestroyed) {
+                        result?.cancel()
+                        return true
+                    }
+                    AlertDialog.Builder(this@MainActivity)
+                        .setMessage(message ?: "")
+                        .setPositiveButton(android.R.string.ok) { _, _ -> result?.confirm() }
+                        .setOnCancelListener { result?.cancel() }
+                        .show()
+                    return true
+                }
+
+                override fun onJsConfirm(
+                    view: WebView?,
+                    url: String?,
+                    message: String?,
+                    result: JsResult?
+                ): Boolean {
+                    if (isFinishing || isDestroyed) {
+                        result?.cancel()
+                        return true
+                    }
+                    AlertDialog.Builder(this@MainActivity)
+                        .setMessage(message ?: "")
+                        .setPositiveButton(android.R.string.ok) { _, _ -> result?.confirm() }
+                        .setNegativeButton(android.R.string.cancel) { _, _ -> result?.cancel() }
+                        .setOnCancelListener { result?.cancel() }
+                        .show()
+                    return true
+                }
+
+                override fun onJsPrompt(
+                    view: WebView?,
+                    url: String?,
+                    message: String?,
+                    defaultValue: String?,
+                    result: JsPromptResult?
+                ): Boolean {
+                    if (isFinishing || isDestroyed) {
+                        result?.cancel()
+                        return true
+                    }
+                    val input = EditText(this@MainActivity).apply {
+                        setText(defaultValue ?: "")
+                    }
+                    AlertDialog.Builder(this@MainActivity)
+                        .setMessage(message ?: "")
+                        .setView(input)
+                        .setPositiveButton(android.R.string.ok) { _, _ ->
+                            result?.confirm(input.text?.toString() ?: "")
+                        }
+                        .setNegativeButton(android.R.string.cancel) { _, _ -> result?.cancel() }
+                        .setOnCancelListener { result?.cancel() }
+                        .show()
+                    return true
+                }
+            }
         }
         webView = wv
         container?.addView(wv)
         wv.loadUrl(url)
+    }
+
+    override fun onDestroy() {
+        mainHandler.removeCallbacksAndMessages(null)
+        webView?.let { wv ->
+            container?.removeView(wv)
+            wv.destroy()
+        }
+        webView = null
+        super.onDestroy()
     }
 
     private fun requestNotificationPermissionIfNeeded() {

@@ -974,6 +974,8 @@ func (s *Server) handleAccountDetect(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		// Token 可选：不传就用已保存的（界面重新检测时不必重输）
 		Token string `json:"token"`
+		// ProfileID 可选：指定要检测的账户配置 ID（防并发切换账户时读错/写错目标）
+		ProfileID string `json:"profileId"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
@@ -987,13 +989,23 @@ func (s *Server) handleAccountDetect(w http.ResponseWriter, r *http.Request) {
 	// 之后拿 token A 去列 account B 的 KV → 403 / 空列表。
 	// 所以外部 Token 只回显探测结果，**绝不落盘**。
 	token := strings.TrimSpace(req.Token)
+	profileID := strings.TrimSpace(req.ProfileID)
 	usingProfileToken := token == ""
 	if usingProfileToken {
-		p, err := s.store.Active()
+		var (
+			p   *store.Profile
+			err error
+		)
+		if profileID != "" {
+			p, err = s.store.Get(profileID)
+		} else {
+			p, err = s.store.Active()
+		}
 		if err != nil || p == nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请先填写 API Token"})
 			return
 		}
+		profileID = p.ID
 		token = p.CfToken
 	}
 	if token == "" {
@@ -1022,17 +1034,26 @@ func (s *Server) handleAccountDetect(w http.ResponseWriter, r *http.Request) {
 	// 只有一个账号时直接用；多个时返回列表让界面选
 	if len(accounts) == 1 {
 		acc := accounts[0]
-		// 顺手把账号信息写回当前 profile
+		// 顺手把账号信息写回对应的 profile
 		//
-		// ⚠️ 仅限「用的是当前 profile 自己的 Token」：
+		// ⚠️ 仅限「用的是 profile 自己的 Token」：
 		// 外部 Token 探测出来的账号不属于本 profile，
 		// 写回去会造成「token A + accountId B」的混合体（见上面的说明）。
 		if usingProfileToken {
-			if _, e := s.store.SaveActive(store.Patch{
-				AccountID:   &acc.ID,
-				AccountName: &acc.Name,
-			}); e != nil {
-				s.logLevel("保存账号信息失败："+e.Error(), "warn")
+			var saveErr error
+			if profileID != "" {
+				_, saveErr = s.store.Update(profileID, store.Patch{
+					AccountID:   &acc.ID,
+					AccountName: &acc.Name,
+				})
+			} else {
+				_, saveErr = s.store.SaveActive(store.Patch{
+					AccountID:   &acc.ID,
+					AccountName: &acc.Name,
+				})
+			}
+			if saveErr != nil {
+				s.logLevel("保存账号信息失败："+saveErr.Error(), "warn")
 			}
 			// 顺手在后台采集一次账号用量：点开「用量/额度」时直接有数据，
 			// 不用临时再花一次 API 调用（后台任务，不阻塞本次响应）。

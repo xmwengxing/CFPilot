@@ -51,6 +51,12 @@ const (
 	// 命令行 `--port` 的优先级高于它。
 	EnvPort = "CFPILOT_PORT"
 
+	// EnvPanel 覆盖面板形态：auto / window / browser。
+	//
+	// 容器与远程桌面用它固定行为：容器里没有图形会话，
+	// 应当明确用 browser（配合 --no-tray）；排障时也可强制回浏览器。
+	EnvPanel = "CFPILOT_PANEL"
+
 	// EnvListenAddr 单独覆盖**监听地址**，与「允许局域网访问」解耦。
 	//
 	// ## 为什么需要解耦
@@ -105,6 +111,17 @@ func EnvPortValue() int {
 		return 0
 	}
 	return n
+}
+
+// EnvPanelValue 返回面板形态的环境变量覆盖值（未设置或非法时返回空串）。
+func EnvPanelValue() string {
+	raw := strings.TrimSpace(strings.ToLower(os.Getenv(EnvPanel)))
+	switch raw {
+	case PanelModeAuto, PanelModeWindow, PanelModeBrowser:
+		return raw
+	default:
+		return ""
+	}
 }
 
 // EnvListenAddrValue 返回监听地址的环境变量覆盖值（未设置时返回空串）。

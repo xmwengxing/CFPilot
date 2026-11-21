@@ -60,7 +60,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.27'
           cache-dependency-path: packages/desktop/go.sum
 
       - name: 安装依赖
@@ -217,12 +217,14 @@ jobs:
         # 与普通版共存。安装包解决 wintun.dll 不捆绑问题（ADR-0002）：
         # Windows 用 NSIS 打真正的 setup.exe（双击即装，安装时提权调 --fetch-wintun
         # 下载 DLL）；Linux 用 dpkg-deb 生成 .deb。两者都是 Ubuntu runner 自带/可装的工具。
+        #
+        # build-desktop.mjs --mesh 只在隐藏暂存目录编译程序，最终只留下安装包。
+        # 安装工具缺失或任何平台未产出安装包时会直接失败。
         run: |
           set -e
           sudo apt-get update -qq
           sudo apt-get install -y -qq nsis dpkg >/dev/null
           node scripts/build-desktop.mjs --mesh
-          node scripts/build-installers.mjs
           echo '== +mesh 产物 =='
           ls -la packages/desktop/dist/*+mesh* || true
 
@@ -270,8 +272,21 @@ jobs:
         run: |
           # ghcr 要求镜像名全小写。
           OWNER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
-          echo "name=ghcr.io/${OWNER}/cfpilot" >> "$GITHUB_OUTPUT"
-          echo "镜像：ghcr.io/${OWNER}/cfpilot"
+          IMG="ghcr.io/${OWNER}/cfpilot"
+          VER="${{ steps.ver.outputs.version }}"
+          echo "name=${IMG}" >> "$GITHUB_OUTPUT"
+          # ⚠️ 预发布版（含 -beta/-rc 等）不覆盖 Docker 的 latest 标签，只推版本标签
+          if [[ "$VER" == *-* ]]; then
+            echo "tags=${IMG}:${VER}" >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "tags<<EOF"
+              echo "${IMG}:${VER}"
+              echo "${IMG}:latest"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
+          echo "镜像：${IMG}"
 
       - uses: docker/setup-qemu-action@v3
         with:
@@ -337,9 +352,7 @@ jobs:
           # workflow_dispatch 是试跑 —— 那时的 HEAD 未必与已发布的某个版本对应，
           # 推上去会用错的二进制冒充那个版本号。
           push: ${{ startsWith(github.ref, 'refs/tags/desktop-v') }}
-          tags: |
-            ${{ steps.image.outputs.name }}:${{ steps.ver.outputs.version }}
-            ${{ steps.image.outputs.name }}:latest
+          tags: ${{ steps.image.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -367,9 +380,7 @@ jobs:
           file: ./docker/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ steps.image.outputs.name }}:${{ steps.ver.outputs.version }}
-            ${{ steps.image.outputs.name }}:latest
+          tags: ${{ steps.image.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -492,8 +503,11 @@ jobs:
           {
             printf '%s\n\n' "$BODY"
             printf -- '---\n\n'
-            printf '**下载后直接运行**：Windows 双击 `.exe`；Linux 先 `chmod +x`。\n\n'
-            printf 'CLI 工具：`npm i -g cfpilot`，然后运行 `cfpilot` 进入中文菜单。\n'
+            printf '**下载说明**：\n'
+            printf -- '- **普通版**（代理部署 / 优选 / 盲中继与云监测台）：Windows 下载 `cfpilot-%s-windows-amd64.exe` 双击运行；Linux 下载对应架构二进制并 `chmod +x`；Android 下载 `cfpilot-%s-android.apk`。\n' "$VERSION" "$VERSION"
+            printf -- '- **+mesh 组网版**（含异地组网）：Windows 下载 `cfpilot-%s+mesh-windows-amd64-setup.exe` 安装运行；Linux 下载对应架构 `.deb`（amd64 / arm64）安装；Android 下载 `cfpilot-%s+mesh-android.apk`（独立组网客户端）。\n' "$VERSION" "$VERSION"
+            printf -- '- **转发内核**：`CFPilot-control.zip` / `CFPilot-dataplane.zip` 与独立热更新通道 `kernel-latest` 同步发布。\n\n'
+            printf 'CLI 工具：`npm i -g cfpilot`（组网版 `npm i -g cfpilot-mesh`），然后运行 `cfpilot` 进入中文菜单。\n'
             printf '\n**容器镜像**：`docker pull ghcr.io/xmwengxing/cfpilot:%s`\n' "$VERSION"
             printf '（linux/amd64 与 linux/arm64；默认只允许本机访问，详见仓库 README 的 Docker 章节）\n'
           } > release_body.md
@@ -561,7 +575,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.27'
           cache-dependency-path: packages/desktop/go.sum
 
       # 固定 JDK 17（2026-11-14）：runner 自带的 JDK 已升到 25（class file
@@ -798,7 +812,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.27'
           cache-dependency-path: packages/desktop/go.sum
 
       # AGP 8.5 / Gradle 8.9 需要 JDK 17（runner 自带 JDK 25 不兼容）

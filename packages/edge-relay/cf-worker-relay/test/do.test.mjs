@@ -5,9 +5,22 @@
 // 运行：node --test test/*.test.mjs
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { registerHooks } from "node:module";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
-import worker, { MeshRoom } from "../src/index.ts";
+registerHooks({
+  load(url, context, nextLoad) {
+    if (url.endsWith(".html")) {
+      const source = `export default ${JSON.stringify(readFileSync(fileURLToPath(url), "utf8"))};`;
+      return { format: "module", shortCircuit: true, source };
+    }
+    return nextLoad(url, context);
+  },
+});
+
+const { default: worker, MeshRoom } = await import("../src/index.ts");
 import {
   BROADCAST_HEX,
   HEADER_LEN,
@@ -119,6 +132,23 @@ test("Worker 路由：合法 upgrade → 按 network_hash 取同名 DO", async (
   const resp = await worker.fetch(req, env);
   assert.equal(resp.status, 200);
   assert.deepEqual(calls, [hash], "必须按 network_hash 取 DO 实例（房间隔离）");
+});
+
+test("Worker 根路径返回监测台，默认 API 使用当前域名", async () => {
+  const env = { MESH_ROOM: { idFromName: () => "x", get: () => ({ fetch: async () => new Response("") }) } };
+  const req = {
+    method: "GET",
+    url: "https://edge.example.com/",
+    headers: { get: () => null },
+  };
+
+  const resp = await worker.fetch(req, env);
+  const html = await resp.text();
+
+  assert.equal(resp.status, 200);
+  assert.match(resp.headers.get("Content-Type"), /text\/html/);
+  assert.equal(resp.headers.get("Cache-Control"), "no-store");
+  assert.match(html, /const DEFAULT_API = location\.origin/);
 });
 
 test("Worker 路由：非法 peer_id / 路径 / 非 upgrade 一律拒绝", async () => {

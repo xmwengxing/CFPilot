@@ -1,9 +1,18 @@
 // 构建 CFPilot 桌面版（Go 单二进制）。
 //
 // 产物：
-//   packages/desktop/dist/cfpilot-<version>-windows-amd64.exe
-//   packages/desktop/dist/cfpilot-<version>-linux-amd64
-//   packages/desktop/dist/cfpilot-<version>-linux-arm64
+//   普通版：packages/desktop/dist/cfpilot-<version>-<platform>
+//   +mesh：packages/desktop/dist/cfpilot-<version>+mesh-<platform>-setup.exe / .deb
+//
+// ## +mesh 变体的安装包（2026-11-20 起自动构建）
+//
+// +mesh 必须交付**现代化安装包**（Windows NSIS setup.exe / Linux deb），
+// 因为只有安装过程才会以管理员权限把 wintun.dll 下载到安装目录
+// （ADR-0002：DLL 不随包捆绑，安装时从官方源下载 + 双重 SHA256 校验）。
+// 只发裸 exe 时 wintun.dll 无处落地，用户启动组网必然失败。
+//
+// --mesh 的主程序只写入 dist/.mesh-build/，再自动交给安装器打包；
+// dist 最终只保留 setup.exe / .deb，不暴露可误发的裸 Mesh 程序。
 //
 // ## 界面资源从哪来
 //
@@ -21,7 +30,7 @@
 // 因此这里在拷贝 index.html 时**动态插入** adapter 的 script 标签。
 // Electron 版的 index.html 保持原样，两个版本各取所需。
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -34,6 +43,8 @@ const desktopDir = join(repoRoot, 'packages', 'desktop')
 // 0.6.4 起不再发布 Electron 版，外壳移出仓库，界面抽成独立的 @cfpilot/ui。
 // 现在从 packages/ui/dist 取，语义清晰，也不再依赖任何外壳。
 const uiDist = join(repoRoot, 'packages', 'ui', 'dist')
+const uiSrc = join(repoRoot, 'packages', 'ui', 'src')
+const uiBuildScript = join(repoRoot, 'packages', 'ui', 'scripts', 'build.mjs')
 const assetsDir = join(desktopDir, 'internal', 'server', 'assets')
 const webuiDir = join(desktopDir, 'webui')
 const outDir = join(desktopDir, 'dist')
@@ -64,7 +75,16 @@ const WINRES_SYSO = join(desktopDir, 'cmd', 'cfpilot', `${WINRES_OUT}_windows_am
 const version = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')).version
 console.log(`[desktop] 构建 CFPilot Desktop v${version}`)
 
-// ---- 1. 同步界面资源 ----
+// ---- 1. 重建并同步界面资源 ----
+// build-desktop 必须自己保证 packages/ui/dist 是最新的：之前只复制 dist，
+// 改了 renderer.ts 却忘记跑 npm run build -w @cfpilot/ui 时，会把旧 JS 打进
+// 新 exe（真机表现为「装了新包、UI 完全没变化」）。这里无条件重建一次，
+// 代价只有几秒，换来的是产物与源码一一对应。
+execFileSync(process.execPath, [uiBuildScript], { cwd: join(repoRoot, 'packages', 'ui'), stdio: 'inherit' })
+if (!existsSync(join(uiSrc, 'index.html'))) {
+  console.error('[desktop] 未找到 packages/ui/src/index.html')
+  process.exit(1)
+}
 if (!existsSync(join(uiDist, 'index.html'))) {
   console.error('[desktop] 未找到 packages/ui/dist/index.html')
   console.error('[desktop] 请先执行：npm run build -w @cfpilot/ui')
@@ -205,14 +225,19 @@ if (existsSync(builtinRelaySrc)) {
 // --mesh：构建 +mesh 变体（内嵌 MobiHop 组网模块）。
 //   - 产物名加 `+mesh` 后缀，与普通版同批发布（同一 tag 多 asset，不增版本号通道）
 //   - go build 加 `-tags=mesh`，启用 internal/mesh 的真实入口（Phase 3b 填充协议）
-//   - 当前 Phase 3a：+mesh 变体只包含工程骨架，协议实现待 3b
+//   - Mesh 主程序只进入隐藏暂存目录，最终 dist 只保留安装包
 const meshVariant = process.argv.includes('--mesh')
 const meshSuffix = meshVariant ? '+mesh' : ''
-const targets = [
-  { goos: 'windows', goarch: 'amd64', out: `cfpilot-${version}${meshSuffix}-windows-amd64.exe`, extra: ['-H=windowsgui'] },
-  { goos: 'linux', goarch: 'amd64', out: `cfpilot-${version}${meshSuffix}-linux-amd64`, extra: [] },
-  { goos: 'linux', goarch: 'arm64', out: `cfpilot-${version}${meshSuffix}-linux-arm64`, extra: [] },
+//
+// Linux 的 `cfp_gui` 标签：启用系统 WebKitGTK 窗口（purego 运行时 dlopen）。
+// ⚠️ 带这个标签的产物会因 purego 而链接 glibc（libc / libdl / libpthread），
+//    不能放进 Alpine 容器 —— 容器用的静态产物在下面单独编，见 stageDocker。
+const allTargets = [
+  { goos: 'windows', goarch: 'amd64', out: `cfpilot-${version}${meshSuffix}-windows-amd64.exe`, extra: ['-H=windowsgui'], tags: [] },
+  { goos: 'linux', goarch: 'amd64', out: `cfpilot-${version}${meshSuffix}-linux-amd64`, extra: [], tags: ['cfp_gui'] },
+  { goos: 'linux', goarch: 'arm64', out: `cfpilot-${version}${meshSuffix}-linux-arm64`, extra: [], tags: ['cfp_gui'] },
 ]
+const targets = allTargets
 
 // 允许限制构建目标（只编一部分平台时用）。
 //
@@ -226,6 +251,10 @@ const targets = [
 // 编译的是自己的 .so（另一套工具链，见 CI 的 android job）。
 // 少编一遍 linux 二进制，省掉几十秒的交叉编译。
 const assetsOnly = process.argv.includes('--assets-only')
+if (meshVariant && !assetsOnly && process.argv.includes('--no-installer')) {
+  console.error('[desktop] --mesh 必须生成安装包，不支持 --no-installer')
+  process.exit(1)
+}
 const onlyFlagIdx = process.argv.indexOf('--only')
 let only = (process.env.CFPILOT_DESKTOP_TARGETS || '').trim()
 if (onlyFlagIdx !== -1) {
@@ -273,6 +302,13 @@ if (picked.some((t) => t.goos === 'windows')) {
 // 也会拦下整目录 trash，导致构建莫名其妙失败。产物文件名带版本号，旧版本
 // 留着无害，同名产物由 go build 直接覆盖，因此只需确保目录存在。
 mkdirSync(outDir, { recursive: true })
+const meshBuildDir = join(outDir, '.mesh-build')
+const buildDir = meshVariant ? meshBuildDir : outDir
+if (meshVariant) {
+  cleanStaleInstallers()
+  rmSync(meshBuildDir, { recursive: true, force: true })
+  mkdirSync(meshBuildDir, { recursive: true })
+}
 
 const ldflags = (extra) => ['-s', '-w', `-X main.Version=${version}`, ...extra].join(' ')
 
@@ -308,15 +344,18 @@ function generateWindowsRes() {
     rmSync(join(pkgDir, f), { force: true })
   }
 
+  // Windows PE 版本资源（VS_FIXEDFILEINFO）要求纯四段/三段数字，不能带 -beta.1 后缀；
+  // 预发布后缀保留在 main.Version / 文件名里。
+  const winVer = (version.match(/^\d+\.\d+\.\d+/) ?? ['0.0.0'])[0]
   const args = [
     'simply',
     '--icon', 'app.ico',
     '--product-name', 'CFPilot',
-    '--file-description', 'CFPilot 部署与维护工具',
+    '--file-description', 'CFPilot 部署与网络维护' + meshSuffix,
     '--copyright', 'Copyright © CFPilot Contributors',
     '--original-filename', 'cfpilot.exe',
-    '--file-version', version,
-    '--product-version', version,
+    '--file-version', winVer,
+    '--product-version', winVer,
     '--manifest', 'gui',
     '--out', join(pkgDir, WINRES_OUT),
   ]
@@ -418,19 +457,22 @@ if (assetsOnly) {
 }
 
 for (const t of picked) {
-  const outPath = join(outDir, t.out)
+  const outPath = join(buildDir, t.out)
   console.log(`[desktop] 编译 ${t.goos}/${t.goarch} …`)
-  const meshTags = meshVariant ? ['-tags=mesh'] : []
+  const tags = [...(meshVariant ? ['mesh'] : []), ...(t.tags || [])]
+  const tagArgs = tags.length ? [`-tags=${tags.join(',')}`] : []
   execFileSync(
     'go',
-    ['build', '-trimpath', ...meshTags, `-ldflags=${ldflags(t.extra)}`, '-o', outPath, './cmd/cfpilot'],
+    ['build', '-trimpath', ...tagArgs, `-ldflags=${ldflags(t.extra)}`, '-o', outPath, './cmd/cfpilot'],
     {
       cwd: desktopDir,
       stdio: 'inherit',
       env: {
         ...process.env,
-        // CGO 必须关：开 CGO 就编不过 Linux（systray 已是纯 Go 实现），
-        // 且关掉后产物是静态二进制，不挑 glibc 版本。
+        // CGO 必须关：开 CGO 就编不过 Linux（systray 已是纯 Go 实现）。
+        // 注意：关掉 CGO 不代表必然静态 ——
+        // 带 cfp_gui 的 Linux 产物会因 purego 的 cgo_import_dynamic
+        // 链接 glibc，所以容器产物另外编（stageDocker）。
         CGO_ENABLED: '0',
         GOOS: t.goos,
         GOARCH: t.goarch,
@@ -440,17 +482,208 @@ for (const t of picked) {
   const mb = (statSync(outPath).size / 1024 / 1024).toFixed(2)
   console.log(`[desktop] ✅ ${t.out} (${mb} MB)`)
 
+  // 图形壳产物的校验：不得链接 WebKitGTK / GTK。
+  //
+  // 窗口是运行时 dlopen 的，一旦链接进来，用户没装 libwebkit 的机器
+  // 连「打开浏览器」都跑不起来 —— 这种回归只能看产物才能发现。
+  if (t.goos === 'linux') {
+    assertNoWebkitLinked(outPath)
+  }
+
   // 容器镜像用的暂存区。
   //
   // 镜像**不在里面编译** —— Go 二进制在这里编好，Dockerfile 只做一次 COPY。
   // 目录按架构分（docker/dist/amd64、docker/dist/arm64），
   // 对应 Dockerfile 里的 `COPY dist/${TARGETARCH}/cfpilot`。
-  if (t.goos === 'linux') {
-    const stageDir = join(repoRoot, 'docker', 'dist', t.goarch)
-    mkdirSync(stageDir, { recursive: true })
-    copyFileSync(outPath, join(stageDir, 'cfpilot'))
-    console.log(`[desktop] 📦 容器暂存 → docker/dist/${t.goarch}/cfpilot`)
+  //
+  // ⚠️ 暂存的是**另行编译的静态产物**（不带 cfp_gui）：
+  //    图形壳产物的 purego 依赖会链接 glibc，而镜像是 Alpine（musl），
+  //    直接拷进去会在 exec 阶段失败。
+  if (t.goos === 'linux' && !meshVariant) {
+    stageDocker(t)
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* +mesh：安装包自动构建 + 陈旧包清理（2026-11-20）                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 清理 dist 里旧的 Mesh 安装包与误留的裸程序。
+ *
+ * 背景：早前 build-desktop 从不删 dist，旧安装包一直留着。
+ * 重新构建后裸 exe 是新的、setup.exe 却是上一版 —— 发版时很容易上传错包；
+ * 而装错包就没有正确的 wintun.dll 落地路径（ADR-0002）。
+ *
+ * 现在每次自动构建安装包前**全删重建**：
+ *   - 工具齐全 → 立刻生成同版本的新包；
+ *   - 工具缺失（如本机没 dpkg-deb）→ 宁可没有，也绝不留下内容过期的旧包被人误传。
+ * 这样「每次都要提醒清理旧包」的问题从流程上根治。
+ */
+function cleanStaleInstallers() {
+  let cleaned = 0
+  for (const name of readdirSync(outDir)) {
+    const oldMeshProgram = /^cfpilot-.+\+mesh-(windows-amd64\.exe|linux-(amd64|arm64))$/.test(name)
+    if (/^cfpilot-.+\+mesh-.*(\.deb|-setup\.exe)$/.test(name) || oldMeshProgram || name === 'cfpilot-meshd.exe' || name === 'cfpilot-meshd') {
+      rmSync(join(outDir, name), { force: true })
+      console.log(`[desktop] 清理旧 Mesh 构建产物：${name}`)
+      cleaned++
+    }
+  }
+  if (cleaned === 0) console.log('[desktop] 无旧安装包需要清理')
+}
+
+/**
+ * --mesh 主程序仅暂存在隐藏目录，成功打包后删除暂存。
+ */
+function buildMeshInstallers() {
+  console.log('[desktop] 构建 +mesh 安装包（NSIS setup.exe / deb）…')
+  try {
+    execFileSync(process.execPath, [join(repoRoot, 'scripts', 'build-installers.mjs')], {
+      cwd: repoRoot,
+      stdio: 'inherit',
+      env: {
+        ...process.env,
+        CFPILOT_MESH_BUILD_DIR: meshBuildDir,
+        CFPILOT_MESH_BUILD_TARGETS: picked.map((target) =>
+          target.goos === 'windows' ? 'windows' : `linux-${target.goarch}`
+        ).join(','),
+        ...(process.platform === 'win32' ? { CFPILOT_DPKG_DEB_WSL: '1' } : {}),
+      },
+    })
+    for (const target of picked) {
+      const packageName = target.goos === 'windows'
+        ? `cfpilot-${version}+mesh-windows-amd64-setup.exe`
+        : `cfpilot-${version}+mesh-linux-${target.goarch}.deb`
+      if (!existsSync(join(outDir, packageName))) {
+        throw new Error(`未生成 ${packageName}；请确认安装器工具已安装`)
+      }
+      console.log(`[desktop] ✅ 安装包就绪：${packageName}`)
+    }
+    for (const target of picked) {
+      if (existsSync(join(outDir, target.out))) {
+        throw new Error(`检测到不应分发的 Mesh 单文件程序：${target.out}`)
+      }
+    }
+  } finally {
+    rmSync(meshBuildDir, { recursive: true, force: true })
+  }
+}
+
+if (meshVariant && !assetsOnly) {
+  buildMeshInstallers()
+}
+
+/**
+ * 编译容器用的静态 Linux 产物并暂存。
+ *
+ * 不带任何 GUI 标签：`shell.New` 返回 ErrUnsupported，
+ * 启动时按老路径走系统浏览器（容器本来就传 --no-browser）。
+ */
+function stageDocker(t) {
+  const stageDir = join(repoRoot, 'docker', 'dist', t.goarch)
+  mkdirSync(stageDir, { recursive: true })
+  const outPath = join(stageDir, 'cfpilot')
+  execFileSync(
+    'go',
+    ['build', '-trimpath', `-ldflags=${ldflags([])}`, '-o', outPath, './cmd/cfpilot'],
+    {
+      cwd: desktopDir,
+      stdio: 'inherit',
+      env: { ...process.env, CGO_ENABLED: '0', GOOS: t.goos, GOARCH: t.goarch },
+    }
+  )
+  assertFullyStatic(outPath)
+  const mb = (statSync(outPath).size / 1024 / 1024).toFixed(2)
+  console.log(`[desktop] 📦 容器暂存 → docker/dist/${t.goarch}/cfpilot (${mb} MB，静态)`)
+}
+
+/**
+ * 读取 ELF 的 DT_NEEDED 列表。
+ *
+ * 只处理 64 位小端（amd64 / arm64），已足够覆盖本项目的 Linux 产物。
+ */
+function readElfNeeded(buf) {
+  if (buf[0] !== 0x7f || buf.toString('latin1', 1, 4) !== 'ELF') return null
+  if (buf[4] !== 2) return null // 非 64 位
+  const shoff = Number(buf.readBigUInt64LE(0x28))
+  const shent = buf.readUInt16LE(0x3a)
+  const shnum = buf.readUInt16LE(0x3c)
+  const shstr = buf.readUInt16LE(0x3e)
+  if (!shoff || !shnum || shstr >= shnum) return null
+  const strOff = Number(buf.readBigUInt64LE(shoff + shstr * shent + 0x18))
+  const secName = (i) => {
+    const off = strOff + buf.readUInt32LE(shoff + i * shent)
+    let end = off
+    while (buf[end] !== 0) end++
+    return buf.toString('latin1', off, end)
+  }
+  let dyn = -1
+  let dynstr = -1
+  for (let i = 0; i < shnum; i++) {
+    const name = secName(i)
+    if (name === '.dynamic') dyn = i
+    if (name === '.dynstr') dynstr = i
+  }
+  if (dyn < 0 || dynstr < 0) return { dynamic: false, needed: [] }
+  const dynOff = Number(buf.readBigUInt64LE(shoff + dyn * shent + 0x18))
+  const dynSize = Number(buf.readBigUInt64LE(shoff + dyn * shent + 0x20))
+  const strBase = Number(buf.readBigUInt64LE(shoff + dynstr * shent + 0x18))
+  const needed = []
+  for (let p = dynOff; p < dynOff + dynSize; p += 16) {
+    const tag = Number(buf.readBigInt64LE(p))
+    if (tag === 0) break
+    if (tag !== 1) continue // DT_NEEDED
+    const v = Number(buf.readBigUInt64LE(p + 8))
+    let end = strBase + v
+    const start = end
+    while (buf[end] !== 0) end++
+    needed.push(buf.toString('latin1', start, end))
+  }
+  return { dynamic: true, needed }
+}
+
+/**
+ * 图形壳产物不得链接 WebKitGTK / GTK。
+ *
+ * purego 的 dlopen 会带上 libc / libdl / libpthread，这是预期内的；
+ * 但 libwebkit* 与 libgtk-* 一旦出现在 DT_NEEDED 里，
+ * 说明「运行时按需加载」退化成了「启动就必须装」，
+ * 没装 WebKit 的用户会直接启动失败。
+ */
+function assertNoWebkitLinked(path) {
+  const info = readElfNeeded(readFileSync(path))
+  if (!info) {
+    console.warn(`[desktop] ⚠ 无法解析 ELF 依赖：${path}`)
+    return
+  }
+  const bad = info.needed.filter((n) => /^lib(webkit|gtk)/i.test(n))
+  if (bad.length) {
+    console.error(`[desktop] ❌ ${path} 链接了 ${bad.join(', ')}`)
+    console.error('[desktop]    图形壳必须在运行时 dlopen，不能写进 DT_NEEDED')
+    process.exit(1)
+  }
+  console.log(`[desktop] ✅ 图形壳未链接 WebKitGTK（DT_NEEDED: ${info.needed.join(', ') || '无'}）`)
+}
+
+/**
+ * 容器产物必须是完全静态的（无 .dynamic 段）。
+ *
+ * 镜像基于 Alpine（musl），任何 glibc 依赖都会让 exec 失败。
+ */
+function assertFullyStatic(path) {
+  const info = readElfNeeded(readFileSync(path))
+  if (!info) {
+    console.error(`[desktop] ❌ 无法解析 ELF：${path}`)
+    process.exit(1)
+  }
+  if (info.dynamic) {
+    console.error(`[desktop] ❌ 容器产物不是静态二进制：${path}`)
+    console.error(`[desktop]    DT_NEEDED: ${info.needed.join(', ') || '(空)'}`)
+    console.error('[desktop]    Alpine（musl）镜像里跑不起来；请确认未带 cfp_gui 标签')
+    process.exit(1)
+  }
+  console.log('[desktop] ✅ 容器产物为静态二进制')
 }
 
 console.log('[desktop] 全部完成')

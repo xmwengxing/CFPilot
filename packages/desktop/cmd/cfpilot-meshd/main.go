@@ -20,19 +20,22 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/config"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/mesh"
 )
 
 const listenAddr = "127.0.0.1:19727"
 
 var (
-	version = "dev"
-	mu      sync.Mutex
-	life    mesh.Lifecycle
-	status  = mesh.Status{Note: "未启动"}
+	version  = "dev"
+	mu       sync.Mutex
+	life     mesh.Lifecycle
+	status   = mesh.Status{Note: "未启动"}
+	profiles *mesh.ProfileStore
 )
 
 func main() {
@@ -66,6 +69,19 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	log.Printf("[meshd] 启动（版本 %s，%s/%s）", version, runtime.GOOS, runtime.GOARCH)
 
+	// 命名网络档案由本服务独占读写（面板通过本地 API 访问），权限 0600。
+	// Windows 服务账号的 HOME 是 systemprofile，与用户目录不同；安装包把 meshd
+	// 放在用户可写的 %LOCALAPPDATA%\CFPilot-Mesh，所以优先用 exe 所在目录，
+	// 这样服务重启后仍能找到同一份档案。Linux deb 安装到 /usr/bin，用 config.Dir()。
+	dataDir, dirErr := profileDataDir()
+	if dirErr != nil {
+		log.Printf("[meshd] 警告：无法定位数据目录，网络档案与自动恢复不可用: %v", dirErr)
+	} else if store, err := mesh.NewProfileStore(dataDir); err != nil {
+		log.Printf("[meshd] 警告：加载网络档案失败: %v", err)
+	} else {
+		profiles = store
+	}
+
 	// Windows 下作为服务运行（SCM 管理生命周期）；Linux 下直接跑（systemd 管理）。
 	if runtime.GOOS == "windows" && !*console {
 		runAsService(func() { serve() })
@@ -75,6 +91,18 @@ func main() {
 }
 
 func serve() {
+	// 服务重启后自动恢复最后一次选中的网络。
+	// 这是「当前网络 + 自动启动」的核心：不再依赖浏览器是否打开过。
+	if profiles != nil && profiles.AutoStartEnabled() {
+		if cfg := profiles.SelectedConfig(); cfg != nil {
+			if started, err := startLifecycle(*cfg); err != nil {
+				log.Printf("[meshd] 自动恢复网络失败: %v", err)
+			} else {
+				log.Printf("[meshd] 已自动恢复上次选择的网络: vip=%s", started.VirtualIP)
+			}
+		}
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/mesh/status", func(w http.ResponseWriter, r *http.Request) {
 		// ⚠️ 必须**实时**调用 life.Status()。早前返回的是 Start 时拍下的快照，
@@ -100,22 +128,60 @@ func serve() {
 	mux.HandleFunc("/api/mesh/version", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"version": version})
 	})
+	// 命名网络档案：面板负责编辑与选择，meshd 负责持久化和服务重启后的自动恢复。
+	mux.HandleFunc("/api/mesh/profiles", func(w http.ResponseWriter, r *http.Request) {
+		if profiles == nil {
+			writeErr(w, "网络档案不可用：无法访问数据目录")
+			return
+		}
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, profiles.State())
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeErr(w, "仅支持 GET/POST")
+			return
+		}
+		var req struct {
+			Action string       `json:"action"`
+			Name   string       `json:"name"`
+			Config *mesh.Config `json:"config"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+			writeErr(w, "参数非法: "+err.Error())
+			return
+		}
+		switch req.Action {
+		case "save":
+			if req.Config == nil {
+				writeErr(w, "缺少 config")
+				return
+			}
+			if err := profiles.Save(req.Name, *req.Config); err != nil {
+				writeErr(w, err.Error())
+				return
+			}
+		case "select":
+			if err := profiles.Select(req.Name); err != nil {
+				writeErr(w, err.Error())
+				return
+			}
+		case "delete":
+			if err := profiles.Delete(req.Name); err != nil {
+				writeErr(w, err.Error())
+				return
+			}
+		default:
+			writeErr(w, "未知 action: "+req.Action)
+			return
+		}
+		writeJSON(w, http.StatusOK, profiles.State())
+	})
 	mux.HandleFunc("/api/mesh/start", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeErr(w, "仅支持 POST")
 			return
 		}
-		// 允许「再次启动」：旧实现遇到 life != nil 直接返回「已启动」，
-		// 一旦上一次停止不彻底/半运行，就永远无法再启动（用户只能卸载重装）。
-		// 这里先取出旧实例、停掉它，再按新配置启动。
-		mu.Lock()
-		old := life
-		life = nil
-		mu.Unlock()
-		if old != nil {
-			_ = old.Stop()
-		}
-
 		var cfg mesh.Config
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&cfg); err != nil {
 			writeErr(w, "配置非法: "+err.Error())
@@ -125,19 +191,12 @@ func serve() {
 		if cfg.ClientVersion == "" {
 			cfg.ClientVersion = version
 		}
-		newLife := mesh.NewLifecycleWithConfig(cfg)
-		ctx, cancel := context.WithCancel(context.Background())
-		_ = cancel // 生命周期内部会创建自己的 runCtx；Stop 会关闭它
-		if err := newLife.Start(ctx); err != nil {
+		started, err := startLifecycle(cfg)
+		if err != nil {
 			writeErr(w, "启动失败: "+err.Error())
 			return
 		}
-		st := newLife.Status()
-		mu.Lock()
-		life = newLife
-		status = st
-		mu.Unlock()
-		log.Printf("[meshd] 组网已启动 node=%s vip=%s", st.NodeID, st.VirtualIP)
+		log.Printf("[meshd] 组网已启动 node=%s vip=%s", started.NodeID, started.VirtualIP)
 		writeJSON(w, http.StatusOK, mesh.ActionResult{OK: true, Message: "已启动"})
 	})
 	mux.HandleFunc("/api/mesh/peers", func(w http.ResponseWriter, r *http.Request) {
@@ -184,6 +243,41 @@ func serve() {
 	}
 }
 
+func profileDataDir() (string, error) {
+	if runtime.GOOS == "windows" {
+		exe, err := os.Executable()
+		if err == nil {
+			return filepath.Dir(exe), nil
+		}
+	}
+	return config.Dir()
+}
+
+// startLifecycle 先停旧实例再按新配置启动，返回新实例的首帧状态。
+func startLifecycle(cfg mesh.Config) (mesh.Status, error) {
+	// 允许「再次启动」：旧实现遇到 life != nil 直接返回「已启动」，
+	// 一旦上一次停止不彻底/半运行，就永远无法再启动（用户只能卸载重装）。
+	mu.Lock()
+	old := life
+	life = nil
+	mu.Unlock()
+	if old != nil {
+		_ = old.Stop()
+	}
+	newLife := mesh.NewLifecycleWithConfig(cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	_ = cancel // 生命周期内部会创建自己的 runCtx；Stop 会关闭它
+	if err := newLife.Start(ctx); err != nil {
+		return mesh.Status{}, err
+	}
+	st := newLife.Status()
+	mu.Lock()
+	life = newLife
+	status = st
+	mu.Unlock()
+	return st, nil
+}
+
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -196,4 +290,3 @@ func writeErr(w http.ResponseWriter, msg string) {
 // runAsService / installService / uninstallService 见 platform 专属文件。
 var _ = fmt.Sprintf
 var _ = os.Exit
-

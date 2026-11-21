@@ -24,7 +24,7 @@ if (!input) {
 
 const pkg = JSON.parse(readFileSync(rootPkgFile, 'utf8'))
 const cur = pkg.version
-const semver = /^(\d+)\.(\d+)\.(\d+)$/.exec(cur)
+const semver = /^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?$/.exec(cur)
 if (!semver) {
   console.error(`根 package.json 版本号无法解析：${cur}`)
   process.exit(1)
@@ -36,10 +36,10 @@ if (['major', 'minor', 'patch'].includes(input)) {
   if (input === 'major') next = `${maj + 1}.0.0`
   else if (input === 'minor') next = `${maj}.${min + 1}.0`
   else next = `${maj}.${min}.${pat + 1}`
-} else if (/^\d+\.\d+\.\d+$/.test(input)) {
+} else if (/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(input)) {
   next = input
 } else {
-  console.error(`版本号格式不正确：${input}（应为 x.y.z 或 major/minor/patch）`)
+  console.error(`版本号格式不正确：${input}（应为 x.y.z[-prerelease] 或 major/minor/patch）`)
   process.exit(1)
 }
 

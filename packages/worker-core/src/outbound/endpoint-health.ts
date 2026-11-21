@@ -140,3 +140,78 @@ export function clearEndpointHealth(): void {
 export function endpointHealthSize(): number {
   return HEALTH.size
 }
+
+/**
+ * 反代入口的「按域名成功记忆」：hostname → 上次真正成功的入口。
+ *
+ * 放在 endpoint-health 模块里（而不是 dial.ts），让 dial 与 websocket-self
+ * 共享同一份状态，且不污染仅 mock `outbound/dial` 的既有单测。
+ */
+const RELAY_SUCCESS_MEMORY = new Map<string, { ip: string; port: number }>()
+const RELAY_SUCCESS_MEMORY_MAX = 128
+
+/** 从 `ip:port` / `[v6]:port` 形式的 endpoint 里取出入口地址。 */
+export function relayEntryFromEndpoint(endpoint: string): { ip: string; port: number } | undefined {
+  const i = String(endpoint ?? '').lastIndexOf(':')
+  if (i <= 0) return undefined
+  const ip = endpoint.slice(0, i).replace(/^\[/, '').replace(/\]$/, '')
+  const port = Number(endpoint.slice(i + 1))
+  if (!ip || !Number.isFinite(port) || port <= 0) return undefined
+  return { ip, port }
+}
+
+/** 记录某域名的反代成功入口（同时刷新「最近使用」顺序）。 */
+export function rememberRelaySuccess(hostname: string, ip: string, port: number): void {
+  const host = String(hostname ?? '').trim().toLowerCase()
+  if (!host || !ip || !port) return
+  RELAY_SUCCESS_MEMORY.delete(host)
+  RELAY_SUCCESS_MEMORY.set(host, { ip, port })
+  while (RELAY_SUCCESS_MEMORY.size > RELAY_SUCCESS_MEMORY_MAX) {
+    const oldest = RELAY_SUCCESS_MEMORY.keys().next().value
+    if (oldest === undefined) break
+    RELAY_SUCCESS_MEMORY.delete(oldest)
+  }
+}
+
+/** 取某域名的反代成功记忆。 */
+export function relaySuccessFor(hostname: string): { ip: string; port: number } | undefined {
+  const host = String(hostname ?? '').trim().toLowerCase()
+  return host ? RELAY_SUCCESS_MEMORY.get(host) : undefined
+}
+
+/**
+ * 标记某反代入口对指定域名失效（TLS 致命告警 / 零下行假活 / 秒级 EOF）：
+ * 立即清除该域名的成功记忆并记入熔断冷却。
+ */
+export function penalizeRelayEndpoint(
+  hostname: string,
+  endpoint: string,
+  immediateCool = true
+): void {
+  const parsed = relayEntryFromEndpoint(endpoint)
+  if (!parsed) return
+  const host = String(hostname ?? '').trim().toLowerCase()
+  const remembered = host ? RELAY_SUCCESS_MEMORY.get(host) : undefined
+  if (remembered && remembered.ip === parsed.ip && remembered.port === parsed.port) {
+    RELAY_SUCCESS_MEMORY.delete(host)
+  }
+  const key = endpointKey('relay', parsed.ip, parsed.port)
+  const now = Date.now()
+  recordEndpointFailure(key, now, false)
+  if (immediateCool) {
+    recordEndpointFailure(key, now, false)
+  }
+}
+
+/** 在收到有效下行首字节后回写成功记忆并恢复健康。 */
+export function confirmRelaySuccess(hostname: string, endpoint: string): void {
+  const parsed = relayEntryFromEndpoint(endpoint)
+  if (!parsed) return
+  rememberRelaySuccess(hostname, parsed.ip, parsed.port)
+  recordEndpointSuccess(endpointKey('relay', parsed.ip, parsed.port))
+}
+
+/** 清空成功记忆（测试用）。 */
+export function clearRelaySuccessMemory(): void {
+  RELAY_SUCCESS_MEMORY.clear()
+}

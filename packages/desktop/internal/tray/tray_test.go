@@ -17,11 +17,45 @@ package tray
 
 import (
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/scan"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/server"
 )
+
+// TestQuitRunsExitHandlerOnce 守护「托盘退出」的防重复与异步清理。
+//
+// 2026-11-20 真机反馈：右键退出没反应、程序假死只能强杀。
+// 两个成因都已修：
+//  1. WebView 的 Terminate 必须在它自己的线程上 Dispatch（见 shell_windows.go）；
+//  2. 清理不能卡住托盘消息循环（这里改成 go a.onExit()）。
+// 本测试固化第 2 点及其副作用「连点退出只清一次」。
+func TestQuitRunsExitHandlerOnce(t *testing.T) {
+	app := &App{}
+	var calls atomic.Int32
+	done := make(chan struct{})
+	app.SetExitHandler(func() {
+		calls.Add(1)
+		close(done)
+	})
+
+	// 连点 5 次：quitOnce 必须只放行一次
+	for i := 0; i < 5; i++ {
+		app.quit()
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("退出回调没有在异步执行 —— 托盘线程会被卡住")
+	}
+	// 给其余（被 once 拦掉的）goroutine 一点调度时间
+	time.Sleep(50 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("退出回调执行了 %d 次，期望 1 次", got)
+	}
+}
 
 // 菜单项尚未创建（onReady 未执行）时调 SetRunning 必须安全。
 //

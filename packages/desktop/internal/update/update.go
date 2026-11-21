@@ -281,24 +281,33 @@ func parseReleases(body io.Reader) ([]Release, error) {
 	return out, nil
 }
 
-// pickAsset 按当前平台挑合适的附件。
+// pickAsset 按当前平台与构建变体（普通版 / +mesh 版）挑合适的附件。
+//
+// ⚠️ 同一 Release 里同时包含普通版（cfpilot-<ver>-windows-amd64.exe）和
+// +mesh 版（cfpilot-<ver>+mesh-windows-amd64-setup.exe / .deb），
+// 普通版更新器绝不能误选带 `+mesh` 的安装包。
 func pickAsset(assets []Asset) *Asset {
 	wantOS := runtime.GOOS
 	wantArch := runtime.GOARCH
 
+	isStandard := func(name string) bool {
+		return !strings.Contains(name, "+mesh") && !strings.HasSuffix(name, ".deb") && !strings.Contains(name, "-setup.")
+	}
+
+	// 1) 精确匹配：当前 OS + 架构 + 普通版
 	for i := range assets {
 		name := strings.ToLower(assets[i].Name)
-		if !strings.Contains(name, wantOS) {
+		if !isStandard(name) || !strings.Contains(name, wantOS) {
 			continue
 		}
-		// 架构匹配（amd64 / arm64）
 		if strings.Contains(name, wantArch) {
 			return &assets[i]
 		}
 	}
-	// 回落：只要 OS 匹配就行（例如 windows 包名里可能没写 amd64）
+	// 2) 回落：当前 OS + 普通版（兼容不带架构名的历史包）
 	for i := range assets {
-		if strings.Contains(strings.ToLower(assets[i].Name), wantOS) {
+		name := strings.ToLower(assets[i].Name)
+		if isStandard(name) && strings.Contains(name, wantOS) {
 			return &assets[i]
 		}
 	}

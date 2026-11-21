@@ -64,8 +64,44 @@ type DesktopSettings struct {
 	AllowLAN bool `json:"allowLan"`
 	// KeepRunningInTray 决定关掉浏览器页面后是否继续在托盘驻留。
 	KeepRunningInTray bool `json:"keepRunningInTray"`
+	// PanelMode 决定面板的打开形态：auto / window / browser。
+	//
+	//   - auto（默认）：能用内嵌窗口就用窗口，否则回退系统浏览器；
+	//   - window：只用内嵌窗口（不可用时仍然回退，避免用户打不开界面）；
+	//   - browser：始终用系统浏览器（排障 / 远程桌面 / 多屏习惯）。
+	//
+	// 环境变量 CFPILOT_PANEL 的优先级高于本字段。
+	PanelMode string `json:"panelMode"`
 	// Experimental 是实验性功能开关（默认全部关闭）。
 	Experimental ExperimentalSettings `json:"experimental"`
+}
+
+// 面板形态取值。
+const (
+	PanelModeAuto    = "auto"
+	PanelModeWindow  = "window"
+	PanelModeBrowser = "browser"
+)
+
+// NormalizePanelMode 把任意写入值收敛到三个合法取值之一。
+//
+// 空串与无法识别的值一律当 auto：这是最「不出错」的方向 ——
+// 既不强行弹窗口，也不会让用户因为写错配置而打不开界面。
+func NormalizePanelMode(v string) string {
+	switch v {
+	case PanelModeWindow, PanelModeBrowser, PanelModeAuto:
+		return v
+	default:
+		return PanelModeAuto
+	}
+}
+
+// EffectivePanelMode 返回最终生效的面板形态（环境变量优先）。
+func EffectivePanelMode(s DesktopSettings) string {
+	if v := EnvPanelValue(); v != "" {
+		return v
+	}
+	return NormalizePanelMode(s.PanelMode)
 }
 
 // LoopbackHost 是仅本机可访问的监听地址。
@@ -81,6 +117,7 @@ func DefaultSettings() DesktopSettings {
 		Host:              LoopbackHost,
 		AllowLAN:          false,
 		KeepRunningInTray: true,
+		PanelMode:         PanelModeAuto,
 		// 实验性功能默认全关，探索比例给一个中性初值。
 		Experimental: ExperimentalSettings{ExploreRatio: 0.2, Access: "fixed"},
 	}
@@ -173,6 +210,8 @@ func LoadSettings() (DesktopSettings, error) {
 	// Host 由 AllowLAN 推导，不信盘上的 Host 字段
 	// （旧版本可能留下 Host="0.0.0.0" 但没有 AllowLAN 的文件）
 	s.Host = s.EffectiveHost()
+	// 旧版本没有这个字段：空串 = 用默认值，不能当成「用户选了空形态」。
+	s.PanelMode = NormalizePanelMode(s.PanelMode)
 	if s.Port < 1 || s.Port > 65535 {
 		s.Port = def.Port
 	}

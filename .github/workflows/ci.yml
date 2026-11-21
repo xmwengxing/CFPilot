@@ -27,7 +27,7 @@ jobs:
         #    （GitHub 不允许），整个发布工作流连挂三次。
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.27'
       - run: go install github.com/rhysd/actionlint/cmd/actionlint@latest
       - name: actionlint
         # ⚠️ 这里的 actionlint 是**安全网**，不是风格闸门 ——

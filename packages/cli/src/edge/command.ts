@@ -5,20 +5,26 @@
  */
 import { flagString, flagBool, flagNumber, type ParsedArgs } from '../shared/args'
 import { CloudflareClient } from '../deploy/cf-api'
-import {
-  deployEdgeRelay,
-  formatEdgeDeploySummary,
-  zoneNameFromDomain,
-} from './deploy'
+import { deployEdgeRelay, formatEdgeDeploySummary } from './deploy'
+import { detectEdgeRelay, formatEdgeDetectSummary } from './detect'
 
 const EDGE_HELP = `
 cfpilot edge —— 盲中继 / 云监测台部署（MobiHop 边缘工程）
 
 用法:
   cfpilot edge deploy [选项]    部署盲中继 Worker + 监测面板
+  cfpilot edge status [选项]    检测已部署的盲中继实例（只读，绝不部署）
   cfpilot edge help             显示本帮助
 
-选项:
+status 选项:
+  --token <token>        Cloudflare API Token（或 CLOUDFLARE_API_TOKEN）
+  --account <id>         目标账号 ID（不传则取账号列表第一个）
+  --domain <host>        只看这个域名对应的实例
+  --worker-name <name>   只看这个 Worker
+  --no-probe             跳过域名可达性探测（离线排查时用）
+  --json                 以 JSON 输出（写脚本用）
+
+deploy 选项:
   --token <token>        Cloudflare API Token（或 CLOUDFLARE_API_TOKEN）
   --account <id>         目标账号 ID（不传则取账号列表第一个）
   --domain <host>        盲中继自定义域名（必填；*.workers.dev 国内被污染）
@@ -52,6 +58,10 @@ export async function runEdgeCommand(args: ParsedArgs): Promise<void> {
 
   if (action === 'help' || flagBool(args, 'h') || flagBool(args, 'help')) {
     process.stdout.write(EDGE_HELP)
+    return
+  }
+  if (action === 'status') {
+    await runEdgeStatus(args)
     return
   }
   if (action !== 'deploy') {
@@ -91,13 +101,16 @@ export async function runEdgeCommand(args: ParsedArgs): Promise<void> {
   // zone：显式 zone-id 优先；否则按域名主域查，查不到则由用户手绑
   let zoneId = flagString(args, 'zone-id').trim()
   if (!zoneId) {
-    const zones = await client.listZones(zoneNameFromDomain(domain))
-    const match = zones.find((z) => domain.toLowerCase().endsWith('.' + z.name.toLowerCase()) || domain.toLowerCase() === z.name.toLowerCase())
+    const zones = await client.listZones()
+    const normalizedDomain = domain.toLowerCase().replace(/\.$/, '')
+    const match = zones
+      .filter((z) => normalizedDomain === z.name.toLowerCase() || normalizedDomain.endsWith('.' + z.name.toLowerCase()))
+      .sort((a, b) => b.name.length - a.name.length)[0]
     if (match) {
       zoneId = match.id
       process.stderr.write(`找到 zone：${match.name}，将自动绑定域名\n`)
     } else {
-      process.stderr.write(`未找到 zone（${zoneNameFromDomain(domain)}），跳过自动绑定；请部署后在控制台手动绑定 ${domain}\n`)
+      process.stderr.write(`未找到覆盖 ${domain} 的 zone，跳过自动绑定；请部署后在控制台手动绑定 ${domain}\n`)
     }
   }
 
@@ -135,4 +148,44 @@ export async function runEdgeCommand(args: ParsedArgs): Promise<void> {
   if (generatedPw) {
     process.stdout.write('（监测台密码为自动生成，上方已显示，请立即保存）\n')
   }
+}
+
+/**
+ * `cfpilot edge status` —— 检测已部署的盲中继实例（只读）。
+ *
+ * 与桌面版「检测部署状态」按钮同源（packages/cli/src/edge/detect.ts）。
+ * 只发 GET，不部署、不写任何资源。
+ */
+async function runEdgeStatus(args: ParsedArgs): Promise<void> {
+  const token = flagString(args, 'token') || process.env.CLOUDFLARE_API_TOKEN || ''
+  if (!token) {
+    process.stderr.write('缺少 --token 参数（或设置 CLOUDFLARE_API_TOKEN）\n')
+    process.exitCode = 1
+    return
+  }
+  const client = new CloudflareClient({ token })
+  let accountId = flagString(args, 'account').trim()
+  if (!accountId) {
+    const accounts = await client.listAccounts()
+    if (accounts.length === 0) {
+      process.stderr.write('账号列表为空，请用 --account 指定\n')
+      process.exitCode = 1
+      return
+    }
+    accountId = accounts[0]!.id
+    process.stderr.write(`使用账号：${accounts[0]!.name}（${accountId.slice(0, 8)}…）\n`)
+  }
+
+  const result = await detectEdgeRelay(client, {
+    accountId,
+    domain: flagString(args, 'domain').trim() || undefined,
+    workerName: flagString(args, 'worker-name').trim() || undefined,
+    probe: !flagBool(args, 'no-probe'),
+  })
+
+  if (flagBool(args, 'json')) {
+    process.stdout.write(JSON.stringify({ ok: true, accountId, ...result }, null, 2) + '\n')
+    return
+  }
+  process.stdout.write(formatEdgeDetectSummary(result))
 }

@@ -1,9 +1,29 @@
 package edge
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/cfapi"
 )
+
+func d1TestClient(t *testing.T, handler http.HandlerFunc) *cfapi.Client {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	return cfapi.New(cfapi.Options{Token: "test-token", APIBase: srv.URL})
+}
+
+func writeD1Response(w http.ResponseWriter, status int, success bool) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"success": success, "result": []any{}, "errors": []any{}})
+}
 
 func TestSplitSQL(t *testing.T) {
 	sql := `-- 注释行
@@ -39,14 +59,169 @@ func TestSplitSchemaAsset(t *testing.T) {
 	}
 }
 
-func TestReplaceDefaultAPI(t *testing.T) {
-	html := "<script>const DEFAULT_API = 'https://relay.shijingtian.de5.net';</script>"
-	got := replaceDefaultAPI(html, "https://relay.example.com")
-	if !strings.Contains(got, "const DEFAULT_API = 'https://relay.example.com'") {
-		t.Errorf("未替换默认 API：%s", got)
+func TestInitializeD1SchemaWaitsForDatabaseAndRetriesTransientSchemaError(t *testing.T) {
+	readinessAttempts := 0
+	schemaAttempts := 0
+	client := d1TestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/accounts/account/d1/database/database/query" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		var body struct {
+			SQL string `json:"sql"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode query: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if body.SQL == "SELECT 1" {
+			readinessAttempts++
+			if readinessAttempts == 1 {
+				writeD1Response(w, http.StatusServiceUnavailable, false)
+				return
+			}
+		} else {
+			schemaAttempts++
+			if schemaAttempts == 1 {
+				writeD1Response(w, http.StatusTooManyRequests, false)
+				return
+			}
+		}
+		writeD1Response(w, http.StatusOK, true)
+	})
+
+	var progress []string
+	err := initializeD1Schema(context.Background(), client, "account", "database", []string{"CREATE TABLE IF NOT EXISTS devices (id INTEGER PRIMARY KEY)"}, func(s string) {
+		progress = append(progress, s)
+	})
+	if err != nil {
+		t.Fatalf("initializeD1Schema returned error: %v", err)
 	}
-	if strings.Contains(got, "shijingtian") {
-		t.Errorf("旧默认 API 仍残留：%s", got)
+	if readinessAttempts != 2 {
+		t.Errorf("readiness attempts = %d, want 2", readinessAttempts)
+	}
+	if schemaAttempts != 2 {
+		t.Errorf("schema attempts = %d, want 2", schemaAttempts)
+	}
+	if len(progress) < 3 || !strings.Contains(strings.Join(progress, " "), "重试") {
+		t.Errorf("expected readiness and retry progress messages, got %v", progress)
+	}
+}
+
+func TestInitializeD1SchemaDoesNotRetryPermanentErrors(t *testing.T) {
+	attempts := 0
+	client := d1TestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		writeD1Response(w, http.StatusBadRequest, false)
+	})
+	err := initializeD1Schema(context.Background(), client, "account", "database", []string{"CREATE TABLE x"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 400") {
+		t.Fatalf("expected permanent API error, got %v", err)
+	}
+	if attempts != 1 {
+		t.Errorf("attempts = %d, want 1", attempts)
+	}
+}
+
+func TestInitializeD1SchemaHonorsCanceledContext(t *testing.T) {
+	client := d1TestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		writeD1Response(w, http.StatusServiceUnavailable, false)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	err := initializeD1Schema(ctx, client, "account", "database", []string{"CREATE TABLE x"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "取消") {
+		t.Fatalf("expected canceled operation, got %v", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("canceled initialization should return promptly")
+	}
+}
+
+func TestSetupMonitorPasswordRetriesUntilWorkerIsReady(t *testing.T) {
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/auth/setup" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		attempts++
+		if attempts == 1 {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	alreadySetup, err := setupMonitorPassword(context.Background(), srv.URL, "password123", nil)
+	if err != nil {
+		t.Fatalf("setupMonitorPassword returned error: %v", err)
+	}
+	if alreadySetup {
+		t.Fatal("fresh setup should not report existing password")
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestSetupMonitorPasswordConflictIsIdempotent(t *testing.T) {
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusConflict)
+	}))
+	defer srv.Close()
+
+	alreadySetup, err := setupMonitorPassword(context.Background(), srv.URL, "password123", nil)
+	if err != nil || !alreadySetup {
+		t.Fatalf("409 should be idempotent success, alreadySetup=%v err=%v", alreadySetup, err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
+func TestQueryD1WithRetryBoundsInFlightRequestByDeadline(t *testing.T) {
+	attempts := 0
+	client := d1TestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		select {
+		case <-r.Context().Done():
+		case <-time.After(time.Second):
+		}
+	})
+	deadline := time.Now().Add(50 * time.Millisecond)
+	start := time.Now()
+	err := queryD1WithRetry(context.Background(), client, "account", "database", "SELECT 1", deadline, "D1 就绪检查", nil)
+	if err == nil || !strings.Contains(err.Error(), "90 秒内未完成") {
+		t.Fatalf("expected deadline error, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("request exceeded deadline: %s", elapsed)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
+func TestReplaceDefaultAPI(t *testing.T) {
+	for _, html := range []string{
+		"<script>const DEFAULT_API = 'https://relay.shijingtian.de5.net';</script>",
+		"<script>const DEFAULT_API = location.origin;</script>",
+	} {
+		got := replaceDefaultAPI(html, "https://relay.example.com")
+		if !strings.Contains(got, "const DEFAULT_API = 'https://relay.example.com'") {
+			t.Errorf("未替换默认 API：%s", got)
+		}
+		if strings.Contains(got, "shijingtian") {
+			t.Errorf("旧默认 API 仍残留：%s", got)
+		}
 	}
 }
 
@@ -87,5 +262,8 @@ func TestEmbeddedAssets(t *testing.T) {
 	code, _ := assets.ReadFile("assets/worker.js")
 	if !strings.Contains(string(code), "export") {
 		t.Error("worker.js 应含 export（ES module）")
+	}
+	if !strings.Contains(string(code), "dashboard_default") || !strings.Contains(string(code), "DEFAULT_API") {
+		t.Error("worker.js 应在根路径提供云监测台页面")
 	}
 }

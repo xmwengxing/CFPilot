@@ -302,3 +302,48 @@ func TestPreferredRemarkRoundTrip(t *testing.T) {
 		t.Error("族判定不对")
 	}
 }
+
+// 切页或刷新后，/api/scan/status 与 /api/relay/status 必须能还原当前进度。
+func TestScanAndRelayStatusSnapshot(t *testing.T) {
+	s, base := newTestServer(t)
+	s.SetStore(newEmptyStore(t))
+	cookie := loginCookie(t, s, base)
+
+	s.scan.mu.Lock()
+	s.scan.running = true
+	s.scan.mu.Unlock()
+	s.setScanProgressStart("data.example.com")
+	s.updateScanProgressState(scan.Progress{Message: "阶段二：TLS + WS 101 校验", Done: 5, Total: 10}, "阶段二：TLS + WS 101 校验（5/10）")
+
+	code, body := getJSON(t, base+"/api/scan/status", cookie)
+	if code != http.StatusOK {
+		t.Fatalf("scan status 应 200，实际 %d", code)
+	}
+	if body["running"] != true || body["hasState"] != true {
+		t.Fatalf("应报告 running=true hasState=true，实际 %v", body)
+	}
+	if body["stage"] != "协议验证" {
+		t.Errorf("阶段名应为「协议验证」，实际 %v", body["stage"])
+	}
+	if pct, _ := body["pct"].(float64); int(pct) != 35 {
+		t.Errorf("阶段二 5/10 应为 35%%，实际 %v", body["pct"])
+	}
+
+	s.scan.mu.Lock()
+	s.scan.running = false
+	s.scan.mu.Unlock()
+	s.finishScanProgressState(true)
+
+	code, doneBody := getJSON(t, base+"/api/scan/status", cookie)
+	if code != http.StatusOK || doneBody["finished"] != true || doneBody["ok"] != true {
+		t.Fatalf("收尾状态不对：%d %v", code, doneBody)
+	}
+	if pct, _ := doneBody["pct"].(float64); int(pct) != 100 {
+		t.Errorf("完成后应为 100%%，实际 %v", doneBody["pct"])
+	}
+
+	code, rBody := getJSON(t, base+"/api/relay/status", cookie)
+	if code != http.StatusOK || rBody["running"] != false {
+		t.Fatalf("relay status 初始状态不对：%d %v", code, rBody)
+	}
+}

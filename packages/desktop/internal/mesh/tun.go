@@ -93,6 +93,8 @@ type Status struct {
 type Peer struct {
 	NodeID    string `json:"nodeId"`
 	VirtualIP string `json:"virtualIp,omitempty"`
+	// Name 是对端设备名（云监测台 alias / gossip 描述符名）；没有时为空。
+	Name string `json:"name,omitempty"`
 	// Addr 是对端 UDP 地址（配置值，或从首帧学到的实际地址）。
 	Addr string `json:"addr,omitempty"`
 	// State 是给人看的状态：已连接 / 握手中 / 等待对端。
@@ -100,10 +102,14 @@ type Peer struct {
 	Online bool   `json:"online"`
 	Via    string `json:"via,omitempty"` // "udp" / "wss"
 	RTTMs  int64  `json:"rttMs,omitempty"`
+	// PunchState / PunchKind 给界面显示持续的打洞进度：
+	// state = idle / probing / retrying / direct / failed；
+	// kind = ipv6 / stun / host / port-predict / wss。
+	PunchState string `json:"punchState,omitempty"`
+	PunchKind  string `json:"punchKind,omitempty"`
 	// LossRate 只在样本足够（≥5）时才有意义，否则为 0。
 	LossRate float64 `json:"lossRate"`
 }
 
 // ErrStub 表示调用到了 Phase 3b 才实现的方法（骨架阶段显式报错，不静默成功）。
 var ErrStub = fmt.Errorf("mesh: 协议实现待 Phase 3b，当前为工程骨架")
-

@@ -3,11 +3,13 @@
 package mesh
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
 	"net"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,15 +29,21 @@ type meshLifecycle struct {
 	cfg       Config
 	mu        sync.Mutex
 	running   bool
+	starting  bool
+	startDone chan struct{}
 	startedAt time.Time
 
-	hub *UdpHub
-	tun TunDevice
+	hub      *UdpHub
+	tun      TunDevice
+	room     *WssRoom
+	roomHash string
+	runCtx   context.Context
 	// tunOverride 是外部注入的 TUN（Android VpnService 创建后传 fd）。
 	// 非 nil 时 Start 直接用它，不再调平台 CreateTunDevice。
 	tunOverride TunDevice
 	fsm         *HandshakeFSM
 	links       map[NodeID]PeerLink // peer -> PeerLink
+	peerStatic  map[NodeID][]byte   // verified peer tunnel public keys
 	vipTable    *VirtualIPTable
 	gossip      *Gossip // 描述符库：动态发现对端虚拟 IP（对齐 MobiHop Gossip）
 	// lastOKRx 记录「最近一次成功解密该对端帧」的时刻，用于判定会话是否已失效。
@@ -169,10 +177,18 @@ func (m *meshLifecycle) SetConfig(cfg Config) { m.cfg = cfg }
 
 func (m *meshLifecycle) Start(ctx context.Context) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.running {
+	if m.running || m.starting {
+		m.mu.Unlock()
 		return fmt.Errorf("mesh: 已在运行")
 	}
+	m.starting = true
+	m.startDone = make(chan struct{})
+	defer func() {
+		m.starting = false
+		close(m.startDone)
+		m.startDone = nil
+		m.mu.Unlock()
+	}()
 	if err := m.cfg.Validate(); err != nil {
 		return err
 	}
@@ -240,6 +256,7 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 
 	// 4. FSM（sendFn 经 peer 的 PeerLink 发帧）
 	m.links = make(map[NodeID]PeerLink)
+	m.peerStatic = make(map[NodeID][]byte)
 	m.recvLoops = make(map[NodeID]*recvLoop)
 	// 线速版本登记表：FSM / 探针 / 数据面共用一个实例，保证「学到 v1 后全部降级」。
 	m.wireVersions = NewPeerWireVersions()
@@ -255,17 +272,19 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 	m.fsm.SetOnEstablished(func(peer NodeID, sess *Session) {
 		m.hsOK.Add(1)
 		m.markOKRx(peer)
-		// 经中继建立的会话：立刻尝试打洞升级为直连（P3）。
-		if link, ok := m.links[peer]; ok && link.IsRelayed() {
-			go m.startPunch(peer, link)
-		}
-		if m.cfg.Verbose {
-			log.Printf("[mesh] 握手建立 peer=%x vip=%s epoch=%x", peer[:4], m.cfg.VirtualIP, sess.EpochID())
-		}
+		go func() {
+			// Defer map access until the FSM lock has been released.
+			if link := m.linkForPeer(peer); link != nil && link.IsRelayed() && !m.cfg.DisablePunch {
+				m.startPunch(peer, link)
+			}
+			if m.cfg.Verbose {
+				log.Printf("[mesh] 握手建立 peer=%x vip=%s epoch=%x", peer[:4], m.cfg.VirtualIP, sess.EpochID())
+			}
+		}()
 	})
 	m.fsm.SetSendFn(func(dst NodeID, frame []byte) error {
-		link, ok := m.links[dst]
-		if !ok {
+		link := m.linkForPeer(dst)
+		if link == nil {
 			return fmt.Errorf("mesh: 到 %x 无链路", dst[:4])
 		}
 		return link.Send(context.Background(), frame)
@@ -279,7 +298,12 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 			return err
 		}
 		m.links[p.NodeID] = m.hub.LinkTo(addr)
+		m.peerStatic[p.NodeID] = append([]byte(nil), p.StaticPub...)
 		m.vipTable.Add(net.ParseIP(p.VirtualIP), p.NodeID)
+	}
+	m.udpLinks = make(map[NodeID]PeerLink, len(m.links))
+	for id, link := range m.links {
+		m.udpLinks[id] = link
 	}
 
 	// 5b. UDP 探针：**始终开启**（不只降级时）。
@@ -292,19 +316,62 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 		m.probes.SetPeer(p.NodeID, addr)
 	}
 
-	// runCtx 统一在函数顶部创建：switchFn 回调与接收循环共用同一个 ctx，
+	// runCtx 统一创建：switchFn 回调与接收循环共用同一个 ctx，
 	// 避免两处 runCtx 导致「停止时新循环仍绑在旧 ctx」的幽灵循环。
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
-	// 阶段 2：降级控制器（仅 EnableDegrade 时）
-	if m.cfg.EnableDegrade {
-		m.udpLinks = make(map[NodeID]PeerLink, len(m.links))
-		for id, link := range m.links {
-			m.udpLinks[id] = link
+	m.runCtx = runCtx
+	if m.cfg.RelayDomain != "" {
+		if m.gossip == nil {
+			cancel()
+			_ = m.cleanupLocked()
+			return fmt.Errorf("mesh: 盲中继自动发现需要本机身份密钥")
 		}
+		roomHash := ResolveRelayRoomHash(m.cfg.RelayRoom, psk)
+		if _, e := RelayRoomURL(m.cfg.RelayDomain, roomHash, m.cfg.NodeID.Hex()); e != nil {
+			cancel()
+			_ = m.cleanupLocked()
+			return fmt.Errorf("mesh: 盲中继配置无效: %w", e)
+		}
+		m.roomHash = roomHash
+		m.mu.Unlock()
+		room, e := m.dialWssRoom(runCtx)
+		m.mu.Lock()
+		if runCtx.Err() != nil {
+			if room != nil {
+				_ = room.Close()
+			}
+			cancel()
+			_ = m.cleanupLocked()
+			return fmt.Errorf("mesh: 启动已取消")
+		}
+		if e != nil {
+			if m.cfg.Verbose {
+				log.Printf("[mesh] 首次连接盲中继失败，将后台重试: %v", e)
+			}
+		} else {
+			m.installWssRoomLocked(runCtx, room, true)
+		}
+		m.wg.Add(1)
+		go m.reconnectWssRoom(runCtx)
+		m.wg.Add(1)
+		go m.roomGossipLoop(runCtx)
+	}
+	// 阶段 2：降级控制器（启用自动降级或盲中继房间时）
+	if m.cfg.EnableDegrade || m.cfg.RelayDomain != "" {
 		m.degrade = NewDegradeController(m.cfg.NodeID, m.probes, m.cfg.RelayDomain, m.cfg.RelayRoom, m.cfg.RelayConnectIP, nil, m.cfg.Verbose)
 		for _, p := range m.cfg.Peers {
 			m.degrade.AddPeer(p.NodeID, p.Addr)
+		}
+		m.degrade.SetSharedWssRoomRequired(m.cfg.RelayDomain != "")
+		m.degrade.SetWssRoom(m.room)
+		if m.room != nil {
+			for id := range m.peerStatic {
+				m.degrade.SetActiveKind(id, TransportWSS)
+			}
 		}
 		// switchFn：切换 active link（nil kind=UDP 表示恢复原始 UDP link）
 		m.degrade.SetSwitchFn(func(peer NodeID, link PeerLink, kind TransportKind) {
@@ -329,14 +396,14 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 			m.startRecvLoop(runCtx, peer, active)
 			// 新链路上重发 Init（打洞/中继建立后双方都需要重新握手）。
 			if _, ok := m.fsm.Session(peer); !ok {
-				if cfg := m.peerConfig(peer); cfg != nil {
-					_ = m.fsm.StartOutbound(peer, cfg.StaticPub)
+				if pub := m.peerStaticKey(peer); len(pub) == 32 {
+					_ = m.fsm.StartOutbound(peer, pub)
 				}
 			}
 			// ⚠️ 切到 WSS（中继）后必须主动打洞：
 			// 若会话最初在 UDP 阶段建立，onEstablished 回调时 link 还不是 relayed，
 			// 那次不会触发 startPunch；而 UDP 不通才降级到 WSS，正是最需要打洞的时候。
-			if kind == TransportWSS {
+			if kind == TransportWSS && !m.roomConfigured() {
 				go m.startPunch(peer, active)
 			}
 			if m.cfg.Verbose {
@@ -362,6 +429,9 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 			// 把中继腿换成这个 hubLink，recv 循环会随 m.links 自动重建。
 			m.links[id] = m.hub.LinkTo(addr)
 			isNew = true
+			if m.degrade != nil {
+				m.degrade.LockDirect(id)
+			}
 			if m.cfg.Verbose {
 				log.Printf("[mesh] 对端 %x 直连地址可达，从中继切换：%s", id[:4], addr)
 			}
@@ -469,14 +539,18 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 	// 6a. 启动即主动握手：UDP 无连接，双方都只「等对方先发包」就会永远无事发生。
 	// 小 NodeId 一方作为发起方直接发 Init（对齐 FSM 的破对称角色），
 	// 非发起方等对端 Init；对端没起来时由 RetryPending 周期重发。
-	for _, p := range m.cfg.Peers {
-		if !m.fsm.IsInitiator(p.NodeID) {
-			continue
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		for _, p := range m.cfg.Peers {
+			if !m.fsm.IsInitiator(p.NodeID) {
+				continue
+			}
+			if err := m.fsm.StartOutbound(p.NodeID, p.StaticPub); err != nil && m.cfg.Verbose {
+				log.Printf("[mesh] 主动握手失败 peer=%x: %v", p.NodeID[:4], err)
+			}
 		}
-		if err := m.fsm.StartOutbound(p.NodeID, p.StaticPub); err != nil && m.cfg.Verbose {
-			log.Printf("[mesh] 主动握手失败 peer=%x: %v", p.NodeID[:4], err)
-		}
-	}
+	}()
 
 	// 6b. 探针循环（1s）：给面板 RTT、给 NAT 保活、让对端从首帧学地址。
 	m.wg.Add(1)
@@ -625,6 +699,144 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 	return nil
 }
 
+func (m *meshLifecycle) dialWssRoom(ctx context.Context) (*WssRoom, error) {
+	url, err := RelayRoomURL(m.cfg.RelayDomain, m.roomHash, m.cfg.NodeID.Hex())
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := ParseWsUrl(url)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(m.cfg.RelayConnectIP) != "" {
+		parsed = parsed.WithConnectIP(m.cfg.RelayConnectIP)
+	}
+	conn, err := DialWss(ctx, parsed, nil)
+	if err != nil {
+		return nil, err
+	}
+	return NewWssRoom(conn, m.cfg.NodeID), nil
+}
+
+// installWssRoomLocked is called with m.mu held.
+func (m *meshLifecycle) installWssRoomLocked(ctx context.Context, room *WssRoom, preferRelay bool) {
+	m.room = room
+	if m.degrade != nil {
+		m.degrade.SetWssRoom(room)
+	}
+	for id := range m.peerStatic {
+		current := m.links[id]
+		if preferRelay || current == nil || current.IsRelayed() {
+			m.links[id] = room.Link(id)
+			if m.degrade != nil {
+				m.degrade.SetActiveKind(id, TransportWSS)
+			}
+		} else if m.degrade != nil {
+			m.degrade.SetActiveKind(id, TransportUDP)
+		}
+	}
+	room.SetPeerHandler(func(id NodeID, link PeerLink) {
+		m.mu.Lock()
+		if id == m.cfg.NodeID {
+			m.mu.Unlock()
+			return
+		}
+		if current := m.links[id]; current == nil || current.IsRelayed() {
+			m.links[id] = link
+		}
+		m.mu.Unlock()
+	})
+	room.Start(ctx)
+	if m.gossip != nil {
+		if payload, err := m.gossip.GossipMessageBytes(); err == nil {
+			frame, err := (&Frame{
+				Version: WireVersionDefault, Type: MsgGossip, TTL: DefaultTTL,
+				Src: m.cfg.NodeID, Dst: broadcastNodeID(), Payload: payload,
+			}).Encode()
+			if err == nil {
+				_ = room.Link(m.cfg.NodeID).Send(ctx, frame)
+			}
+		}
+	}
+}
+
+func (m *meshLifecycle) reconnectWssRoom(ctx context.Context) {
+	defer m.wg.Done()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		m.mu.Lock()
+		room := m.room
+		active := m.running
+		m.mu.Unlock()
+		if !active {
+			return
+		}
+		if room != nil {
+			select {
+			case <-room.done:
+			default:
+				continue
+			}
+		}
+		next, err := m.dialWssRoom(ctx)
+		if err != nil {
+			if m.cfg.Verbose && ctx.Err() == nil {
+				log.Printf("[mesh] 盲中继重连失败: %v", err)
+			}
+			continue
+		}
+		m.mu.Lock()
+		if ctx.Err() != nil {
+			m.mu.Unlock()
+			_ = next.Close()
+			return
+		}
+		old := m.room
+		m.installWssRoomLocked(ctx, next, false)
+		m.mu.Unlock()
+		if old != nil {
+			_ = old.Close()
+		}
+		m.syncRecvLoops(ctx)
+	}
+}
+
+func (m *meshLifecycle) roomGossipLoop(ctx context.Context) {
+	defer m.wg.Done()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		m.mu.Lock()
+		room := m.room
+		m.mu.Unlock()
+		if room == nil || m.gossip == nil {
+			continue
+		}
+		payload, err := m.gossip.GossipMessageBytes()
+		if err != nil {
+			continue
+		}
+		frame, err := (&Frame{
+			Version: WireVersionDefault, Type: MsgGossip, TTL: DefaultTTL,
+			Src: m.cfg.NodeID, Dst: broadcastNodeID(), Payload: payload,
+		}).Encode()
+		if err == nil {
+			_ = room.Link(m.cfg.NodeID).Send(ctx, frame)
+		}
+	}
+}
+
 // tunToPeersLoop：TUN 读 IP 包 → 加密 → PeerLink 发送。
 func (m *meshLifecycle) tunToPeersLoop(ctx context.Context) {
 	defer m.wg.Done()
@@ -663,18 +875,11 @@ func (m *meshLifecycle) tunToPeersLoop(ctx context.Context) {
 		// 确保会话（无则触发握手）
 		sess, hasSession := m.fsm.Session(peerID)
 		if !hasSession {
-			link, ok := m.links[peerID]
-			if !ok {
+			link := m.linkForPeer(peerID)
+			if link == nil {
 				continue
 			}
-			_ = link // 触发握手需要 peer 静态公钥，从配置取
-			var peerStatic []byte
-			for _, p := range m.cfg.Peers {
-				if p.NodeID == peerID {
-					peerStatic = p.StaticPub
-					break
-				}
-			}
+			peerStatic := m.peerStaticKey(peerID)
 			if len(peerStatic) != 32 {
 				continue
 			}
@@ -690,8 +895,8 @@ func (m *meshLifecycle) tunToPeersLoop(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		link, ok := m.links[peerID]
-		if !ok {
+		link := m.linkForPeer(peerID)
+		if link == nil {
 			m.txDropped.Add(1)
 			continue
 		}
@@ -761,10 +966,90 @@ func (m *meshLifecycle) peerConfig(id NodeID) *PeerConfig {
 	return nil
 }
 
+func (m *meshLifecycle) peerStaticKey(id NodeID) []byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]byte(nil), m.peerStatic[id]...)
+}
+
+// lookupPeerVirtualIP 返回签名 Gossip 描述符登记的对端虚拟 IP。
+// 独立函数避免在 Status() 中重复 nil 判断，也减少与 gossip 内部锁的耦合。
+func (m *meshLifecycle) lookupPeerVirtualIP(id NodeID) (string, bool) {
+	if m.gossip == nil {
+		return "", false
+	}
+	return m.gossip.LookupVirtualIP(id)
+}
+
+func printablePeerName(raw string) string {
+	var out strings.Builder
+	for _, r := range strings.TrimSpace(raw) {
+		if r < 32 || r == 127 || r == 0xfffd {
+			continue
+		}
+		out.WriteRune(r)
+	}
+	return strings.TrimSpace(out.String())
+}
+
+func (m *meshLifecycle) roomConfigured() bool {
+	return strings.TrimSpace(m.cfg.RelayDomain) != "" && strings.TrimSpace(m.roomHash) != ""
+}
+
+func (m *meshLifecycle) linkForPeer(id NodeID) PeerLink {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.links[id]
+}
+
+func (m *meshLifecycle) registerDiscoveredPeer(d NodeDescriptor) {
+	if d.NodeID == m.cfg.NodeID || len(d.TunnelPub) != 32 || d.Verify() != nil {
+		return
+	}
+	pub := append([]byte(nil), d.TunnelPub[:]...)
+	m.mu.Lock()
+	if previous := m.peerStatic[d.NodeID]; len(previous) == 32 && !bytes.Equal(previous, pub) {
+		m.mu.Unlock()
+		return
+	}
+	m.peerStatic[d.NodeID] = pub
+	vip := d.VirtualIP()
+	if vip != nil {
+		if cfg := m.peerConfig(d.NodeID); cfg != nil {
+			if old := net.ParseIP(cfg.VirtualIP); old != nil && !old.Equal(vip) {
+				log.Printf("[mesh] 对端 %x 虚拟 IP 与静态配置不一致：配置=%s 描述符=%s，按签名描述符修正路由",
+					d.NodeID[:4], cfg.VirtualIP, vip.String())
+			}
+		}
+	}
+	link := m.links[d.NodeID]
+	if link == nil && m.room != nil {
+		link = m.room.Link(d.NodeID)
+		m.links[d.NodeID] = link
+	}
+	m.mu.Unlock()
+	if vip != nil {
+		m.vipTable.Add(vip, d.NodeID)
+	}
+	if m.degrade != nil && link != nil && link.IsRelayed() {
+		m.degrade.AddPeerWithoutUDP(d.NodeID, TransportWSS)
+	}
+	if lessNodeID(m.cfg.NodeID, d.NodeID) {
+		if err := m.fsm.StartOutbound(d.NodeID, pub); err != nil && m.cfg.Verbose {
+			log.Printf("[mesh] 发现对端后发起握手失败 peer=%x: %v", d.NodeID[:4], err)
+		}
+	}
+}
+
 func (m *meshLifecycle) startRecvLoop(ctx context.Context, id NodeID, link PeerLink) {
 	loopCtx, cancel := context.WithCancel(ctx)
 	loop := &recvLoop{link: link, cancel: cancel, done: make(chan struct{})}
 	m.mu.Lock()
+	if existing := m.recvLoops[id]; existing != nil && existing.link == link {
+		m.mu.Unlock()
+		cancel()
+		return
+	}
 	m.recvLoops[id] = loop
 	m.mu.Unlock()
 	go func() {
@@ -794,9 +1079,15 @@ func (m *meshLifecycle) startRecvLoop(ctx context.Context, id NodeID, link PeerL
 			m.markOKRx(id)
 			// 解码成功才学习版本（v1 已过 buf[5]==0 校验）；伪造帧最多让本机降级。
 			m.learnWireVersion(parsed.Src, parsed.Version)
-			// HolePunch / RelayMgmt 已由 UdpHub 的独立观察通道（onControl）处理，
-			// 不再走活跃 link 的 recv 队列 —— 对齐 MobiHop hub.rs:386-393（§11.5）。
-			if parsed.Type == MsgHolePunch || parsed.Type == MsgRelayMgmt {
+			// HolePunch 在 UDP 上由 UdpHub 的独立观察通道处理；但在 WSS 房间里
+			// 没有 UDP 源地址，必须在链路 recv 循环里处理 PunchReq/PunchReply，
+			// 否则「经 WSS 的中继会话」永远无法发起打洞（真机症状：一直中继）。
+			// 探测类帧（PunchProbe/Ack）仍要求真实 UDP 源地址，handlePunch 会忽略 nil remote。
+			if parsed.Type == MsgHolePunch {
+				m.handlePunch(parsed.Src, parsed, nil)
+				continue
+			}
+			if parsed.Type == MsgRelayMgmt {
 				continue
 			}
 			if parsed.Type == MsgHandshake {
@@ -813,11 +1104,9 @@ func (m *meshLifecycle) startRecvLoop(ctx context.Context, id NodeID, link PeerL
 					}
 					// 动态登记发现的对端虚拟 IP（一次链接双向自动发现的核心）
 					for _, d := range added {
-						if ip := d.VirtualIP(); ip != nil {
-							m.vipTable.Add(ip, d.NodeID)
-							if m.cfg.Verbose {
-								log.Printf("[mesh] 发现对端 %s → %s", d.NodeID.Hex(), d.VirtualIPv4)
-							}
+						m.registerDiscoveredPeer(d)
+						if m.cfg.Verbose {
+							log.Printf("[mesh] 发现对端 %s → %s", d.NodeID.Hex(), d.VirtualIPv4)
 						}
 					}
 				}
@@ -880,11 +1169,24 @@ func (m *meshLifecycle) Stop() error {
 	// stopRecvLoop）都要拿同一把锁 ⇒ 持锁 wg.Wait() 必然死锁
 	// （真机实测：面板点「停止组网」后 /api/mesh/stop 永久挂起）。
 	m.mu.Lock()
+	if m.starting {
+		done := m.startDone
+		cancel := m.cancel
+		m.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		if done != nil {
+			<-done
+		}
+		return m.Stop()
+	}
 	if !m.running {
 		m.mu.Unlock()
 		return nil
 	}
 	tun, hub, cancel, degrade := m.tun, m.hub, m.cancel, m.degrade
+	room := m.room
 	m.mu.Unlock()
 
 	if cancel != nil {
@@ -892,6 +1194,9 @@ func (m *meshLifecycle) Stop() error {
 	}
 	if degrade != nil {
 		degrade.Stop()
+	}
+	if room != nil {
+		_ = room.Close()
 	}
 	// 先关设备再 Wait：读循环阻塞在 TUN 读上，只有 Close 才能让它返回。
 	if tun != nil {
@@ -906,6 +1211,7 @@ func (m *meshLifecycle) Stop() error {
 	m.running = false
 	m.tun = nil
 	m.hub = nil
+	m.room = nil
 	m.links = nil
 	m.mu.Unlock()
 	return nil
@@ -913,6 +1219,10 @@ func (m *meshLifecycle) Stop() error {
 
 func (m *meshLifecycle) cleanupLocked() error {
 	m.running = false
+	if m.room != nil {
+		_ = m.room.Close()
+		m.room = nil
+	}
 	if m.tun != nil {
 		_ = m.tun.Close()
 		m.tun = nil
@@ -922,6 +1232,7 @@ func (m *meshLifecycle) cleanupLocked() error {
 		m.hub = nil
 	}
 	m.links = nil
+	m.peerStatic = nil
 	return nil
 }
 
@@ -961,19 +1272,37 @@ func (m *meshLifecycle) Status() Status {
 	}
 	views := make(map[NodeID]*peerView)
 	for _, p := range m.cfg.Peers {
+		vip := p.VirtualIP
+		if discovered, ok := m.lookupPeerVirtualIP(p.NodeID); ok && discovered != "" {
+			// 签名描述符是运行时权威值：静态配置里的旧网段只应作为未发现时的兜底。
+			vip = discovered
+		}
+		if vip == "" {
+			if discovered, ok := m.lookupPeerVirtualIP(p.NodeID); ok {
+				vip = discovered
+			}
+		}
 		v := &peerView{peer: Peer{
 			NodeID:    p.NodeID.Hex(),
-			VirtualIP: p.VirtualIP,
+			VirtualIP: vip,
 			Addr:      p.Addr,
 			State:     "等待对端",
 			Via:       "udp",
+			Name:      printablePeerName(p.Name),
 		}, set: true}
 		views[p.NodeID] = v
 	}
 	for id, link := range m.links {
 		v := views[id]
 		if v == nil {
-			v = &peerView{peer: Peer{NodeID: id.Hex(), Via: "udp", State: "等待对端"}, set: true}
+			vip := ""
+			if discovered, ok := m.lookupPeerVirtualIP(id); ok && discovered != "" {
+				vip = discovered
+			}
+			if discovered, ok := m.lookupPeerVirtualIP(id); ok {
+				vip = discovered
+			}
+			v = &peerView{peer: Peer{NodeID: id.Hex(), VirtualIP: vip, Via: "udp", State: "等待对端"}, set: true}
 			views[id] = v
 		}
 		if addr := link.PeerAddr(); addr != nil && v.peer.Addr == "" {
@@ -1005,10 +1334,11 @@ func (m *meshLifecycle) Status() Status {
 		}
 		// 传输档位：经中继转发 / 降级到 WSS 都要明确标出来
 		// （直连假活、却其实走中继时，用户最需要看这个）。
-		if link := m.links[id]; link != nil && link.IsRelayed() {
-			p.Via = "relay"
-		} else if m.degrade != nil && m.degrade.Kind(id) == TransportWSS {
-			p.Via = "wss"
+		p.Via = peerTransportName(m.links[id], m.peerTransportKind(id))
+		p.PunchState, p.PunchKind = m.punchState(id)
+		if p.PunchKind == "port-predict" {
+			// 硬对称扫描由状态机在探测阶段内部执行，当前用 stun + 端口预测概括。
+			p.PunchKind = "stun+预测端口"
 		}
 		// 探针实测 RTT / 丢包（样本不足时 Measurement 返回 0，不误报）
 		if m.probes != nil {
@@ -1025,4 +1355,24 @@ func (m *meshLifecycle) Status() Status {
 		st.Note = "尚无任何对端完成握手：确认两端网络名/PSK 一致、对端 UDP 地址可达、防火墙放行"
 	}
 	return st
+}
+
+func (m *meshLifecycle) peerTransportKind(id NodeID) TransportKind {
+	if m.degrade == nil {
+		return TransportUDP
+	}
+	return m.degrade.Kind(id)
+}
+
+func peerTransportName(link PeerLink, kind TransportKind) string {
+	if kind == TransportWSS {
+		return "wss"
+	}
+	if link != nil && link.IsRelayed() {
+		return "relay"
+	}
+	if a := link.PeerAddr(); a != nil && a.IP.To4() == nil {
+		return "udp6"
+	}
+	return "udp4"
 }

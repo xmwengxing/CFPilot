@@ -14,8 +14,7 @@ package mesh
 //     打洞失败则保持不变（继续走中继）——绝不静默切出口。
 //
 // 与 MobiHop 的差异（如实标注）：
-//   - 未实现 `punch_at_ms` 的双方时钟对齐（本地直接立即开打；MobiHop 用约定时刻同步）；
-//   - 未做 2s/5s/10s 退避重试（只在会话建立时尝试一轮）。
+//   - 未实现 `punch_at_ms` 的双方时钟对齐（本地直接立即开打；MobiHop 用约定时刻同步）。
 //
 // 关键纪律：**信令走现有链路（通常是中继），探测走 UdpHub 同一个 socket**。
 // 用另一个 socket 会让 NAT 映射不一致，打洞必然失败。
@@ -36,11 +35,19 @@ type punchRun struct {
 	nonce  uint64
 	target []Candidate // 对端候选（用于探测）
 	at     time.Time
+	state  string // idle / probing / retrying / direct / failed
+	kind   string // ipv6 / stun / host / port-predict / wss
+	round  uint32
 }
 
 const (
 	punchProbeInterval = 100 * time.Millisecond
 	punchProbeWindow   = 3 * time.Second
+	// 持续打洞：每轮窗口结束后按 2s/5s/10s/30s 退避重试，最长 5 分钟；
+	// 对端上线晚、STUN 结果回来晚、IPv6 路由临时不可用时都能最终成功。
+	punchRetryBase  = 2 * time.Second
+	punchRetryMax   = 30 * time.Second
+	punchRetryLimit = 5 * time.Minute
 
 	// 硬对称洗牌扫描（对齐 MobiHop HARD_SYM_* 与 easytier send_punch_packet_hard_sym）：
 	// 跨度 2048、步长 1021（与 2048 互质 ⇒ [0,2048) 上的置换，连续调用不重复），
@@ -343,29 +350,138 @@ func (m *meshLifecycle) encodePunchFrame(dst NodeID, msg *PunchMessage) ([]byte,
 	}).Encode()
 }
 
-// startPunch 经现有链路（通常是中继）发起一轮打洞。
+// startPunch 经现有链路（通常是中继）启动持续打洞循环。
 func (m *meshLifecycle) startPunch(peer NodeID, via PeerLink) {
 	if m.cfg.DisablePunch || via == nil {
 		return
 	}
+	m.punchMu.Lock()
+	if run := m.punch[peer]; run != nil && (run.state == "probing" || run.state == "retrying") {
+		m.punchMu.Unlock()
+		return
+	}
+	m.punchMu.Unlock()
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		m.punchLoop(peer, via)
+	}()
+}
+
+// punchLoop 在 WSS 链路上持续重试打洞，直到直连升级成功或达到总时限。
+func (m *meshLifecycle) punchLoop(peer NodeID, via PeerLink) {
+	backoff := punchRetryBase
+	deadline := time.Now().Add(punchRetryLimit)
+	for round := uint32(0); ; round++ {
+		if m.runCtx != nil && m.runCtx.Err() != nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			m.setPunchState(peer, "failed", "wss")
+			return
+		}
+		if !m.punchOnce(peer, via, round) {
+			return
+		}
+		m.setPunchState(peer, "retrying", punchKindForCandidates(m.localCandidates()))
+		timer := time.NewTimer(backoff)
+		select {
+		case <-timer.C:
+		case <-m.runCtx.Done():
+			timer.Stop()
+			return
+		}
+		// 直连已由 PunchAck 升级成功：停止重试，不要无谓占 WSS 带宽。
+		if state, _ := m.punchState(peer); state == "direct" {
+			return
+		}
+		if backoff < punchRetryMax {
+			backoff *= 2
+			if backoff > punchRetryMax {
+				backoff = punchRetryMax
+			}
+		}
+	}
+}
+
+// punchOnce 发一轮 PunchRequest；成功返回 true 表示还需继续下一轮。
+func (m *meshLifecycle) punchOnce(peer NodeID, via PeerLink, round uint32) bool {
 	cands := m.localCandidates()
 	if len(cands) == 0 {
-		return
+		return false
 	}
 	nonce := randUint64()
 	m.punchMu.Lock()
-	m.punch[peer] = &punchRun{nonce: nonce, at: time.Now()}
+	m.punch[peer] = &punchRun{nonce: nonce, at: time.Now(), state: "probing", kind: punchKindForCandidates(cands), round: round}
 	m.punchMu.Unlock()
 
 	msg := &PunchMessage{PunchReq: &PunchRequest{From: m.cfg.NodeID, Candidates: cands, Nonce: nonce}}
 	frame, err := m.encodePunchFrame(peer, msg)
 	if err != nil {
-		return
+		return false
 	}
-	_ = via.Send(context.Background(), frame)
+	if err := via.Send(context.Background(), frame); err != nil {
+		return false
+	}
 	if m.cfg.Verbose {
-		log.Printf("[mesh] 经中继向 %x 发起打洞（候选 %d 个，对称NAT=%v）", peer[:4], len(cands), m.isSymmetricNat())
+		log.Printf("[mesh] 经中继向 %x 发起打洞（第 %d 轮，候选 %d 个，对称NAT=%v）", peer[:4], round+1, len(cands), m.isSymmetricNat())
 	}
+	return true
+}
+
+func (m *meshLifecycle) setPunchState(peer NodeID, state, kind string) {
+	m.punchMu.Lock()
+	if m.punch == nil {
+		m.punch = make(map[NodeID]*punchRun)
+	}
+	run := m.punch[peer]
+	if run == nil {
+		run = &punchRun{}
+		m.punch[peer] = run
+	}
+	run.state, run.kind = state, kind
+	m.punchMu.Unlock()
+}
+
+func (m *meshLifecycle) punchState(peer NodeID) (string, string) {
+	m.punchMu.Lock()
+	defer m.punchMu.Unlock()
+	run := m.punch[peer]
+	if run == nil {
+		return "", ""
+	}
+	return run.state, run.kind
+}
+
+// punchKindForCandidates 挑一个最值得展示的候选类型（IPv6 > STUN > Host）。
+func punchKindForCandidates(cands []Candidate) string {
+	kind := ""
+	for _, c := range cands {
+		a := candidateUDP(c)
+		if a == nil {
+			continue
+		}
+		switch c.Kind {
+		case CandidateServerReflexive:
+			if a.IP.To4() == nil {
+				return "ipv6"
+			}
+			if kind == "" {
+				kind = "stun"
+			}
+		case CandidateHost:
+			if a.IP.To4() == nil {
+				return "ipv6"
+			}
+			if kind == "" {
+				kind = "host"
+			}
+		}
+	}
+	if kind == "" {
+		return "wss"
+	}
+	return kind
 }
 
 // handlePunch 处理 0x05 帧（由 UdpHub 的独立观察通道调用，与活跃链路无关）。
@@ -494,12 +610,34 @@ func (m *meshLifecycle) upgradeToDirect(peer NodeID, addr *net.UDPAddr) {
 	m.mu.Lock()
 	cur := m.links[peer]
 	if cur != nil && !cur.IsRelayed() {
+		// 直连已经生效（例如 onIncoming 先完成升级）：仍然要锁定档位，
+		// 否则降级控制器会按残留的 WSS 探针窗口把已建立的 P2P 切回中继。
+		if m.degrade != nil {
+			m.degrade.LockDirect(peer)
+		}
 		m.mu.Unlock()
 		return
 	}
 	m.links[peer] = m.hub.LinkTo(addr)
 	m.mu.Unlock()
+	if m.degrade != nil {
+		m.degrade.LockDirect(peer)
+	}
+	m.setPunchState(peer, "direct", punchAddrKind(addr))
 	if m.cfg.Verbose {
 		log.Printf("[mesh] 打洞成功：%x 升级为直连 %s", peer[:4], addr)
 	}
+}
+
+func punchAddrKind(addr *net.UDPAddr) string {
+	if addr == nil {
+		return "wss"
+	}
+	if addr.IP.To4() == nil {
+		return "ipv6"
+	}
+	if addr.IP.IsPrivate() {
+		return "host"
+	}
+	return "stun"
 }

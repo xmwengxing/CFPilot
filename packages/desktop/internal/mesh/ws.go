@@ -4,12 +4,15 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -85,14 +88,15 @@ func (w *WsUrl) tcpTarget() string {
 
 // WsConn 封装到盲中继的 WebSocket 连接。
 type WsConn struct {
-	conn *websocket.Conn
-	url  *WsUrl
+	conn    *websocket.Conn
+	url     *WsUrl
+	writeMu sync.Mutex
 	// gorilla/websocket 在一次 ReadMessage 失败后**再次读取会直接 panic**
 	// （"repeated read on failed websocket connection"）。
 	// 降级到 WSS 后如果连接被中继关闭，recv 循环会不断重试 Recv，
 	// 于是第二次读取就把整个 meshd 进程打崩。这里记住永久失败状态，
 	// 之后所有 Recv/Send 都直接返回错误，不再触碰底层连接。
-	failed bool
+	failed atomic.Bool
 }
 
 // failedErr 是连接失败后的固定错误（recv 循环会按错误退出/回退，而不是重试死循环）。
@@ -149,12 +153,17 @@ func (c *WsConn) SendFrame(ctx context.Context, data []byte) error {
 	if len(data) > MaxFrame {
 		return fmt.Errorf("mesh ws: 帧 %d 字节超过 %d", len(data), MaxFrame)
 	}
-	if c.failed || c.conn == nil {
+	if c.failed.Load() || c.conn == nil {
+		return errWsFailed
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if c.failed.Load() {
 		return errWsFailed
 	}
 	_ = c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if err := c.conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
-		c.failed = true
+		c.failed.Store(true)
 		return fmt.Errorf("mesh ws: 发送失败: %w", err)
 	}
 	return nil
@@ -163,22 +172,22 @@ func (c *WsConn) SendFrame(ctx context.Context, data []byte) error {
 // RecvFrame 接收一帧（契约 §6.3）。
 // Text 视为协议错误；Ping/Pong 由 gorilla 自动处理；Close/EOF 报错。
 func (c *WsConn) RecvFrame(ctx context.Context) ([]byte, error) {
-	if c.failed || c.conn == nil {
+	if c.failed.Load() || c.conn == nil {
 		return nil, errWsFailed
 	}
 	_ = c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	typ, data, err := c.conn.ReadMessage()
 	if err != nil {
 		// 永久失败：gorilla 不允许在失败连接上再次 ReadMessage（会 panic）。
-		c.failed = true
+		c.failed.Store(true)
 		return nil, fmt.Errorf("mesh ws: 接收失败: %w", err)
 	}
 	if typ != websocket.BinaryMessage {
-		c.failed = true
+		c.failed.Store(true)
 		return nil, fmt.Errorf("mesh ws: 非 Binary 消息（type=%d）", typ)
 	}
 	if len(data) > MaxFrame {
-		c.failed = true
+		c.failed.Store(true)
 		return nil, fmt.Errorf("mesh ws: 帧 %d 字节超过 %d", len(data), MaxFrame)
 	}
 	return data, nil
@@ -197,6 +206,15 @@ func RelayRoomURL(domain, networkHash, peerID string) (string, error) {
 		return "", fmt.Errorf("mesh: peer_id 必须 16 位小写 hex")
 	}
 	return fmt.Sprintf("wss://%s/mesh/%s?peer_id=%s", domain, networkHash, peerID), nil
+}
+
+func ResolveRelayRoomHash(configured string, psk [32]byte) string {
+	room := strings.TrimSpace(configured)
+	if room == "" || room == "<network_hash>" {
+		tag := DeriveRoomTag(psk)
+		return hex.EncodeToString(tag[:])
+	}
+	return room
 }
 
 func isLowerHex(s string) bool {

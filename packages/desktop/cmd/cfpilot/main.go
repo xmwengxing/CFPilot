@@ -24,6 +24,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -46,12 +47,31 @@ import (
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/mesh"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/notify"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/server"
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/shell"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/tray"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/update"
 )
 
 // Version 由构建时通过 -ldflags 注入（见 scripts/build-desktop.mjs）。
 var Version = "dev"
+
+// panel 是内嵌面板窗口（不可用时为 nil，界面回退到系统浏览器）。
+//
+// 放在包级是因为托盘回调与页面跳转都要用它，而它们定义在 main 之外。
+var panel shell.Panel
+
+// panelTitles 返回窗口标题与「唤醒其它实例」要查找的标题。
+//
+// 两个变体（普通版 / +mesh）监听同一个端口，同一时刻只能有一个在跑；
+// 端口被占用时，要能找到那个正在托盘里运行的窗口并把它唤出来，
+// 而不是让用户看到「端口已被占用」。变体不同，窗口标题也不同
+// （见 panel_title_stub.go / panel_title_mesh.go），所以要按标题逐个尝试。
+//
+// 旧标题「CFPilot 部署与维护工具」保留一个发布周期：
+// 升级前启动、仍在托盘里的实例用的是旧标题，也要能被唤醒。
+func panelTitles() (own, peer, legacy string) {
+	return panelWindowTitle, panelPeerTitle, "CFPilot 部署与维护工具"
+}
 
 // runUpdateHelper 是「重启并更新应用」的收尾进程（--update-helper 模式）。
 //
@@ -103,6 +123,8 @@ func main() {
 		consoleFlag = flag.Bool("console", false, "把日志写到文件（便于排查）")
 		// --no-tray 不启托盘，前台只跑 HTTP 服务（无桌面会话时使用）
 		noTray = flag.Bool("no-tray", false, "不启托盘，只运行本地服务")
+		// --browser 强制用系统浏览器打开面板（排查窗口问题时的逃生门）。
+		browserFlag = flag.Bool("browser", false, "用系统浏览器打开面板，不使用内嵌窗口")
 		// --update-helper 是「重启并更新应用」的收尾进程（由更新流程 spawn 自身）：
 		// 等旧进程退出 → 删除 .old 备份 → 以正常模式重启主程序 → helper 退出。
 		// 详见 internal/update/apply.go 的注释。
@@ -249,13 +271,58 @@ func main() {
 		fatal(err)
 	}
 	if err := srv.Start(); err != nil {
-		// 端口占用时给出可操作的提示，而不是直接崩
+		// 端口被占用最常见的原因是「上一个实例还在托盘里跑」：
+		// 用户双击 exe 的本意是把面板调出来，不该看到一个「端口已被占用」的错误框。
+		// 窗口存在就唤醒它并安静退出（那个实例仍在提供服务，不能动它）。
+		// 本变体 / 另一变体 / 旧标题都试一遍 —— 双变体共用端口，标题各不相同。
+		if !*noTray {
+			own, peer, legacy := panelTitles()
+			for _, title := range []string{own, peer, legacy} {
+				if shell.ActivateExisting(title) {
+					log.Printf("[cfpilot] 已有实例在运行，已唤醒它的面板窗口，本次启动退出")
+					return
+				}
+			}
+		}
+		// 真的被别的程序占用时给出可操作的提示，而不是直接崩
 		fatal(fmt.Errorf("%w\n提示：用 --port <端口> 换一个，或先关掉占用该端口的程序", err))
 	}
 
 	url := srv.WelcomeURL()
 	// URL 中的 ?t= 是一次性高权限启动令牌，不能写入持久日志。
 	log.Printf("[cfpilot] 管理界面：%s（启动令牌已通过本地打开流程传递）", srv.WelcomeURLForLog())
+
+	// ---- 面板窗口 ----
+	//
+	// 普通版与 +mesh 版走同一条路径：能用内嵌窗口就用窗口，
+	// 不能用（无图形会话 / 缺 WebView2 运行时 / 用户指定 --browser）就回退浏览器。
+	// 容器与无桌面环境显式用 --no-tray --no-browser，不会走到这里。
+	if !*noBrowser && !*noTray && !*browserFlag &&
+		config.EffectivePanelMode(settings) != config.PanelModeBrowser {
+		dataDir := ""
+		if dir, derr := config.EnsureDir(); derr == nil {
+			dataDir = filepath.Join(dir, "webview")
+		}
+		p, perr := shell.New(shell.Options{
+			Title:        panelWindowTitle,
+			URL:          url,
+			DataDir:      dataDir,
+			OpenExternal: openBrowser,
+			Logf:         log.Printf,
+		})
+		switch {
+		case perr == nil:
+			panel = p
+			log.Printf("[cfpilot] 面板已在应用窗口内打开（%s）", p.Platform())
+		case errors.Is(perr, shell.ErrAlreadyRunning):
+			// 已有实例：刚才已经把它唤到前台，本进程安静退出。
+			log.Printf("[cfpilot] 面板已在另一个窗口里运行，本次启动退出")
+			_ = srv.Stop()
+			return
+		default:
+			log.Printf("[cfpilot] 内嵌窗口不可用，回退系统浏览器：%v", perr)
+		}
+	}
 
 	// ⚠️ 允许局域网访问时的风险警告。
 	//
@@ -287,7 +354,7 @@ func main() {
 	// 那是个默认 false 的开关，用户第一次双击 exe 时浏览器不打开，
 	// 表现为「双击了但什么都没发生」—— 极难自解释。
 	// 现在只有 --no-browser 能关掉它。
-	if !*noBrowser {
+	if !*noBrowser && panel == nil {
 		// 给监听器一点时间就绪，再打开浏览器
 		go func() {
 			time.Sleep(300 * time.Millisecond)
@@ -315,11 +382,18 @@ func main() {
 	app := tray.New(srv)
 	app.SetRunning(true)
 	app.SetOpenHandler(func(u string) {
+		// 窗口还活着就置前它；窗口已被关闭（或本就没有）才回退浏览器。
+		if panel != nil && panel.Show("") {
+			return
+		}
 		if err := openBrowser(u); err != nil {
 			log.Printf("[cfpilot] 打开浏览器失败：%v", err)
 		}
 	})
 	app.SetExitHandler(func() {
+		if panel != nil {
+			panel.Close()
+		}
 		_ = srv.Stop()
 		os.Exit(0)
 	})
@@ -379,7 +453,7 @@ func main() {
 			defer cancel()
 			st := checker.Check(ctx)
 			logUpdateState(st)
-			openPage(url, "about")
+			openPanelPage(url, "about")
 		}()
 	})
 	app.SetCheckDeployUpdateHandler(func() {
@@ -388,7 +462,7 @@ func main() {
 			defer cancel()
 			st := checker.Check(ctx)
 			logUpdateState(st)
-			openPage(url, "deploy")
+			openPanelPage(url, "deploy")
 		}()
 	})
 
@@ -467,6 +541,12 @@ func main() {
 	// 所以这里降级为「无托盘模式」：服务继续跑并打开浏览器，至少还能用。
 	if app.Failed() {
 		log.Printf("[cfpilot] 托盘不可用，降级为无托盘模式（服务继续运行）")
+		// 没有托盘就没有「打开面板」入口：窗口留着用户关掉后再也打不开，
+		// 所以这里先关掉窗口，改用浏览器 + 常驻服务这条老路径。
+		if panel != nil {
+			panel.Close()
+			panel = nil
+		}
 		log.Printf("[cfpilot] 管理界面：%s（启动令牌已通过本地打开流程传递）", srv.WelcomeURLForLog())
 		if !*noBrowser {
 			if err := openBrowser(url); err != nil {
@@ -489,6 +569,14 @@ func waitForSignal() {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
 	<-ch
+}
+
+// openPanelPage 优先在内嵌窗口里切到指定页签，窗口不可用时回退浏览器。
+func openPanelPage(baseURL, page string) {
+	if panel != nil && panel.Show(page) {
+		return
+	}
+	openPage(baseURL, page)
 }
 
 // openPage 打开管理界面的指定页签。

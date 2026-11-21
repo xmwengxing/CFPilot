@@ -54,6 +54,10 @@ Section "主程序" Main
   DetailPrint "正在停止旧版组网服务…"
   ExecWait 'net stop CFPilotMesh'
   ExecWait 'taskkill /F /IM "${EXE_NAME}" /T'
+  ; 普通版 / 旧版本号的程序与 Mesh 版共用端口，若仍在托盘运行，新 exe 只会唤醒旧窗口。
+  ; 因此安装时统一结束所有 CFPilot 进程（不含系统服务，服务由 net stop 单独处理）。
+  ExecWait 'taskkill /F /IM "cfpilot.exe" /T'
+  ExecWait 'taskkill /F /IM "cfpilot-0.50.0-windows-amd64.exe" /T'
   Sleep 800
 
   File "EXE_SOURCE_PLACEHOLDER"

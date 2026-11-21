@@ -9,18 +9,25 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { deployEdgeRelay, isMonitorSetupDone, zoneNameFromDomain } from '../src/edge/deploy'
-import type { CloudflareClient } from '../src/deploy/cf-api'
+import { CloudflareError, type CloudflareClient } from '../src/deploy/cf-api'
 
 afterEach(() => vi.unstubAllGlobals())
 
-function fakeClient() {
+function fakeClient(onQuery?: (sql: string) => Promise<void>) {
   const calls: string[] = []
   const client = {
     createD1Database: vi.fn(async (_a: string, name: string) => {
       calls.push(`d1:${name}`)
       return { uuid: 'db-uuid-12345678', name }
     }),
-    queryD1: vi.fn(async (_a: string, _id: string, sql: string) => { calls.push(`sql:${sql.slice(0, 20)}`) }),
+    listD1Databases: vi.fn(async (_a: string, name?: string) => {
+      calls.push(`d1-list:${name}`)
+      return [{ uuid: 'db-uuid-existing', name: name ?? 'edge-relay-test-monitor' }]
+    }),
+    queryD1: vi.fn(async (_a: string, _id: string, sql: string) => {
+      calls.push(`sql:${sql.slice(0, 20)}`)
+      await onQuery?.(sql)
+    }),
     uploadScript: vi.fn(async (_a: string, name: string, opts: { bindings: unknown[]; doExports?: unknown; migrations?: unknown; code: string }) => {
       calls.push(`worker:${name}`)
       ;(globalThis as Record<string, unknown>).__lastUpload = opts
@@ -70,7 +77,8 @@ describe('deployEdgeRelay 编排', () => {
 
     // 顺序
     expect(calls[0]).toBe('d1:edge-relay-test-monitor')
-    expect(calls.filter((c) => c.startsWith('sql:'))).toHaveLength(5)
+    expect(calls.filter((c) => c.startsWith('sql:'))).toHaveLength(6)
+    expect(calls[1]).toBe('sql:SELECT 1')
     expect(calls).toContain('worker:edge-relay-test')
     expect(calls.indexOf('domain')).toBeGreaterThan(calls.indexOf('worker:edge-relay-test'))
     expect(calls).toContain('auth-setup')
@@ -102,6 +110,49 @@ describe('deployEdgeRelay 编排', () => {
     expect(code).toContain('export default')
   })
 
+  it('等待新建 D1 就绪，并重试初始化期间的瞬时错误', async () => {
+    let readinessAttempts = 0
+    let schemaAttempts = 0
+    const { client } = fakeClient(async (sql) => {
+      if (sql === 'SELECT 1' && ++readinessAttempts === 1) {
+        throw new CloudflareError('D1 database is not ready', 503)
+      }
+      if (sql !== 'SELECT 1' && ++schemaAttempts === 1) {
+        throw new CloudflareError('D1 temporarily unavailable', 429)
+      }
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"ok":true}', { status: 200 })))
+
+    await expect(deployEdgeRelay(client, { ...baseOpts, withDashboard: false })).resolves.toBeTruthy()
+
+    expect(readinessAttempts).toBe(2)
+    expect(schemaAttempts).toBe(6)
+    expect(client.uploadScript).toHaveBeenCalledOnce()
+  })
+
+  it('D1 永久错误不重试，也不上传 Worker', async () => {
+    const { client } = fakeClient(async (sql) => {
+      if (sql !== 'SELECT 1') throw new CloudflareError('invalid SQL', 400)
+    })
+
+    await expect(deployEdgeRelay(client, { ...baseOpts, withDashboard: false })).rejects.toThrow('invalid SQL')
+
+    expect(client.queryD1).toHaveBeenCalledTimes(2)
+    expect(client.uploadScript).not.toHaveBeenCalled()
+  })
+
+  it('创建 D1 因同名失败时复用已有库', async () => {
+    const { client, calls } = fakeClient()
+    vi.mocked(client.createD1Database).mockRejectedValueOnce(new CloudflareError('database already exists', 409))
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{"ok":true}', { status: 200 })))
+
+    const result = await deployEdgeRelay(client, { ...baseOpts, withDashboard: false })
+
+    expect(client.listD1Databases).toHaveBeenCalledWith('acct', 'edge-relay-test-monitor')
+    expect(calls).toContain('d1-list:edge-relay-test-monitor')
+    expect(result.d1Uuid).toBe('db-uuid-existing')
+  })
+
   it('/auth/setup 返回 409（已设置）视为幂等成功', async () => {
     const { client } = fakeClient()
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
@@ -109,6 +160,33 @@ describe('deployEdgeRelay 编排', () => {
       throw new Error('unexpected fetch')
     }))
     await expect(deployEdgeRelay(client, baseOpts)).resolves.toBeTruthy()
+  })
+
+  it('Worker/D1 暂不可达或限流时重试密码初始化', async () => {
+    const { client } = fakeClient()
+    let attempts = 0
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (String(url).includes('/auth/setup')) {
+        attempts += 1
+        if (attempts === 1) throw new TypeError('fetch failed')
+        if (attempts === 2) return new Response('initializing', { status: 503 })
+        return new Response('{"ok":true}', { status: 200 })
+      }
+      throw new Error('unexpected fetch')
+    }))
+    await expect(deployEdgeRelay(client, { ...baseOpts, withDashboard: false })).resolves.toBeTruthy()
+    expect(attempts).toBe(3)
+  })
+
+  it('密码初始化返回永久 4xx 时不重试', async () => {
+    const { client } = fakeClient()
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).includes('/auth/setup')) return new Response('bad password', { status: 400 })
+      throw new Error('unexpected fetch')
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(deployEdgeRelay(client, { ...baseOpts, withDashboard: false })).rejects.toThrow('HTTP 400')
+    expect(fetchMock).toHaveBeenCalledOnce()
   })
 
   it('--no-dashboard 跳过面板部署', async () => {

@@ -145,9 +145,12 @@ if (versionStaged()) {
  * - 否则先试普通 publish，遇到 403 staging 错误自动回退到 stage
  */
 function runPublish(useStage) {
+  // 预发布版本（如 0.60.0-beta.1）必须带 --tag beta，避免污染 npm 的 latest 标签。
+  const isPrerelease = version.includes('-')
+  const tagFlag = isPrerelease ? ' --tag beta' : ''
   const cmd = useStage
-    ? 'npm stage publish --access public'
-    : 'npm publish --access public'
+    ? `npm stage publish --access public${tagFlag}`
+    : `npm publish --access public${tagFlag}`
   execSync(cmd, {
     cwd: dir,
     stdio: 'inherit',

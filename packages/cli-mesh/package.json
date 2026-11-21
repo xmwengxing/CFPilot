@@ -1,6 +1,6 @@
 {
   "name": "cfpilot-mesh",
-  "version": "0.50.0",
+  "version": "0.60.0-beta.1",
   "description": "CFPilot +mesh —— 带异地组网能力的 Cloudflare 代理部署与优选工具（npx cfpilot-mesh mesh ...）",
   "type": "module",
   "license": "AGPL-3.0-only",

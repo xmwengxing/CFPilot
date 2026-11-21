@@ -195,22 +195,11 @@ func versionFromReleaseURL(url string) string {
 		rest = rest[:i]
 	}
 	rest = strings.TrimPrefix(rest, "v")
-	// 只留数字与点
-	var b strings.Builder
-	for _, r := range rest {
-		if (r >= '0' && r <= '9') || r == '.' {
-			b.WriteRune(r)
-		}
-	}
-	cleaned := strings.Trim(b.String(), ".")
-	if cleaned == "" {
+	// 保留完整 semver（含 -beta.1 等预发布后缀），避免把 0.60.0-beta.1 拼成 0.60.0.1 导致免 API 通道下载 404
+	if !semverRe.MatchString(rest) {
 		return ""
 	}
-	// 至少要有 major.minor
-	if !strings.Contains(cleaned, ".") {
-		return ""
-	}
-	return cleaned
+	return rest
 }
 
 // DesktopAssetName 按平台与版本拼出桌面版安装包名。

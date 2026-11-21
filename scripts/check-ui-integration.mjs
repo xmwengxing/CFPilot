@@ -77,6 +77,10 @@ for (const f of readdirSync(serverDir)) {
   for (const m of src.matchAll(/HandleFunc\("([^"]+)"/g)) {
     routes.add(m[1])
   }
+  // 路由可能放在 []string{...} 里统一注册（+mesh 控制面就是这种写法）。
+  for (const m of src.matchAll(/"(\/api\/[^"]+)"/g)) {
+    routes.add(m[1])
+  }
 }
 
 // 收集 adapter 请求的路由（去掉查询串）

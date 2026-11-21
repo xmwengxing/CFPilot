@@ -815,6 +815,11 @@ func (s *Server) handleServiceStatus(w http.ResponseWriter, r *http.Request) {
 		"pid": osGetpid(),
 		// 程序版本（界面「运行状态」要显示**真实版本**，不能只写「运行中」）。
 		"version": Version(),
+		// 构建变体：两个产物共用同一个版本号，界面靠它区分普通版与 +mesh 版。
+		"variant": variantName(),
+		// 内嵌界面指纹：同版本号可能重编多次，这里给面板一个可自证的构建标记，
+		// 避免「装了新包但界面没变」时无法判断到底跑的是哪一份 renderer.js。
+		"uiBuild": embeddedUIBuild(),
 	})
 }
 

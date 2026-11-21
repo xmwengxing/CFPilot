@@ -3,6 +3,7 @@ package mesh
 import (
 	"encoding/base64"
 	"encoding/json"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -100,15 +101,19 @@ func TestBuildInviteSuggestsSameSubnet(t *testing.T) {
 	}
 }
 
-func TestPickReachableIPv4(t *testing.T) {
-	if got := pickReachableIPv4([]string{"203.0.113.5", "192.168.1.10"}); got != "192.168.1.10" {
-		t.Errorf("应优先私网地址，实际 %q", got)
+func TestReachableInterfaceFilters(t *testing.T) {
+	for _, name := range []string{"cfpilot0", "easytier0", "Wintun", "vEthernet", "vmnet1"} {
+		if reachableInterfaceName(name) {
+			t.Errorf("虚拟网卡 %q 不应作为邀请地址来源", name)
+		}
 	}
-	if got := pickReachableIPv4([]string{"", "2001:db8::1", "198.51.100.7"}); got != "198.51.100.7" {
-		t.Errorf("无私网时应退回公网 IPv4，实际 %q", got)
+	for _, name := range []string{"Ethernet", "以太网", "en0", "ens33"} {
+		if !reachableInterfaceName(name) {
+			t.Errorf("物理网卡 %q 被误排除", name)
+		}
 	}
-	if got := pickReachableIPv4(nil); got != "" {
-		t.Errorf("无候选应返回空，实际 %q", got)
+	if reachableInterface(net.ParseIP("127.0.0.1")) || reachableInterface(net.ParseIP("100.64.1.2")) {
+		t.Error("回环/CGNAT 地址不应作为对端地址")
 	}
 }
 

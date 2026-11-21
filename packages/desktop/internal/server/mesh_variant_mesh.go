@@ -26,7 +26,7 @@ const meshdAddr = "http://127.0.0.1:19727"
 // 所以这里复用 s.guard，再把请求原样转给 meshd（普通进程不碰 TUN，提权只在 meshd）。
 func (s *Server) registerMeshControlRoutes(mux *http.ServeMux) {
 	for _, p := range []string{
-		"/api/mesh/status", "/api/mesh/start", "/api/mesh/stop", "/api/mesh/peers",
+		"/api/mesh/status", "/api/mesh/start", "/api/mesh/stop", "/api/mesh/peers", "/api/mesh/profiles",
 		// 版本自报：排查「装了新包但服务还是旧二进制」时对照用
 		"/api/mesh/version",
 	} {
@@ -115,6 +115,8 @@ func (s *Server) handleMeshRelayScan(w http.ResponseWriter, r *http.Request) {
 		Candidates    []string `json:"candidates"`
 		RelayDomain   string   `json:"relayDomain"`
 		Room          string   `json:"room"`
+		Network       string   `json:"network"`
+		PSK           string   `json:"psk"`
 		Port          int      `json:"port"`
 		TimeoutMs     int      `json:"timeoutMs"`
 		MaxCandidates int      `json:"maxCandidates"`
@@ -127,6 +129,16 @@ func (s *Server) handleMeshRelayScan(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(req.RelayDomain) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请先填写盲中继域名"})
 		return
+	}
+	room := strings.TrimSpace(req.Room)
+	if room == "" {
+		if strings.TrimSpace(req.Network) == "" || req.PSK == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "请先填写网络名与网络密钥"})
+			return
+		}
+		psk := mesh.DerivePSK(req.Network, req.PSK)
+		tag := mesh.DeriveRoomTag(psk)
+		room = hex.EncodeToString(tag[:])
 	}
 
 	candidates := req.Candidates
@@ -163,7 +175,7 @@ func (s *Server) handleMeshRelayScan(w http.ResponseWriter, r *http.Request) {
 	sum, err := scan.RunMeshEntry(ctx, scan.MeshEntryOptions{
 		Candidates:    candidates,
 		RelayDomain:   strings.TrimSpace(req.RelayDomain),
-		Room:          strings.TrimSpace(req.Room),
+		Room:          room,
 		DefaultPort:   req.Port,
 		TimeoutMs:     req.TimeoutMs,
 		MaxCandidates: req.MaxCandidates,
@@ -268,6 +280,7 @@ func (s *Server) handleMeshInviteParse(w http.ResponseWriter, r *http.Request) {
 		"peerNodeId": p.NodeID, "peerAddr": p.Addr,
 		"peerPub": p.TunnelPub, "peerVip": p.VirtualIP,
 		"suggestedIp": p.Suggested,
+		"peerName":    p.Alias,
 		// 云监测配置（A 生成链接时带上；B 解析后自动填入）
 		"monitoringEndpoint":   p.MonitorEndpoint,
 		"monitoringToken":      p.MonitorToken,
@@ -290,6 +303,19 @@ func (s *Server) handleMeshProxy(w http.ResponseWriter, r *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
+		// 守护进程没装 / 没启动时，**状态接口**回一份「未运行」而不是 502。
+		//
+		// 面板每 2 秒轮询一次 /api/mesh/status，若这里回 5xx，日志页会被
+		// 「接口 GET /api/mesh/status 返回 502」刷满（真机反馈过）。
+		// 未运行是正常状态，不是服务器错误；「组网」页会把 note 显示出来。
+		if r.Method == http.MethodGet && r.URL.Path == mesh.APIMeshStatus {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"running": false,
+				"daemon":  false,
+				"note":    "mesh 守护进程未运行（请用 +mesh 安装包安装并启动服务）",
+			})
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"error": "mesh 守护进程未运行（请先安装并启动 +mesh 服务）: " + err.Error(),
 		})
@@ -304,6 +330,9 @@ func (s *Server) handleMeshProxy(w http.ResponseWriter, r *http.Request) {
 
 // meshVariantEnabled 返回当前构建是否启用 +mesh 组网变体（+mesh 版）。
 func meshVariantEnabled() bool { return true }
+
+// variantName 是界面用来区分产物的构建变体标识。
+func variantName() string { return "mesh" }
 
 func (s *Server) handleMeshEnabled(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {

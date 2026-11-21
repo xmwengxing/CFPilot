@@ -12,6 +12,7 @@
 // 说明：DO 内只用内存状态（限速窗口 / 计数 / WebSocket 标签）。Hibernation 唤醒后
 // 这些计数会重置——这是刻意的「不持久化任何载荷」取舍；会话元数据也不需要落盘。
 
+import dashboardHtml from "../dashboard.html";
 import {
   MAX_WIRE_FRAME,
   SlidingWindow,
@@ -329,6 +330,14 @@ export default {
     }
     if (path === "/health" && request.method === "GET") {
       return json({ ok: true });
+    }
+    if (path === "/" && request.method === "GET" && !isWebSocketUpgrade(request)) {
+      return new Response(dashboardHtml, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store",
+        },
+      });
     }
     // 鉴权路由
     if (path === "/auth/status" && request.method === "GET") {

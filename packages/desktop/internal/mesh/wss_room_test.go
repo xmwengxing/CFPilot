@@ -99,12 +99,12 @@ func TestWssRoomPeerHandlerNotifiesOnceOutsideRoomLock(t *testing.T) {
 	room := NewWssRoom(conn, self)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var calls int
+	notified := make(chan struct{}, 2)
 	room.SetPeerHandler(func(id NodeID, link PeerLink) {
-		calls++
 		if id != peer || link != room.Link(peer) {
 			t.Errorf("handler received wrong peer link")
 		}
+		notified <- struct{}{}
 	})
 	room.Start(ctx)
 	frame, _ := (&Frame{Version: WireVersionDefault, Type: MsgHandshake, TTL: DefaultTTL, Src: peer, Dst: self}).Encode()
@@ -112,8 +112,15 @@ func TestWssRoomPeerHandlerNotifiesOnceOutsideRoomLock(t *testing.T) {
 	conn.in <- frame
 	_, _ = room.Link(peer).Recv(ctx)
 	_, _ = room.Link(peer).Recv(ctx)
-	if calls != 1 {
-		t.Fatalf("peer handler should run once, got %d", calls)
+	select {
+	case <-notified:
+	case <-time.After(time.Second):
+		t.Fatal("peer handler did not run")
+	}
+	select {
+	case <-notified:
+		t.Fatal("peer handler ran more than once")
+	case <-time.After(30 * time.Millisecond):
 	}
 	_ = room.Close()
 }

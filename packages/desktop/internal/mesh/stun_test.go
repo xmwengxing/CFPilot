@@ -100,6 +100,36 @@ func TestDiscoverNatNoResponseUnknown(t *testing.T) {
 	}
 }
 
+func TestDiscoverNatStopsAfterContextCancellation(t *testing.T) {
+	sink, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sink.Close()
+	hub, err := NewUdpHub("127.0.0.1:0", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan NatAssessment, 1)
+	go func() { result <- DiscoverNat(ctx, hub, []string{sink.LocalAddr().String()}, time.Minute) }()
+	_ = sink.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := sink.ReadFromUDP(make([]byte, stunHeaderLen)); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case assessment := <-result:
+		if assessment.Type != "Unknown" {
+			t.Fatalf("未收到响应，NAT 类型应为 Unknown，实际 %q", assessment.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("取消后仍在等待 STUN 响应")
+	}
+}
+
 func TestClassifyMappings(t *testing.T) {
 	// 映射一致 → NAT3（保守）
 	m1 := []StunMapping{{IP: "203.0.113.5", Port: 5000, Address: "203.0.113.5:5000"},
@@ -110,17 +140,16 @@ func TestClassifyMappings(t *testing.T) {
 	// 同 IP 不同端口 → NAT4
 	m2 := []StunMapping{{IP: "203.0.113.5", Port: 5000, Address: "203.0.113.5:5000"},
 		{IP: "203.0.113.5", Port: 5001, Address: "203.0.113.5:5001"}}
-	if got := classifyMappings(m2, 4); got.Type != "NAT4" {
+	if got := classifyMappings(m2, 4); got.Type != "NAT4" || got.Reflexive != "" || got.punchReflexive != m2[0].Address {
 		t.Errorf("同 IP 不同端口应 NAT4: %+v", got)
 	}
 	// 不同 IP → NAT4
 	m3 := []StunMapping{{IP: "203.0.113.5", Port: 5000, Address: "203.0.113.5:5000"},
 		{IP: "198.51.100.7", Port: 5000, Address: "198.51.100.7:5000"}}
-	if got := classifyMappings(m3, 4); got.Type != "NAT4" {
+	if got := classifyMappings(m3, 4); got.Type != "NAT4" || got.punchReflexive != "" {
 		t.Errorf("不同公网 IP 应 NAT4: %+v", got)
 	}
 	if got := classifyMappings(nil, 4); got.Type != "Unknown" {
 		t.Errorf("无观测应 Unknown: %+v", got)
 	}
 }
-

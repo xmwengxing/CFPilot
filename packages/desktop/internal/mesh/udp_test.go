@@ -97,6 +97,44 @@ func TestUdpHubSendProbeTo(t *testing.T) {
 	}
 }
 
+func TestUdpHubPunchConsumedByObserver(t *testing.T) {
+	discovered := make(chan NodeID, 2)
+	hub, err := NewUdpHub("127.0.0.1:0", func(peer NodeID, _ *net.UDPAddr) {
+		discovered <- peer
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	observed := 0
+	hub.SetControlHandler(func(_ *net.UDPAddr, _ []byte) { observed++ })
+	sender, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sender.Close()
+	for _, frame := range []Frame{
+		{Type: MsgHolePunch, TTL: DefaultTTL, Src: nodeID(1), Dst: nodeID(9)},
+		{Type: MsgPing, TTL: DefaultTTL, Src: nodeID(2), Dst: nodeID(9)},
+	} {
+		wire, err := frame.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sender.WriteToUDP(wire, hub.LocalAddr()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case got := <-discovered:
+		if got != nodeID(2) || observed != 1 {
+			t.Fatalf("发现节点=%x，探针回调次数=%d", got, observed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("普通 UDP 帧未创建链路")
+	}
+}
+
 func TestUdpHubForget(t *testing.T) {
 	hub, err := NewUdpHub("127.0.0.1:0", nil)
 	if err != nil {

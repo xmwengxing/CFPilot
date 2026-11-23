@@ -7,12 +7,10 @@
 //   - 它监听本地 127.0.0.1:19727，提供 start/stop/status/peers API；
 //   - 面板（普通进程）和托盘通过本地 HTTP 调用它，用户全程不碰命令行 / JSON 文件。
 //
-// 配置由调用方（面板）通过 POST /api/mesh/start 的 JSON body 传入，
-// 守护进程内存持有，不落盘（PSK 等敏感信息不写文件）。
+// 启动配置由面板通过本地 API 传入，保存网络档案时由守护进程写入档案库。
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -22,7 +20,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sync"
 
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/config"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/mesh"
@@ -30,13 +27,7 @@ import (
 
 const listenAddr = "127.0.0.1:19727"
 
-var (
-	version  = "dev"
-	mu       sync.Mutex
-	life     mesh.Lifecycle
-	status   = mesh.Status{Note: "未启动"}
-	profiles *mesh.ProfileStore
-)
+var version = "dev"
 
 func main() {
 	install := flag.Bool("install", false, "注册为系统服务（Windows）")
@@ -73,6 +64,7 @@ func main() {
 	// Windows 服务账号的 HOME 是 systemprofile，与用户目录不同；安装包把 meshd
 	// 放在用户可写的 %LOCALAPPDATA%\CFPilot-Mesh，所以优先用 exe 所在目录，
 	// 这样服务重启后仍能找到同一份档案。Linux deb 安装到 /usr/bin，用 config.Dir()。
+	var profiles *mesh.ProfileStore
 	dataDir, dirErr := profileDataDir()
 	if dirErr != nil {
 		log.Printf("[meshd] 警告：无法定位数据目录，网络档案与自动恢复不可用: %v", dirErr)
@@ -84,45 +76,29 @@ func main() {
 
 	// Windows 下作为服务运行（SCM 管理生命周期）；Linux 下直接跑（systemd 管理）。
 	if runtime.GOOS == "windows" && !*console {
-		runAsService(func() { serve() })
+		runAsService(func() { serve(profiles) })
 		return
 	}
-	serve()
+	serve(profiles)
 }
 
-func serve() {
-	// 服务重启后自动恢复最后一次选中的网络。
-	// 这是「当前网络 + 自动启动」的核心：不再依赖浏览器是否打开过。
-	if profiles != nil && profiles.AutoStartEnabled() {
-		if cfg := profiles.SelectedConfig(); cfg != nil {
-			if started, err := startLifecycle(*cfg); err != nil {
-				log.Printf("[meshd] 自动恢复网络失败: %v", err)
-			} else {
-				log.Printf("[meshd] 已自动恢复上次选择的网络: vip=%s", started.VirtualIP)
-			}
-		}
+func serve(profiles *mesh.ProfileStore) {
+	ln, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		log.Fatalf("[meshd] 监听失败: %v", err)
 	}
+	control := &meshControl{newLifecycle: mesh.NewLifecycleWithConfig}
+	control.restore(profiles)
+	log.Printf("[meshd] 本地 API 就绪: http://%s", listenAddr)
+	if err := http.Serve(ln, control.handler(profiles)); err != nil {
+		log.Fatalf("[meshd] 服务退出: %v", err)
+	}
+}
 
+func (control *meshControl) handler(profiles *mesh.ProfileStore) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/mesh/status", func(w http.ResponseWriter, r *http.Request) {
-		// ⚠️ 必须**实时**调用 life.Status()。早前返回的是 Start 时拍下的快照，
-		// 于是面板永远看到 handshakeOk=0 / online=false / tx=0，
-		// 而底层其实早已握手并转发流量（真机实测踩到）。
-		mu.Lock()
-		l := life
-		mu.Unlock()
-		if l == nil {
-			mu.Lock()
-			st := status
-			mu.Unlock()
-			writeJSON(w, http.StatusOK, st)
-			return
-		}
-		st := l.Status()
-		mu.Lock()
-		status = st
-		mu.Unlock()
-		writeJSON(w, http.StatusOK, st)
+	mux.HandleFunc(mesh.APIMeshStatus, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, control.status())
 	})
 	// 版本自报：面板可据此发现「装的是新包，服务跑的是旧二进制」。
 	mux.HandleFunc("/api/mesh/version", func(w http.ResponseWriter, r *http.Request) {
@@ -177,7 +153,7 @@ func serve() {
 		}
 		writeJSON(w, http.StatusOK, profiles.State())
 	})
-	mux.HandleFunc("/api/mesh/start", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(mesh.APIMeshStart, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeErr(w, "仅支持 POST")
 			return
@@ -187,11 +163,12 @@ func serve() {
 			writeErr(w, "配置非法: "+err.Error())
 			return
 		}
-		// 上报给云监测台的客户端版本：由本进程注入（面板不必知道内核版本）
-		if cfg.ClientVersion == "" {
-			cfg.ClientVersion = version
+		previous, ok := control.begin(transitionStarting)
+		if !ok {
+			writeMeshConflict(w)
+			return
 		}
-		started, err := startLifecycle(cfg)
+		started, err := control.start(cfg, previous)
 		if err != nil {
 			writeErr(w, "启动失败: "+err.Error())
 			return
@@ -199,48 +176,35 @@ func serve() {
 		log.Printf("[meshd] 组网已启动 node=%s vip=%s", started.NodeID, started.VirtualIP)
 		writeJSON(w, http.StatusOK, mesh.ActionResult{OK: true, Message: "已启动"})
 	})
-	mux.HandleFunc("/api/mesh/peers", func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		st := status
-		mu.Unlock()
-		if st.Peers == nil {
-			st.Peers = []mesh.Peer{}
+	mux.HandleFunc(mesh.APIMeshPeers, func(w http.ResponseWriter, r *http.Request) {
+		peers := control.status().Peers
+		if peers == nil {
+			peers = []mesh.Peer{}
 		}
-		writeJSON(w, http.StatusOK, st.Peers)
+		writeJSON(w, http.StatusOK, peers)
 	})
-	mux.HandleFunc("/api/mesh/stop", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(mesh.APIMeshStop, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeErr(w, "仅支持 POST")
 			return
 		}
-		mu.Lock()
-		if life == nil {
-			mu.Unlock()
-			writeJSON(w, http.StatusOK, mesh.ActionResult{OK: true, Message: "未运行"})
+		previous, ok := control.begin(transitionStopping)
+		if !ok {
+			writeMeshConflict(w)
 			return
 		}
-		// 先摘出实例再 Stop：持全局锁等 Stop 会把 status/start 一起堵住。
-		l := life
-		life = nil
-		status = mesh.Status{Note: "未启动"}
-		mu.Unlock()
-		err := l.Stop()
-		if err != nil {
+		if err := control.stop(previous); err != nil {
 			writeErr(w, err.Error())
+			return
+		}
+		if previous == nil {
+			writeJSON(w, http.StatusOK, mesh.ActionResult{OK: true, Message: "未运行"})
 			return
 		}
 		log.Printf("[meshd] 组网已停止")
 		writeJSON(w, http.StatusOK, mesh.ActionResult{OK: true, Message: "已停止"})
 	})
-
-	ln, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		log.Fatalf("[meshd] 监听失败: %v", err)
-	}
-	log.Printf("[meshd] 本地 API 就绪: http://%s", listenAddr)
-	if err := http.Serve(ln, mux); err != nil {
-		log.Fatalf("[meshd] 服务退出: %v", err)
-	}
+	return mux
 }
 
 func profileDataDir() (string, error) {
@@ -253,31 +217,6 @@ func profileDataDir() (string, error) {
 	return config.Dir()
 }
 
-// startLifecycle 先停旧实例再按新配置启动，返回新实例的首帧状态。
-func startLifecycle(cfg mesh.Config) (mesh.Status, error) {
-	// 允许「再次启动」：旧实现遇到 life != nil 直接返回「已启动」，
-	// 一旦上一次停止不彻底/半运行，就永远无法再启动（用户只能卸载重装）。
-	mu.Lock()
-	old := life
-	life = nil
-	mu.Unlock()
-	if old != nil {
-		_ = old.Stop()
-	}
-	newLife := mesh.NewLifecycleWithConfig(cfg)
-	ctx, cancel := context.WithCancel(context.Background())
-	_ = cancel // 生命周期内部会创建自己的 runCtx；Stop 会关闭它
-	if err := newLife.Start(ctx); err != nil {
-		return mesh.Status{}, err
-	}
-	st := newLife.Status()
-	mu.Lock()
-	life = newLife
-	status = st
-	mu.Unlock()
-	return st, nil
-}
-
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -287,6 +226,6 @@ func writeErr(w http.ResponseWriter, msg string) {
 	writeJSON(w, http.StatusBadRequest, mesh.ActionResult{OK: false, Error: msg})
 }
 
-// runAsService / installService / uninstallService 见 platform 专属文件。
-var _ = fmt.Sprintf
-var _ = os.Exit
+func writeMeshConflict(w http.ResponseWriter) {
+	writeJSON(w, http.StatusConflict, mesh.ActionResult{Error: "正在启动或停止组网，请等待当前操作完成"})
+}

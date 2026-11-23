@@ -115,11 +115,17 @@ func DialWss(ctx context.Context, u *WsUrl, rootCAs *x509.CertPool) (*WsConn, er
 	if u == nil {
 		return nil, fmt.Errorf("mesh ws: nil WsUrl")
 	}
+	var stopClosing func() bool
 	dialer := websocket.Dialer{
-		NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		NetDialContext: func(dialCtx context.Context, network, _ string) (net.Conn, error) {
 			// 强制连到 tcpTarget（connect_ip），忽略 gorilla 传来的 addr
 			var d net.Dialer
-			return d.DialContext(ctx, network, u.tcpTarget())
+			conn, err := d.DialContext(dialCtx, network, u.tcpTarget())
+			if err == nil {
+				// HTTP Upgrade 读取响应时不会轮询 ctx，关连接才能立即取消这一步。
+				stopClosing = context.AfterFunc(ctx, func() { _ = conn.Close() })
+			}
+			return conn, err
 		},
 		TLSClientConfig: &tls.Config{
 			ServerName: u.Host, // SNI 用原域名
@@ -141,6 +147,15 @@ func DialWss(ctx context.Context, u *WsUrl, rootCAs *x509.CertPool) (*WsConn, er
 	wsURL := "wss://" + net.JoinHostPort(u.Host, strconv.Itoa(u.Port)) + path
 
 	conn, _, err := dialer.DialContext(ctx, wsURL, reqHeader)
+	if stopClosing != nil {
+		stopClosing()
+	}
+	if ctx.Err() != nil {
+		if conn != nil {
+			_ = conn.Close()
+		}
+		return nil, ctx.Err()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("mesh ws: 拨号失败: %w", err)
 	}
@@ -158,12 +173,20 @@ func (c *WsConn) SendFrame(ctx context.Context, data []byte) error {
 	}
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if c.failed.Load() {
 		return errWsFailed
 	}
-	_ = c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	deadline := time.Now().Add(10 * time.Second)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	_ = c.conn.SetWriteDeadline(deadline)
 	if err := c.conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
 		c.failed.Store(true)
+		_ = c.conn.Close()
 		return fmt.Errorf("mesh ws: 发送失败: %w", err)
 	}
 	return nil

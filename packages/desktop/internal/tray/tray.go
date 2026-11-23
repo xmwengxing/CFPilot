@@ -60,6 +60,10 @@ type App struct {
 	// +mesh 专属：组网服务启停 + 节点列表二级菜单（tray_mesh.go 初始化）
 	mMeshToggle *systray.MenuItem
 	mMeshPeers  []*systray.MenuItem
+	// mMeshAutoStart 是 +mesh 专属的「开机自启」复选菜单项。
+	mMeshAutoStart    *systray.MenuItem
+	meshToggleLabel   string
+	meshActionPending bool
 	// mCheckDeployUpdate 是「检查部署更新」菜单项
 	mCheckDeployUpdate *systray.MenuItem
 	// mQuickScan 是「一键优选 IP」父项。

@@ -1,7 +1,10 @@
 package mesh
 
 import (
+	"context"
+	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -93,6 +96,50 @@ func TestRelayRoomURLFromDeploymentTemplateUsesNetworkDerivedRoom(t *testing.T) 
 	expected := fmt.Sprintf("wss://relay.example.com/mesh/%s?peer_id=0011223344556677", expectedHash)
 	if got != expected {
 		t.Fatalf("deployment template URL = %q, expected network-derived room %q", got, expected)
+	}
+}
+
+func TestDialWssCancelsWhileWaitingForUpgrade(t *testing.T) {
+	received := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		close(received)
+		select {
+		case <-request.Context().Done():
+		case <-release:
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+	endpoint, err := ParseWsUrl("wss" + strings.TrimPrefix(server.URL, "https") + "/mesh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(server.Certificate())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		conn, err := DialWss(ctx, endpoint, roots)
+		if conn != nil {
+			_ = conn.Close()
+		}
+		result <- err
+	}()
+	select {
+	case <-received:
+	case <-time.After(3 * time.Second):
+		t.Fatal("未收到 HTTP Upgrade 请求")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("期望取消，实际错误 %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("取消后仍在等待 HTTP Upgrade")
 	}
 }
 

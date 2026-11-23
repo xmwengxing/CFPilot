@@ -26,12 +26,11 @@ import (
 //     - peer→tun：PeerLink.Recv → Handshake 帧交 FSM / Data 帧解密 → TUN.Send
 //  5. Stop：关 TUN / UdpHub / 取消循环
 type meshLifecycle struct {
-	cfg       Config
-	mu        sync.Mutex
-	running   bool
-	starting  bool
-	startDone chan struct{}
-	startedAt time.Time
+	cfg         Config
+	lifecycleMu sync.Mutex
+	mu          sync.Mutex
+	running     bool
+	startedAt   time.Time
 
 	hub      *UdpHub
 	tun      TunDevice
@@ -60,12 +59,9 @@ type meshLifecycle struct {
 	// STUN 探测结果（启动后后台异步更新；不阻断组网）。
 	natMu sync.Mutex
 	nat   NatAssessment
-	// 专用服务器中继心跳状态（独立锁，避免与 m.mu 交叉）。
-	relayCtx       context.Context
-	relayHbMu      sync.Mutex
-	relayHbStarted map[string]bool
-	// relayAccepted 记录已收到 AuthAccept 的中继地址：注册循环据此停止重试。
-	relayAccepted map[string]bool
+	// 中继地址、节点和当前心跳状态由独立锁保护。
+	relayMu        sync.Mutex
+	relayEndpoints map[string]*relayEndpoint
 
 	// P3 打洞编排状态（每个对端一份）。
 	punchMu sync.Mutex
@@ -100,7 +96,6 @@ type meshLifecycle struct {
 type recvLoop struct {
 	link   PeerLink
 	cancel context.CancelFunc
-	done   chan struct{}
 }
 
 // Stats 返回运行时统计（诊断用）。
@@ -176,21 +171,22 @@ func NewLifecycleWithTun(cfg Config, tun TunDevice) Lifecycle {
 func (m *meshLifecycle) SetConfig(cfg Config) { m.cfg = cfg }
 
 func (m *meshLifecycle) Start(ctx context.Context) error {
+	return m.start(ctx, m.dialWssRoom)
+}
+
+func (m *meshLifecycle) start(ctx context.Context, dialRoom func(context.Context) (*WssRoom, error)) error {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
 	m.mu.Lock()
-	if m.running || m.starting {
-		m.mu.Unlock()
+	defer m.mu.Unlock()
+	if m.running {
 		return fmt.Errorf("mesh: 已在运行")
 	}
-	m.starting = true
-	m.startDone = make(chan struct{})
-	defer func() {
-		m.starting = false
-		close(m.startDone)
-		m.startDone = nil
-		m.mu.Unlock()
-	}()
 	if err := m.cfg.Validate(); err != nil {
 		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	// 1. 身份与网络
@@ -210,6 +206,10 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 	}
 	network := DeriveNetworkID(m.cfg.NetworkName)
 	psk := DerivePSK(m.cfg.NetworkName, m.cfg.PSK)
+	m.roomHash = ""
+	if m.cfg.RelayDomain != "" {
+		m.roomHash = ResolveRelayRoomHash(m.cfg.RelayRoom, psk)
+	}
 	tunnel, err := m.cfg.tunnelKey()
 	if err != nil {
 		return err
@@ -224,15 +224,26 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 		}
 	}
 
-	// 2. UdpHub（新 peer 发现后由回调建 link）
-	var onIncoming func(NodeID, *net.UDPAddr)
-	// 双栈默认开启：listen 为未指定地址时实际绑 [::]（v4 走 v4-mapped），
-	// IPv6 侧无需端口映射即可直连；IPv4 侧路径不变。
-	m.hub, err = NewUdpHubWithDual(m.cfg.Listen, !m.cfg.DisableListenDual, func(id NodeID, addr *net.UDPAddr) {
-		if onIncoming != nil {
-			onIncoming(id, addr)
+	resolveCtx, stopResolving := context.WithTimeout(ctx, 5*time.Second)
+	defer stopResolving()
+	bindAddr, err := resolveMeshUDPAddr(resolveCtx, 0, m.cfg.Listen)
+	if err != nil {
+		return fmt.Errorf("mesh: 解析 UDP 监听地址失败: %w", err)
+	}
+	seedAddrs := make(map[NodeID]*net.UDPAddr, len(m.cfg.Peers))
+	for _, peer := range m.cfg.Peers {
+		addr, err := resolveMeshUDPAddr(resolveCtx, 0, peer.Addr)
+		if err != nil {
+			return fmt.Errorf("mesh: 解析对端地址失败: %w", err)
 		}
-	})
+		seedAddrs[peer.NodeID] = addr
+	}
+	stopResolving()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// 双栈默认开启，监听地址为通配地址时由同一个 socket 接收 IPv4 与 IPv6。
+	m.hub, err = NewUdpHubWithDual(bindAddr.String(), !m.cfg.DisableListenDual, nil)
 	if err != nil {
 		return err
 	}
@@ -250,9 +261,19 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 		m.tun, err = CreateTunDevice(tunName, m.cfg.VirtualIP, m.cfg.MTU)
 		if err != nil {
 			_ = m.hub.Close()
+			m.hub = nil
 			return err
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		_ = m.hub.Close()
+		_ = m.tun.Close()
+		m.hub, m.tun = nil, nil
+		return err
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	m.cancel = cancel
+	m.runCtx = runCtx
 
 	// 4. FSM（sendFn 经 peer 的 PeerLink 发帧）
 	m.links = make(map[NodeID]PeerLink)
@@ -263,8 +284,7 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 	m.lastOKRx = make(map[NodeID]time.Time)
 	m.lastTxData = make(map[NodeID]time.Time)
 	m.punch = make(map[NodeID]*punchRun)
-	m.relayHbStarted = make(map[string]bool)
-	m.relayAccepted = make(map[string]bool)
+	m.relayEndpoints = make(map[string]*relayEndpoint)
 	m.probeBackSent = make(map[string]struct{})
 	m.hardSymCursor = make(map[NodeID]uint32)
 	m.fsm = NewHandshakeFSM(m.cfg.NodeID, network, psk, tunnel)
@@ -287,17 +307,12 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 		if link == nil {
 			return fmt.Errorf("mesh: 到 %x 无链路", dst[:4])
 		}
-		return link.Send(context.Background(), frame)
+		return link.Send(runCtx, frame)
 	})
 
 	// 5. 为每个静态 peer 建 link + 记录虚拟 IP（用 peer NodeID 派生的占位 IP 不便，留空由实际发现填）
 	for _, p := range m.cfg.Peers {
-		addr, err := net.ResolveUDPAddr("udp", p.Addr)
-		if err != nil {
-			_ = m.cleanupLocked()
-			return err
-		}
-		m.links[p.NodeID] = m.hub.LinkTo(addr)
+		m.links[p.NodeID] = m.hub.LinkTo(seedAddrs[p.NodeID])
 		m.peerStatic[p.NodeID] = append([]byte(nil), p.StaticPub...)
 		m.vipTable.Add(net.ParseIP(p.VirtualIP), p.NodeID)
 	}
@@ -312,53 +327,7 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 	m.probes = NewProbeTracker(m.hub, m.cfg.NodeID)
 	m.probes.SetWireVersionProvider(m.wireVersionFor)
 	for _, p := range m.cfg.Peers {
-		addr, _ := net.ResolveUDPAddr("udp", p.Addr)
-		m.probes.SetPeer(p.NodeID, addr)
-	}
-
-	// runCtx 统一创建：switchFn 回调与接收循环共用同一个 ctx，
-	// 避免两处 runCtx 导致「停止时新循环仍绑在旧 ctx」的幽灵循环。
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	runCtx, cancel := context.WithCancel(ctx)
-	m.cancel = cancel
-	m.runCtx = runCtx
-	if m.cfg.RelayDomain != "" {
-		if m.gossip == nil {
-			cancel()
-			_ = m.cleanupLocked()
-			return fmt.Errorf("mesh: 盲中继自动发现需要本机身份密钥")
-		}
-		roomHash := ResolveRelayRoomHash(m.cfg.RelayRoom, psk)
-		if _, e := RelayRoomURL(m.cfg.RelayDomain, roomHash, m.cfg.NodeID.Hex()); e != nil {
-			cancel()
-			_ = m.cleanupLocked()
-			return fmt.Errorf("mesh: 盲中继配置无效: %w", e)
-		}
-		m.roomHash = roomHash
-		m.mu.Unlock()
-		room, e := m.dialWssRoom(runCtx)
-		m.mu.Lock()
-		if runCtx.Err() != nil {
-			if room != nil {
-				_ = room.Close()
-			}
-			cancel()
-			_ = m.cleanupLocked()
-			return fmt.Errorf("mesh: 启动已取消")
-		}
-		if e != nil {
-			if m.cfg.Verbose {
-				log.Printf("[mesh] 首次连接盲中继失败，将后台重试: %v", e)
-			}
-		} else {
-			m.installWssRoomLocked(runCtx, room, true)
-		}
-		m.wg.Add(1)
-		go m.reconnectWssRoom(runCtx)
-		m.wg.Add(1)
-		go m.roomGossipLoop(runCtx)
+		m.probes.SetPeer(p.NodeID, seedAddrs[p.NodeID])
 	}
 	// 阶段 2：降级控制器（启用自动降级或盲中继房间时）
 	if m.cfg.EnableDegrade || m.cfg.RelayDomain != "" {
@@ -367,16 +336,18 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 			m.degrade.AddPeer(p.NodeID, p.Addr)
 		}
 		m.degrade.SetSharedWssRoomRequired(m.cfg.RelayDomain != "")
-		m.degrade.SetWssRoom(m.room)
-		if m.room != nil {
-			for id := range m.peerStatic {
-				m.degrade.SetActiveKind(id, TransportWSS)
-			}
-		}
 		// switchFn：切换 active link（nil kind=UDP 表示恢复原始 UDP link）
 		m.degrade.SetSwitchFn(func(peer NodeID, link PeerLink, kind TransportKind) {
 			m.mu.Lock()
+			if runCtx.Err() != nil || m.degrade.IsDirectLocked(peer) {
+				m.mu.Unlock()
+				return
+			}
 			if kind == TransportWSS {
+				if shared, ok := link.(*WssRoomPeer); ok && shared.room != m.room {
+					m.mu.Unlock()
+					return
+				}
 				if link != nil {
 					m.links[peer] = link
 				}
@@ -392,8 +363,7 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 			}
 			// ⚠️ 关键：切换链路后必须**重启该 peer 的接收循环**，否则旧循环还绑在
 			// 原来的 UDP link 上，WSS 上收到的握手帧永远没人读（handshakeOK 恒 0）。
-			m.stopRecvLoop(peer)
-			m.startRecvLoop(runCtx, peer, active)
+			m.syncRecvLoops(runCtx)
 			// 新链路上重发 Init（打洞/中继建立后双方都需要重新握手）。
 			if _, ok := m.fsm.Session(peer); !ok {
 				if pub := m.peerStaticKey(peer); len(pub) == 32 {
@@ -403,23 +373,22 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 			// ⚠️ 切到 WSS（中继）后必须主动打洞：
 			// 若会话最初在 UDP 阶段建立，onEstablished 回调时 link 还不是 relayed，
 			// 那次不会触发 startPunch；而 UDP 不通才降级到 WSS，正是最需要打洞的时候。
-			if kind == TransportWSS && !m.roomConfigured() {
-				go m.startPunch(peer, active)
+			if kind == TransportWSS && m.fsm.HasSession(peer) {
+				m.startPunch(peer, active)
 			}
 			if m.cfg.Verbose {
 				log.Printf("[mesh] 链路切换完成 peer=%x kind=%v，接收循环已重启", peer[:4], kind)
 			}
 		})
-		m.degrade.SetCloseWssFn(func(peer NodeID) {
-			m.mu.Lock()
-			defer m.mu.Unlock()
-			// 旧 WSS 由 controller 内部关闭；这里只清 active 引用（若有）
-		})
 	}
 
 	// onIncoming：新 peer 自动建 link
-	onIncoming = func(id NodeID, addr *net.UDPAddr) {
+	m.hub.setIncomingHandler(func(id NodeID, addr *net.UDPAddr) {
 		m.mu.Lock()
+		if runCtx.Err() != nil || m.isVirtualMeshIP(addr.IP) {
+			m.mu.Unlock()
+			return
+		}
 		isNew := false
 		if cur, ok := m.links[id]; !ok {
 			m.links[id] = m.hub.LinkTo(addr)
@@ -455,16 +424,24 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 					Src: m.cfg.NodeID, Dst: broadcast, Payload: payload,
 				}).Encode()
 				if err == nil {
-					_ = link.Send(context.Background(), frame)
+					_ = link.Send(runCtx, frame)
 				}
 			}()
 		}
-	}
+	})
 
 	// 6. 起收发循环
 	m.wg.Add(2)
 	go m.tunToPeersLoop(runCtx)
 	go m.peersToTunLoop(runCtx)
+	if configurer, ok := m.tun.(interface{ configureNetwork(context.Context) }); ok {
+		m.wg.Go(func() { configurer.configureNetwork(runCtx) })
+	}
+	if m.roomConfigured() {
+		m.wg.Go(func() { m.reconnectWssRoom(runCtx, dialRoom) })
+		m.wg.Add(1)
+		go m.roomGossipLoop(runCtx)
+	}
 
 	// 6.0a STUN 探测（后台异步，失败只记状态）：跨 NAT 的第一步。
 	// 必须复用 m.hub 的 socket —— 换 socket 会拿到不同 NAT 映射，打洞端口对不上。
@@ -480,6 +457,9 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 		timeout := time.Duration(m.cfg.StunProbeTimeoutMS) * time.Millisecond
 		// 第一轮 IPv4：NAT 类型语义只对 v4 有意义（对称/锥形）。
 		nat4 := DiscoverNatFamily(runCtx, m.hub, m.cfg.StunServers, timeout, 4)
+		m.natMu.Lock()
+		m.nat = nat4
+		m.natMu.Unlock()
 		// 第二轮 IPv6：只为了拿反射地址（无 NAT 即本机全球地址），
 		// 它是「免端口映射直连」的直接依据。失败不降级也不报错。
 		nat6 := DiscoverNatFamily(runCtx, m.hub, m.cfg.StunServers, timeout, 6)
@@ -526,15 +506,7 @@ func (m *meshLifecycle) Start(ctx context.Context) error {
 		}
 	})
 
-	// 服务器中继：启动注册 + 心跳（兜底链路，独立于盲中继 WSS）。
-	// relayCtx 必须先注入：心跳 goroutine 会拿它做退出信号（漏了就 nil.Done() 崩进程）。
-	m.relayCtx = runCtx
-	spawnRelayClients(runCtx, m.hub, m.cfg.NodeID, m.cfg.RelayServers, DeriveRoomTag(psk), m.cfg.Verbose, func(addr string) bool {
-		m.relayHbMu.Lock()
-		ok := m.relayAccepted[addr]
-		m.relayHbMu.Unlock()
-		return ok
-	})
+	m.spawnRelayClients(runCtx, DeriveRoomTag(psk))
 
 	// 6a. 启动即主动握手：UDP 无连接，双方都只「等对方先发包」就会永远无事发生。
 	// 小 NodeId 一方作为发起方直接发 Init（对齐 FSM 的破对称角色），
@@ -718,26 +690,27 @@ func (m *meshLifecycle) dialWssRoom(ctx context.Context) (*WssRoom, error) {
 	return NewWssRoom(conn, m.cfg.NodeID), nil
 }
 
-// installWssRoomLocked is called with m.mu held.
-func (m *meshLifecycle) installWssRoomLocked(ctx context.Context, room *WssRoom, preferRelay bool) {
+// installWssRoomLocked 只更新链路引用，不在状态锁内执行网络 I/O。
+func (m *meshLifecycle) installWssRoomLocked(ctx context.Context, room *WssRoom) []NodeID {
 	m.room = room
+	var relayed []NodeID
 	if m.degrade != nil {
 		m.degrade.SetWssRoom(room)
 	}
 	for id := range m.peerStatic {
 		current := m.links[id]
-		if preferRelay || current == nil || current.IsRelayed() {
-			m.links[id] = room.Link(id)
-			if m.degrade != nil {
-				m.degrade.SetActiveKind(id, TransportWSS)
-			}
-		} else if m.degrade != nil {
-			m.degrade.SetActiveKind(id, TransportUDP)
+		if current != nil && !current.IsRelayed() && m.fsm.HasSession(id) {
+			continue
+		}
+		m.links[id] = room.Link(id)
+		relayed = append(relayed, id)
+		if m.degrade != nil {
+			m.degrade.AddPeerWithoutUDP(id, TransportWSS)
 		}
 	}
 	room.SetPeerHandler(func(id NodeID, link PeerLink) {
 		m.mu.Lock()
-		if id == m.cfg.NodeID {
+		if ctx.Err() != nil || m.room != room || id == m.cfg.NodeID {
 			m.mu.Unlock()
 			return
 		}
@@ -747,63 +720,50 @@ func (m *meshLifecycle) installWssRoomLocked(ctx context.Context, room *WssRoom,
 		m.mu.Unlock()
 	})
 	room.Start(ctx)
-	if m.gossip != nil {
-		if payload, err := m.gossip.GossipMessageBytes(); err == nil {
-			frame, err := (&Frame{
-				Version: WireVersionDefault, Type: MsgGossip, TTL: DefaultTTL,
-				Src: m.cfg.NodeID, Dst: broadcastNodeID(), Payload: payload,
-			}).Encode()
-			if err == nil {
-				_ = room.Link(m.cfg.NodeID).Send(ctx, frame)
-			}
-		}
-	}
+	return relayed
 }
 
-func (m *meshLifecycle) reconnectWssRoom(ctx context.Context) {
-	defer m.wg.Done()
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		m.mu.Lock()
-		room := m.room
-		active := m.running
-		m.mu.Unlock()
-		if !active {
-			return
-		}
-		if room != nil {
-			select {
-			case <-room.done:
-			default:
-				continue
-			}
-		}
-		next, err := m.dialWssRoom(ctx)
+func (m *meshLifecycle) reconnectWssRoom(ctx context.Context, dialRoom func(context.Context) (*WssRoom, error)) {
+	for ctx.Err() == nil {
+		next, err := dialRoom(ctx)
 		if err != nil {
 			if m.cfg.Verbose && ctx.Err() == nil {
-				log.Printf("[mesh] 盲中继重连失败: %v", err)
+				log.Printf("[mesh] 连接盲中继失败，将重试: %v", err)
 			}
-			continue
-		}
-		m.mu.Lock()
-		if ctx.Err() != nil {
+		} else {
+			m.mu.Lock()
+			if ctx.Err() != nil {
+				m.mu.Unlock()
+				_ = next.Close()
+				return
+			}
+			old := m.room
+			relayed := m.installWssRoomLocked(ctx, next)
 			m.mu.Unlock()
-			_ = next.Close()
+			if old != nil {
+				_ = old.Close()
+			}
+			m.syncRecvLoops(ctx)
+			m.sendRoomGossip(ctx, next)
+			for _, id := range relayed {
+				if m.fsm.HasSession(id) {
+					m.startPunch(id, next.Link(id))
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-next.done:
+				m.resumeUDPRelay(ctx)
+			}
+		}
+		timer := time.NewTimer(5 * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
 			return
+		case <-timer.C:
 		}
-		old := m.room
-		m.installWssRoomLocked(ctx, next, false)
-		m.mu.Unlock()
-		if old != nil {
-			_ = old.Close()
-		}
-		m.syncRecvLoops(ctx)
 	}
 }
 
@@ -820,20 +780,24 @@ func (m *meshLifecycle) roomGossipLoop(ctx context.Context) {
 		m.mu.Lock()
 		room := m.room
 		m.mu.Unlock()
-		if room == nil || m.gossip == nil {
-			continue
-		}
-		payload, err := m.gossip.GossipMessageBytes()
-		if err != nil {
-			continue
-		}
-		frame, err := (&Frame{
-			Version: WireVersionDefault, Type: MsgGossip, TTL: DefaultTTL,
-			Src: m.cfg.NodeID, Dst: broadcastNodeID(), Payload: payload,
-		}).Encode()
-		if err == nil {
-			_ = room.Link(m.cfg.NodeID).Send(ctx, frame)
-		}
+		m.sendRoomGossip(ctx, room)
+	}
+}
+
+func (m *meshLifecycle) sendRoomGossip(ctx context.Context, room *WssRoom) {
+	if room == nil || m.gossip == nil {
+		return
+	}
+	payload, err := m.gossip.GossipMessageBytes()
+	if err != nil {
+		return
+	}
+	frame, err := (&Frame{
+		Version: WireVersionDefault, Type: MsgGossip, TTL: DefaultTTL,
+		Src: m.cfg.NodeID, Dst: broadcastNodeID(), Payload: payload,
+	}).Encode()
+	if err == nil {
+		_ = room.Link(m.cfg.NodeID).Send(ctx, frame)
 	}
 }
 
@@ -920,7 +884,6 @@ func (m *meshLifecycle) peersToTunLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			m.stopAllRecvLoops()
 			return
 		case <-ticker.C:
 			m.syncRecvLoops(ctx)
@@ -931,28 +894,20 @@ func (m *meshLifecycle) peersToTunLoop(ctx context.Context) {
 // syncRecvLoops 对比 m.links 与 recvLoops，起新停旧。
 func (m *meshLifecycle) syncRecvLoops(ctx context.Context) {
 	m.mu.Lock()
-	type pair struct {
-		id   NodeID
-		link PeerLink
+	defer m.mu.Unlock()
+	if ctx.Err() != nil {
+		return
 	}
-	var start []pair
-	var stop []NodeID
 	for id, link := range m.links {
-		loop := m.recvLoops[id]
-		if loop == nil || loop.link != link {
-			if loop != nil {
-				stop = append(stop, id)
+		if loop := m.recvLoops[id]; loop != nil {
+			if loop.link == link {
+				continue
 			}
-			start = append(start, pair{id, link})
+			loop.cancel()
 		}
-	}
-	m.mu.Unlock()
-
-	for _, id := range stop {
-		m.stopRecvLoop(id)
-	}
-	for _, p := range start {
-		m.startRecvLoop(ctx, p.id, p.link)
+		loopCtx, cancel := context.WithCancel(ctx)
+		m.recvLoops[id] = &recvLoop{link: link, cancel: cancel}
+		m.wg.Go(func() { m.recvFromPeer(loopCtx, id, link) })
 	}
 }
 
@@ -1031,7 +986,7 @@ func (m *meshLifecycle) registerDiscoveredPeer(d NodeDescriptor) {
 	if vip != nil {
 		m.vipTable.Add(vip, d.NodeID)
 	}
-	if m.degrade != nil && link != nil && link.IsRelayed() {
+	if m.degrade != nil && peerTransportName(link) == "wss" {
 		m.degrade.AddPeerWithoutUDP(d.NodeID, TransportWSS)
 	}
 	if lessNodeID(m.cfg.NodeID, d.NodeID) {
@@ -1041,169 +996,118 @@ func (m *meshLifecycle) registerDiscoveredPeer(d NodeDescriptor) {
 	}
 }
 
-func (m *meshLifecycle) startRecvLoop(ctx context.Context, id NodeID, link PeerLink) {
-	loopCtx, cancel := context.WithCancel(ctx)
-	loop := &recvLoop{link: link, cancel: cancel, done: make(chan struct{})}
-	m.mu.Lock()
-	if existing := m.recvLoops[id]; existing != nil && existing.link == link {
-		m.mu.Unlock()
-		cancel()
-		return
-	}
-	m.recvLoops[id] = loop
-	m.mu.Unlock()
-	go func() {
-		defer close(loop.done)
-		for {
-			select {
-			case <-loopCtx.Done():
-				return
-			default:
-			}
-			frame, err := link.Recv(loopCtx)
-			if err != nil || len(frame) == 0 {
-				if err != nil && loopCtx.Err() == nil {
-					time.Sleep(10 * time.Millisecond)
-				}
-				continue
-			}
-			parsed, err := Decode(frame)
-			if err != nil {
-				continue
-			}
-			m.rxFrames.Add(1)
-			// 任何从该 peer 链路成功解出的帧都是「链路活着」的证据 —— 不能只在
-			// Decapsulate 成功后才 markOKRx：经中继的链路在没有业务数据时只有周期
-			// Gossip，面板会一直显示「已断开（无响应）」而实际 ping 全通（真机）。
-			// 只认本循环所属的 peer（不用帧头 src，避免同房间冒名改写别人状态）。
-			m.markOKRx(id)
-			// 解码成功才学习版本（v1 已过 buf[5]==0 校验）；伪造帧最多让本机降级。
-			m.learnWireVersion(parsed.Src, parsed.Version)
-			// HolePunch 在 UDP 上由 UdpHub 的独立观察通道处理；但在 WSS 房间里
-			// 没有 UDP 源地址，必须在链路 recv 循环里处理 PunchReq/PunchReply，
-			// 否则「经 WSS 的中继会话」永远无法发起打洞（真机症状：一直中继）。
-			// 探测类帧（PunchProbe/Ack）仍要求真实 UDP 源地址，handlePunch 会忽略 nil remote。
-			if parsed.Type == MsgHolePunch {
-				m.handlePunch(parsed.Src, parsed, nil)
-				continue
-			}
-			if parsed.Type == MsgRelayMgmt {
-				continue
-			}
-			if parsed.Type == MsgHandshake {
-				if _, err := m.fsm.OnFrame(frame); err != nil && m.cfg.Verbose {
-					log.Printf("[mesh] 握手帧处理失败: %v", err)
-				}
-				continue
-			}
-			if parsed.Type == MsgGossip {
-				if m.gossip != nil {
-					added, gerr := m.gossip.OnGossip(parsed.Payload)
-					if gerr != nil && m.cfg.Verbose {
-						log.Printf("[mesh] Gossip 处理失败: %v", gerr)
-					}
-					// 动态登记发现的对端虚拟 IP（一次链接双向自动发现的核心）
-					for _, d := range added {
-						m.registerDiscoveredPeer(d)
-						if m.cfg.Verbose {
-							log.Printf("[mesh] 发现对端 %s → %s", d.NodeID.Hex(), d.VirtualIPv4)
-						}
-					}
-				}
-				continue
-			}
-			if parsed.Type == MsgUdpProbe {
-				if m.probes != nil {
-					_, _ = m.probes.OnProbeFrame(loopCtx, frame)
-				}
-				continue
-			}
-			var sess *Session
-			for _, pid := range []NodeID{parsed.Src, id} {
-				if s, ok := m.fsm.Session(pid); ok {
-					sess = s
-					break
-				}
-			}
-			if sess == nil {
-				continue
-			}
-			packet, err := Decapsulate(frame, m.cfg.NodeID, sess)
-			if err != nil {
-				continue
-			}
-			m.markOKRx(parsed.Src)
-			_ = m.tun.Send(loopCtx, packet)
-		}
-	}()
-}
-
-func (m *meshLifecycle) stopRecvLoop(id NodeID) {
-	m.mu.Lock()
-	loop := m.recvLoops[id]
-	delete(m.recvLoops, id)
-	m.mu.Unlock()
-	if loop != nil {
-		loop.cancel()
+func (m *meshLifecycle) recvFromPeer(loopCtx context.Context, id NodeID, link PeerLink) {
+	for {
 		select {
-		case <-loop.done:
-		case <-time.After(2 * time.Second):
+		case <-loopCtx.Done():
+			return
+		default:
 		}
-	}
-}
-
-func (m *meshLifecycle) stopAllRecvLoops() {
-	m.mu.Lock()
-	ids := make([]NodeID, 0, len(m.recvLoops))
-	for id := range m.recvLoops {
-		ids = append(ids, id)
-	}
-	m.mu.Unlock()
-	for _, id := range ids {
-		m.stopRecvLoop(id)
+		frame, err := link.Recv(loopCtx)
+		if loopCtx.Err() != nil {
+			return
+		}
+		if err != nil || len(frame) == 0 {
+			if err != nil && loopCtx.Err() == nil {
+				time.Sleep(10 * time.Millisecond)
+			}
+			continue
+		}
+		parsed, err := Decode(frame)
+		if err != nil {
+			continue
+		}
+		m.rxFrames.Add(1)
+		// 任何从该 peer 链路成功解出的帧都是「链路活着」的证据 —— 不能只在
+		// Decapsulate 成功后才 markOKRx：经中继的链路在没有业务数据时只有周期
+		// Gossip，面板会一直显示「已断开（无响应）」而实际 ping 全通（真机）。
+		// 只认本循环所属的 peer（不用帧头 src，避免同房间冒名改写别人状态）。
+		m.markOKRx(id)
+		// 解码成功才学习版本（v1 已过 buf[5]==0 校验）；伪造帧最多让本机降级。
+		m.learnWireVersion(parsed.Src, parsed.Version)
+		// HolePunch 在 UDP 上由 UdpHub 的独立观察通道处理；但在 WSS 房间里
+		// 没有 UDP 源地址，必须在链路 recv 循环里处理 PunchReq/PunchReply，
+		// 否则「经 WSS 的中继会话」永远无法发起打洞（真机症状：一直中继）。
+		// 探测类帧（PunchProbe/Ack）仍要求真实 UDP 源地址，handlePunch 会忽略 nil remote。
+		if parsed.Type == MsgHolePunch {
+			m.handlePunch(parsed.Src, parsed, nil)
+			continue
+		}
+		if parsed.Type == MsgRelayMgmt {
+			continue
+		}
+		if parsed.Type == MsgHandshake {
+			if _, err := m.fsm.OnFrame(frame); err != nil && m.cfg.Verbose {
+				log.Printf("[mesh] 握手帧处理失败: %v", err)
+			}
+			continue
+		}
+		if parsed.Type == MsgGossip {
+			if m.gossip != nil {
+				added, gerr := m.gossip.OnGossip(parsed.Payload)
+				if gerr != nil && m.cfg.Verbose {
+					log.Printf("[mesh] Gossip 处理失败: %v", gerr)
+				}
+				// 动态登记发现的对端虚拟 IP（一次链接双向自动发现的核心）
+				for _, d := range added {
+					m.registerDiscoveredPeer(d)
+					if m.cfg.Verbose {
+						log.Printf("[mesh] 发现对端 %s → %s", d.NodeID.Hex(), d.VirtualIPv4)
+					}
+				}
+			}
+			continue
+		}
+		if parsed.Type == MsgUdpProbe {
+			if m.probes != nil {
+				_, _ = m.probes.OnProbeFrame(loopCtx, frame)
+			}
+			continue
+		}
+		var sess *Session
+		for _, pid := range []NodeID{parsed.Src, id} {
+			if s, ok := m.fsm.Session(pid); ok {
+				sess = s
+				break
+			}
+		}
+		if sess == nil {
+			continue
+		}
+		packet, err := Decapsulate(frame, m.cfg.NodeID, sess)
+		if err != nil {
+			continue
+		}
+		m.markOKRx(parsed.Src)
+		_ = m.tun.Send(loopCtx, packet)
 	}
 }
 
 func (m *meshLifecycle) Stop() error {
-	// ⚠️ 不能持 m.mu 等待：退出路径（peersToTunLoop 的 stopAllRecvLoops、
-	// stopRecvLoop）都要拿同一把锁 ⇒ 持锁 wg.Wait() 必然死锁
-	// （真机实测：面板点「停止组网」后 /api/mesh/stop 永久挂起）。
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
 	m.mu.Lock()
-	if m.starting {
-		done := m.startDone
-		cancel := m.cancel
-		m.mu.Unlock()
-		if cancel != nil {
-			cancel()
-		}
-		if done != nil {
-			<-done
-		}
-		return m.Stop()
-	}
 	if !m.running {
 		m.mu.Unlock()
 		return nil
 	}
-	tun, hub, cancel, degrade := m.tun, m.hub, m.cancel, m.degrade
+	tun, hub, degrade := m.tun, m.hub, m.degrade
 	room := m.room
+	m.cancel()
 	m.mu.Unlock()
 
-	if cancel != nil {
-		cancel()
-	}
-	if degrade != nil {
-		degrade.Stop()
-	}
+	// 关闭传输以唤醒尚在读写的任务，再等待退出，期间不持状态锁。
 	if room != nil {
 		_ = room.Close()
 	}
-	// 先关设备再 Wait：读循环阻塞在 TUN 读上，只有 Close 才能让它返回。
+	if hub != nil {
+		_ = hub.Close()
+	}
 	if tun != nil {
 		_ = tun.Close()
 	}
-	if hub != nil {
-		_ = hub.Close()
+	if degrade != nil {
+		degrade.Stop()
 	}
 	m.wg.Wait()
 
@@ -1213,26 +1117,9 @@ func (m *meshLifecycle) Stop() error {
 	m.hub = nil
 	m.room = nil
 	m.links = nil
+	m.recvLoops = nil
+	m.degrade = nil
 	m.mu.Unlock()
-	return nil
-}
-
-func (m *meshLifecycle) cleanupLocked() error {
-	m.running = false
-	if m.room != nil {
-		_ = m.room.Close()
-		m.room = nil
-	}
-	if m.tun != nil {
-		_ = m.tun.Close()
-		m.tun = nil
-	}
-	if m.hub != nil {
-		_ = m.hub.Close()
-		m.hub = nil
-	}
-	m.links = nil
-	m.peerStatic = nil
 	return nil
 }
 
@@ -1334,7 +1221,7 @@ func (m *meshLifecycle) Status() Status {
 		}
 		// 传输档位：经中继转发 / 降级到 WSS 都要明确标出来
 		// （直连假活、却其实走中继时，用户最需要看这个）。
-		p.Via = peerTransportName(m.links[id], m.peerTransportKind(id))
+		p.Via = peerTransportName(m.links[id])
 		p.PunchState, p.PunchKind = m.punchState(id)
 		if p.PunchKind == "port-predict" {
 			// 硬对称扫描由状态机在探测阶段内部执行，当前用 stun + 端口预测概括。
@@ -1357,21 +1244,17 @@ func (m *meshLifecycle) Status() Status {
 	return st
 }
 
-func (m *meshLifecycle) peerTransportKind(id NodeID) TransportKind {
-	if m.degrade == nil {
-		return TransportUDP
-	}
-	return m.degrade.Kind(id)
-}
-
-func peerTransportName(link PeerLink, kind TransportKind) string {
-	if kind == TransportWSS {
+func peerTransportName(link PeerLink) string {
+	switch link.(type) {
+	case nil:
+		return ""
+	case *WssRoomPeer, *WssLink:
 		return "wss"
 	}
-	if link != nil && link.IsRelayed() {
+	if link.IsRelayed() {
 		return "relay"
 	}
-	if a := link.PeerAddr(); a != nil && a.IP.To4() == nil {
+	if addr := link.PeerAddr(); addr != nil && addr.IP.To4() == nil {
 		return "udp6"
 	}
 	return "udp4"

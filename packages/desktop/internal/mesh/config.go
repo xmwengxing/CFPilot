@@ -147,6 +147,9 @@ func (c *Config) Validate() error {
 	if c.Listen == "" {
 		c.Listen = "0.0.0.0:51820"
 	}
+	if _, _, err := net.SplitHostPort(c.Listen); err != nil {
+		return fmt.Errorf("mesh config: UDP 监听需填写地址和端口")
+	}
 	if c.VirtualIP == "" {
 		return fmt.Errorf("mesh config: VirtualIP 不能为空")
 	}
@@ -207,6 +210,23 @@ func (c *Config) Validate() error {
 	}
 	if len(c.IdentitySeed) > 0 && len(c.IdentitySeed) != 32 {
 		return fmt.Errorf("mesh config: IdentitySeed 必须 32 字节，实际 %d", len(c.IdentitySeed))
+	}
+	c.RelayDomain = strings.TrimSpace(c.RelayDomain)
+	if c.RelayDomain != "" {
+		if len(c.IdentitySeed) != 32 || len(c.TunnelPrivate) != 32 {
+			return fmt.Errorf("mesh: 盲中继自动发现需要本机身份密钥")
+		}
+		room := ResolveRelayRoomHash(c.RelayRoom, DerivePSK(c.NetworkName, c.PSK))
+		uri, err := RelayRoomURL(c.RelayDomain, room, c.NodeID.Hex())
+		if err != nil {
+			return fmt.Errorf("mesh: 盲中继房间无效: %w", err)
+		}
+		if strings.ContainsAny(c.RelayDomain, "/?#@") {
+			return fmt.Errorf("mesh: 盲中继需填写域名，可附带端口")
+		}
+		if _, err := ParseWsUrl(uri); err != nil {
+			return fmt.Errorf("mesh: 盲中继域名或端口无效")
+		}
 	}
 	// 专用中继条目：NodeID 必须是 16 hex，Addr 必须是 host:port；token 可空（盲中继除外）
 	for i, r := range c.RelayServers {

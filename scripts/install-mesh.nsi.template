@@ -63,18 +63,21 @@ Section "主程序" Main
   File "EXE_SOURCE_PLACEHOLDER"
   File "MESHD_SOURCE_PLACEHOLDER"
 
+  ; 先准备 wintun.dll，服务启动时可能立即恢复上次的组网。
+  DetailPrint "正在下载并校验 wintun.dll（官方源 + SHA256）…"
+  ClearErrors
+  ExecWait '"$INSTDIR\${EXE_NAME}" --fetch-wintun "$INSTDIR"' $0
+  IfErrors dllfail
+  IntCmp $0 0 dllok
+  dllfail:
+    MessageBox MB_ICONSTOP "wintun.dll 下载/校验失败，安装中止。请检查网络后重试。"
+    Abort
+  dllok:
+
   ; 注册提权守护进程为 Windows 服务（LocalSystem 权限，面板/托盘通过本地 API 控制）
   ; --install 会先删除旧服务再按当前路径重建，保证升级后跑的是新二进制。
   ExecWait '"$INSTDIR\${MESHD_NAME}" --install'
   ExecWait 'net start CFPilotMesh'
-
-  ; 提权下载并校验 wintun.dll（calling cfpilot 内置命令）
-  DetailPrint "正在下载并校验 wintun.dll（官方源 + SHA256）…"
-  ExecWait '"$INSTDIR\${EXE_NAME}" --fetch-wintun "$INSTDIR"' $0
-  IntCmp $0 0 dllok
-    MessageBox MB_ICONSTOP "wintun.dll 下载/校验失败，安装中止。请检查网络后重试。"
-    Abort
-  dllok:
 
   ; 开始菜单 + 桌面快捷方式（用用户选的 $INSTDIR，支持自定义路径）
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
@@ -101,6 +104,10 @@ Section "Uninstall"
   ; 停止并卸载提权守护服务
   ExecWait 'net stop CFPilotMesh'
   ExecWait '"$INSTDIR\${MESHD_NAME}" --uninstall'
+  ; 删除 CFPilot 虚拟网卡入站放行规则（规则由提权服务在启动时幂等创建）
+  nsExec::ExecToStack /TIMEOUT=10000 `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "Remove-NetFirewallRule -DisplayName 'CFPilot Mesh Interface Inbound' -ErrorAction SilentlyContinue"`
+  Pop $0
+  Pop $1
   Delete "$INSTDIR\${EXE_NAME}"
   Delete "$INSTDIR\${MESHD_NAME}"
   Delete "$INSTDIR\wintun.dll"

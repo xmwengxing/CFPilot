@@ -102,7 +102,7 @@ func TestBuildInviteSuggestsSameSubnet(t *testing.T) {
 }
 
 func TestReachableInterfaceFilters(t *testing.T) {
-	for _, name := range []string{"cfpilot0", "easytier0", "Wintun", "vEthernet", "vmnet1"} {
+	for _, name := range []string{"cfpilot0", "easytier0", "et_2_grrk", "ET_2_GRRK", "Wintun", "vEthernet", "vmnet1"} {
 		if reachableInterfaceName(name) {
 			t.Errorf("虚拟网卡 %q 不应作为邀请地址来源", name)
 		}
@@ -126,6 +126,18 @@ func TestBuildInviteKeepsExplicitAddr(t *testing.T) {
 	got, _ := ParseInvite(uri)
 	if got.Addr != "1.2.3.4:51820" {
 		t.Errorf("用户填写的具体地址不应被替换，实际 %q", got.Addr)
+	}
+}
+
+func TestInviteAddressPrefersGlobalIPv6AndFallsBackToLAN(t *testing.T) {
+	ula := net.ParseIP("fd12::7")
+	lan := net.ParseIP("192.168.1.7")
+	global := net.ParseIP("2001:db8::7")
+	if got := inviteListenAddr("0.0.0.0:51820", "51820", []net.IP{ula, lan, global}); got != "[2001:db8::7]:51820" {
+		t.Fatalf("全球 IPv6 候选应优先，实际 %q", got)
+	}
+	if got := inviteListenAddr("0.0.0.0:51820", "51820", []net.IP{ula, lan}); got != "192.168.1.7:51820" {
+		t.Fatalf("无全球 IPv6 时应选择局域网 IPv4，实际 %q", got)
 	}
 }
 

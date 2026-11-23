@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"sync"
 	"syscall"
 	"time"
@@ -26,6 +27,51 @@ import (
 // 这样 IPv6 侧可以免端口映射直连（运营商 CGNAT 下的唯一出路），IPv4 侧仍走原路径。
 
 const hubQueueSize = 4096 // hub.rs:445
+
+func resolveMeshUDPAddr(ctx context.Context, family int, endpoint string) (*net.UDPAddr, error) {
+	host, service, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	port, err := net.DefaultResolver.LookupPort(ctx, "udp", service)
+	if err != nil {
+		return nil, err
+	}
+	if host == "" {
+		return &net.UDPAddr{Port: port}, nil
+	}
+	if literal, err := netip.ParseAddr(host); err == nil {
+		literal = literal.Unmap()
+		if (family == 4 && !literal.Is4()) || (family == 6 && !literal.Is6()) {
+			return nil, fmt.Errorf("UDP 地址族不匹配")
+		}
+		return &net.UDPAddr{IP: literal.AsSlice(), Port: port, Zone: literal.Zone()}, nil
+	}
+	network := "ip"
+	switch family {
+	case 4:
+		network = "ip4"
+	case 6:
+		network = "ip6"
+	}
+	addresses, err := net.DefaultResolver.LookupNetIP(ctx, network, host)
+	if err != nil {
+		return nil, err
+	}
+	if len(addresses) == 0 {
+		return nil, fmt.Errorf("未解析到 UDP 地址")
+	}
+	address := addresses[0]
+	if family == 0 {
+		for _, candidate := range addresses {
+			if candidate.Unmap().Is4() {
+				address = candidate.Unmap()
+				break
+			}
+		}
+	}
+	return &net.UDPAddr{IP: address.AsSlice(), Port: port}, nil
+}
 
 // UdpHub 管理单 socket 与多个 peer 的链路。
 type UdpHub struct {
@@ -235,6 +281,12 @@ func (h *UdpHub) SetProbeHandler(fn func([]byte)) {
 	h.mu.Unlock()
 }
 
+func (h *UdpHub) setIncomingHandler(fn func(NodeID, *net.UDPAddr)) {
+	h.mu.Lock()
+	h.onIncoming = fn
+	h.mu.Unlock()
+}
+
 // SetRawHandler 设置「非 MobiHop 帧」的原始报文回调（STUN 响应用）。
 func (h *UdpHub) SetRawHandler(fn func([]byte)) {
 	h.mu.Lock()
@@ -272,6 +324,9 @@ func (h *UdpHub) dispatch(remote *net.UDPAddr, frame []byte) {
 		h.mu.RUnlock()
 		if ctrl != nil {
 			ctrl(remote, frame)
+			if frame[2] == byte(MsgHolePunch) {
+				return
+			}
 		}
 	}
 	// 0x08 UdpProbe 直接交探针跟踪器（对齐 UdpHub.observe_probes），不进 peer 队列，
@@ -347,10 +402,11 @@ func (h *UdpHub) dispatch(remote *net.UDPAddr, frame []byte) {
 	}
 	// 直连帧证明该对端在此地址可达：按 NodeID 记为它的当前链路。
 	h.byNode[parsed.Src] = link
+	onIncoming := h.onIncoming
 	h.mu.Unlock()
 
-	if !exists && h.onIncoming != nil {
-		h.onIncoming(parsed.Src, remote)
+	if !exists && onIncoming != nil {
+		onIncoming(parsed.Src, remote)
 	}
 	select {
 	case link.rx <- frame:

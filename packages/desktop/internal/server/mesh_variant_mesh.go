@@ -7,10 +7,14 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
+	"net"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/mesh"
@@ -19,6 +23,8 @@ import (
 
 // meshdAddr 是提权守护进程的本地 API 地址（安装时注册为服务）。
 const meshdAddr = "http://127.0.0.1:19727"
+
+const wsaConnectionRefused = syscall.Errno(10061)
 
 // registerMeshControlRoutes 把面板/托盘的 mesh 控制请求转发到提权守护进程 meshd。
 //
@@ -294,8 +300,18 @@ func (s *Server) handleMeshInviteParse(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMeshProxy(w http.ResponseWriter, r *http.Request) {
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest(r.Method, meshdAddr+r.URL.Path, r.Body)
+	proxyMeshRequest(w, r, http.DefaultClient, meshdAddr)
+}
+
+func proxyMeshRequest(w http.ResponseWriter, r *http.Request, client *http.Client, addr string) {
+	limit := 5 * time.Second
+	isAction := r.Method == http.MethodPost && (r.URL.Path == mesh.APIMeshStart || r.URL.Path == mesh.APIMeshStop)
+	if isAction {
+		limit = mesh.DaemonActionTimeout
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), limit)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, r.Method, addr+r.URL.Path, r.Body)
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "构造请求失败: " + err.Error()})
 		return
@@ -303,26 +319,42 @@ func (s *Server) handleMeshProxy(w http.ResponseWriter, r *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		// 守护进程没装 / 没启动时，**状态接口**回一份「未运行」而不是 502。
-		//
-		// 面板每 2 秒轮询一次 /api/mesh/status，若这里回 5xx，日志页会被
-		// 「接口 GET /api/mesh/status 返回 502」刷满（真机反馈过）。
-		// 未运行是正常状态，不是服务器错误；「组网」页会把 note 显示出来。
-		if r.Method == http.MethodGet && r.URL.Path == mesh.APIMeshStatus {
+		var netErr net.Error
+		switch {
+		case r.Context().Err() != nil:
+			return
+		case errors.Is(err, context.DeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
+			msg := "组网服务响应超时"
+			if isAction {
+				msg = "组网服务响应超时，请查看当前组网状态"
+			}
+			writeJSON(w, http.StatusGatewayTimeout, mesh.ActionResult{Error: msg})
+		case errors.Is(err, syscall.ECONNREFUSED), runtime.GOOS == "windows" && errors.Is(err, wsaConnectionRefused):
+			const msg = "组网服务未运行，请检查 +mesh 安装与服务状态"
+			if r.Method != http.MethodGet || r.URL.Path != mesh.APIMeshStatus {
+				writeJSON(w, http.StatusServiceUnavailable, mesh.ActionResult{Error: msg})
+				return
+			}
 			writeJSON(w, http.StatusOK, map[string]any{
 				"running": false,
 				"daemon":  false,
-				"note":    "mesh 守护进程未运行（请用 +mesh 安装包安装并启动服务）",
+				"note":    msg,
 			})
-			return
+		default:
+			writeJSON(w, http.StatusBadGateway, mesh.ActionResult{Error: "无法读取组网服务响应"})
 		}
-		writeJSON(w, http.StatusBadGateway, map[string]any{
-			"error": "mesh 守护进程未运行（请先安装并启动 +mesh 服务）: " + err.Error(),
-		})
 		return
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			writeJSON(w, http.StatusGatewayTimeout, mesh.ActionResult{Error: "组网服务响应超时，请查看当前组网状态"})
+		} else if r.Context().Err() == nil {
+			writeJSON(w, http.StatusBadGateway, mesh.ActionResult{Error: "无法读取组网服务响应"})
+		}
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)

@@ -65,10 +65,11 @@ type Lifecycle interface {
 // 字段刻意保持精简且与协议无关：Phase 3b 内部实现变化时，
 // 这份对外快照尽量稳定，避免 UI / CLI 跟着改。
 type Status struct {
-	Running   bool   `json:"running"`
-	NodeID    string `json:"nodeId,omitempty"`
-	VirtualIP string `json:"virtualIp,omitempty"`
-	Network   string `json:"network,omitempty"`
+	Running    bool   `json:"running"`
+	Transition string `json:"transition,omitempty"`
+	NodeID     string `json:"nodeId,omitempty"`
+	VirtualIP  string `json:"virtualIp,omitempty"`
+	Network    string `json:"network,omitempty"`
 	// NatType / Reflexive 是 STUN 探测结果（Unknown / NAT3 / NAT4 + 公网映射）。
 	NatType   string `json:"natType,omitempty"`
 	Reflexive string `json:"reflexive,omitempty"`

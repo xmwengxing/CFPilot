@@ -2306,6 +2306,7 @@
                 <div class="pair"><label for="meshPsk" class="has-tip" data-tip="留空时，生成邀请链接会创建 256 位随机网络密钥。邀请链接含有此密钥，请勿公开分享。">网络密钥</label><input type="password" id="meshPsk" placeholder="生成邀请链接时自动创建" /></div>
                 <div class="pair"><label for="meshVirtualIp" class="has-tip" data-tip="留空时自动分配。所有节点必须在同一 /24 网段。">本机虚拟 IP</label><input type="text" id="meshVirtualIp" placeholder="生成邀请链接时自动分配" /></div>
                 <div class="pair"><label for="meshRelayDomain" class="has-tip" data-tip="【必填】WSS 盲中继域名。跨 NAT 场景下没有它基本连不上（直连往往不可达）。&#10;先在「部署」页部署盲中继，再点「填入组网配置」自动带入。&#10;示例：relay.example.com">盲中继域名 ⓘ</label><input type="text" id="meshRelayDomain" placeholder="部署盲中继后自动填入" /></div>
+                <input type="hidden" id="meshRelayRoom" />
               </div>
 
               <details class="fold">

@@ -70,6 +70,8 @@ type NatAssessment struct {
 	Reflexive6 string `json:"reflexive6,omitempty"`
 	// Observations 是各服务器的原始观测（诊断用）。
 	Observations []StunMapping `json:"observations,omitempty"`
+	// punchReflexive 仅供打洞使用：公网 IP 一致但端口变化时，保留一条观测供端口探测。
+	punchReflexive string
 }
 
 // looksLikeSTUN 判断一个 UDP 数据包是否是 STUN 报文（magic cookie 校验）。
@@ -202,13 +204,11 @@ func DiscoverNatFamily(ctx context.Context, hub *UdpHub, servers []string, timeo
 	if hub == nil || len(servers) == 0 {
 		return NatAssessment{Type: "Unknown"}
 	}
-	network := "udp4"
-	if family == 6 {
-		network = "udp6"
-	}
 	if timeout <= 0 {
 		timeout = DefaultStunProbeMS * time.Millisecond
 	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	type waiter struct {
 		ch chan StunMapping
@@ -249,22 +249,18 @@ func DiscoverNatFamily(ctx context.Context, hub *UdpHub, servers []string, timeo
 	var rmu sync.Mutex
 	for _, srv := range servers {
 		srv = strings.TrimSpace(srv)
-		addr, err := net.ResolveUDPAddr(network, srv)
-		if err != nil {
-			continue
-		}
-		if (family == 6) != (addr.IP.To4() == nil) {
-			continue // 该服务器没有对应地址族的记录：跳过，别用 v4 假装 v6
-		}
-		txid := randomTxID()
-		w := &waiter{ch: make(chan StunMapping, 1)}
-		mu.Lock()
-		waiters[txid] = w
-		mu.Unlock()
-
 		wg.Add(1)
-		go func(srv string, addr *net.UDPAddr, txid [12]byte, w *waiter) {
+		go func() {
 			defer wg.Done()
+			addr, err := resolveMeshUDPAddr(ctx, family, srv)
+			if err != nil || ctx.Err() != nil {
+				return
+			}
+			txid := randomTxID()
+			w := &waiter{ch: make(chan StunMapping, 1)}
+			mu.Lock()
+			waiters[txid] = w
+			mu.Unlock()
 			defer func() {
 				mu.Lock()
 				delete(waiters, txid)
@@ -279,10 +275,9 @@ func DiscoverNatFamily(ctx context.Context, hub *UdpHub, servers []string, timeo
 				rmu.Lock()
 				results = append(results, m)
 				rmu.Unlock()
-			case <-time.After(timeout):
 			case <-ctx.Done():
 			}
-		}(srv, addr, txid, w)
+		}()
 	}
 	wg.Wait()
 	return classifyMappings(results, family)
@@ -339,6 +334,7 @@ func classifyMappings(ms []StunMapping, family int) NatAssessment {
 	case !sameAddr:
 		// 同 IP 不同端口：对称 NAT
 		out.Type = "NAT4"
+		out.punchReflexive = first
 	default:
 		// 映射一致：锥形；未做 CHANGE-REQUEST 细分，保守 NAT3
 		out.Type = "NAT3"

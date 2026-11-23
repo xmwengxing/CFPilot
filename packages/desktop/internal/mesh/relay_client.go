@@ -18,12 +18,7 @@ import (
 //   - token 只以 BLAKE3(token) 摘要上线，原文不落盘/不进日志；
 //   - 收到 AuthAccept 后按 heartbeat_interval_ms 周期发 Heartbeat；
 //   - 注册失败/超时只记日志，不影响直连，中继是兜底不是必需。
-//
-// 本客户端维持「中继注册状态」（RelaySession），供上层选路把中继作为兜底 neck。
-// 它**不**替换 peer 的 PeerLink —— 那由 WSS 降级/打洞链路统一管理，避免两套机制打架。
-
-// relayRegisterIntervalMS 是注册重试间隔（未收到 AuthAccept 时）。
-const relayRegisterIntervalMS = 5000
+const relayRegisterInterval = 5 * time.Second
 
 // tokenHash 计算中继准入令牌摘要：BLAKE3(token_string)。
 // 对齐 MobiHop `blake3::hash(t.as_bytes())`。
@@ -32,19 +27,16 @@ func relayTokenHash(token string) []byte {
 	return h[:]
 }
 
-// RelaySession 是与一台中继的注册会话状态。
-type RelaySession struct {
-	NodeID              NodeID
-	Addr                string
-	SessionID           uint64
-	HeartbeatIntervalMS uint32
-	Seq                 uint64
-	registered          bool
+type relayEndpoint struct {
+	nodeID   NodeID
+	addr     *net.UDPAddr
+	accepted *RelayAuthAccept
+	changed  chan struct{}
 }
 
 // relayClient 管理所有已配置中继的注册与心跳。 向单台中继发送一次 Register 帧。
 func relayRegister(ctx context.Context, hub *UdpHub, selfID NodeID, srv RelayServerConfig, roomTag [8]byte) error {
-	addr, err := net.ResolveUDPAddr("udp", srv.Addr)
+	addr, err := resolveMeshUDPAddr(ctx, 0, srv.Addr)
 	if err != nil {
 		return err
 	}
@@ -82,23 +74,17 @@ func relayRegister(ctx context.Context, hub *UdpHub, selfID NodeID, srv RelaySer
 }
 
 // relayHeartbeat 发送一次心跳帧。
-func relayHeartbeat(ctx context.Context, hub *UdpHub, selfID NodeID, srv RelayServerConfig, sess *RelaySession) error {
-	addr, err := net.ResolveUDPAddr("udp", srv.Addr)
-	if err != nil {
-		return err
-	}
-	sess.Seq++
+func relayHeartbeat(ctx context.Context, hub *UdpHub, selfID, relayID NodeID, addr *net.UDPAddr, seq uint64) error {
 	msg := &RelayMessage{Heartbeat: &RelayHeartbeat{
-		NodeID: selfID, Seq: sess.Seq, SentAtMS: uint64(time.Now().UnixMilli()),
+		NodeID: selfID, Seq: seq, SentAtMS: uint64(time.Now().UnixMilli()),
 	}}
 	payload, err := EncodeRelayMessage(msg)
 	if err != nil {
 		return err
 	}
-	nid, _ := ParseNodeIDHex(srv.NodeID)
 	frame, err := (&Frame{
 		Version: WireVersionDefault, Type: MsgRelayMgmt, TTL: DefaultTTL,
-		Payload: payload, Src: selfID, Dst: nid,
+		Payload: payload, Src: selfID, Dst: relayID,
 	}).Encode()
 	if err != nil {
 		return err
@@ -107,193 +93,214 @@ func relayHeartbeat(ctx context.Context, hub *UdpHub, selfID NodeID, srv RelaySe
 }
 
 // handleRelayMgmt 处理 0x06 中继管理帧（由 UdpHub 观察通道调用）。
-// 主要处理 AuthAccept：记录会话 ID 与心跳间隔，之后按间隔发 Heartbeat。
 func (m *meshLifecycle) handleRelayMgmt(parsed *Frame, remote *net.UDPAddr) {
+	ctx := m.runCtx
+	remote = canonicalAddr(remote)
+	if ctx == nil || ctx.Err() != nil || remote == nil || parsed.Dst != m.cfg.NodeID {
+		return
+	}
+	m.relayMu.Lock()
+	endpoint := m.relayEndpoints[remote.String()]
+	if endpoint == nil || parsed.Src != endpoint.nodeID {
+		m.relayMu.Unlock()
+		return
+	}
 	msg, err := DecodeRelayMessage(parsed.Payload)
 	if err != nil {
+		m.relayMu.Unlock()
 		return
 	}
-	if msg.AuthAccept == nil {
-		// AuthReject：中继重启 / 会话被回收后，本端还留着「已准入」标记，
-		// 注册循环已停 ⇒ 只剩心跳被拒，永远回不到已准入状态（真机：中继重新部署后
-		// 两端都显示 via=relay 却全是死腿）。这里清掉标记，让注册循环恢复重试。
-		if msg.AuthReject != nil && remote != nil {
-			m.relayHbMu.Lock()
-			delete(m.relayAccepted, remote.String())
-			delete(m.relayHbStarted, remote.String())
-			m.relayHbMu.Unlock()
-			if m.cfg.Verbose {
-				log.Printf("[mesh] 中继拒绝会话（%v），恢复注册重试 %s", msg.AuthReject.Reason, remote)
-			}
+	var accept *RelayAuthAccept
+	switch {
+	case msg.AuthAccept != nil && msg.AuthAccept.NodeID == m.cfg.NodeID:
+		accept = msg.AuthAccept
+		if endpoint.accepted != nil && endpoint.accepted.SessionID == accept.SessionID {
+			m.relayMu.Unlock()
+			return
 		}
-		return // Register/Heartbeat 等由我们发出，收到即忽略
+		endpoint.accepted = accept
+	case msg.AuthReject != nil && msg.AuthReject.NodeID == m.cfg.NodeID:
+		if endpoint.accepted == nil {
+			m.relayMu.Unlock()
+			return
+		}
+		endpoint.accepted = nil
+	default:
+		m.relayMu.Unlock()
+		return
 	}
-	acc := msg.AuthAccept
-	// 记下“该中继已准入”，让注册循环停下来（只留心跳）。
-	m.relayHbMu.Lock()
-	if m.relayAccepted == nil {
-		m.relayAccepted = map[string]bool{}
+	select {
+	case endpoint.changed <- struct{}{}:
+	default:
 	}
-	m.relayAccepted[remote.String()] = true
-	m.relayHbMu.Unlock()
+	m.relayMu.Unlock()
+	if accept == nil {
+		if m.cfg.Verbose {
+			log.Printf("[mesh] 中继拒绝会话，恢复注册 %s", remote)
+		}
+		return
+	}
 	if m.cfg.Verbose {
 		log.Printf("[mesh] 中继注册成功 node=%x session=%d hb=%dms from=%s",
-			acc.NodeID[:4], acc.SessionID, acc.HeartbeatIntervalMS, remote)
+			endpoint.nodeID[:4], accept.SessionID, accept.HeartbeatIntervalMS, remote)
 	}
-	// 找到对应的中继条目，按其 interval 起心跳循环（幂等：每台只需一个）。
-	found := false
-	for _, srv := range m.cfg.RelayServers {
-		if srv.Addr == "" || remote == nil {
-			continue
+	m.activateUDPRelay(ctx, remote)
+}
+
+func (m *meshLifecycle) resumeUDPRelay(ctx context.Context) {
+	var ready *net.UDPAddr
+	m.relayMu.Lock()
+	for _, endpoint := range m.relayEndpoints {
+		if endpoint.accepted != nil {
+			ready = endpoint.addr
+			break
 		}
-		srvAddr, e := net.ResolveUDPAddr("udp", srv.Addr)
-		if e != nil || srvAddr.Port != remote.Port || !srvAddr.IP.Equal(remote.IP) {
-			continue
-		}
-		found = true
-		break
 	}
-	if !found {
+	m.relayMu.Unlock()
+	if ready != nil {
+		m.activateUDPRelay(ctx, ready)
+	}
+}
+
+func (m *meshLifecycle) activateUDPRelay(ctx context.Context, remote *net.UDPAddr) {
+	m.mu.Lock()
+	if ctx.Err() != nil {
+		m.mu.Unlock()
 		return
 	}
-
-	// 认证通过 ⇒ 中继腿正式可用：给每个静态对端挂一条「经中继转发」的伪链路。
-	// 只替换「没有链路」或「已经在中继上」的，绝不把跑通的直连打回中继。
-	m.mu.Lock()
-	var needHandshake []NodeID
-	// ⚠️ 换了链路就必须重启该 peer 的接收循环：旧循环还挂在原来的 fake 地址链路上，
-	// 中继腿里到的握手帧永远没人读（症状：双向都已注册、relay rx 有包，却恒“握手中”）。
-	type restart struct {
-		id   NodeID
-		link PeerLink
-	}
-	var restarts []restart
-	for _, p := range m.cfg.Peers {
-		cur := m.links[p.NodeID]
-		_, hasSession := m.fsm.Session(p.NodeID)
-		// 已经在直连上跑着的会话不动（不能被中继「打回去」）；
-		// 其余情况一律先挂中继腿——「先通后优」：有中继先保证能通，
-		// 打洞成功后 punch 会把链路升为直连。
-		if !hasSession || cur == nil || cur.IsRelayed() {
-			link := m.hub.RelayLinkTo(remote, p.NodeID)
-			m.links[p.NodeID] = link
-			if loop := m.recvLoops[p.NodeID]; loop == nil || loop.link != link {
-				restarts = append(restarts, restart{p.NodeID, link})
+	var needHandshake, relayed []NodeID
+	for peer := range m.peerStatic {
+		current := m.links[peer]
+		hasSession := m.fsm.HasSession(peer)
+		if current != nil && !current.IsRelayed() && hasSession {
+			continue
+		}
+		// WSS 可用时继续走双方的同一个房间，避免仅受邀端切换到 UDP 中继。
+		switch current := current.(type) {
+		case *WssRoomPeer:
+			if current.room.connected() {
+				continue
 			}
-			if !hasSession {
-				needHandshake = append(needHandshake, p.NodeID)
-			}
+		case *WssLink:
+			continue
+		}
+		m.links[peer] = m.hub.RelayLinkTo(remote, peer)
+		if m.degrade != nil {
+			m.degrade.SetActiveKind(peer, TransportUDP)
+		}
+		if hasSession {
+			relayed = append(relayed, peer)
+		} else {
+			needHandshake = append(needHandshake, peer)
 		}
 	}
 	m.mu.Unlock()
-	for _, r := range restarts {
-		m.stopRecvLoop(r.id)
-		loopCtx := m.relayCtx
-		if loopCtx == nil {
-			loopCtx = context.Background()
-		}
-		m.startRecvLoop(loopCtx, r.id, r.link)
-	}
+	m.syncRecvLoops(ctx)
 	for _, id := range needHandshake {
-		if p := m.peerConfig(id); p != nil {
+		if publicKey := m.peerStaticKey(id); len(publicKey) == 32 {
 			// 用 StartOutbound（尊重「小 NodeId 才发起」）：两端都用 Force 会
 			// 各自变成发起方，收到的 msg1 被当成 msg2 解，永远握不上手。
-			if err := m.fsm.StartOutbound(id, p.StaticPub); err != nil {
+			if err := m.fsm.StartOutbound(id, publicKey); err != nil {
 				log.Printf("[mesh] 中继腿发起握手失败 peer=%x: %v", id[:4], err)
 			}
 		}
 	}
-	m.relayHbMu.Lock()
-	if m.relayHbStarted[remote.String()] {
-		m.relayHbMu.Unlock()
-		return
+	for _, peer := range relayed {
+		m.startPunch(peer, m.linkForPeer(peer))
 	}
-	m.relayHbStarted[remote.String()] = true
-	m.relayHbMu.Unlock()
-
-	// 心跳用生命周期 ctx，Stop 时自动退出。
-	// ⚠️ relayCtx 曾在 Start 里漏初始化：一旦收到 AuthAccept，心跳 goroutine
-	// 就 `nil.Done()` 崩掉整个进程（真机：刚“中继注册成功”进程就消失）。
-	hbCtx := m.relayCtx
-	if hbCtx == nil {
-		hbCtx = context.Background()
-	}
-	go func(srv RelayServerConfig, sess *RelaySession) {
-		interval := time.Duration(acc.HeartbeatIntervalMS) * time.Millisecond
-		if interval <= 0 || interval > 60*time.Second {
-			interval = 5 * time.Second
-		}
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-hbCtx.Done():
-				return
-			case <-ticker.C:
-				_ = relayHeartbeat(hbCtx, m.hub, m.cfg.NodeID, srv, sess)
-			}
-		}
-	}(srvForRemote(m.cfg.RelayServers, remote), &RelaySession{
-		NodeID: acc.NodeID, SessionID: acc.SessionID, HeartbeatIntervalMS: acc.HeartbeatIntervalMS,
-	})
 }
 
-// srvForRemote 按 remote 找中继配置。
-func srvForRemote(servers []RelayServerConfig, remote *net.UDPAddr) RelayServerConfig {
-	for _, srv := range servers {
-		a, err := net.ResolveUDPAddr("udp", srv.Addr)
-		if err == nil && remote != nil && a.Port == remote.Port && a.IP.Equal(remote.IP) {
-			return srv
-		}
-	}
-	return RelayServerConfig{}
-}
-
-func spawnRelayClients(ctx context.Context, hub *UdpHub, selfID NodeID, servers []RelayServerConfig, roomTag [8]byte, verbose bool, accepted func(addr string) bool) bool {
-	if hub == nil || len(servers) == 0 {
-		return false
-	}
-	enabled := false
-	for _, srv := range servers {
-		// 盲中继：只需要 node_id + addr（room_tag 由 PSK 现算）；
-		// 令牌中继：还需要 token。
-		if srv.Addr == "" || srv.NodeID == "" || (!srv.Blind && srv.Token == "") {
-			if verbose {
-				log.Printf("[mesh] 中继条目不完整（盲中继需 node_id/addr；令牌中继还需 token），跳过：%s", srv.Addr)
+func (m *meshLifecycle) spawnRelayClients(ctx context.Context, roomTag [8]byte) {
+	for _, server := range m.cfg.RelayServers {
+		relayID, err := ParseNodeIDHex(server.NodeID)
+		if err != nil || server.Addr == "" || (!server.Blind && server.Token == "") {
+			if m.cfg.Verbose {
+				log.Printf("[mesh] 中继条目不完整（盲中继需节点 ID 和地址；令牌中继还需令牌），跳过：%s", server.Addr)
 			}
 			continue
 		}
-		enabled = true
-		// 提前登记中继地址：转发来的帧源地址是中继，不是对端，
-		// 必须按帧头 Src 分派（见 UdpHub.dispatch）。
-		if ra, err := net.ResolveUDPAddr("udp", srv.Addr); err == nil {
-			hub.AddRelayAddr(ra)
-		}
-		go func(srv RelayServerConfig) {
-			interval := time.Duration(relayRegisterIntervalMS) * time.Millisecond
-			for {
-				if err := relayRegister(ctx, hub, selfID, srv, roomTag); err != nil {
-					if verbose && ctx.Err() == nil {
-						log.Printf("[mesh] 中继注册失败 %s: %v", srv.Addr, err)
-					}
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(interval):
-				}
-				// 已收到 AuthAccept ⇒ 之后只靠心跳保活，**不再重复注册**：
-				// 每次 Register 都会在中继侧新建会话/链路，反复重建会把单播转发路径
-				// 拆掉（症状：握手帧“准入转发”日志有、对端却收不到）。
-				if accepted != nil && accepted(srv.Addr) {
-					<-ctx.Done()
-					return
-				}
+		m.wg.Go(func() { m.runRelayClient(ctx, server, relayID, roomTag) })
+	}
+}
+
+func (m *meshLifecycle) runRelayClient(ctx context.Context, server RelayServerConfig, relayID NodeID, roomTag [8]byte) {
+	for ctx.Err() == nil {
+		resolveCtx, cancel := context.WithTimeout(ctx, relayRegisterInterval)
+		addr, err := resolveMeshUDPAddr(resolveCtx, 0, server.Addr)
+		cancel()
+		if err == nil {
+			addr = canonicalAddr(addr)
+			server.Addr = addr.String()
+			endpoint := &relayEndpoint{nodeID: relayID, addr: addr, changed: make(chan struct{}, 1)}
+			m.relayMu.Lock()
+			if m.relayEndpoints[server.Addr] != nil {
+				m.relayMu.Unlock()
+				return
 			}
-		}(srv)
+			m.relayEndpoints[server.Addr] = endpoint
+			m.relayMu.Unlock()
+			m.hub.AddRelayAddr(addr)
+			m.runRelaySession(ctx, server, endpoint, addr, roomTag)
+			return
+		}
+		if m.cfg.Verbose && ctx.Err() == nil {
+			log.Printf("[mesh] 中继地址解析失败 %s: %v", server.Addr, err)
+		}
+		timer := time.NewTimer(relayRegisterInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
 	}
-	if enabled && verbose {
-		log.Printf("[mesh] 专用服务器中继已启用（%d 台）", len(servers))
+}
+
+// runRelaySession 让每个中继的注册和心跳共用一个任务，被拒后切回注册。
+func (m *meshLifecycle) runRelaySession(ctx context.Context, server RelayServerConfig, endpoint *relayEndpoint, addr *net.UDPAddr, roomTag [8]byte) {
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	var session *RelayAuthAccept
+	var seq uint64
+	interval := relayRegisterInterval
+	for ctx.Err() == nil {
+		stateChanged := false
+		select {
+		case <-ctx.Done():
+			return
+		case <-endpoint.changed:
+			stateChanged = true
+		case <-timer.C:
+		}
+		m.relayMu.Lock()
+		accepted := endpoint.accepted
+		m.relayMu.Unlock()
+		if accepted != session {
+			session, seq = accepted, 0
+			interval = relayRegisterInterval
+			if session != nil {
+				if requested := time.Duration(session.HeartbeatIntervalMS) * time.Millisecond; requested > 0 && requested <= time.Minute {
+					interval = requested
+				}
+				timer.Reset(interval)
+				continue
+			}
+		} else if stateChanged {
+			continue
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		var err error
+		if session == nil {
+			err = relayRegister(ctx, m.hub, m.cfg.NodeID, server, roomTag)
+		} else {
+			seq++
+			err = relayHeartbeat(ctx, m.hub, m.cfg.NodeID, endpoint.nodeID, addr, seq)
+		}
+		if err != nil && m.cfg.Verbose && ctx.Err() == nil {
+			log.Printf("[mesh] 中继控制帧发送失败 %s: %v", server.Addr, err)
+		}
+		timer.Reset(interval)
 	}
-	return enabled
 }

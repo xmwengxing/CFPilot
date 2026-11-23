@@ -69,7 +69,10 @@ func ReachableListenAddr(listen string) string {
 	if port == "" {
 		port = "51820"
 	}
-	ips := reachableInterfaceIPs()
+	return inviteListenAddr(trimmed, port, reachableInterfaceIPs())
+}
+
+func inviteListenAddr(fallback, port string, ips []net.IP) string {
 	var physicalV4 string
 	for _, ip := range ips {
 		if !reachableInterface(ip) {
@@ -85,7 +88,7 @@ func ReachableListenAddr(listen string) string {
 	if physicalV4 != "" {
 		return net.JoinHostPort(physicalV4, port)
 	}
-	return listen
+	return fallback
 }
 
 func isWildcardHost(host string) bool {
@@ -95,7 +98,7 @@ func isWildcardHost(host string) bool {
 
 // reachableInterface 排除不能作为 UDP 对端地址的地址类型。
 func reachableInterface(ip net.IP) bool {
-	if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+	if ip == nil || !ip.IsGlobalUnicast() {
 		return false
 	}
 	if v4 := ip.To4(); v4 != nil {
@@ -103,15 +106,16 @@ func reachableInterface(ip net.IP) bool {
 		if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
 			return false
 		}
+		return true
 	}
-	return true
+	return !ip.IsPrivate()
 }
 
 // reachableInterfaceName 排除常见虚拟网卡 / TUN / VPN 接口（Windows / Linux / macOS）。
 func reachableInterfaceName(name string) bool {
 	lower := strings.ToLower(name)
 	for _, prefix := range []string{
-		"cfpilot", "mobihop", "easytier", "tap", "tun", "wintun", "wsl", "veth",
+		"cfpilot", "mobihop", "easytier", "et_", "tap", "tun", "wintun", "wsl", "veth",
 		"vmnet", "virtualbox", "vmware", "hyper-v", "vswitch", "docker", "lo", "utun",
 	} {
 		if strings.HasPrefix(lower, prefix) {
@@ -129,7 +133,7 @@ func reachableInterfaceIPs() []net.IP {
 	}
 	out := make([]net.IP, 0, len(ifs))
 	for _, iface := range ifs {
-		if !reachableInterfaceName(iface.Name) {
+		if iface.Flags&net.FlagUp == 0 || !reachableInterfaceName(iface.Name) {
 			continue
 		}
 		addrs, err := iface.Addrs()

@@ -94,6 +94,15 @@ func (r *WssRoom) Link(peer NodeID) *WssRoomPeer {
 
 func (r *WssRoom) PeerLinkFor(peer NodeID) PeerLink { return r.Link(peer) }
 
+func (r *WssRoom) connected() bool {
+	select {
+	case <-r.done:
+		return false
+	default:
+		return true
+	}
+}
+
 func (r *WssRoom) linkLocked(peer NodeID) *WssRoomPeer {
 	if link := r.links[peer]; link != nil {
 		return link
@@ -157,18 +166,9 @@ func (r *WssRoom) Close() error {
 	})
 	r.mu.Lock()
 	started := r.started
-	ctx := r.ctx
 	r.mu.Unlock()
-	if !started {
-		return nil
-	}
-	select {
-	case <-r.done:
-	case <-ctx.Done():
-		select {
-		case <-r.done:
-		default:
-		}
+	if started {
+		<-r.done
 	}
 	return nil
 }

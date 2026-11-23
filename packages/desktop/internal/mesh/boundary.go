@@ -10,6 +10,8 @@
 //   - 两者共享 Status/Peer 快照结构（见 tun.go），保证语义一致。
 package mesh
 
+import "time"
+
 // 事件名（SSE，桌面版 UI 订阅）。
 // 与 server 的 eventBus publish 名一致；Phase 3b 在 server 层注册。
 const (
@@ -24,6 +26,8 @@ const (
 	APIMeshStop   = "/api/mesh/stop"
 	APIMeshPeers  = "/api/mesh/peers"
 )
+
+const DaemonActionTimeout = 30 * time.Second
 
 // ActionResult 是 Start/Stop 动作的返回契约（与协议无关，Phase 3b 复用）。
 type ActionResult struct {

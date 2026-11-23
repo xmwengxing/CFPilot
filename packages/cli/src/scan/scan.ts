@@ -770,7 +770,7 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
     }
   }
 
-  // XHTTP 子阶段（无凭据端点探针：H2 POST 期望 400）
+  // XHTTP 子阶段（无凭据端点探针：H2 POST，按响应形态判是否命中本站数据面）
   let xhttpOk: Stage2Item[] = wsPool
   let xhttpOkCount = 0
   if (needXhttp) {
@@ -797,6 +797,18 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
     }
     xhttpOk = xAll.filter((r) => r.xhttp?.ok)
     xhttpOkCount = xhttpOk.length
+    // 全军覆没时把最常见的原因直接说清楚 —— 用户看到「一个都选不出来」
+    // 而不知道是路径写错、域名写错，还是传输选项选错了。
+    if (xhttpOkCount === 0 && xAll.length > 0) {
+      report({
+        type: 'progress',
+        stage: 2,
+        done: xAll.length,
+        total: xAll.length,
+        message:
+          'XHTTP 校验全部失败：确认「XHTTP 路径」与数据面 xhttpPath 一致，域名填数据面（不是控制面）',
+      })
+    }
   } else {
     xhttpOkCount = wsPool.length
   }
@@ -817,14 +829,27 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
   let tunnelOk = wsOk
   let tunnelFailed = 0
   const tunnelCredential = options.uuid || options.trojanPassword
-  if (needWs && tunnelCredential && options.wsPath) {
+  // ⚠️ 必须排除探针端点自身：`--path` 的默认值就是 `/__edge_probe`，
+  // 而它是 PING/PONG 端点、不接受 VLESS 头。拿它做隧道校验会让 30 个候选
+  // 全报「WS 关闭（code 1000）」—— 全是假失败，只是把日志刷满。
+  const realWsPath = options.wsPath && options.wsPath !== '/__edge_probe' ? options.wsPath : ''
+  if (needWs && tunnelCredential && !realWsPath) {
+    report({
+      type: 'progress',
+      stage: 2,
+      done: 0,
+      total: 0,
+      message: '跳过真实隧道校验：未提供真实 WS 路径（--path），探针端点不能代替',
+    })
+  }
+  if (needWs && tunnelCredential && realWsPath) {
     const candidates = tunnelOk.slice(0, speedLimit)
     const verified = await pool(candidates, 4, async (item) => {
       const result = await verifyTunnel({
         ip: item.ip,
         port: options.port,
         host: options.host,
-        wsPath: options.wsPath!,
+        wsPath: realWsPath,
         uuid: options.uuid,
         trojanPassword: options.trojanPassword,
         targetHost: options.verifyTargetHost,
@@ -1055,6 +1080,20 @@ export async function runScan(options: ScanOptions): Promise<ScanSummary> {
         ? a.tlsMs - b.tlsMs || a.latency - b.latency
         : b.speed - a.speed || a.tlsMs - b.tlsMs || a.latency - b.latency
     )
+
+  // 测速阶段全灭但前面都通过了：最典型的原因是「XHTTP 传输 + 网络封锁 WS 升级」——
+  // 阶段三的测速仍打 WS 探针端点（对照桌面版 internal/scan/scan.go 的同名提示）。
+  if (!options.skipSpeed && ranked.length === 0 && stage2.length > 0 && transport !== 'ws') {
+    report({
+      type: 'progress',
+      stage: 3,
+      done: 0,
+      total: stage2.length,
+      message:
+        '测速全部失败：当前传输下测速仍走 WS 探针端点；若网络封锁 WS 升级，' +
+        '请把探针路径填成一个 https 测速地址，或用 --speed-mode off 跳过测速',
+    })
+  }
 
   // 下行速度下限过滤（0 = 不过滤）。
   //

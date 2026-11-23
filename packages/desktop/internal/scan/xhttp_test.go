@@ -50,16 +50,20 @@ func TestProbeTLSWithALPN(t *testing.T) {
 	}
 }
 
+// 中性页：数据面对未认证的入站请求回的就是这张页（不是 400）。
+const testNeutralPage = `<!DOCTYPE html><html><head><title>Welcome</title></head>` +
+	`<body><h1>Welcome</h1><p>This site is up and running.</p></body></html>`
+
 func TestProbeXHTTPEndpoint(t *testing.T) {
 	srv := newH2TLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cf-Ray", "abc-SJC")
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/xhttp/") {
-			w.WriteHeader(400)
-			_, _ = w.Write([]byte("VLESS 头解析失败"))
+			// 真实数据面的行为：未认证 → 中性页 200
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write([]byte(testNeutralPage))
 			return
 		}
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte("<html>Welcome</html>"))
+		w.WriteHeader(404)
 	}))
 	defer srv.stop()
 	r := ProbeXHTTP(context.Background(), srv.Addr, srv.Port, "test.example.com", "/xhttp", 2*time.Second)
@@ -68,6 +72,35 @@ func TestProbeXHTTPEndpoint(t *testing.T) {
 	}
 	if r.Colo != "SJC" {
 		t.Fatalf("colo 应为 SJC，实际 %q", r.Colo)
+	}
+}
+
+// 200 但不是本站中性页 → 该 IP 指向别的站点，必须判失败。
+func TestProbeXHTTPForeignPage(t *testing.T) {
+	srv := newH2TLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte("<html><body>some other site</body></html>"))
+	}))
+	defer srv.stop()
+	r := ProbeXHTTP(context.Background(), srv.Addr, srv.Port, "test.example.com", "/xhttp", 2*time.Second)
+	if r.OK {
+		t.Fatal("非本站中性页应判失败")
+	}
+	if !strings.Contains(r.Error, "不是本站数据面") {
+		t.Fatalf("错误应说明不是本站数据面，实际 %q", r.Error)
+	}
+}
+
+// 200 + text/event-stream → 认证已通过（packet-up 的响应头特征）。
+func TestProbeXHTTPEventStream(t *testing.T) {
+	srv := newH2TLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+	}))
+	defer srv.stop()
+	r := ProbeXHTTP(context.Background(), srv.Addr, srv.Port, "test.example.com", "/xhttp", 2*time.Second)
+	if !r.OK {
+		t.Fatalf("event-stream 应判成功：%v", r.Error)
 	}
 }
 

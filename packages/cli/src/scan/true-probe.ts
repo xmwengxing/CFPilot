@@ -1176,13 +1176,31 @@ function extractColoFromHeaders(headers: Record<string, unknown>): string {
 }
 
 /**
+ * 中性页判据：数据面对未认证/未命中的入站请求一律返回这张静态页
+ * （铁律 33 —— 绝不回显协议报错）。
+ *
+ * ⚠️ 字符串必须与 `packages/worker-core/src/ui/neutral.ts` 一致，
+ * `scripts/check-xhttp-probe-marker.mjs` 会校验两边没有漂移。
+ */
+const NEUTRAL_PAGE_MARKER = 'This site is up and running.'
+
+/**
  * XHTTP 端点存活探针（无凭据）。
  *
  * TLS+H2 发 `POST <xhttpPath>/<会话>/0`（`text/plain`，与订阅的
- * `noGRPCHeader` 一致，避免 CF 边缘 403），期望 `400`（处理器已达，
- * 只是 VLESS 头非法）。
- * `200` 中性页说明路径没命中（中性页对 POST 也回 200），判失败；
- * `403` 说明边缘拦截，判失败。
+ * `noGRPCHeader` 一致，避免 CF 边缘 403）。
+ *
+ * ## 判据（2026-11-23 修正）
+ *
+ * 早前这里期望 `400` —— 那是旧数据面「协议头非法」时的状态码。
+ * 现在数据面对入站请求一律回中性页 `200`（铁律 33），于是**每一个**
+ * 候选都判成 `HTTP 200` 失败，XHTTP 优选必然全军覆没。
+ *
+ * 现在改为看响应**形态**：
+ * - `200` + `content-type: text/event-stream` → 认证已通过（带凭据场景）；
+ * - `200` + body 是本站中性页 → 命中本数据面（无凭据场景的判据）；
+ * - `200` + 其它 body → 不是本站（域名/路径写错，或该 IP 指向别处）；
+ * - `400` / `403` / 其它 → 按原因失败。
  */
 export function probeXhttpEndpoint(
   ip: string,
@@ -1228,34 +1246,69 @@ export function probeXhttpEndpoint(
           const err = args[0] as Error
           finish({ ok: false, colo: '', status: 0, error: err.message })
         })
+        const body = Buffer.from('probe')
         const req = client.request({
           ':method': 'POST',
           ':path': `${base}/${session}/0`,
           ':authority': `${host}:${port}`,
           'content-type': 'text/plain',
+          'content-length': String(body.length),
           host,
           referer: `https://${host}${base}/?x_padding=${'X'.repeat(200)}`,
         })
+
+        let status = 0
+        let contentType = ''
+        let colo = ''
+        let text = ''
         req.on('response', (...args: unknown[]) => {
           const headers = args[0] as Record<string, unknown>
-          const status = Number(headers[':status'] ?? 0)
-          const colo = extractColoFromHeaders(headers as Record<string, unknown>)
-          if (status === 400) {
+          status = Number(headers[':status'] ?? 0)
+          contentType = String(headers['content-type'] ?? '').toLowerCase()
+          colo = extractColoFromHeaders(headers)
+          // 认证通过（带凭据场景）就没有 body，也不必等 end
+          if (status === 200 && contentType.includes('text/event-stream')) {
             finish({ ok: true, colo, status })
+          }
+        })
+        // 无凭据时靠 body 判定 —— 中性页 551 字节左右，读够 2 KiB 就够
+        req.on('data', (...args: unknown[]) => {
+          const chunk = args[0] as Buffer
+          if (settled) return
+          if (text.length < 2048) text += chunk.toString('utf8')
+        })
+        req.on('end', () => {
+          if (settled) return
+          if (status === 200) {
+            if (text.includes(NEUTRAL_PAGE_MARKER)) {
+              finish({ ok: true, colo, status })
+            } else {
+              finish({
+                ok: false,
+                colo,
+                status,
+                error: 'HTTP 200（响应不是本站数据面，检查域名与 XHTTP 路径）',
+              })
+            }
             return
           }
-          req.destroy()
           finish({
             ok: false,
             colo,
             status,
-            error: status === 403 ? 'HTTP 403（边缘拦截）' : `HTTP ${status}`,
+            error:
+              status === 403
+                ? 'HTTP 403（边缘拦截）'
+                : status === 400
+                  ? 'HTTP 400（边缘拒绝该请求）'
+                  : `HTTP ${status}`,
           })
         })
-        req.on('error', (...args: unknown[]) => { const err = args[0] as Error;
+        req.on('error', (...args: unknown[]) => {
+          const err = args[0] as Error
           finish({ ok: false, colo: '', status: 0, error: err.message })
         })
-        req.end(Buffer.from('probe'))
+        req.end(body)
       } catch (err) {
         finish({
           ok: false,

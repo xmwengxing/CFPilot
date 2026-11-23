@@ -680,8 +680,13 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 	}
 	stats["wsOk"] = len(wsOK)
 	if len(wsOK) == 0 {
-		report(Progress{Stage: "probe", Done: len(stage2), Total: len(stage2),
-			Message: "阶段二全部失败：没有 IP 通过当前传输的校验"})
+		// 传输不同，失败原因完全不同：WS 多是 101 被拦或路径不对，
+		// XHTTP 多是路径 / 域名不对（探针按「响应是不是本站中性页」判定）。
+		hint := "阶段二全部失败：没有 IP 通过当前传输的校验"
+		if needXhttp && !needWs {
+			hint = "XHTTP 校验全部失败：确认「XHTTP 路径」与数据面 xhttpPath 一致，域名填数据面（不是控制面）"
+		}
+		report(Progress{Stage: "probe", Done: len(stage2), Total: len(stage2), Message: hint})
 		return &Summary{Entries: []Entry{}, Stats: stats}, nil
 	}
 
@@ -691,7 +696,17 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 	// 认证配置、数据面出站是否可用 —— 这三类都会表现为「优选结果正常、
 	// 导入客户端全是 -1」。只有给了真实凭据才跑（对齐 CLI scan.ts:749-784）。
 	tunnelRes := make(map[string]TunnelVerifyResult)
-	if needWs && (opt.UUID != "" || opt.TrojanPassword != "") {
+	// ⚠️ 必须排除探针端点自身：WSPath 的默认值就是 /__edge_probe，
+	// 而它是 PING/PONG 端点、不接受 VLESS 头。拿它做隧道校验会让所有候选
+	// 全报「WS 关闭（code 1000）」—— 全是假失败，只把日志刷满（对照 CLI scan.ts）。
+	realWsPath := opt.WSPath
+	if realWsPath == ProbeDefaultPath {
+		realWsPath = ""
+	}
+	if needWs && (opt.UUID != "" || opt.TrojanPassword != "") && realWsPath == "" {
+		report(Progress{Stage: "probe", Message: "跳过真实隧道校验：未提供真实 WS 路径，探针端点不能代替"})
+	}
+	if needWs && (opt.UUID != "" || opt.TrojanPassword != "") && realWsPath != "" {
 		limit := opt.SpeedLimit
 		if limit > len(wsOK) {
 			limit = len(wsOK)
@@ -700,7 +715,7 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 		failed := 0
 		for _, r := range wsOK[:limit] {
 			res := VerifyTunnel(ctx, TunnelVerifyOptions{
-				IP: r.IP, Port: opt.Port, Host: opt.Host, WSPath: opt.WSPath,
+				IP: r.IP, Port: opt.Port, Host: opt.Host, WSPath: realWsPath,
 				UUID: opt.UUID, TrojanPassword: opt.TrojanPassword,
 				TargetHost: opt.VerifyTargetHost, TargetPort: opt.VerifyTargetPort,
 				Timeout: msDuration(opt.ProbeTimeoutMs),
@@ -937,6 +952,14 @@ func Run(ctx context.Context, raw Options) (*Summary, error) {
 
 	report(Progress{Stage: "speed", Done: len(stage3), Total: len(stage3),
 		Message: fmt.Sprintf("完成：%d 个可用节点", len(entries))})
+
+	// 测速阶段全灭但前面都通过了：最典型的原因是「XHTTP 传输 + 网络封锁 WS 升级」——
+	// 阶段三的测速仍打 WS 探针端点（对照 CLI scan.ts 的同名提示）。
+	if len(entries) == 0 && len(stage3) > 0 && !opt.SkipSpeed && opt.ProbeTransport != "ws" {
+		report(Progress{Stage: "speed",
+			Message: "测速全部失败：当前传输下测速仍走 WS 探针端点；若网络封锁 WS 升级，" +
+				"请把测速地址填成一个 https 地址，或关闭测速后重试"})
+	}
 
 	return &Summary{Entries: entries, Stats: stats}, nil
 }

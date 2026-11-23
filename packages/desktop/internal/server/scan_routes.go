@@ -374,6 +374,12 @@ func (s *Server) handleScanRun(w http.ResponseWriter, r *http.Request) {
 		ProbeLimit:       req.ProbeLimit,
 		ProbeConcurrency: req.ProbeConcurrency,
 		SpeedLimit:       req.SpeedLimit,
+		// 跳过测速：界面「测速 = 关」传的就是它。
+		//
+		// ⚠️ 早前这里漏了这个字段（req.SkipSpeed 只进了历史记录），
+		// 于是界面选「关」也照样跑阶段三测速 —— 与 CLI 的 --speed-mode off 不一致，
+		// 用户以为跳过测速会更快，实际还要等完整的测速窗口。
+		SkipSpeed: req.SkipSpeed,
 		// 两轮测速：界面开关直接透传，不传（旧客户端 / 0 值）保持旧行为。
 		TwoStageSpeed:    req.TwoStageSpeed,
 		CoarseSpeedLimit: req.CoarseSpeedLimit,

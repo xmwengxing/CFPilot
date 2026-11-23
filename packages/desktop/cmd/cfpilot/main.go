@@ -415,8 +415,17 @@ func main() {
 			// 优先走内核热更新通道（固定滚动 Release，只拉几 KB 的版本清单）：
 			// 只改内核、不发新包时，只有这条通道知道「有新内核」。
 			// 通道没消息（离线 / 尚未发布）→ 回退旧的包 Release 语义。
-			if info, has := kernel.CheckChannelUpdate(ctx, server.Version()); has {
-				return &tray.DeployCheckResult{RemoteVersion: info.Version, RemoteNewer: true}, nil
+			//
+			// ⚠️ 判据必须是「线上已部署的 build」而不是「本程序内置的锚点」。
+			// 内置锚点只在应用升级时变化，而「更新内核」更新的是线上部署 ——
+			// 拿通道比内置，会让提示在更新完之后**永远消不掉**（用户反复点、
+			// 反复弹同一个提示）。见 kernel.ResolveTarget 的说明。
+			target := kernel.ResolveTarget(ctx, server.Version())
+			if target.Info != nil {
+				return &tray.DeployCheckResult{
+					RemoteVersion: target.Version,
+					RemoteNewer:   target.HasUpdateAgainstDeployed(srv.DeployedKernelBuild()),
+				}, nil
 			}
 			info, err := kernel.FetchRemoteInfo(ctx)
 			if err != nil {
@@ -425,12 +434,11 @@ func main() {
 			if info == nil {
 				return &tray.DeployCheckResult{}, nil
 			}
-			// 必须拿远程内核版本比「线上已部署内核版本」，不能比应用包版本：
-			// 包版本（server.Version()）不随部署变化，会导致更新提示永远消不掉。
-			deployed := srv.DeployedKernelVersion()
+			// 通道不可用时只能比版本号（semver），同样比「线上已部署」而不是包版本：
+			// 包版本不随部署变化，会导致更新提示永远消不掉。
 			return &tray.DeployCheckResult{
 				RemoteVersion: info.Version,
-				RemoteNewer:   kernel.CompareSemver(info.Version, deployed) > 0,
+				RemoteNewer:   kernel.CompareSemver(info.Version, srv.DeployedKernelVersion()) > 0,
 			}, nil
 		},
 	)

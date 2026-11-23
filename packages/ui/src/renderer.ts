@@ -3948,53 +3948,109 @@ import { buildRelayDeployScript, parseRelayInitOutput, randomRelayToken } from '
     /**
      * 自动识别：一次填好域名 + WS 路径。
      *
-     * 但它们读的是同一份部署清单，用户总是要连点两次 —— 属于多余步骤。
+     * ## 为什么必须有就地可见的反馈（2026-11-23 真机缺陷）
      *
-     * 现在一次点击同时调两个接口，任一失败不影响另一个。
+     * 两个接口都要读一次 KV 部署清单，每次都是一趟跨境外呼 ——
+     * 实测桌面端首次约 10 秒，手机上更久。早前点击后按钮完全不变、
+     * 结果只写进页面底部的运行日志（窄屏上根本不在视线内），
+     * 用户看到的就是「点了没反应」。
+     *
+     * 现在：
+     *   1. 点击瞬间按钮变「识别中…」并禁用 —— 立刻有反应；
+     *   2. 两次探测**并行**（原来串行 = 两个 RTT 叠加）；
+     *   3. 结果与失败原因都写到输入框下面那一行（`autoDetectHint`），
+     *      不依赖日志面板是否在视野里；
+     *   4. 外壳缺少对应能力时直接说清，而不是抛异常静默。
      */
     document.getElementById('btnAutoDetect')!.addEventListener('click', async () => {
       const btn = document.getElementById('btnAutoDetect') as HTMLButtonElement | null
-      if (btn) btn.disabled = true
+      const hint = document.getElementById('autoDetectHint')
+      const setHint = (text: string, level: 'ok' | 'warn' | 'err' = 'ok'): void => {
+        if (!hint) return
+        hint.hidden = false
+        hint.textContent = text
+        hint.style.color = level === 'ok' ? '' : level === 'warn' ? 'var(--warn)' : 'var(--err)'
+      }
+      const restore = (): void => {
+        if (!btn) return
+        btn.disabled = false
+        btn.textContent = '自动识别'
+      }
+
+      if (btn) {
+        btn.disabled = true
+        btn.textContent = '识别中…'
+      }
+      setHint('正在读取部署清单…（需要一次 Cloudflare 查询，请稍候）', 'warn')
       log('自动识别域名与 WS 路径…')
 
       try {
-        try {
-          const host = await window.cfpilot.detectScanHost()
-          if (host.ok && host.host) {
-            $('optHost').value = host.host
-            const source = host.source ?? ''
-            if (source === 'custom' || source.includes('自定义域名')) {
-              log(`已填入自定义域名：${host.host}`, 'ok')
-            } else {
-              log(`已填入 ${host.host}（来源：${source || '未知'}）`, 'warn')
-              log('该实例没有绑定自定义域名。建议绑定后再优选——', 'warn')
-              log('workers.dev / pages.dev 生产链接在部分网络环境会被阻断，测出来的结果不可信。', 'warn')
-            }
-          } else {
-            log('识别域名失败：' + (host.error ?? '未知错误'), 'err')
-          }
-        } catch (err) {
-          log('识别域名异常：' + (err instanceof Error ? err.message : String(err)), 'err')
+        const api = window.cfpilot
+        if (!api || typeof api.detectScanHost !== 'function' || typeof api.detectScanPath !== 'function') {
+          setHint('当前外壳版本不支持自动识别，请手动填写域名与 WS 路径。', 'err')
+          log('自动识别不可用：当前外壳缺少 detectScanHost / detectScanPath，请升级后再试。', 'err')
+          return
         }
 
-        try {
-          const path = await window.cfpilot.detectScanPath()
-          if (path.ok && path.path) {
-            $('optPath').value = path.path
-            log(`已填入 WS 路径：${path.path}`, 'ok')
+        const [hostRes, pathRes] = await Promise.allSettled([
+          api.detectScanHost(),
+          api.detectScanPath(),
+        ])
+
+        const notes: string[] = []
+        const problems: string[] = []
+
+        // ---- 域名 ----
+        if (hostRes.status === 'rejected') {
+          const msg = hostRes.reason instanceof Error ? hostRes.reason.message : String(hostRes.reason)
+          problems.push('域名识别失败：' + msg)
+          log('识别域名异常：' + msg, 'err')
+        } else if (hostRes.value.ok && hostRes.value.host) {
+          $('optHost').value = hostRes.value.host
+          const source = hostRes.value.source ?? ''
+          if (source === 'custom' || source.includes('自定义域名')) {
+            notes.push('域名 ' + hostRes.value.host)
+            log(`已填入自定义域名：${hostRes.value.host}`, 'ok')
           } else {
-            log('识别 WS 路径失败：' + (path.error ?? '未知错误'), 'err')
+            notes.push('域名 ' + hostRes.value.host + '（非自定义域名）')
+            log(`已填入 ${hostRes.value.host}（来源：${source || '未知'}）`, 'warn')
+            log('该实例没有绑定自定义域名。建议绑定后再优选——', 'warn')
+            log('workers.dev / pages.dev 生产链接在部分网络环境会被阻断，测出来的结果不可信。', 'warn')
           }
-          if (path.ok && (path as { xhttpPath?: string }).xhttpPath) {
+        } else {
+          const msg = hostRes.value.error ?? '未知错误'
+          problems.push('域名识别失败：' + msg)
+          log('识别域名失败：' + msg, 'err')
+        }
+
+        // ---- WS / XHTTP 路径 ----
+        if (pathRes.status === 'rejected') {
+          const msg = pathRes.reason instanceof Error ? pathRes.reason.message : String(pathRes.reason)
+          problems.push('WS 路径识别失败：' + msg)
+          log('识别 WS 路径异常：' + msg, 'err')
+        } else if (pathRes.value.ok && pathRes.value.path) {
+          $('optPath').value = pathRes.value.path
+          notes.push('WS 路径 ' + pathRes.value.path)
+          log(`已填入 WS 路径：${pathRes.value.path}`, 'ok')
+          const xhttpPath = (pathRes.value as { xhttpPath?: string }).xhttpPath
+          if (xhttpPath) {
             const xEl = $('optXhttpPath') as unknown as HTMLInputElement | null
-            if (xEl) xEl.value = (path as { xhttpPath: string }).xhttpPath
-            log(`已填入 XHTTP 路径：${(path as { xhttpPath: string }).xhttpPath}`, 'ok')
+            if (xEl) xEl.value = xhttpPath
+            log(`已填入 XHTTP 路径：${xhttpPath}`, 'ok')
           }
-        } catch (err) {
-          log('识别 WS 路径异常：' + (err instanceof Error ? err.message : String(err)), 'err')
+        } else {
+          const msg = pathRes.value.error ?? '未知错误'
+          problems.push('WS 路径识别失败：' + msg)
+          log('识别 WS 路径失败：' + msg, 'err')
+        }
+
+        if (problems.length > 0) {
+          setHint(problems.join('；'), 'err')
+        } else {
+          setHint('已填入' + notes.join('，') + '。', 'ok')
         }
       } finally {
-        if (btn) btn.disabled = false
+        restore()
       }
     })
 

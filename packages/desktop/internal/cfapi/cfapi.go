@@ -406,6 +406,36 @@ func (c *Client) ListKVNamespaces(ctx context.Context, accountID string) ([]KVNa
 	return out, nil
 }
 
+// ListKVKeys 列出 KV 命名空间里的键名（不读值）。
+//
+// 归属判定靠键名集合：本项目自己的键是固定集合，其它项目用另一套键名。
+// 只探 `config` / `CONFIG` 两个键会把大量真实占用判成「空命名空间」，
+// 于是部署时把别的项目的 KV 覆盖掉（见 deploy.inspectKvOwnership）。
+//
+// 权限不足 / 网络失败一律返回 error —— 调用方按「无法确认归属」拒绝放行。
+// 与 CLI 的 CloudflareClient.listKvKeys 同语义（AGENTS §2.2）。
+//
+// ⚠️ 只取第一页（1000 个键）：Keys 接口按字典序返回，本项目自己的键
+// （大写字母开头）一定排在 `SESSION:` 这类小写键之前，判定用不到更多。
+// 分页游标在信封的 result_info 里，而 doJSON 只解 result ——
+// 为一页用不完的场景去复制一份请求逻辑不值得。
+func (c *Client) ListKVKeys(ctx context.Context, accountID, nsID string) ([]string, error) {
+	var items []struct {
+		Name string `json:"name"`
+	}
+	p := fmt.Sprintf("/accounts/%s/storage/kv/namespaces/%s/keys?limit=1000", accountID, nsID)
+	if err := c.doJSON(ctx, http.MethodGet, p, nil, &items); err != nil {
+		return nil, fmt.Errorf("列出 KV 键名失败：%w", err)
+	}
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.Name != "" {
+			names = append(names, item.Name)
+		}
+	}
+	return names, nil
+}
+
 // CreateKVNamespace 创建 KV 命名空间。
 func (c *Client) CreateKVNamespace(ctx context.Context, accountID, title string) (*KVNamespace, error) {
 	var out KVNamespace
@@ -1313,4 +1343,3 @@ func (c *Client) DeployPagesStatic(ctx context.Context, accountID, project strin
 		fmt.Sprintf("/accounts/%s/pages/projects/%s/deployments", url.PathEscape(accountID), url.PathEscape(project)),
 		formFiles, map[string]string{"branch": "main", "manifest": "{}"}, &out)
 }
-

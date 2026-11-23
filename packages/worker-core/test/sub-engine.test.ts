@@ -476,6 +476,51 @@ describe('订阅输出', () => {
   })
 
   /**
+   * sing-box 订阅**不能带 `dns` 段**（2026-11-23 实测两版 sing-box 后确定）：
+   *
+   *   - 旧格式 `{ tag, address }` → sing-box 1.14 直接拒绝加载（1.12 起废弃），
+   *     客户端表现为「导入订阅解析不到任何节点」；
+   *   - 新格式 `{ type, server }` → 1.10 及更早拒绝（`unknown field "type"`），
+   *     NekoBox 这类还在用 1.8~1.10 内核的客户端全挂；
+   *   - 有 dns 段且默认走境外 DoH 时，**域名形态的节点**会成环
+   *     （解析节点域名要走代理，而连代理前又要解析），
+   *     表现为「TCPing 正常但 URL Test 全部超时」。
+   *
+   * 因此这里断言「不写 dns 段」，同时确认分流规则仍在。
+   */
+  /**
+   * `tls.utls.fingerprint` 是**枚举字段**：写一个 sing-box 不认识的指纹名
+   * （mihomo 的 `hellogithub`、v2rayN 的 `chrome_120`）会让整份配置加载失败，
+   * 用户侧同样表现为「订阅里一个节点都没有」。未知值必须归一到 `chrome`。
+   */
+  it('Sing-box 的 uTLS 指纹只会输出枚举内的值', () => {
+    const unknown = JSON.parse(
+      renderSingbox({ ...ctx, config: { ...ctx.config, clientFingerprint: 'hellogithub' } })
+    )
+    const vless = unknown.outbounds.find((o: any) => o.type === 'vless')
+    expect(vless.tls.utls).toEqual({ enabled: true, fingerprint: 'chrome' })
+
+    const kept = JSON.parse(
+      renderSingbox({ ...ctx, config: { ...ctx.config, clientFingerprint: 'firefox' } })
+    )
+    expect(kept.outbounds.find((o: any) => o.type === 'vless').tls.utls.fingerprint).toBe('firefox')
+
+    // 留空时不写 utls（由客户端自己决定）
+    const empty = JSON.parse(renderSingbox({ ...ctx, config: { ...ctx.config, clientFingerprint: '' } }))
+    expect(empty.outbounds.find((o: any) => o.type === 'vless').tls.utls).toBeUndefined()
+  })
+
+  it('Sing-box 不下发 dns 段（跨版本兼容 + 避免域名节点 DNS 回环）', () => {
+    const json = JSON.parse(renderSingbox(ctx))
+    expect(json.dns).toBeUndefined()
+    // 分流靠 route.rules，不能因为删掉 dns 段把国内直连也一起删了
+    const rules = json.route.rules as Array<Record<string, unknown>>
+    expect(rules.some((r) => r.ip_is_private === true && r.outbound === 'direct')).toBe(true)
+    expect(rules.some((r) => Array.isArray(r.domain_suffix) && r.outbound === 'direct')).toBe(true)
+    expect(json.route.final).toBe('CFPilot')
+  })
+
+  /**
    * IPv6 节点在三种订阅里的地址形态**必须各不相同**，写错任何一种客户端就连不上：
    *
    *   - URI（vless:// / trojan://）→ **必须带方括号**，否则 `2606:4700::1:443`

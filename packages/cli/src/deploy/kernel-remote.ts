@@ -700,6 +700,80 @@ export async function loadBuiltinKernelVersion(): Promise<KernelVersionManifest>
 }
 
 /**
+ * 「现在部署会用哪一份内核」——与桌面版的 `kernel.ResolveTarget` 一一对应。
+ *
+ * ## 为什么需要它（真机缺陷 2026-11-23）
+ *
+ * 早前各处拿「通道序号」去比「包里内置的锚点」。内置锚点只在发新包时变，
+ * 而「更新内核」更新的是**线上部署** —— 于是部署完再看，结论仍是
+ * 「有更新」，提示永远消不掉。
+ *
+ * 现在的判据只有一个：**线上已部署的 build** 与这里的 `build` 是否相同。
+ */
+export interface KernelTarget {
+  /** 本次部署会用的内核 build（通道比内置新时用通道的，否则用内置的） */
+  build: string
+  /** 展示用版本号（通道为 k<seq>，否则为工具版本） */
+  version: string
+  /** 通道清单（通道不可用时为 null） */
+  channel: KernelVersionManifest | null
+  /** 是否用通道内核（通道比内置新） */
+  fromChannel: boolean
+  /** 通道内核要求更高的工具版本 → 本次不升级 */
+  blocked: boolean
+}
+
+/** 解析「现在部署会用的内核」，不下载产物（秒级返回）。 */
+export async function resolveKernelTarget(
+  currentVersion: string,
+  timeoutMs = DEFAULT_TIMEOUT_MS
+): Promise<KernelTarget> {
+  const builtin = await loadBuiltinKernelVersion()
+  const target: KernelTarget = {
+    build: builtin.build,
+    version: currentVersion,
+    channel: null,
+    fromChannel: false,
+    blocked: false,
+  }
+
+  const channel = await fetchChannelVersion(timeoutMs)
+  if (!channel) return target
+
+  target.channel = channel
+
+  if (channel.minToolVersion && compareSemver(currentVersion, channel.minToolVersion) < 0) {
+    target.blocked = true
+    return target
+  }
+  // ⚠️ 版本号只在**真的用通道内核**时才换成 k<序号> ——
+  // 通道比内置旧时部署仍用内置，展示通道序号会让人以为目标是通道内核。
+  if (isChannelNewer(channel, builtin)) {
+    target.build = channel.build
+    target.version = `k${channel.seq}`
+    target.fromChannel = true
+  }
+  return target
+}
+
+/**
+ * 线上已部署的内核是否与「现在部署会用的那份」不同。
+ *
+ * deployedBuild 为空表示线上版本未知 —— 返回 true（提示去部署页确认）。
+ */
+export function hasKernelUpdate(
+  target: KernelTarget,
+  deployedBuild: string | null | undefined
+): boolean {
+  if (target.blocked) return false
+  const want = String(target.build ?? '').trim()
+  if (!want) return false
+  const online = String(deployedBuild ?? '').trim()
+  if (!online) return true
+  return want.toLowerCase() !== online.toLowerCase()
+}
+
+/**
  * 取通道内核产物（清单官方直连校验 + 缓存复验，与包 Release 通道同口径）。
  */
 async function fetchChannelKernel(

@@ -60,6 +60,27 @@ func (f *fakeKVListCF) handler(t *testing.T) http.HandlerFunc {
 			return
 		}
 
+		// GET /accounts/{acc}/storage/kv/namespaces/{ns}/keys —— 键名列表
+		//
+		// 归属判定靠键名集合（见 handleKvList）：有清单的命名空间只有
+		// CFP_DEPLOY_MANIFEST，其余的一律「空」。这里不计入并发峰值统计，
+		// 那个峰值专门用来证明「清单读取」是并发的。
+		if idx := strings.Index(path, "/storage/kv/namespaces/"); idx >= 0 &&
+			strings.HasSuffix(path, "/keys") {
+			rest := path[idx+len("/storage/kv/namespaces/"):]
+			nsID := strings.TrimSuffix(rest, "/keys")
+			f.mu.Lock()
+			raw, ok := f.manifests[nsID]
+			f.mu.Unlock()
+			list := []map[string]string{}
+			if ok && strings.TrimSpace(raw) != "" {
+				list = append(list, map[string]string{"name": "CFP_DEPLOY_MANIFEST"})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": list})
+			return
+		}
+
 		// GET /accounts/{acc}/storage/kv/namespaces/{ns}/values/{key}
 		if idx := strings.Index(path, "/storage/kv/namespaces/"); idx >= 0 {
 			rest := path[idx+len("/storage/kv/namespaces/"):]

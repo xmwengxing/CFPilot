@@ -1313,6 +1313,25 @@ export const WS_ONLY_VARIANTS: readonly SubVariant[] = ['vless-ws', 'trojan']
  */
 export const CLASH_VARIANTS: readonly SubVariant[] = ['vless-ws', 'vless-xhttp', 'trojan']
 
+/**
+ * sing-box `tls.utls.fingerprint` 接受的指纹名（写错一个就让**整份配置加载失败**）。
+ *
+ * 来源：sing-box 的 uTLS 客户端 hello 枚举。mihomo 的 `hellogithub`、
+ * v2rayN 的 `chrome_120` 这类名字它不认，必须归一到枚举内的值。
+ */
+const SINGBOX_FINGERPRINTS = new Set([
+  'chrome',
+  'firefox',
+  'safari',
+  'ios',
+  'android',
+  'edge',
+  '360',
+  'qq',
+  'random',
+  'randomized',
+])
+
 /** 把节点分组（若无分组信息则整体作为一组） */
 function resolveGroups(ctx: RenderContext): PoolGroup[] {
   if (ctx.groups && ctx.groups.length > 0) return ctx.groups
@@ -1855,7 +1874,7 @@ const CN_DIRECT_SUFFIXES: readonly string[] = (
   'csdn.net,gitee.com,cnblogs.com'
 ).split(',')
 
-/** 生成 Sing-box JSON（1.12+ 结构），按来源分组 */
+/** 生成 Sing-box JSON，按来源分组 */
 export function renderSingbox(ctx: RenderContext): string {
   const outbounds: unknown[] = []
   const groupTags: Array<{ tag: string; members: string[] }> = []
@@ -1879,6 +1898,27 @@ export function renderSingbox(ctx: RenderContext): string {
     return { ech: { enabled: true, query_server_name: echHost } }
   }
 
+  /**
+   * sing-box 的 TLS 出站字段。
+   *
+   * `utls.fingerprint` 只接受固定枚举值，写一个它不认识的指纹名（例如 mihomo
+   * 的 `hellogithub`、v2rayN 的 `chrome_120`）会让 **整份配置加载失败** ——
+   * 客户端侧就表现为「订阅导入后一个节点都没有」。面板的指纹输入框是自由文本，
+   * 因此这里做一次归一化：不在枚举内的值的退化到 `chrome`。
+   */
+  const utlsField = (): Record<string, unknown> => {
+    const raw = String(ctx.config.clientFingerprint ?? '').trim().toLowerCase()
+    if (!raw) return {}
+    return { utls: { enabled: true, fingerprint: SINGBOX_FINGERPRINTS.has(raw) ? raw : 'chrome' } }
+  }
+  const tlsField = (): Record<string, unknown> => ({
+    enabled: true,
+    server_name: ctx.domain,
+    insecure: false,
+    ...utlsField(),
+    ...echField(),
+  })
+
   for (const group of resolveGroups(ctx)) {
     const members: string[] = []
     group.entries.forEach((entry, index) => {
@@ -1895,13 +1935,7 @@ export function renderSingbox(ctx: RenderContext): string {
           server: entry.ip,
           server_port: port,
           uuid: ctx.config.uuid,
-          tls: {
-            enabled: true,
-            server_name: ctx.domain,
-            insecure: false,
-            utls: { enabled: true, fingerprint: ctx.config.clientFingerprint },
-            ...echField(),
-          },
+          tls: tlsField(),
           transport: { type: 'ws', path: ctx.config.wsPath, headers: { Host: ctx.domain } },
         })
         if (wantTrojan) outbounds.push({
@@ -1910,13 +1944,7 @@ export function renderSingbox(ctx: RenderContext): string {
           server: entry.ip,
           server_port: port,
           password: ctx.config.trojanPassword,
-          tls: {
-            enabled: true,
-            server_name: ctx.domain,
-            insecure: false,
-            utls: { enabled: true, fingerprint: ctx.config.clientFingerprint },
-            ...echField(),
-          },
+          tls: tlsField(),
           transport: { type: 'ws', path: ctx.config.trojanPath, headers: { Host: ctx.domain } },
         })
       }
@@ -1937,18 +1965,22 @@ export function renderSingbox(ctx: RenderContext): string {
 
   const config = {
     log: { level: 'info', timestamp: true },
-    dns: {
-      servers: [
-        { tag: 'dns-out', address: 'https://1.1.1.1/dns-query' },
-        { tag: 'local', address: 'local' },
-      ],
-      // ⚠️ 这里原来是 `[{ rule_set: [], server: 'dns-out' }]` ——
-      // 一个引用了**空规则集**的规则。它要么匹配全部、要么匹配不到，
-      // 两种语义都不是我们想要的；而「全部走境外 DoH」会让国内域名解析到
-      // 海外 CDN 节点，直连反而更慢（用户侧表现为「分流了但没变快」）。
-      // 现在改成显式的「国内后缀走本地 DNS」，其余仍走 dns-out。
-      rules: [{ domain_suffix: CN_DIRECT_SUFFIXES, server: 'local' }],
-    },
+    // ⚠️ **不写 `dns` 段**（2026-11-23 实测确定）。两个理由都是真机验证出来的：
+    //
+    // 1. DNS 段没有跨版本写法。旧格式（`{ tag, address }`）在 sing-box 1.12
+    //    标记废弃、1.14 **整份配置拒绝加载**（报 `legacy DNS server formats …
+    //    removed in sing-box 1.14.0`）；新格式（`{ type, server }`）又会被
+    //    1.10 及更早版本拒绝（`dns.servers[0].type: json: unknown field "type"`）。
+    //    sing-box 系客户端横跨 1.8~1.14，写任何一种都必然有一半用户
+    //    **解析不到节点**。
+    // 2. 默认 DNS 走 DoH（境外）+ `route.final` 指向代理组时，节点地址若是
+    //    **域名**就会成环：解析节点域名 → 需要走代理 → 连代理前又要解析域名。
+    //    sing-box 直接报 `DNS query loopback`，客户端表现为
+    //    「TCPing 正常（TCP 能通到边缘）但 URL Test 全部超时」。
+    //    优选域名（域名形态的节点）因此在 sing-box 系客户端里必然全军覆没。
+    //
+    // 去掉 DNS 段后 sing-box 用系统解析器，两条问题一起消失；
+    // 国内域名的分流仍由下面 `route.rules` 的 domain_suffix 完成。
     inbounds: [{ type: 'mixed', tag: 'mixed-in', listen: '127.0.0.1', listen_port: 2080 }],
     outbounds,
     route: {

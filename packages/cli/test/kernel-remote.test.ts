@@ -6,9 +6,11 @@ import { rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { compareSemver, parseVersion } from '../src/shared/version-util'
 import {
   fetchRemoteKernelInfo,
+  hasKernelUpdate,
   isChannelNewer,
   loadKernelBundle,
   parseKernelVersionManifest,
+  resolveKernelTarget,
   versionFromTag,
   CHECKSUMS_ASSET_NAME,
   CONTROL_ASSET_NAME,
@@ -509,5 +511,74 @@ describe('内核热更新通道（kernel-latest）', () => {
     const bundle = await loadKernelBundle('0.40.6')
     // Release 通道 v9.9.9 更新 → 用 Release 内核（原有行为不受影响）
     expect(bundle.version).toBe('9.9.9')
+  })
+})
+
+// 「有没有内核更新」的判定口径（与桌面版 kernel.ResolveTarget 一一对应）。
+//
+// 真机缺陷（2026-11-23）：内核更新完，提示仍然反复出现。
+// 根因是判据拿「通道序号」比「包里内置的锚点」，而内置锚点不随部署变化。
+// 现在的判据：线上已部署的 build 与「现在部署会用的那份」是否一致。
+describe('内核更新判定的口径（线上 vs 目标）', () => {
+  function setupBuiltin(builtin: { seq: number; build: string }): string {
+    const dir = join(cacheRoot, 'builtin-target')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'control.js'), 'export default {control:1}')
+    writeFileSync(join(dir, 'dataplane.js'), 'export default {data:1}')
+    writeFileSync(join(dir, 'cfpilot-kernel-VERSION'), JSON.stringify({ ...builtin, minToolVersion: '' }))
+    return dir
+  }
+
+  function mockChannelVersion(manifest: { seq: number; build: string; minToolVersion?: string }) {
+    return async (input: unknown) => {
+      const url = String(input)
+      if (url.includes('cfpilot-kernel-VERSION')) return textResponse(JSON.stringify(manifest))
+      return textResponse('', false)
+    }
+  }
+
+  it('通道比内置新：线上已是通道 build 时不再提示有更新', async () => {
+    process.env.CFPILOT_KERNEL_DIR = setupBuiltin({ seq: 202611210000, build: 'aaa-1111' })
+    process.env.CFPILOT_KERNEL_CHANNEL_BASE = 'https://channel.test/kernel-latest'
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      mockChannelVersion({ seq: 202611220000, build: 'ccc-3333' })
+    )
+
+    const target = await resolveKernelTarget('0.60.0')
+    expect(target.fromChannel).toBe(true)
+    expect(target.build).toBe('ccc-3333')
+    // 核心：更新完（线上 == 通道 build）必须收敛
+    expect(hasKernelUpdate(target, 'ccc-3333')).toBe(false)
+    // 线上还是旧内核 → 有更新
+    expect(hasKernelUpdate(target, 'aaa-1111')).toBe(true)
+    // 线上版本读不到 → 提示一次让用户去确认
+    expect(hasKernelUpdate(target, '')).toBe(true)
+  })
+
+  it('通道不比内置新：目标内核 = 内置内核，避免降级提示', async () => {
+    process.env.CFPILOT_KERNEL_DIR = setupBuiltin({ seq: 202611230000, build: 'aaa-1111' })
+    process.env.CFPILOT_KERNEL_CHANNEL_BASE = 'https://channel.test/kernel-latest'
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      mockChannelVersion({ seq: 202611210000, build: 'ccc-3333' })
+    )
+
+    const target = await resolveKernelTarget('0.60.0')
+    expect(target.fromChannel).toBe(false)
+    expect(target.build).toBe('aaa-1111')
+    // 没走通道内核时版本号不能被写成通道序号（否则「目标」与 build 对不上）
+    expect(target.version).toBe('0.60.0')
+    expect(hasKernelUpdate(target, 'aaa-1111')).toBe(false)
+  })
+
+  it('兼容护栏挡住时不再催升级内核', async () => {
+    process.env.CFPILOT_KERNEL_DIR = setupBuiltin({ seq: 202611210000, build: 'aaa-1111' })
+    process.env.CFPILOT_KERNEL_CHANNEL_BASE = 'https://channel.test/kernel-latest'
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      mockChannelVersion({ seq: 202611220000, build: 'ccc-3333', minToolVersion: '0.70.0' })
+    )
+
+    const target = await resolveKernelTarget('0.60.0')
+    expect(target.blocked).toBe(true)
+    expect(hasKernelUpdate(target, 'aaa-1111')).toBe(false)
   })
 })

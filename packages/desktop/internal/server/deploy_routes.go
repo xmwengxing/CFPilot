@@ -541,7 +541,18 @@ func (s *Server) handleDeployCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	localBuild := localKernelBuild()
+	// 「本次部署会用的内核」——通道比内置新时是通道内核，否则是内置内核。
+	// 它才是判断「线上是否最新」的唯一参照物（见 kernel.ResolveTarget）。
+	targetCtx, cancelTarget := context.WithTimeout(ctx, 8*time.Second)
+	target := kernel.ResolveTarget(targetCtx, Version())
+	cancelTarget()
+
+	// 部署实际会使用的 build（不是「exe 里内嵌的那份」—— 两者在走内核
+	// 热更新通道时会不同，用错就会出现「部署完还是显示可升级」）。
+	localBuild := target.Build
+	if strings.TrimSpace(localBuild) == "" {
+		localBuild = localKernelBuild()
+	}
 
 	// 线上版本：优先问数据面自己（最权威），探不到才回落清单里的值。
 	//
@@ -580,19 +591,26 @@ func (s *Server) handleDeployCheck(w http.ResponseWriter, r *http.Request) {
 	if liveKernel != "" && liveKernel != "dev" {
 		ks.Deployed = liveKernel
 	}
-	// 内核热更新通道优先（2026-11-14）：
-	// 只改内核、不发新包时（kernel-latest 滚动 Release），只有这条通道知道
-	// 「有新内核」。而且它只拉几 KB 的版本清单，比包 Release 的查询更容易
-	// 在受限网络下成功。通道有新内核 → 直接判定可升级，与线上版本号无关
-	// （通道版本号是 k<序号>，semver 比不了）。
-	// 通道没消息（离线 / 未发布 / 需要更高工具版本）→ 回退包 Release 通道。
-	channelCtx, cancelChannel := context.WithTimeout(ctx, 8*time.Second)
-	chInfo, chNewer := kernel.CheckChannelUpdate(channelCtx, Version())
-	cancelChannel()
-	if chNewer && chInfo != nil {
-		ks.ChannelNewer = true
-		ks.Remote = chInfo.Version
+	// 内核更新判定的唯一口径：**线上已部署的 build** 是否等于「现在部署会用的那份」。
+	//
+	// ⚠️ 不能拿通道序号去比「本程序内置的锚点」：内置锚点只在应用升级时变，
+	// 而「更新内核」更新的是线上部署 —— 那样比出来的结论在更新完成后依然
+	// 是「有更新」，用户就会看到提示永远消不掉（真机反复出现）。
+	// target 已在上面解析（state 的计算也用它）。
+	if target.Info != nil {
+		// 通道可用：直接用通道版本号展示（k<序号> 比不了 semver）
+		ks.Remote = target.Version
+		ks.MinToolBlocked = target.Blocked
+		ks.ChannelNewer = target.HasUpdateAgainstDeployed(remoteBuild)
+		ks.ChannelLatest = !ks.ChannelNewer
+		if ks.ChannelLatest {
+			// 线上已是要部署的那份（可能比本程序内置还新，也可能同版本）→ 不是 outdated
+			state = "latest"
+		} else {
+			state = "outdated"
+		}
 	} else {
+		// 通道不可用（离线 / 未发布）→ 回退包 Release 的 semver 对比
 		remoteCtx, cancelRemote := context.WithTimeout(ctx, 8*time.Second)
 		if info, e := kernel.FetchRemoteInfo(remoteCtx); e != nil {
 			ks.RemoteErr = e.Error()
@@ -601,27 +619,6 @@ func (s *Server) handleDeployCheck(w http.ResponseWriter, r *http.Request) {
 			ks.Remote = info.Version
 		}
 		cancelRemote()
-	}
-	// 线上 build == 官方通道最新 build → 线上已经是官方最新内核。
-	//
-	// 这纠正 build 比对的**方向性盲区**：build 指纹只知「相同/不同」，
-	// 不知道谁新谁旧。线上 ≠ 本程序内置时，若线上恰好就是通道的最新
-	// build（例如用户刚在别的工具里更新过内核），绝不是 outdated ——
-	// 此时把按钮标成「更新到最新内核」会让用户把新内核打回旧版
-	//（2026-11-14 用户实际踩到：检查后按钮提示更新，点下去反而降级）。
-	channelBuild := ""
-	if chInfo != nil {
-		channelBuild = chInfo.Build
-	}
-	channelLatest := channelBuild != "" && remoteBuild == channelBuild
-	if channelLatest {
-		ks.ChannelLatest = true
-		if chInfo != nil {
-			ks.Remote = chInfo.Version
-		}
-		// 覆盖上方 build 比对的方向性盲区：线上已是官方最新内核时，
-		// 无论与本程序内置是否一致，都不是 outdated。
-		state = "latest"
 	}
 
 	// 检查过状态 = 拿到了最新的部署记录 → 顺手刷新本地快照，
@@ -698,6 +695,9 @@ type kernelStatus struct {
 	// 此时无论与本程序内置是否一致，都不需要更新（可能是用户刚在
 	// 别的工具里更新过内核，线上比内置还新）。
 	ChannelLatest bool
+	// MinToolBlocked 表示通道内核要求更高的工具版本，本次不宜升级
+	// （旧工具部署新内核会踩协议不兼容，提示里要说清「先升级工具」）
+	MinToolBlocked bool
 	// RemoteErr 是远程查询失败的原因（没有失败就是空串）
 	RemoteErr string
 }
@@ -715,7 +715,7 @@ type kernelStatus struct {
 //
 // 远程版本查不到（离线）时永远是 false —— 不能凭「查不到」就催用户更新。
 func (k kernelStatus) Updatable() bool {
-	if k.ChannelLatest {
+	if k.ChannelLatest || k.MinToolBlocked {
 		return false
 	}
 	if k.ChannelNewer {
@@ -1139,9 +1139,9 @@ func (s *Server) handleKvList(w http.ResponseWriter, r *http.Request) {
 		DataSubdomain    string `json:"dataSubdomain,omitempty"`
 	}
 
-	// ---- 逐个命名空间读清单，但**并发** ----
+	// ---- 逐个命名空间探测，但**并发** ----
 	//
-	// 每个命名空间都要读 1~3 个键，每次都是一趟 Cloudflare API。
+	// 每个命名空间先列键名（1 趟），有清单键才再读一次值（第 2 趟）。
 	// 串行时 6 个命名空间实测要 20~25 秒（跨境链路 RTT 大），
 	// 而凭据页启动时就会触发这个请求 —— 用户看到的是「检测账号…」卡住二十多秒，
 	// 很像程序假死。
@@ -1166,29 +1166,57 @@ func (s *Server) handleKvList(w http.ResponseWriter, r *http.Request) {
 			ns := nsList[i]
 			opt := &options[i]
 
-			// 1) 有清单 → instance（或清单损坏 → cfpilot）
-			if raw, ok := client.GetKVValue(ctx, accountID, ns.ID, deploy.ManifestKey); ok && strings.TrimSpace(raw) != "" {
-				var m deploy.Manifest
-				if err := json.Unmarshal([]byte(raw), &m); err == nil {
-					opt.Ownership = "instance"
-					opt.ControlProject = m.ControlProject
-					opt.DataProject = m.DataProject
-					opt.At = m.At
-					opt.Build = m.Build
-					opt.ControlSubdomain = m.ControlSubdomain
-					opt.DataSubdomain = m.DataSubdomain
-				} else {
-					opt.Ownership = "cfpilot"
-				}
+			// 1) 先列键名：归属靠**键名集合**判定，不能只看 config / CONFIG。
+			//    别的项目可能用 `c` / `wk` / `rm` 这类键名，只探两个键会把
+			//    真实占用判成「空命名空间」，用户一下部署就把对方配置覆盖了。
+			keys, kerr := client.ListKVKeys(ctx, accountID, ns.ID)
+			if kerr != nil {
+				// 读不到 ≠ 空 —— 标成占用，界面会禁用它
+				opt.Ownership = "foreign"
+				return
+			}
+			if len(keys) == 0 {
+				opt.Ownership = "empty"
 				return
 			}
 
-			// 2) 没有清单：看有没有别的产品留下的痕迹
-			if _, ok := client.GetKVValue(ctx, accountID, ns.ID, "config"); ok {
-				opt.Ownership = "foreign"
-			} else if _, ok := client.GetKVValue(ctx, accountID, ns.ID, deploy.ConfigKey); ok {
-				opt.Ownership = "cfpilot"
+			hasManifest := false
+			cfpilotTouched := false
+			for _, key := range keys {
+				if key == deploy.ManifestKey {
+					hasManifest = true
+				}
+				if deploy.IsCfPilotKVKey(key) {
+					cfpilotTouched = true
+				}
 			}
+
+			// 2) 有清单 → instance（或清单损坏 → cfpilot 残留）
+			if hasManifest {
+				if raw, ok := client.GetKVValue(ctx, accountID, ns.ID, deploy.ManifestKey); ok && strings.TrimSpace(raw) != "" {
+					var m deploy.Manifest
+					if err := json.Unmarshal([]byte(raw), &m); err == nil {
+						opt.Ownership = "instance"
+						opt.ControlProject = m.ControlProject
+						opt.DataProject = m.DataProject
+						opt.At = m.At
+						opt.Build = m.Build
+						opt.ControlSubdomain = m.ControlSubdomain
+						opt.DataSubdomain = m.DataSubdomain
+						return
+					}
+				}
+				opt.Ownership = "cfpilot"
+				return
+			}
+
+			if cfpilotTouched {
+				opt.Ownership = "cfpilot"
+				return
+			}
+
+			// 3) 有键但一个都不是本项目的 → 被其它项目占着（界面禁用）
+			opt.Ownership = "foreign"
 		}(i)
 	}
 	wg.Wait()

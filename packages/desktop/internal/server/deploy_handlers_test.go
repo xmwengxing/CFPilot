@@ -86,6 +86,22 @@ func (f *fakeCF) handler(t *testing.T) http.HandlerFunc {
 			return
 		}
 
+		// ---- KV 键名 ----
+		// 路径：/accounts/{acc}/storage/kv/namespaces/{ns}/keys
+		// 归属判定先列键名（见 handleKvList），假服务器按键名回应。
+		if idx := strings.Index(r.URL.Path, "/storage/kv/namespaces/"); idx >= 0 &&
+			strings.HasSuffix(r.URL.Path, "/keys") {
+			rest := r.URL.Path[idx+len("/storage/kv/namespaces/"):]
+			ns := strings.TrimSuffix(rest, "/keys")
+			list := make([]map[string]string, 0, len(f.kv[ns]))
+			for key := range f.kv[ns] {
+				list = append(list, map[string]string{"name": key})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": list})
+			return
+		}
+
 		// ---- KV 值 ----
 		// 路径：/accounts/{acc}/storage/kv/namespaces/{ns}/values/{key}
 		if strings.Contains(r.URL.Path, "/storage/kv/namespaces/") {

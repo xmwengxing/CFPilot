@@ -70,6 +70,8 @@ interface CfRoutes {
   namespaces?: Record<string, Array<{ id: string; title: string }>>
   /** GET /accounts/{id}/storage/kv/namespaces/{ns}/values/{key} —— 值是纯文本 */
   values?: Record<string, string>
+  /** GET /accounts/{id}/storage/kv/namespaces/{ns}/keys —— 键名列表（默认取 values 的键） */
+  keys?: string[]
   /** 整体失败（模拟网络 / 权限问题） */
   failStatus?: number
 }
@@ -90,6 +92,14 @@ function mockCloudflare(routes: CfRoutes): string[] {
 
       if (routes.failStatus) {
         return new Response('boom', { status: routes.failStatus })
+      }
+
+      // /accounts/{id}/storage/kv/namespaces/{ns}/keys
+      const keysMatch = /^\/accounts\/([^/]+)\/storage\/kv\/namespaces\/([^/]+)\/keys$/.exec(path)
+      if (keysMatch) {
+        // 没有显式给 values 时视为空命名空间；给了就按键名列表返回
+        const names = routes.keys ?? Object.keys(routes.values ?? {})
+        return jsonResponse(names.map((name) => ({ name })))
       }
 
       // /accounts/{id}/storage/kv/namespaces/{ns}/values/{key}
@@ -260,6 +270,48 @@ describe('B9：KV 读失败不能当成「键不存在」', () => {
     info = await inspectKvOwnership(client, 'acc', 'ns', 'p')
     expect(info.verdict).toBe('stale')
     expect(info.blocking).toBe(true)
+  })
+
+  /**
+   * 关键回归：**别的项目用别的键名占着 KV 时不能判成「空」**。
+   *
+   * 这类实现（例如第三方面板）用的是 `c` / `c_ver` / `wk` 之类的键，
+   * 既不叫 `config` 也不叫 `CONFIG`。早前只探测那两个键，
+   * 于是这种命名空间被显示成「空命名空间，可用于部署」——
+   * 用户一部署就把对方项目的配置覆盖掉，还以为什么都没发生。
+   */
+  it('其它项目用自己的键名占用时判为 foreign（不可部署）', async () => {
+    mockCloudflare({ keys: ['c', 'c_ver', 'wk', 'rm'] })
+    const client = new CloudflareClient({ token: 't' })
+    const info = await inspectKvOwnership(client, 'acc', 'ns', 'p')
+    expect(info.verdict).toBe('foreign')
+    expect(info.blocking).toBe(true)
+    // 详情里要带上实际键名，用户才知道是「被谁占着」而不是「读不出来」
+    expect(info.detail).toContain('c_ver')
+  })
+
+  it('只有会话类残留键时判为 stale（仍是本项目的命名空间）', async () => {
+    mockCloudflare({ keys: ['SESSION:abc', 'ONETIME:def'] })
+    const client = new CloudflareClient({ token: 't' })
+    const info = await inspectKvOwnership(client, 'acc', 'ns', 'p')
+    expect(info.verdict).toBe('stale')
+    expect(info.blocking).toBe(true)
+  })
+
+  it('真正空的命名空间才判为 empty', async () => {
+    mockCloudflare({ keys: [] })
+    const client = new CloudflareClient({ token: 't' })
+    const info = await inspectKvOwnership(client, 'acc', 'ns', 'p')
+    expect(info.verdict).toBe('empty')
+    expect(info.blocking).toBe(false)
+  })
+
+  it('列不出键名时不可放行（按无法确认归属处理）', async () => {
+    mockCloudflare({ failStatus: 403 })
+    const client = new CloudflareClient({ token: 't' })
+    const info = await inspectKvOwnership(client, 'acc', 'ns', 'p')
+    expect(info.blocking).toBe(true)
+    expect(info.detail).toContain('无法确认')
   })
 })
 

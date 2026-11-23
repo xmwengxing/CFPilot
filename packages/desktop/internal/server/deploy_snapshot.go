@@ -107,6 +107,19 @@ func (s *Server) DeployedKernelVersion() string {
 	return strings.TrimSpace(snap.KernelVersion)
 }
 
+// DeployedKernelBuild 返回最近一次部署（或检查到）的线上内核构建指纹。
+//
+// 与 DeployedKernelVersion 的分工：版本号（semver）判断「谁新」，
+// 构建指纹判断「是不是同一份产物」。内核更新提示必须用**构建指纹**：
+// 通道里的版本号形如 k<seq>，与 semver 比不上。
+func (s *Server) DeployedKernelBuild() string {
+	snap := s.loadSnapshot()
+	if snap == nil {
+		return ""
+	}
+	return strings.TrimSpace(snap.Build)
+}
+
 // saveSnapshot 写本地快照（原子替换，权限 0600）。
 //
 // saveSnapshot 写本地快照（原子替换，权限 0600）。

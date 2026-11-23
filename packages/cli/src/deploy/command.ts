@@ -23,7 +23,9 @@ import {
 import {
   extractBuildVersion,
   fetchRemoteKernelInfo,
+  hasKernelUpdate,
   loadBuiltinBundle,
+  resolveKernelTarget,
 } from './kernel-remote'
 import { randomWorkerName } from './utils'
 import { DEPLOY_HELP } from './help'
@@ -42,6 +44,10 @@ export async function listKvInstances(client: CloudflareClient, accountId: strin
   // ⚠️ 这里**不阻塞**主流程 —— 查不到时只是少一行「远程」信息，
   // 绝不能因为 GitHub 不可达就让「检查状态」失败。
   const remote = await fetchRemoteKernelInfo({ timeoutMs: 8000 })
+  // 与桌面版同一口径：判断「有没有内核更新」只看**线上 build** 与
+  // 「现在部署会用的那份」是否一致（见 resolveKernelTarget 的说明）。
+  // 早前拿通道序号比「包里内置的锚点」，于是部署完仍然提示有更新。
+  const target = await resolveKernelTarget(VERSION, 8000)
 
   for (const ns of namespaces) {
     const instance = instances.find((i) => i.id === ns.id)
@@ -49,28 +55,35 @@ export async function listKvInstances(client: CloudflareClient, accountId: strin
       // 线上内核版本：清单里的 kernelVersion（semver）。
       // 旧清单没有这个字段 → 空串 → 显示「未知」，绝不显示 "unknown"。
       const online = instance.manifest.kernelVersion?.trim() || '未知'
+      const onlineBuild = instance.manifest.build?.trim() || ''
+      const verdict = target.blocked
+        ? '（通道内核要求更高工具版本，本次不升级）'
+        : hasKernelUpdate(target, onlineBuild)
+          ? '可升级'
+          : '已是最新'
       process.stdout.write(
         `  ● ${ns.id}  ${ns.title}\n` +
           `      实例：控制面 ${instance.manifest.controlProject} / 数据面 ${instance.manifest.dataProject}\n` +
           `      域名：${instance.manifest.controlSubdomain} / ${instance.manifest.dataSubdomain}\n` +
-          `      部署于 ${instance.manifest.at}，版本 ${instance.manifest.build}\n` +
-          `      内核版本：线上 ${online} ｜ 内置 ${VERSION} ｜ 远程 ${remote?.version ?? '未知'}\n`
+          `      部署于 ${instance.manifest.at}，版本 ${onlineBuild || '未知'}\n` +
+          `      内核：线上 ${online} ｜ 目标 ${target.version}（${target.build || '未知'}）${verdict}\n`
       )
     } else {
       process.stdout.write(`  ○ ${ns.id}  ${ns.title}  （不含 CFPilot 实例）\n`)
     }
   }
 
-  // 内置 vs 远程：semver 能比出**谁更新**，build 指纹只能说明「不一样」。
-  if (remote) {
-    const cmp = compareSemver(remote.version, VERSION)
+  // 总结：口径与每个实例的判定一致 —— 只回答「线上是不是目标内核」。
+  if (remote || target.channel) {
+    const pending = instances.filter((i) => hasKernelUpdate(target, i.manifest.build))
     const hint =
-      cmp > 0
-        ? `远程内核 ${remote.version} 比内置 ${VERSION} 更新，部署时会自动使用远程内核。`
-        : cmp === 0
-          ? `远程内核 ${remote.version} 与内置版本一致。`
-          : `远程内核 ${remote.version} 比内置 ${VERSION} 旧，将使用内置内核。`
+      pending.length === 0
+        ? `所有实例都已是目标内核 ${target.version}（${target.build || '未知'}），无需更新。`
+        : `${pending.length} 个实例可升级到目标内核 ${target.version}（${target.build || '未知'}）。`
     process.stdout.write(`\n${hint}\n`)
+    if (target.fromChannel) {
+      process.stdout.write('目标内核来自内核热更新通道（kernel-latest），与工具版本无关。\n')
+    }
   }
 
   process.stdout.write(

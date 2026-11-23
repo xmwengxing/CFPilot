@@ -111,6 +111,27 @@ func (f *fakeCF) handler(t *testing.T) http.HandlerFunc {
 		}
 
 		// ---- KV ----
+		// 列键名：归属判定靠键名集合（见 inspectKvOwnership）。
+		// 假服务器按「已写入的键 + 预置的键」回应，和真实 API 的字典序无关 ——
+		// 判定只做集合比较。
+		if strings.Contains(path, "/storage/kv/namespaces/") && strings.HasSuffix(path, "/keys") {
+			seen := map[string]bool{}
+			list := make([]map[string]string, 0, len(f.kvSeed)+len(f.kvWrites))
+			for key := range f.kvSeed {
+				if !seen[key] {
+					seen[key] = true
+					list = append(list, map[string]string{"name": key})
+				}
+			}
+			for key := range f.kvWrites {
+				if !seen[key] {
+					seen[key] = true
+					list = append(list, map[string]string{"name": key})
+				}
+			}
+			ok(list)
+			return
+		}
 		if strings.Contains(path, "/storage/kv/namespaces/") && strings.Contains(path, "/values/") {
 			parts := strings.Split(path, "/values/")
 			key := parts[len(parts)-1]

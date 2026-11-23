@@ -328,6 +328,57 @@ export class CloudflareClient {
     return await this.request('POST', `/accounts/${accountId}/storage/kv/namespaces`, { title })
   }
 
+  /**
+   * 列出 KV 命名空间里的键名（不读值）。
+   *
+   * 归属判定靠键名就够了：CFPilot 自己的键是固定集合，其它项目
+   * （例如第三方面板）用的是另一套键名。只看 `config` / `CONFIG`
+   * 两个键会漏掉大量实际占用（见 inspectKvOwnership 的注释）。
+   *
+   * 失败（权限不足 / 网络）一律抛出 —— 调用方按「无法确认归属」拒绝放行。
+   */
+  async listKvKeys(accountId: string, namespaceId: string): Promise<string[]> {
+    const names: string[] = []
+    let cursor = ''
+    // 单页上限 1000；循环取完（正常实例只有几个键，最多两页）
+    for (let page = 0; page < 5; page++) {
+      const query = `?limit=1000${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
+      let response: Response
+      try {
+        response = await fetch(
+          `${this.apiBase}/accounts/${accountId}/storage/kv/namespaces/${namespaceId}/keys${query}`,
+          {
+            headers: { Authorization: `Bearer ${this.token}` },
+            signal: AbortSignal.timeout(this.timeoutMs),
+          }
+        )
+      } catch (err) {
+        throw new Error(
+          `列出 KV 键名失败（无法确认归属）：${err instanceof Error ? err.message : String(err)}`
+        )
+      }
+      const text = await response.text()
+      if (!response.ok) {
+        throw new Error(
+          `列出 KV 键名失败（无法确认归属）：${parseApiError(response.status, text).message}`
+        )
+      }
+      let body: { result?: Array<{ name?: string }>; result_info?: { cursor?: string } }
+      try {
+        body = JSON.parse(text) as typeof body
+      } catch {
+        throw new Error(`列出 KV 键名失败（无法确认归属）：响应不是合法 JSON`)
+      }
+      for (const item of body.result ?? []) {
+        if (item && typeof item.name === 'string') names.push(item.name)
+      }
+      const next = body.result_info?.cursor ?? ''
+      if (!next || next === cursor) break
+      cursor = next
+    }
+    return names
+  }
+
   /* ---------------------------------------------------------------- */
   /* D1（盲中继 / 云监测台）                                            */
   /* ---------------------------------------------------------------- */

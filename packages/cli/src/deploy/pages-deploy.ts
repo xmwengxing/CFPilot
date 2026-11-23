@@ -369,6 +369,40 @@ function unableToConfirm(err: unknown): KvOwnershipInfo {
 }
 
 /**
+ * 内核会在 KV 里写的键名（用于「这个命名空间是本项目的」判定）。
+ *
+ * ## 为什么按键名集合判定，而不是只探测两个键
+ *
+ * 早前只探测小写 `config` 与大写 `CONFIG` 两个键，于是**任何用别的键名的
+ * 第三方实现都会被判成「空命名空间」**（可通过）—— 用户账号里已经有别的
+ * 面板项目占着的 KV 会在界面里显示为「空命名空间，可用于部署」,
+ * 一部署就把对方的配置覆盖掉（对方的键还在，但自己的 CONFIG/凭据写进去了，
+ * 两边互相干扰，且用户完全看不出发生了什么）。
+ *
+ * 现在靠**键名集合**判定：本项目自己的键是固定集合，不在集合里的键
+ * 就是别的项目留下的痕迹。
+ */
+const CFPILOT_KV_KEYS: ReadonlySet<string> = new Set([
+  'CONFIG',
+  'LOCAL_PREFERRED_IPS',
+  'SCANNER_TOKEN',
+  'POOL_DOMAIN_LIBRARY',
+  'ROUTE_PROFILE',
+  'PANEL_PATH',
+  'ADMIN_PW_HASH',
+  'ADMIN_PW_PLAIN',
+  'SUB_TOKEN_SECRET',
+  MANIFEST_KEY,
+])
+
+/** 带前缀的本项目键（会话 / 一次性令牌） */
+const CFPILOT_KV_KEY_PREFIXES: readonly string[] = ['SESSION:', 'ONETIME:']
+
+function isCfPilotKvKey(key: string): boolean {
+  return CFPILOT_KV_KEYS.has(key) || CFPILOT_KV_KEY_PREFIXES.some((p) => key.startsWith(p))
+}
+
+/**
  * 探测 KV 命名空间的归属。
  *
  * ## 为什么必须探测而不是靠字段值猜
@@ -387,23 +421,35 @@ export async function inspectKvOwnership(
 ): Promise<KvOwnershipInfo> {
   // ⚠️ **读不到 ≠ 不存在**。
   //
-  // `getKvValue` 只把 404（键不存在）当 null，其它错误（403 / 500 / 网络异常）
-  // 一律抛出。读不到时**绝不能**落到 `empty` ——
+  // 失败（403 / 500 / 网络异常）时**绝不能**落到 `empty` ——
   // 那等于「归属确认通过」，于是会去建项目、写 KV，
   // 产出孤儿 Pages 项目与半成品实例。
   //
-  // 读不到时按 `occupied` 处理（**不可放行**），并在 detail 里说清原因。
-  //
   // ⚠️ 五分支语义（AGENTS.md §1.3）保持不变：empty / owned / occupied /
-  // foreign / stale —— 与两个 GUI 版本完全一致，这里不新增第六个分支。
-  let manifest: DeployManifest | null
+  // foreign / stale —— 两个 GUI 版本与 CLI 完全一致，不新增第六个分支。
+  let keys: string[]
   try {
-    manifest = await readManifest(client, accountId, namespaceId)
+    keys = await client.listKvKeys(accountId, namespaceId)
   } catch (err) {
     return unableToConfirm(err)
   }
 
-  if (manifest) {
+  if (keys.length === 0) {
+    return { verdict: 'empty', manifest: null, detail: '空命名空间', blocking: false }
+  }
+
+  // 有清单键才去读值 —— 少一趟 API 往返，也不会把别人的大键读回来
+  if (keys.includes(MANIFEST_KEY)) {
+    let manifest: DeployManifest | null
+    try {
+      manifest = await readManifest(client, accountId, namespaceId)
+    } catch (err) {
+      return unableToConfirm(err)
+    }
+    if (!manifest) {
+      // 清单键在但读不出合法 JSON：状态未知，不可放行
+      return unableToConfirm(new Error(`部署清单 ${MANIFEST_KEY} 内容无效`))
+    }
     if (manifest.controlProject === controlProject) {
       return {
         verdict: 'owned',
@@ -420,39 +466,27 @@ export async function inspectKvOwnership(
     }
   }
 
-  // 没有清单：看有没有别的产品留下的痕迹
-  let legacyConfig: string | null
-  try {
-    legacyConfig = await client.getKvValue(accountId, namespaceId, 'config')
-  } catch (err) {
-    return unableToConfirm(err)
-  }
-  if (legacyConfig !== null) {
-    return {
-      verdict: 'foreign',
-      manifest: null,
-      detail: '含其他项目的 config 键，该命名空间正被别的项目使用',
-      // ⚠️ 阻断：
-      // CFPilot 已是纯自研数据面，不再与其他项目共存于同一 KV。
-      // 理由见上方 KvOwnership 的注释（配额共享 / 语义污染 / 用户预期）。
-      blocking: true,
-    }
-  }
-  let cfpilotConfig: string | null
-  try {
-    cfpilotConfig = await client.getKvValue(accountId, namespaceId, 'CONFIG')
-  } catch (err) {
-    return unableToConfirm(err)
-  }
-  if (cfpilotConfig !== null) {
+  // 没有清单：按键名判断是谁的
+  if (keys.some(isCfPilotKvKey)) {
     return {
       verdict: 'stale',
       manifest: null,
-      detail: '含 CFPilot 的 CONFIG 键但没有部署清单（残留配置，可能是清单被删或手工写入）',
+      detail: '含 CFPilot 的配置键但没有部署清单（残留配置，可能是清单被删或手工写入）',
       blocking: true,
     }
   }
-  return { verdict: 'empty', manifest: null, detail: '空命名空间', blocking: false }
+
+  // 有键，但不是本项目的任何键 —— 被别的项目占着（不能写入）
+  const sample = keys.slice(0, 4).join(', ')
+  return {
+    verdict: 'foreign',
+    manifest: null,
+    detail: `含其它项目的键（${sample}${keys.length > 4 ? ` 等 ${keys.length} 个` : ''}），该命名空间正被别的项目使用`,
+    // ⚠️ 阻断：
+    // CFPilot 已是纯自研数据面，不再与其他项目共存于同一 KV。
+    // 理由见上方 KvOwnership 的注释（配额共享 / 语义污染 / 用户预期）。
+    blocking: true,
+  }
 }
 
 /**

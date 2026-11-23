@@ -693,11 +693,44 @@ const (
 	OwnOwned Ownership = "owned"
 	// OwnOccupied 清单属于另一个 CFPilot 实例，必须拒绝
 	OwnOccupied Ownership = "occupied"
-	// OwnForeign 被旧版第三方实现占用（存在小写 config 键）—— **必须拒绝**
+	// OwnForeign 被其它项目占用（含本项目之外的键名）—— **必须拒绝**
 	OwnForeign Ownership = "foreign"
 	// OwnStale 含 CFPilot 的 CONFIG 但无清单（残留配置），必须拒绝
 	OwnStale Ownership = "stale"
 )
+
+// CfPilotKVKeys 是本项目内核 / 工具会在 KV 里写的键名集合。
+//
+// 用于归属判定：不在集合里的键名 = 别的项目留下的痕迹。
+// 与 CLI 的 `pages-deploy.ts` 的 `CFPILOT_KV_KEYS` **必须逐项一致**。
+var CfPilotKVKeys = map[string]bool{
+	"CONFIG":              true,
+	"LOCAL_PREFERRED_IPS": true,
+	"SCANNER_TOKEN":       true,
+	"POOL_DOMAIN_LIBRARY": true,
+	"ROUTE_PROFILE":       true,
+	"PANEL_PATH":          true,
+	"ADMIN_PW_HASH":       true,
+	"ADMIN_PW_PLAIN":      true,
+	"SUB_TOKEN_SECRET":    true,
+	ManifestKey:           true,
+}
+
+// CfPilotKVKeyPrefixes 是带前缀的本项目键（会话 / 一次性令牌）。
+var CfPilotKVKeyPrefixes = []string{"SESSION:", "ONETIME:"}
+
+// IsCfPilotKVKey 判断键名是否属于本项目。
+func IsCfPilotKVKey(key string) bool {
+	if CfPilotKVKeys[key] {
+		return true
+	}
+	for _, p := range CfPilotKVKeyPrefixes {
+		if strings.HasPrefix(key, p) {
+			return true
+		}
+	}
+	return false
+}
 
 // inspectKvOwnership 探测 KV 归属。
 //
@@ -742,7 +775,7 @@ func (d *Deployer) inspectKvOwnership(ctx context.Context, manifest *Manifest, c
 			manifest.ControlProject, manifest.DataProject, manifest.At)
 	}
 
-	// 没有清单：探测别的产品留下的痕迹
+	// 没有清单：按键名集合判断这个命名空间是谁的。
 	//
 	// ⚠️ **「读不到」不能当成「不存在」**。
 	//
@@ -751,28 +784,35 @@ func (d *Deployer) inspectKvOwnership(ctx context.Context, manifest *Manifest, c
 	// 两个判据全为 false → 落到 `OwnEmpty`（**不阻断**）
 	// → 继续建项目、写 KV → 孤儿 Pages 项目 + 半成品实例。
 	//
-	// 现在用三态读取：读不到时按 `OwnOccupied` 处理（**不可放行**）。
-	// ⚠️ 五分支语义保持不变（不新增第六个分支）——
-	// 与 CLI 版 packages/cli/src/deploy/pages-deploy.ts 一致
-	// （AGENTS.md §1.3 / §2.2）。
-	legacyConfig, legacyState, legacyErr := d.client.GetKVValueState(ctx, d.opt.AccountID, d.opt.KVNamespaceID, "config")
-	if legacyState == cfapi.KVError {
-		return OwnOccupied, fmt.Sprintf("无法确认 KV 归属（读取 config 键失败：%v）—— 请检查 Token 权限与网络后重试", legacyErr)
+	// 现在列键名，失败就按 `OwnOccupied` 处理（**不可放行**）。
+	keystrs, kerr := d.client.ListKVKeys(ctx, d.opt.AccountID, d.opt.KVNamespaceID)
+	if kerr != nil {
+		return OwnOccupied, fmt.Sprintf("无法确认 KV 归属（%v）—— 请检查 Token 权限与网络后重试", kerr)
 	}
-	if legacyState == cfapi.KVFound {
-		_ = legacyConfig
-		return OwnForeign, "含旧版第三方实现的 config 键，该命名空间正被其它项目使用"
+	if len(keystrs) == 0 {
+		return OwnEmpty, "空命名空间"
 	}
 
-	cfpilotConfig, cfpilotState, cfpilotErr := d.client.GetKVValueState(ctx, d.opt.AccountID, d.opt.KVNamespaceID, ConfigKey)
-	if cfpilotState == cfapi.KVError {
-		return OwnOccupied, fmt.Sprintf("无法确认 KV 归属（读取 CONFIG 键失败：%v）—— 请检查 Token 权限与网络后重试", cfpilotErr)
+	cfpilotTouched := false
+	for _, key := range keystrs {
+		if IsCfPilotKVKey(key) {
+			cfpilotTouched = true
+			break
+		}
 	}
-	if cfpilotState == cfapi.KVFound {
-		_ = cfpilotConfig
-		return OwnStale, "含 CFPilot 的 CONFIG 键但没有部署清单（残留配置，可能是清单被删或手工写入）"
+	if cfpilotTouched {
+		return OwnStale, "含 CFPilot 的配置键但没有部署清单（残留配置，可能是清单被删或手工写入）"
 	}
-	return OwnEmpty, "空命名空间"
+
+	// 有键但一个都不是本项目的 —— 被其它项目占着。
+	//
+	// ⚠️ 不能再只看 `config` 键：别的实现可能用 `c` / `wk` / `rm` 之类的键名，
+	// 那种命名空间早前会被判成「空」，一部署就把对方配置覆盖掉。
+	sample := keystrs
+	if len(sample) > 4 {
+		sample = sample[:4]
+	}
+	return OwnForeign, fmt.Sprintf("含其它项目的键（%s），该命名空间正被别的项目使用", strings.Join(sample, ", "))
 }
 
 // assertKvOwnership 校验 KV 归属，不通过则中止部署。

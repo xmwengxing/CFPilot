@@ -164,3 +164,83 @@ func CheckChannelUpdate(ctx context.Context, currentVersion string) (info *Remot
 	}
 	return channelRemoteInfo(channel), true
 }
+
+// Target 描述「现在部署会用哪一份内核」。
+//
+// ## 为什么需要它
+//
+// 「有没有内核更新」这个问题，早前各处的口径不一致：
+//
+//   - 托盘的后台检查、面板的「检查状态」都拿**通道序号**去比**本程序内置的锚点**；
+//   - 而「更新内核」实际更新的是**线上部署**，内置锚点并不会变。
+//
+// 于是用户更新完内核、线上已经是通道最新，托盘照样隔一段时间就提示
+// 「有内核更新」，再点一次还是同一个提示 —— 提示永远消不掉。
+//
+// 正确口径只有一个：**线上正在跑的内核 build 与「现在部署会用的那份」是否一致**。
+// 一致 = 没有更新；不一致 = 有更新（点一次就能收敛）。
+type Target struct {
+	// Build 是本次部署会用的内核 build（通道比内置新时用通道的，否则用内置的）
+	Build string
+	// Version 是给人看的版本号（通道为 k<seq>，否则就是本程序版本）
+	Version string
+	// Info 是通道信息；通道不可用（离线 / 未发布）时为 nil
+	Info *RemoteInfo
+	// FromChannel 表示这次用的是内核热更新通道里的内核（比内置新）
+	FromChannel bool
+	// Blocked 表示通道内核要求更高的工具版本，本次**不能**升级内核
+	Blocked bool
+}
+
+// ResolveTarget 解析「现在部署会用的内核」，并返回通道信息。
+//
+// 语义与 LoadPreferred 的选源顺序完全一致（通道 → 包 Release → 内置），
+// 只是**不下载**，因此可以在托盘后台检查里几十毫秒跑完。
+// currentVersion 是当前工具版本（兼容护栏用；空串 = 跳过护栏）。
+func ResolveTarget(ctx context.Context, currentVersion string) Target {
+	builtin := loadBuiltinKernelVersion()
+	target := Target{Build: builtin.Build, Version: builtin.Build}
+
+	channel := fetchChannelVersion(ctx)
+	if channel == nil {
+		return target
+	}
+	target.Info = channelRemoteInfo(channel)
+
+	// 兼容护栏：通道内核要求更新的工具版本 → 本次不升级（也不提示可升级）
+	if channel.MinToolVersion != "" &&
+		strings.TrimSpace(currentVersion) != "" &&
+		CompareSemver(currentVersion, channel.MinToolVersion) < 0 {
+		target.Blocked = true
+		return target
+	}
+
+	// 通道只有比内置**新**时才参与（否则用内置，避免把线上降级）。
+	// ⚠️ 版本号也只在此时换成 k<序号>：通道更旧时部署仍用内置，
+	// 展示通道序号会让人以为目标内核来自通道。
+	if isChannelNewer(channel, builtin) {
+		target.Build = channel.Build
+		target.Version = target.Info.Version
+		target.FromChannel = true
+	}
+	return target
+}
+
+// HasUpdateAgainstDeployed 判断「现在部署用的内核」与线上已部署的 build 是否不同。
+//
+// deployedBuild 为空表示线上版本未知 —— 返回 true（提示用户去部署页确认，
+// 那里会给出「更新并记录版本」）。调用方不要用空串去触发自动部署。
+func (t Target) HasUpdateAgainstDeployed(deployedBuild string) bool {
+	deployedBuild = strings.TrimSpace(deployedBuild)
+	if t.Blocked {
+		return false
+	}
+	if strings.TrimSpace(t.Build) == "" {
+		// 两边都读不到：不凭「不知道」催用户更新
+		return false
+	}
+	if deployedBuild == "" {
+		return true
+	}
+	return !strings.EqualFold(strings.TrimSpace(t.Build), deployedBuild)
+}

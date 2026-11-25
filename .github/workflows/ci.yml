@@ -167,8 +167,11 @@ jobs:
           go-version: '1.27'
           cache-dependency-path: packages/desktop/go.sum
       - run: npm ci
-      - name: 构建界面（@cfpilot/ui）
-        run: npm run build -w @cfpilot/ui
+      - name: 构建内核与界面
+        # 内核产物是 go:embed 进二进制的，缺了 build-desktop 会直接退出
+        run: |
+          npm run build -w @cfpilot/worker-core
+          npm run build -w @cfpilot/ui
       - name: 编译 + 打包（.app / .dmg）
         # 两种架构都编，打包脚本会 lipo 成 universal 并挂载回读校验
         run: node scripts/build-desktop.mjs --only darwin

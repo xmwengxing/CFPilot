@@ -592,9 +592,11 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "版本：$V"
 
-      - name: 构建界面
-        # 界面与内核资产都是 go:embed 进二进制的，必须先构建
-        run: npm run build -w @cfpilot/ui
+      - name: 构建内核与界面
+        # 界面与内核资产都是 go:embed 进二进制的，缺一项 build-desktop 就退出
+        run: |
+          npm run build -w @cfpilot/worker-core
+          npm run build -w @cfpilot/ui
 
       - name: 包内测试（含 macOS 整包替换逻辑）
         working-directory: packages/desktop

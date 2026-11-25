@@ -55,6 +55,12 @@ func ApplyUpdate(newFile string) (oldPath string, err error) {
 		return "", err
 	}
 
+	// macOS：应用是 .app 包，换的是整个包（不是里面的可执行文件）。
+	// 单文件 rename-swap 在那里会让 Info.plist / 资源 / 代码签名全部过期。
+	if runtime.GOOS == "darwin" {
+		return applyAppBundle(newFile)
+	}
+
 	exe, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("定位当前程序失败：%v", err)
@@ -165,6 +171,12 @@ func copyExecutable(src, dst string) error {
 // helper 就是**新版 exe 自己**（swap 后原路径已是新版），re-exec 自身并带上
 // 主进程原来的启动参数 —— 用户显式给过的 --port / --console 等不会丢。
 func SpawnUpdateHelper(oldPath string, originalArgs []string) error {
+	// macOS 不重启自身当 helper（swap 前后原路径已经是另一个包），
+	// 改为拉起一个等待-替换-重启的小脚本。
+	if runtime.GOOS == "darwin" {
+		return spawnAppBundleSwap(originalArgs)
+	}
+
 	self, err := os.Executable()
 	if err != nil {
 		return err
@@ -186,5 +198,5 @@ func RestartExecutable() error {
 }
 
 // 平台差异收口：Windows 上重命名运行中的 exe 是允许的；
-// 其它平台（POSIX）rename 覆盖运行中的 exe 也允许 —— 统一走同一条路径。
-var _ = runtime.GOOS
+// 其它平台（POSIX）rename 覆盖运行中的 exe 也允许 —— 统一走同一条单文件路径。
+// 例外是 macOS（.app 整包替换），分支写在 ApplyUpdate 开头。

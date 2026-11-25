@@ -282,13 +282,46 @@ func parseReleases(body io.Reader) ([]Release, error) {
 }
 
 // pickAsset 按当前平台与构建变体（普通版 / +mesh 版）挑合适的附件。
+func pickAsset(assets []Asset) *Asset {
+	return pickAssetFor(assets, runtime.GOOS, runtime.GOARCH)
+}
+
+// pickAssetFor 是 pickAsset 的平台无关版本（便于单元测试覆盖每个平台）。
 //
 // ⚠️ 同一 Release 里同时包含普通版（cfpilot-<ver>-windows-amd64.exe）和
 // +mesh 版（cfpilot-<ver>+mesh-windows-amd64-setup.exe / .deb），
 // 普通版更新器绝不能误选带 `+mesh` 的安装包。
-func pickAsset(assets []Asset) *Asset {
-	wantOS := runtime.GOOS
-	wantArch := runtime.GOARCH
+//
+// ⚠️ macOS 特殊：应用是 .app，更新必须换**整个包**，所以只认 dmg。
+// 裸的 `cfpilot-<ver>-darwin-<arch>` 是给手动使用的，拿它去替换
+// .app 里的可执行文件会直接破坏代码签名（这正是之前的老问题）。
+func pickAssetFor(assets []Asset, wantOS, wantArch string) *Asset {
+	if wantOS == "darwin" {
+		// Release 里的 macOS 资产写的是 macos（不是 goos 的 darwin），
+		// 因为用户看到的是「macOS 安装包」而不是 Go 的构建目标名。
+		isDMG := func(name string) bool {
+			if !strings.HasSuffix(name, ".dmg") || strings.Contains(name, "+mesh") {
+				return false
+			}
+			return strings.Contains(name, "macos")
+		}
+		// 1) universal 优先：一份包同时管 Intel 与 Apple Silicon
+		for i := range assets {
+			name := strings.ToLower(assets[i].Name)
+			if isDMG(name) && strings.Contains(name, "universal") {
+				return &assets[i]
+			}
+		}
+		// 2) 本架构的 dmg（只发布过单架构包的版本）
+		for i := range assets {
+			name := strings.ToLower(assets[i].Name)
+			if isDMG(name) && strings.Contains(name, "-"+wantArch) {
+				return &assets[i]
+			}
+		}
+		// 3) 其它架构的 dmg 也不行 —— 装上去架构不匹配，直接报「没有本平台包」
+		return nil
+	}
 
 	isStandard := func(name string) bool {
 		return !strings.Contains(name, "+mesh") && !strings.HasSuffix(name, ".deb") && !strings.Contains(name, "-setup.")
@@ -489,8 +522,13 @@ func DefaultDownloadPath(version string) string {
 	}
 	dir := filepath.Join(home, ".cfpilot-gui", "updates")
 	name := "cfpilot-" + version
-	if runtime.GOOS == "windows" {
+	switch runtime.GOOS {
+	case "windows":
 		name += ".exe"
+	case "darwin":
+		// macOS 下载的是 dmg：更新要换整个 .app，不是换里面的可执行文件。
+		// 后缀同时决定 ApplyUpdate 走哪条分支（看后缀认不出来时按单二进制处理）。
+		name += ".dmg"
 	}
 	return filepath.Join(dir, name)
 }

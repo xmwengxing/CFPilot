@@ -204,8 +204,16 @@ func versionFromReleaseURL(url string) string {
 
 // DesktopAssetName 按平台与版本拼出桌面版安装包名。
 //
-// 与 CLI 版 shared/github-mirrors.ts 的 desktopAssetName 一致。
+// Windows / Linux 与 CLI 版 shared/github-mirrors.ts 的 desktopAssetName 一致。
+//
+// ⚠️ macOS 返回的是 **dmg**，且固定用 universal（CLI 侧没有下载桌面版的路径，
+// 所以那边不需要同步这个分支）：应用内更新装的是整个 .app，
+// 裸二进制不是可用的更新包；这里拼出的名字只用于「免 API 通道」
+// （直接取 /releases/latest/download/<名>），必须与发版产物名对得上。
 func DesktopAssetName(version, goos, goarch string) string {
+	if goos == "darwin" {
+		return fmt.Sprintf("cfpilot-%s-macos-universal.dmg", version)
+	}
 	ext := ""
 	if goos == "windows" {
 		ext = ".exe"

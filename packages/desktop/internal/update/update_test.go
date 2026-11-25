@@ -119,11 +119,8 @@ func releaseJSON(tag, assetName string, draft, prerelease bool) map[string]any {
 
 // 发现新版本。
 func TestCheckHasUpdate(t *testing.T) {
-	// 资产名要匹配当前平台
-	assetName := "cfpilot-0.6.0-" + runtime.GOOS + "-" + runtime.GOARCH
-	if runtime.GOOS == "windows" {
-		assetName += ".exe"
-	}
+	// 资产名要匹配当前平台（macOS 是 dmg）
+	assetName := platformAssetName("0.6.0", true)
 	srv := fakeGitHub(t, []any{
 		releaseJSON("desktop-v0.6.0", assetName, false, false),
 		releaseJSON("desktop-v0.5.5", assetName, false, false),
@@ -147,7 +144,7 @@ func TestCheckHasUpdate(t *testing.T) {
 
 // 已是最新版。
 func TestCheckNoUpdate(t *testing.T) {
-	assetName := "cfpilot-0.5.5-" + runtime.GOOS + "-" + runtime.GOARCH
+	assetName := platformAssetName("0.5.5", true)
 	srv := fakeGitHub(t, []any{
 		releaseJSON("desktop-v0.5.5", assetName, false, false),
 	})
@@ -164,7 +161,7 @@ func TestCheckNoUpdate(t *testing.T) {
 
 // draft 与 prerelease 必须跳过。
 func TestCheckSkipsDraftAndPrerelease(t *testing.T) {
-	assetName := "cfpilot-0.6.0-" + runtime.GOOS + "-" + runtime.GOARCH
+	assetName := platformAssetName("0.6.0", true)
 	srv := fakeGitHub(t, []any{
 		releaseJSON("desktop-v0.9.0", assetName, true, false),  // draft
 		releaseJSON("desktop-v0.8.0", assetName, false, true),  // prerelease
@@ -184,7 +181,7 @@ func TestCheckSkipsDraftAndPrerelease(t *testing.T) {
 // 而 release-desktop.yml 产出的是 `v*` → 一个发行版都找不到 →
 // 界面「检查更新」按钮永远显示「检查失败」。
 func TestCheckAcceptsVPrefix(t *testing.T) {
-	assetName := "cfpilot-0.6.0-" + runtime.GOOS + "-" + runtime.GOARCH
+	assetName := platformAssetName("0.6.0", true)
 	srv := fakeGitHub(t, []any{
 		releaseJSON("v0.6.0", assetName, false, false),
 	})
@@ -204,7 +201,7 @@ func TestCheckAcceptsVPrefix(t *testing.T) {
 
 // 不相关的 tag 前缀要跳过。
 func TestCheckIgnoresUnrelatedTags(t *testing.T) {
-	assetName := "cfpilot-0.6.0-" + runtime.GOOS + "-" + runtime.GOARCH
+	assetName := platformAssetName("0.6.0", true)
 	srv := fakeGitHub(t, []any{
 		releaseJSON("release-0.6.0", assetName, false, false), // 无关前缀
 		releaseJSON("desktop-v0.6.0", assetName, false, false),
@@ -219,10 +216,8 @@ func TestCheckIgnoresUnrelatedTags(t *testing.T) {
 
 // 兼容 gui-v* 前缀（过渡期）。
 func TestCheckAcceptsGuiPrefix(t *testing.T) {
-	assetName := "CFPilot-0.6.0-" + runtime.GOOS
-	if runtime.GOOS == "windows" {
-		assetName += ".exe"
-	}
+	// 保留首字母大写：这条用例本来就在验证资产名大小写不敏感
+	assetName := "C" + platformAssetName("0.6.0", false)[1:]
 	srv := fakeGitHub(t, []any{
 		releaseJSON("gui-v0.6.0", assetName, false, false),
 	})
@@ -304,7 +299,7 @@ func TestReleaseVersion(t *testing.T) {
 func TestCheckSkipsWhenNoPlatformAsset(t *testing.T) {
 	srv := fakeGitHub(t, []any{
 		releaseJSON("desktop-v0.9.0", "cfpilot-0.9.0-solaris-sparc", false, false),
-		releaseJSON("desktop-v0.6.0", "cfpilot-0.6.0-"+runtime.GOOS, false, false),
+		releaseJSON("desktop-v0.6.0", platformAssetName("0.6.0", false), false, false),
 	})
 	withAPIBase(t, srv.URL)
 
@@ -589,10 +584,17 @@ func TestDefaultDownloadPath(t *testing.T) {
 	if runtime.GOOS == "windows" && !strings.HasSuffix(p, ".exe") {
 		t.Errorf("Windows 上应以 .exe 结尾，实际 %q", p)
 	}
+	if runtime.GOOS == "darwin" && !strings.HasSuffix(p, ".dmg") {
+		t.Errorf("macOS 上应以 .dmg 结尾（整包更新），实际 %q", p)
+	}
 }
 
 // 同一 Release 同时包含 +mesh 安装包与普通版时，pickAsset 不应误选 +mesh 安装包。
 func TestPickAssetPrefersStandardOverMesh(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		// macOS 发布的是 dmg（没有 +mesh 变体），走另一组用例（见下）。
+		t.Skip("macOS 的资产是 dmg，由 TestPickAssetForDarwin* 覆盖")
+	}
 	standardName := "cfpilot-0.60.0-beta.1-" + runtime.GOOS + "-" + runtime.GOARCH
 	meshName := "cfpilot-0.60.0-beta.1+mesh-" + runtime.GOOS + "-" + runtime.GOARCH
 	if runtime.GOOS == "windows" {
@@ -612,5 +614,64 @@ func TestPickAssetPrefersStandardOverMesh(t *testing.T) {
 	}
 }
 
+// platformAssetName 生成「当前平台能被 pickAsset 选中」的资产名。
+//
+// macOS 的更新包是 dmg（整包替换），其余平台仍是裸二进制。
+func platformAssetName(version string, withArch bool) string {
+	if runtime.GOOS == "darwin" {
+		return "cfpilot-" + version + "-macos-universal.dmg"
+	}
+	name := "cfpilot-" + version + "-" + runtime.GOOS
+	if withArch {
+		name += "-" + runtime.GOARCH
+	}
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	return name
+}
+
 // 保证 time 被引用（超时相关）
 var _ = time.Second
+
+// macOS 只能选 dmg：裸 darwin 二进制装不进 .app。
+func TestPickAssetForDarwinRequiresDMG(t *testing.T) {
+	assets := []Asset{
+		{Name: "cfpilot-0.61.0-darwin-amd64", URL: "https://example.com/bin"},
+		{Name: "cfpilot-0.61.0-macos-amd64.dmg", URL: "https://example.com/amd64.dmg"},
+	}
+	got := pickAssetFor(assets, "darwin", "amd64")
+	if got == nil || got.Name != "cfpilot-0.61.0-macos-amd64.dmg" {
+		t.Fatalf("应选中本架构 dmg，实际 %#v", got)
+	}
+
+	// 只有裸二进制时宁可不更新，也不能选它
+	onlyBin := []Asset{{Name: "cfpilot-0.61.0-darwin-arm64", URL: "https://example.com/bin"}}
+	if got := pickAssetFor(onlyBin, "darwin", "arm64"); got != nil {
+		t.Fatalf("没有 dmg 时不应选裸二进制，实际选到 %#v", got)
+	}
+}
+
+// universal 优先于架构包（同一版本两种都发时）。
+func TestPickAssetForDarwinPrefersUniversal(t *testing.T) {
+	assets := []Asset{
+		{Name: "cfpilot-0.61.0-macos-arm64.dmg", URL: "https://example.com/arm64.dmg"},
+		{Name: "cfpilot-0.61.0-macos-universal.dmg", URL: "https://example.com/universal.dmg"},
+	}
+	for _, arch := range []string{"amd64", "arm64"} {
+		got := pickAssetFor(assets, "darwin", arch)
+		if got == nil || got.Name != "cfpilot-0.61.0-macos-universal.dmg" {
+			t.Fatalf("%s 应优先选 universal，实际 %#v", arch, got)
+		}
+	}
+}
+
+// +mesh 版的 dmg（将来若有）不能被普通版更新器选中。
+func TestPickAssetForDarwinIgnoresMesh(t *testing.T) {
+	assets := []Asset{
+		{Name: "cfpilot-0.61.0+mesh-macos-universal.dmg", URL: "https://example.com/mesh.dmg"},
+	}
+	if got := pickAssetFor(assets, "darwin", "arm64"); got != nil {
+		t.Fatalf("不应选 +mesh 包，实际 %#v", got)
+	}
+}

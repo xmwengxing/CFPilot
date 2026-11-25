@@ -34,6 +34,9 @@ func TestDesktopAssetName(t *testing.T) {
 		{"0.8.1", "windows", "amd64", "cfpilot-0.8.1-windows-amd64.exe"},
 		{"0.8.1", "linux", "amd64", "cfpilot-0.8.1-linux-amd64"},
 		{"0.8.1", "linux", "arm64", "cfpilot-0.8.1-linux-arm64"},
+		// macOS 装的是整个 .app，更新包固定是 universal dmg
+		{"0.8.1", "darwin", "amd64", "cfpilot-0.8.1-macos-universal.dmg"},
+		{"0.8.1", "darwin", "arm64", "cfpilot-0.8.1-macos-universal.dmg"},
 	}
 	for _, c := range cases {
 		if got := DesktopAssetName(c.version, c.goos, c.goarch); got != c.want {

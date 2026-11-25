@@ -49,6 +49,13 @@ const (
 	ManifestKey = "CFP_DEPLOY_MANIFEST"
 	// ConfigKey 是内核配置键（大写！小写 config 是旧版第三方实现的，绝不能写）。
 	ConfigKey = "CONFIG"
+	// LocalIpsKey 是面板「本地真连接池」的键名（内核 config.ts 的 LOCAL_IPS_KEY）。
+	//
+	// 值是**换行分隔**的 `IP:Port#备注` 行 —— 与 /api/v1/preferred-ips 收的格式一致。
+	//
+	// 定时优选的「竞速回填」会先读它把 IP 拉进候选队列，跑完再整池覆盖写回，
+	// 所以这里的键名与格式都不能改（改了就变成「读出 0 条 / 写进去面板不认」）。
+	LocalIpsKey = "LOCAL_PREFERRED_IPS"
 )
 
 // Options 是部署参数。
@@ -705,7 +712,7 @@ const (
 // 与 CLI 的 `pages-deploy.ts` 的 `CFPILOT_KV_KEYS` **必须逐项一致**。
 var CfPilotKVKeys = map[string]bool{
 	"CONFIG":              true,
-	"LOCAL_PREFERRED_IPS": true,
+	LocalIpsKey:           true,
 	"SCANNER_TOKEN":       true,
 	"POOL_DOMAIN_LIBRARY": true,
 	"ROUTE_PROFILE":       true,

@@ -79,6 +79,11 @@ export function formatTaskTime(ms?: number): string {
  */
 export function taskRowHtml(t: ScheduledTask, checked: boolean): string {
   const badge = t.builtin ? ' <span class="badge info">内置</span>' : ''
+  // 竞速回填会连带改用户面板上的数据，谱上要有痕迹 ——
+  // 否则用户只看到「任务跑完了」，却不知道面板池被换掉了。
+  const raceBadge = t.raceBackfill
+    ? ' <span class="badge warn" title="每轮跑完会把最快的 N 条覆盖回填到面板的本地真连接池">竞速回填</span>'
+    : ''
   const speed = t.minSpeedMBps > 0 ? `≥ ${t.minSpeedMBps} MB/s` : '不过滤'
   const next = t.enabled ? '运行中…' : '—'
   // 数据面域名是**运行期**从该账号的部署清单取的 —— 第一次跑完才有值。
@@ -91,7 +96,7 @@ export function taskRowHtml(t: ScheduledTask, checked: boolean): string {
       escapeHtml(t.id) +
       '" title="启用后到点自动运行优选。">启用</button>'
   // 气泡**只放优选参数**：说明不是重要信息，点「编辑」就能看到。
-  const tip = '优选参数：' + scanParamsSummary(t.scan)
+  const tip = '优选参数：' + scanParamsSummary(t.scan) + (t.raceBackfill ? '\n竞速回填：开启' : '')
   const edit =
     '<button class="btn btn-ghost btn-sm" data-task-edit="' +
     escapeHtml(t.id) +
@@ -104,7 +109,7 @@ export function taskRowHtml(t: ScheduledTask, checked: boolean): string {
     '<tr>' +
     `<td>${checkCell}</td>` +
     `<td>${toggle}</td>` +
-    `<td title="${escapeHtml(tip)}">${escapeHtml(t.name)}${badge}</td>` +
+    `<td title="${escapeHtml(tip)}">${escapeHtml(t.name)}${badge}${raceBadge}</td>` +
     `<td>${t.intervalDays} 天</td>` +
     `<td class="mono">${escapeHtml(t.runAt)}</td>` +
     `<td>${escapeHtml(speed)}</td>` +

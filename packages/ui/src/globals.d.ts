@@ -659,6 +659,8 @@ interface Window {
       intervalDays: number
       runAt: string
       minSpeedMBps?: number
+      /** 竞速回填：把面板本地真连接池的 IP 拉进候选竞速，跑完覆盖回填最快的 N 条 */
+      raceBackfill?: boolean
       scan: ScheduledScanParams
     }): Promise<{ ok: boolean; task?: ScheduledTask; error?: string; conflict?: { id: string; name: string; runAt: string } }>
 
@@ -675,6 +677,7 @@ interface Window {
       runAt?: string
       minSpeedMBps?: number
       enabled?: boolean
+      raceBackfill?: boolean
     }): Promise<{ ok: boolean; tasks?: ScheduledTask[]; error?: string; conflict?: { id: string; name: string; runAt: string } }>
 
     /** 删除定时优选任务（内置任务不会被删，会在 skipped 里说明） */
@@ -1099,6 +1102,13 @@ interface ScheduledTask {
   runAt: string
   /** 下行速度下限（MB/s）；0 = 不过滤 */
   minSpeedMBps: number
+  /**
+   * 竞速回填：跑完把最快的 N 条覆盖写回面板的本地真连接池。
+   *
+   * 打开后本轮还会先把面板池里现有的 IP 拉进候选队列一起竞争，
+   * 面板池原有的 IP（含手填的）会被整体覆盖。
+   */
+  raceBackfill?: boolean
   /** 优选参数快照（只读） */
   scan: ScheduledScanParams
   anchorAt: number

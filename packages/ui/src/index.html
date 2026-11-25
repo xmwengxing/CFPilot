@@ -1077,6 +1077,8 @@
       pointer-events: none;
     }
     .has-tip:hover::after { opacity: 1; visibility: visible; }
+    /* 弹窗里的气泡向上展开：.modal-box 是 overflow:auto，向下会被底边裁掉 */
+    .modal-box .has-tip::after { top: auto; bottom: 135%; }
 
     /* 链接列表 */
     .links { font-size: 12.5px; line-height: 2.1; color: var(--text-secondary); }
@@ -3555,7 +3557,7 @@
             很容易把不该改的一并改掉。
 
             优选参数**只读**：要改得删了任务、在优选页重新配置。
-            这里只开放 5 个参数：名称 / 说明 / 周期 / 运行时间 / 速度过滤。
+            这里只开放 6 个参数：名称 / 说明 / 周期 / 运行时间 / 速度过滤 / 竞速回填。
           -->
           <div class="modal-mask" id="taskModal" hidden>
             <div class="modal-box" style="width: min(620px, 100%)">
@@ -3588,6 +3590,14 @@
                     <p class="tip">0 = 不过滤；低于该值的候选淘汰。</p>
                   </div>
                 </div>
+                <label class="switch-box" style="margin-top:12px">
+                  <span class="sw-info">
+                    <span class="sw-title has-tip" data-tip="打开后每轮会先把面板「本地真连接池」里现有的 IP 拉进候选队列，和本任务采样的新 IP 一起做 TCP / TLS / WS 101 与下行测速，再把最快的前 N 条（N = 保留条数）写回面板。&#10;&#10;⚠️ 回填是覆盖写入：面板池会被清空后重写，用户手填的 IP 与没赢下竞速的旧 IP 都会消失。&#10;⚠️ 面板池为空时会先按普通模式跑，跑完写入本轮最快的 N 条。&#10;&#10;需要控制面面板密码（用于登录取一次性回填令牌）；取不到时本轮扫描照常完成，只是不会写面板。">竞速回填 ⓘ</span>
+                    <span class="sw-desc">面板池旧 IP 一起竞速，跑完覆盖面板池</span>
+                  </span>
+                  <input type="checkbox" id="taskRaceBackfill" />
+                  <span class="switch"></span>
+                </label>
                 <div class="field" style="margin-top:12px">
                   <label>任务说明（可选）</label>
                   <textarea id="taskDesc" rows="2" maxlength="200" placeholder="这条任务是做什么的"></textarea>

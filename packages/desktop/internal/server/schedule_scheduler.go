@@ -47,6 +47,14 @@ const (
 	// 一轮完整优选（含测速）约 5~10 分钟；留到 15 分钟够用，
 	// 超时按失败处理，不让它无限挂着。
 	schedMaxRun = 15 * time.Minute
+
+	// maxRacePoolCandidates 是「竞速回填」从面板池拉进来参与竞争的上限（条）。
+	//
+	// 面板池最多能存 5000 条（内核 MAX_LOCAL_IPS_ENTRIES）。全拉进候选队列会让
+	// 阶段一的 TCP 握手数凭空多出几千个，既拖时长又让本机行为更像扫描器。
+	// 300 条足够让「上一轮赢家 + 最近几轮的长尾」都参与竞速 ——
+	// 池子按入池时间排序，取前 300 就是「最近跑出来的那批」。
+	maxRacePoolCandidates = 300
 )
 
 // scheduleScheduler 是定时优选任务的调度器。
@@ -169,7 +177,7 @@ func (s *Server) runScheduledTask(ctx context.Context, task schedule.Task) {
 	runCtx, cancel := context.WithTimeout(ctx, schedMaxRun)
 	defer cancel()
 
-	summary, entries, host, err := s.executeScheduledTask(runCtx, task)
+	summary, entries, host, note, err := s.executeScheduledTask(runCtx, task)
 	if err != nil {
 		s.finishScheduledTask(task, schedule.StatusFailed, err.Error(), 0, "")
 		return
@@ -189,30 +197,40 @@ func (s *Server) runScheduledTask(ctx context.Context, task schedule.Task) {
 			message = "本轮没有可用节点"
 		}
 	}
+	// 竞速回填的结论要一并告诉用户：它失败了不会让本轮变成失败
+	// （扫描结果仍然进了本地池），但用户必须知道面板池没被改。
+	if note != "" {
+		if message == "" {
+			message = note
+		} else {
+			message = message + "；" + note
+		}
+	}
 	s.finishScheduledTask(task, status, message, len(entries), host)
 }
 
 // executeScheduledTask 跑一轮优选并把结果写进本地池。
 //
-// 返回扫描摘要、入池条目与**实际使用的数据面域名**。
+// 返回扫描摘要、入池条目、**实际使用的数据面域名**，以及一段可选的附注
+// （目前只有「竞速回填」会产出它：回填了几条、或者为什么没回填）。
 //
 // ⚠️ 数据面域名与 WS 路径都是**运行期从该账号的部署清单现取**的 ——
 // 用户不需要在界面上填，也不必点「自动识别」：
 // 任务用的是「这个账号部署的那个实例」，填的值反而可能对不上。
-func (s *Server) executeScheduledTask(ctx context.Context, task schedule.Task) (*scan.Summary, []schedule.PoolEntry, string, error) {
+func (s *Server) executeScheduledTask(ctx context.Context, task schedule.Task) (*scan.Summary, []schedule.PoolEntry, string, string, error) {
 	// ---- 1. 取该任务归属账号的凭据 ----
 	//
 	// ⚠️ 绝不能回落活跃账号：多账号场景下会串号 ——
 	// 用 A 账号的凭据去回填 B 账号的部署。
 	profile, err := s.store.Get(task.ProfileID)
 	if err != nil || profile == nil {
-		return nil, nil, "", fmt.Errorf("归属账号已不存在")
+		return nil, nil, "", "", fmt.Errorf("归属账号已不存在")
 	}
 	if strings.TrimSpace(profile.CfToken) == "" {
-		return nil, nil, "", fmt.Errorf("归属账号没有 API Token")
+		return nil, nil, "", "", fmt.Errorf("归属账号没有 API Token")
 	}
 	if strings.TrimSpace(profile.AccountID) == "" || strings.TrimSpace(profile.KVNamespaceID) == "" {
-		return nil, nil, "", fmt.Errorf("归属账号没有检测账号或选择 KV")
+		return nil, nil, "", "", fmt.Errorf("归属账号没有检测账号或选择 KV")
 	}
 
 	// ---- 2. 读部署清单与 KV 配置：数据面域名 / WS 路径 / XHTTP 路径 ----
@@ -221,18 +239,18 @@ func (s *Server) executeScheduledTask(ctx context.Context, task schedule.Task) (
 	defer cancelRead()
 	raw, ok := client.GetKVValue(readCtx, profile.AccountID, profile.KVNamespaceID, deploy.ManifestKey)
 	if !ok || strings.TrimSpace(raw) == "" {
-		return nil, nil, "", fmt.Errorf("没有找到部署清单，请先完成一次部署")
+		return nil, nil, "", "", fmt.Errorf("没有找到部署清单，请先完成一次部署")
 	}
 	var m deploy.Manifest
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
-		return nil, nil, "", fmt.Errorf("部署清单格式损坏")
+		return nil, nil, "", "", fmt.Errorf("部署清单格式损坏")
 	}
 	host := strings.TrimSpace(m.DataCustomDomain)
 	if host == "" {
 		host = normalizePagesHost(m.DataSubdomain)
 	}
 	if host == "" {
-		return nil, nil, "", fmt.Errorf("清单里没有可用的数据面域名")
+		return nil, nil, "", "", fmt.Errorf("清单里没有可用的数据面域名")
 	}
 	wsPath := strings.TrimSpace(m.Credentials.WSPath)
 	if wsPath == "" {
@@ -273,7 +291,21 @@ func (s *Server) executeScheduledTask(ctx context.Context, task schedule.Task) (
 	// 与手动优选 / CLI 的口径一致。
 	candidates := s.sampleCandidates(adaptive, sample, len(task.Scan.Countries) > 0, family, extraIPv6)
 	if len(candidates) == 0 {
-		return nil, nil, "", fmt.Errorf("未能生成候选 IP")
+		return nil, nil, "", "", fmt.Errorf("未能生成候选 IP")
+	}
+	// ---- 3.5 竞速回填：把面板「本地真连接池」里的 IP 拉进候选队列 ----
+	//
+	// 它们与采样出来的新候选走**同一套阶段**（TCP / TLS / WS101 / 测速），
+	// 而不是被当作保送名单 —— 已失效的旧 IP 就该在阶段一被刷掉。
+	if task.RaceBackfill {
+		if rawPool, ok := client.GetKVValue(readCtx, profile.AccountID, profile.KVNamespaceID, deploy.LocalIpsKey); ok && strings.TrimSpace(rawPool) != "" {
+			poolHosts := scan.ParseCandidateList(rawPool)
+			var added int
+			candidates, added = mergeRaceCandidates(poolHosts, candidates, family)
+			s.logf(fmt.Sprintf("竞速回填：面板池 %d 条 IP 已加入候选（去重后新增 %d 条）", len(poolHosts), added))
+		} else {
+			s.logf("竞速回填：面板池为空（或读不到），本轮只用新采样候选")
+		}
 	}
 	if ipv6Env != nil && ipv6Env.Status != scan.IPv6EnvOK {
 		s.logLevel("定时优选："+ipv6Env.Message, "warn")
@@ -314,7 +346,7 @@ func (s *Server) executeScheduledTask(ctx context.Context, task schedule.Task) (
 		},
 	})
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, "", "", err
 	}
 
 	// ---- 5. 写优选历史（与手动优选同一套留底，便于回看与复测）----
@@ -346,7 +378,116 @@ func (s *Server) executeScheduledTask(ctx context.Context, task schedule.Task) (
 		schedule.SortPool(next)
 		return next
 	})
-	return summary, entries, host, nil
+
+	// ---- 7. 竞速回填：把本轮最快的 N 条**覆盖写回**面板的本地真连接池 ----
+	//
+	// N = 任务的「保留条数」（Scan.Top）—— summary.Entries 已经按保留条数截过，
+	// 而且按**稳态下行速度**降序（跳过测速的轮次则按 101 延迟升序），
+	// 所以直接取前 N 条就是「本轮赢家」。
+	//
+	// 回填失败**不让本轮变成失败**：扫描结果已经进了本地池，
+	// 用户还可以手动点「回填」重试。但必须把原因写进任务状态，
+	// 否则「开关打开了但面板池没变」会变成一个静默的坑。
+	note := ""
+	if task.RaceBackfill {
+		limit := task.Scan.Top
+		if limit <= 0 {
+			limit = schedule.BuiltinTop
+		}
+		winners := raceBackfillTargets(entries, limit)
+		if len(winners) == 0 {
+			note = "竞速回填跳过：本轮无可用节点，面板池未改动"
+			s.logLevel("定时优选「"+task.Name+"」：竞速回填跳过 —— 本轮无可用节点，面板池保持不变", "warn")
+		} else if cnt, err := s.pushPoolToPanel(ctx, task.ProfileID, winners, "replace"); err != nil {
+			note = "竞速回填失败：" + err.Error()
+			s.logLevel("定时优选「"+task.Name+"」竞速回填失败："+err.Error(), "warn")
+		} else {
+			note = fmt.Sprintf("已覆盖回填 %d 条到面板的本地真连接池", cnt)
+		}
+	}
+	return summary, entries, host, note, nil
+}
+
+// mergeRaceCandidates 把面板池里的 IP 并进候选队列（池在前，新采样在后）。
+//
+// 返回合并后的候选与**实际新增条数**（已在采样里出现的不重复计）。
+//
+// ## 为什么要过滤地址族
+//
+// 面板池可能是多轮任务共用一份（一个实例一个池），池里同时有 v4 与 v6。
+// 任务本身只跑 v4 时把 v6 也拉进来，会让这一轮去拨根本不属于它范围的地址，
+// 既拖时长也污染结果。
+//
+// ## 为什么要截断
+//
+// 见 maxRacePoolCandidates。截断只影响**池**那一部分，采样候选一条不少。
+func mergeRaceCandidates(poolHosts, sampled []string, family string) ([]string, int) {
+	norm := func(host string) string { return strings.ToLower(strings.TrimSpace(host)) }
+
+	// 采样候选先记账：池里与采样重复的**不算新增**（那条候选本来就会被扫）。
+	sampledSet := make(map[string]struct{}, len(sampled))
+	for _, host := range sampled {
+		if key := norm(host); key != "" {
+			sampledSet[key] = struct{}{}
+		}
+	}
+
+	out := make([]string, 0, len(poolHosts)+len(sampled))
+	emitted := make(map[string]struct{}, len(poolHosts)+len(sampled))
+	added, taken := 0, 0
+	for _, host := range poolHosts {
+		if taken >= maxRacePoolCandidates {
+			break
+		}
+		if norm(host) == "" || !familyAllowed(scan.FamilyOf(host), family) {
+			continue
+		}
+		key := norm(host)
+		if _, dup := emitted[key]; dup {
+			continue
+		}
+		emitted[key] = struct{}{}
+		out = append(out, strings.TrimSpace(host))
+		taken++
+		if _, inSampled := sampledSet[key]; !inSampled {
+			added++
+		}
+	}
+	for _, host := range sampled {
+		key := norm(host)
+		if key == "" {
+			continue
+		}
+		if _, dup := emitted[key]; dup {
+			continue
+		}
+		emitted[key] = struct{}{}
+		out = append(out, strings.TrimSpace(host))
+	}
+	return out, added
+}
+
+// familyAllowed 判断某个地址族是否属于本任务的扫描范围。
+func familyAllowed(ipFamily, want string) bool {
+	switch want {
+	case "v4":
+		return ipFamily == "v4"
+	case "v6":
+		return ipFamily == "v6"
+	default: // both / auto / 空 —— 都要
+		return true
+	}
+}
+
+// raceBackfillTargets 取回填用的前 limit 条（入参已是最终的快→慢顺序）。
+func raceBackfillTargets(entries []schedule.PoolEntry, limit int) []schedule.PoolEntry {
+	if limit <= 0 || len(entries) == 0 {
+		return nil
+	}
+	if len(entries) > limit {
+		return entries[:limit]
+	}
+	return entries
 }
 
 // publishTaskStatus 广播任务状态变化（SSE 事件 `task-status`）。

@@ -152,6 +152,7 @@ type taskCreateRequest struct {
 	IntervalDays int                 `json:"intervalDays"`
 	RunAt        string              `json:"runAt"`
 	MinSpeedMBps float64             `json:"minSpeedMBps"`
+	RaceBackfill bool                `json:"raceBackfill"`
 	Scan         schedule.ScanParams `json:"scan"`
 }
 
@@ -180,6 +181,7 @@ func (s *Server) handleScheduleTasksCreate(w http.ResponseWriter, r *http.Reques
 		IntervalDays: req.IntervalDays,
 		RunAt:        strings.TrimSpace(req.RunAt),
 		MinSpeedMBps: req.MinSpeedMBps,
+		RaceBackfill: req.RaceBackfill,
 		Scan:         req.Scan,
 		AnchorAt:     now,
 		CreatedAt:    now,
@@ -255,6 +257,7 @@ type taskUpdateRequest struct {
 	RunAt        *string  `json:"runAt"`
 	MinSpeedMBps *float64 `json:"minSpeedMBps"`
 	Enabled      *bool    `json:"enabled"`
+	RaceBackfill *bool    `json:"raceBackfill"`
 }
 
 // handleScheduleTasksUpdate 批量修改任务（多选后「保存应用」）。
@@ -302,6 +305,9 @@ func (s *Server) handleScheduleTasksUpdate(w http.ResponseWriter, r *http.Reques
 			}
 			if req.Enabled != nil {
 				next.Enabled = *req.Enabled
+			}
+			if req.RaceBackfill != nil {
+				next.RaceBackfill = *req.RaceBackfill
 			}
 			updated = append(updated, next)
 			break

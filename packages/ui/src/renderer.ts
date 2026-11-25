@@ -3354,6 +3354,7 @@ import { buildRelayDeployScript, parseRelayInitOutput, randomRelayToken } from '
       ;($('taskInterval') as HTMLInputElement).value = '2'
       ;($('taskRunAt') as HTMLInputElement).value = '01:00'
       ;($('taskMinSpeed') as HTMLInputElement).value = '0'
+      ;($('taskRaceBackfill') as HTMLInputElement).checked = false
       const nameEl0 = $('taskName') as HTMLInputElement | null
       if (nameEl0) {
         nameEl0.disabled = false
@@ -3377,6 +3378,7 @@ import { buildRelayDeployScript, parseRelayInitOutput, randomRelayToken } from '
       ;($('taskInterval') as HTMLInputElement).value = String(first.intervalDays)
       ;($('taskRunAt') as HTMLInputElement).value = first.runAt
       ;($('taskMinSpeed') as HTMLInputElement).value = String(first.minSpeedMBps)
+      ;($('taskRaceBackfill') as HTMLInputElement).checked = first.raceBackfill === true
       $('taskScanSummary').textContent = scanParamsSummary(first.scan)
       // 内置任务的名字**不可改** ——
       // 「亚洲组_IPv4」这个名字本身就是它在扫什么的唯一线索。
@@ -3400,6 +3402,7 @@ import { buildRelayDeployScript, parseRelayInitOutput, randomRelayToken } from '
       intervalDays: ($('taskInterval') as HTMLInputElement).value,
       runAt: ($('taskRunAt') as HTMLInputElement).value,
       minSpeedMBps: ($('taskMinSpeed') as HTMLInputElement).value,
+      raceBackfill: ($('taskRaceBackfill') as HTMLInputElement).checked ? '1' : '',
     }
     modal.hidden = false
   }
@@ -3419,6 +3422,7 @@ import { buildRelayDeployScript, parseRelayInitOutput, randomRelayToken } from '
     const intervalDays = Number(($('taskInterval') as HTMLInputElement).value) || 0
     const runAt = ($('taskRunAt') as HTMLInputElement).value.trim()
     const minSpeedMBps = Number(($('taskMinSpeed') as HTMLInputElement).value) || 0
+    const raceBackfill = ($('taskRaceBackfill') as HTMLInputElement).checked
 
     if (!name) {
       showTaskWarn('任务名称不能为空', true)
@@ -3454,6 +3458,7 @@ import { buildRelayDeployScript, parseRelayInitOutput, randomRelayToken } from '
           intervalDays,
           runAt,
           minSpeedMBps,
+          raceBackfill,
           scan: taskDraftScan!,
         })
         if (!res.ok) {
@@ -3474,6 +3479,7 @@ import { buildRelayDeployScript, parseRelayInitOutput, randomRelayToken } from '
           intervalDays: String(intervalDays),
           runAt,
           minSpeedMBps: String(minSpeedMBps),
+          raceBackfill: raceBackfill ? '1' : '',
         }
         const targetId = taskEditId ?? Array.from(scheduledChecked)[0] ?? ''
         if (!targetId) {
@@ -3493,6 +3499,9 @@ import { buildRelayDeployScript, parseRelayInitOutput, randomRelayToken } from '
         if (now.runAt !== taskModalOrigin.runAt) patch.runAt = now.runAt
         if (now.minSpeedMBps !== taskModalOrigin.minSpeedMBps) {
           patch.minSpeedMBps = Number(now.minSpeedMBps)
+        }
+        if (now.raceBackfill !== taskModalOrigin.raceBackfill) {
+          patch.raceBackfill = raceBackfill
         }
         if (Object.keys(patch).length === 1) {
           showTaskWarn('没有改动任何字段', true)

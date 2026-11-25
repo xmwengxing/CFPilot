@@ -91,6 +91,18 @@ describe('任务行渲染', () => {
     const html = taskRowHtml(task({ description: '秘密说明XYZ' }), false)
     expect(html).not.toContain('秘密说明XYZ')
   })
+
+  it('开启竞速回填的任务在谱上带标记', () => {
+    const on = taskRowHtml(task({ raceBackfill: true }), false)
+    expect(on).toContain('竞速回填')
+    // 气泡里也要能看到，否则只有一个「看着眼熟」的标签
+    expect(on).toContain('竞速回填：开启')
+  })
+
+  it('未开启竞速回填时谱上不出现该标签', () => {
+    const off = taskRowHtml(task(), false)
+    expect(off).not.toContain('竞速回填')
+  })
 })
 
 describe('优选参数摘要', () => {

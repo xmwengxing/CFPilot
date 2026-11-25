@@ -1042,6 +1042,7 @@
         intervalDays: Number(p.intervalDays) || 2,
         runAt: p.runAt || '',
         minSpeedMBps: Number(p.minSpeedMBps) || 0,
+        raceBackfill: !!p.raceBackfill,
         scan: p.scan || {},
       }).then(function (r) {
         return {
@@ -1068,6 +1069,7 @@
       if (p.runAt !== undefined && p.runAt !== null) body.runAt = p.runAt
       if (p.minSpeedMBps !== undefined && p.minSpeedMBps !== null) body.minSpeedMBps = Number(p.minSpeedMBps)
       if (p.enabled !== undefined && p.enabled !== null) body.enabled = !!p.enabled
+      if (p.raceBackfill !== undefined && p.raceBackfill !== null) body.raceBackfill = !!p.raceBackfill
       return call('PUT', '/api/schedule/tasks', body).then(function (r) {
         return {
           ok: !!(r && r.ok),

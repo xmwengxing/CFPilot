@@ -21,6 +21,9 @@
 //     拖动 / 最小化 / 最大化 / 关闭走本包注入的 JS 桥。
 //   - Linux：系统 WebKitGTK（缺库或没有图形会话时返回 ErrUnsupported，
 //     由调用方回退到系统浏览器）。使用窗口管理器提供的原生标题栏。
+//   - macOS：系统 WKWebView + Cocoa 原生标题栏。窗口必须在主线程创建，
+//     因此调用顺序是「先 shell.New，后 tray.Run」（托盘会占用主线程跑消息循环）。
+//     只在 `cfp_gui` 标签下编入，且产物必须在 macOS 上构建（cgo + AppKit）。
 //   - 其他平台：ErrUnsupported。
 //
 // ## 安全边界
@@ -51,7 +54,7 @@ type ChromeMode string
 const (
 	// ChromeCustom 表示无边框窗口：标题栏由面板自己绘制（Windows）。
 	ChromeCustom ChromeMode = "custom"
-	// ChromeNative 表示使用窗口管理器的原生标题栏（Linux）。
+	// ChromeNative 表示使用系统窗口装饰（Linux / macOS）。
 	ChromeNative ChromeMode = "native"
 )
 
@@ -92,7 +95,7 @@ type Panel interface {
 	Close()
 	// Chrome 返回标题栏归属，供面板决定是否绘制自绘标题栏。
 	Chrome() ChromeMode
-	// Platform 返回平台标识（windows / linux / other）。
+	// Platform 返回平台标识（windows / linux / darwin / other）。
 	Platform() string
 }
 

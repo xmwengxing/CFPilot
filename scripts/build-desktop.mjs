@@ -2,6 +2,7 @@
 //
 // 产物：
 //   普通版：packages/desktop/dist/cfpilot-<version>-<platform>
+//   macOS 额外产物：dist/CFPilot.app 与 dist/cfpilot-<version>-macos-<arch>.dmg
 //   +mesh：packages/desktop/dist/cfpilot-<version>+mesh-<platform>-setup.exe / .deb
 //
 // ## +mesh 变体的安装包（2026-11-20 起自动构建）
@@ -236,6 +237,14 @@ const allTargets = [
   { goos: 'windows', goarch: 'amd64', out: `cfpilot-${version}${meshSuffix}-windows-amd64.exe`, extra: ['-H=windowsgui'], tags: [] },
   { goos: 'linux', goarch: 'amd64', out: `cfpilot-${version}${meshSuffix}-linux-amd64`, extra: [], tags: ['cfp_gui'] },
   { goos: 'linux', goarch: 'arm64', out: `cfpilot-${version}${meshSuffix}-linux-arm64`, extra: [], tags: ['cfp_gui'] },
+  // macOS：cgo 必须开 —— 面板窗口是 WKWebView，托盘是 ObjC（energye/systray）。
+  // 因此这两项**只能在 macOS 上编**（Windows / Linux 上没有 AppKit 头文件），
+  // 下面的 picked 过滤已经按宿主机平台做了守卫。
+  //
+  // 暂不产出 .app / .dmg：分发形态还没定（签名与公证要先有 Developer ID），
+  // 目前先给裸可执行文件，配合托盘与内嵌窗口已经能直接用。
+  { goos: 'darwin', goarch: 'amd64', out: `cfpilot-${version}${meshSuffix}-darwin-amd64`, extra: [], tags: ['cfp_gui'], cgo: true },
+  { goos: 'darwin', goarch: 'arm64', out: `cfpilot-${version}${meshSuffix}-darwin-arm64`, extra: [], tags: ['cfp_gui'], cgo: true },
 ]
 const targets = allTargets
 
@@ -265,13 +274,35 @@ if (onlyFlagIdx !== -1) {
   }
 }
 const wanted = only ? only.split(',').map((s) => s.trim()).filter(Boolean) : []
-const picked = wanted.length
+const selected = wanted.length
   ? targets.filter((t) => wanted.includes(`${t.goos}/${t.goarch}`) || wanted.includes(t.goos))
   : targets
-if (picked.length === 0) {
+if (selected.length === 0) {
   console.error(`[desktop] 构建目标没有匹配到任何平台：${only}`)
   console.error(`[desktop] 可用目标：${targets.map((t) => `${t.goos}/${t.goarch}`).join(', ')}`)
   process.exit(1)
+}
+
+// darwin 必须在 macOS 上编（cgo + AppKit 头文件）。
+//
+// 两种情形分开处理：
+//   - 显式 --only darwin：用户以为能编，直接报错并说明原因；
+//   - 默认全平台（CI 在 Linux/Windows 上跑）：跳过 darwin，不当成失败。
+const darwinTs = selected.filter((t) => t.goos === 'darwin')
+if (darwinTs.length && process.platform !== 'darwin') {
+  if (wanted.length) {
+    console.error('[desktop] macOS 产物只能在 macOS 上编译（面板窗口依赖 WKWebView / AppKit）')
+    process.exit(1)
+  }
+  console.log('[desktop] 跳过 darwin 目标：macOS 产物只能在 macOS 上编译')
+}
+// +mesh 的安装包只定义了 Windows / Linux 两种形态，不把 darwin 拖进去。
+const picked = selected.filter((t) =>
+  t.goos !== 'darwin' || (process.platform === 'darwin' && !(meshVariant && !assetsOnly))
+)
+if (picked.length === 0) {
+  console.log('[desktop] 没有任何可在本机构建的目标，退出')
+  process.exit(0)
 }
 console.log(`[desktop] 构建目标：${picked.map((t) => `${t.goos}/${t.goarch}`).join(', ')}`)
 
@@ -469,11 +500,14 @@ for (const t of picked) {
       stdio: 'inherit',
       env: {
         ...process.env,
-        // CGO 必须关：开 CGO 就编不过 Linux（systray 已是纯 Go 实现）。
+        // CGO 默认关：开 CGO 就编不过 Linux（systray 已是纯 Go 实现）。
         // 注意：关掉 CGO 不代表必然静态 ——
         // 带 cfp_gui 的 Linux 产物会因 purego 的 cgo_import_dynamic
         // 链接 glibc，所以容器产物另外编（stageDocker）。
-        CGO_ENABLED: '0',
+        //
+        // darwin 是唯一必须开 cgo 的目标：面板窗口是 WKWebView，
+        // 托盘是 ObjC，两者都只能通过 cgo 调用。
+        CGO_ENABLED: t.cgo ? '1' : '0',
         GOOS: t.goos,
         GOARCH: t.goarch,
       },
@@ -502,6 +536,26 @@ for (const t of picked) {
   if (t.goos === 'linux' && !meshVariant) {
     stageDocker(t)
   }
+}
+
+// ---- macOS 应用包（.app + .dmg）----
+//
+// 只能在 macOS 上生成（iconutil / codesign / lipo / hdiutil 都是系统工具）。
+// 两种架构都编出来的话，打包脚本用 lipo 合成 universal，只出一个 dmg ——
+// 用户不该为「Intel 还是 Apple Silicon」做选择题。
+const darwinBuilt = picked.filter((t) => t.goos === 'darwin')
+if (darwinBuilt.length && !process.argv.includes('--no-dmg')) {
+  execFileSync(process.execPath, [join(repoRoot, 'scripts', 'package-macos.mjs')], {
+    cwd: repoRoot,
+    stdio: 'inherit',
+    env: {
+      ...process.env,
+      // 告诉打包脚本「本次到底编了哪几种架构」：
+      // dist 里可能残留上一次构建的另一种架构，不能按文件存在与否猜，
+      // 否则 --only darwin/amd64 会莫名其妙打出一个 universal 包。
+      CFPILOT_MAC_ARCHS: darwinBuilt.map((t) => t.goarch).join(','),
+    },
+  })
 }
 
 /* ------------------------------------------------------------------ */

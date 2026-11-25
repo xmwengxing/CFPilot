@@ -144,3 +144,46 @@ jobs:
         with:
           name: cfpilot-ui-dist
           path: packages/ui/dist
+
+  # macOS 面板窗口与应用包的守卫。
+  #
+  # 窗口走 WKWebView + AppKit，只能 cgo 编，而 cgo 交叉编译要 macOS 的
+  # SDK 与 clang —— 在 ubuntu 上根本跑不到这段代码，
+  # 没有这个 job 的话 Objective-C 写错了要到发版才发现。
+  #
+  # 这里跑的是**完整打包链路**（编译 → .app → 签名 → .dmg → 挂载回读），
+  # 而不是裸 go build：dmg 的坑（Info.plist 键、ATS、图标、符号链接）
+  # 只会在打包后才出现。窗口的交互行为仍需本地实测。
+  desktop-darwin:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache-dependency-path: packages/desktop/go.sum
+      - run: npm ci
+      - name: 构建界面（@cfpilot/ui）
+        run: npm run build -w @cfpilot/ui
+      - name: 编译 + 打包（.app / .dmg）
+        # 两种架构都编，打包脚本会 lipo 成 universal 并挂载回读校验
+        run: node scripts/build-desktop.mjs --only darwin
+      - name: 编译（无图形壳，纯服务形态）
+        working-directory: packages/desktop
+        env:
+          CGO_ENABLED: '1'
+        run: go build -o /tmp/cfpilot-darwin-headless ./cmd/cfpilot
+      - name: 包内测试
+        # update 也必须跑：macOS 的整包替换脚本（ditto / 回滚）只在 darwin 上编译，
+        # ubuntu 那套测试完全覆盖不到。
+        working-directory: packages/desktop
+        run: go test ./internal/update/ ./internal/shell/ ./internal/tray/
+      - name: 上传 dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: cfpilot-macos-dmg
+          path: packages/desktop/dist/*.dmg

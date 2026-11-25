@@ -5,7 +5,7 @@ name: Release Desktop
 # 触发条件：推送 desktop-v* tag（如 desktop-v0.5.5）。
 # 与 release-gui.yml 并列存在，互不干扰：
 #   - gui-v*     → Electron 版（Windows exe，收尾阶段仍发布）
-#   - desktop-v* → Go 版（Windows + Linux）
+#   - desktop-v* → Go 版（Windows + Linux + macOS）
 #
 # 版本政策沿用「单一版本源」：tag 里的版本号必须与根 package.json 一致。
 
@@ -504,7 +504,8 @@ jobs:
             printf '%s\n\n' "$BODY"
             printf -- '---\n\n'
             printf '**下载说明**：\n'
-            printf -- '- **普通版**（代理部署 / 优选 / 盲中继与云监测台）：Windows 下载 `cfpilot-%s-windows-amd64.exe` 双击运行；Linux 下载对应架构二进制并 `chmod +x`；Android 下载 `cfpilot-%s-android.apk`。\n' "$VERSION" "$VERSION"
+            printf -- '- **普通版**（代理部署 / 优选 / 盲中继与云监测台）：Windows 下载 `cfpilot-%s-windows-amd64.exe` 双击运行；Linux 下载对应架构二进制并 `chmod +x`；macOS 下载 `cfpilot-%s-macos-universal.dmg`（Intel / Apple Silicon 通用）；Android 下载 `cfpilot-%s-android.apk`。\n' "$VERSION" "$VERSION" "$VERSION"
+            printf -- '- **macOS 首次打开**：安装包未做苹果公证，首次启动会被拦。请在「系统设置 → 隐私与安全性」里点「仍要打开」，之后正常使用。\n'
             printf -- '- **+mesh 组网版**（含异地组网）：Windows 下载 `cfpilot-%s+mesh-windows-amd64-setup.exe` 安装运行；Linux 下载对应架构 `.deb`（amd64 / arm64）安装；Android 下载 `cfpilot-%s+mesh-android.apk`（独立组网客户端）。\n' "$VERSION" "$VERSION"
             printf -- '- **转发内核**：`CFPilot-control.zip` / `CFPilot-dataplane.zip` 与独立热更新通道 `kernel-latest` 同步发布。\n\n'
             printf 'CLI 工具：`npm i -g cfpilot`（组网版 `npm i -g cfpilot-mesh`），然后运行 `cfpilot` 进入中文菜单。\n'
@@ -547,6 +548,104 @@ jobs:
           #
           # 没有 tag 注释时回退到自动生成的变更列表。
           body: ${{ steps.notes.outputs.body }}
+
+  # ─────────────────────────────────────────────────────────────
+  # macOS 应用包（.app + .dmg）
+  # ─────────────────────────────────────────────────────────────
+  #
+  # 单独一个 job：macOS 产物只能在 macOS 上做 ——
+  # 面板窗口是 WKWebView/cgo，托盘是 ObjC，打包还要 iconutil / codesign /
+  # hdiutil / lipo，而 build 那个 job 跑在 ubuntu 上。
+  #
+  # why needs: build
+  #   应用内更新靠 `cfpilot-desktop-SHA256SUMS` 校验每一个下载到的包。
+  #   那份清单由 build job 生成并随 Release 发布，**不包含** dmg；
+  #   这里要把 dmg 的哈希追加进同一份清单再覆盖上传，
+  #   否则更新器会以「清单里没有这个文件」拒绝安装（fail-closed）。
+  macos:
+    needs: build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache-dependency-path: packages/desktop/go.sum
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 确定版本号
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ inputs.version }}"
+          else
+            V="${GITHUB_REF_NAME#desktop-v}"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "版本：$V"
+
+      - name: 构建界面
+        # 界面与内核资产都是 go:embed 进二进制的，必须先构建
+        run: npm run build -w @cfpilot/ui
+
+      - name: 包内测试（含 macOS 整包替换逻辑）
+        working-directory: packages/desktop
+        run: go test ./internal/update/ ./internal/shell/ ./internal/tray/
+
+      - name: 编译 + 打包（两种架构 → universal .app → .dmg）
+        # 打包脚本自己会：lipo 合成、写 Info.plist、iconutil 转 icns、
+        # ad-hoc 签名、hdiutil 出 dmg、**挂载回读校验**结构与签名。
+        run: node scripts/build-desktop.mjs --only darwin
+
+      - name: 校验产物
+        run: |
+          set -euo pipefail
+          ls -lh packages/desktop/dist/CFPilot.app packages/desktop/dist/*.dmg
+          DMG=$(ls packages/desktop/dist/*-macos-*.dmg | head -1)
+          [ -n "$DMG" ] || { echo "::error::没有生成 macOS dmg"; exit 1; }
+          codesign --verify --strict packages/desktop/dist/CFPilot.app
+          lipo -archs packages/desktop/dist/CFPilot.app/Contents/MacOS/CFPilot
+
+      - name: 上传 dmg（构建产物）
+        uses: actions/upload-artifact@v4
+        with:
+          name: CFPilot-macos-${{ steps.ver.outputs.version }}
+          path: packages/desktop/dist/*.dmg
+          retention-days: 30
+
+      - name: 追加 dmg 到 Release 与摘要清单
+        # 为什么不用 softprops：它不能覆盖已存在的同名资产，而清单必须覆盖。
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          TAG="v$V"
+
+          mkdir -p /tmp/manifest
+          gh release download "$TAG" -p cfpilot-desktop-SHA256SUMS -D /tmp/manifest --clobber
+
+          DMG=$(ls packages/desktop/dist/*-macos-*.dmg | head -1)
+          # 与 build job 同口径：sha256sum 格式（<hex>␠␠<文件名>）
+          ( cd packages/desktop/dist && shasum -a 256 "$(basename "$DMG")" ) \
+            >> /tmp/manifest/cfpilot-desktop-SHA256SUMS
+          LC_ALL=C sort -k2 /tmp/manifest/cfpilot-desktop-SHA256SUMS \
+            -o /tmp/manifest/cfpilot-desktop-SHA256SUMS
+          cat /tmp/manifest/cfpilot-desktop-SHA256SUMS
+
+          gh release upload "$TAG" "$DMG" /tmp/manifest/cfpilot-desktop-SHA256SUMS --clobber
+
+          echo '== Release 资产 =='
+          gh release view "$TAG" --json assets -q '.assets[].name'
 
   # ─────────────────────────────────────────────────────────────
   # 安卓版 APK

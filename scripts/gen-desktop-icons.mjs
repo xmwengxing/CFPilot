@@ -11,13 +11,14 @@
 //   - packages/desktop/build/tray-16.png   托盘图标（16×16）
 //   - packages/desktop/build/tray-32.png   托盘图标（32×32，高 DPI）
 //   - packages/desktop/build/app.ico       应用图标（多尺寸 ICO，给 go-winres 用）
+//   - packages/desktop/build/AppIcon.iconset/   macOS iconset（打包时 iconutil 转 .icns）
 //   - packages/desktop/internal/tray/icon.go  把托盘 PNG 字节内嵌成 Go 代码
 //
 // ## 为什么自己编码而不装图像库
 //
 // 项目坚持零第三方依赖（连图标生成也不想引入 sharp/jimp 之类的重依赖）。
 // PNG 与 ICO 的编码规则都很短，直接手写反而更可控。
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { deflateSync, crc32 } from 'node:zlib'
@@ -161,6 +162,31 @@ writeFileSync(join(outDir, 'app.ico'), ico)
 console.log(`[icons] tray-16.png  ${tray16.length} 字节`)
 console.log(`[icons] tray-32.png  ${tray32.length} 字节`)
 console.log(`[icons] app.ico      ${ico.length} 字节（7 个尺寸）`)
+
+// ---- macOS iconset ----
+//
+// macOS 要的是 .icns，而 .icns 的标准生成路径是 iconutil，它的输入是
+// 一个**文件名写死**的 iconset 目录（icon_16x16@2x.png 这种）。
+// 所以这里只铺好 PNG，转 icns 放到打包脚本里做 ——
+// 转换只能在 macOS 上跑，不能摆在通用图标脚本里。
+const iconsetDir = join(outDir, 'AppIcon.iconset')
+rmSync(iconsetDir, { recursive: true, force: true })
+mkdirSync(iconsetDir, { recursive: true })
+for (const [name, size] of [
+  ['icon_16x16.png', 16],
+  ['icon_16x16@2x.png', 32],
+  ['icon_32x32.png', 32],
+  ['icon_32x32@2x.png', 64],
+  ['icon_128x128.png', 128],
+  ['icon_128x128@2x.png', 256],
+  ['icon_256x256.png', 256],
+  ['icon_256x256@2x.png', 512],
+  ['icon_512x512.png', 512],
+  ['icon_512x512@2x.png', 1024],
+]) {
+  writeFileSync(join(iconsetDir, name), makePng(size))
+}
+console.log('[icons] AppIcon.iconset/  10 个尺寸（打包时转 AppIcon.icns）')
 
 // ---- 安卓启动图标 ----
 //

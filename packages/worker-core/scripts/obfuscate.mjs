@@ -71,7 +71,10 @@ const DECODER =
 const EXTERNAL_NAMES = ['@edge' + 'tunnel', 'cmliu' + 'ssss']
 
 const SENSITIVE = new RegExp(
-  'vless|trojan|xhttp|socks\\d?h?|socks5|websocket|sec-websocket|cfpilot|proxyip|' +
+  // 清单源 / 仓库路径特征：动态反代清单是「本项目在 jsDelivr 上的仓库文件」，
+  // 拆成多段拼接后各段不含协议词，明文等于直接指名仓库（见 URL_LIKE 注释）。
+  'jsdelivr|xmwengxing|relay-ips|' +
+    'vless|trojan|xhttp|socks\\d?h?|socks5|websocket|sec-websocket|cfpilot|proxyip|' +
     EXTERNAL_NAMES[0] +
     '|clash|vmess|shadowsocks|proxy-|packet-up|noGRPCHeader|CONNECT |优选|反代|代理|节点|订阅|测速|探针|诊断|网段|面板|分流|握手|头解析|解析失败|暂不支持|需要 WebSocket|需要 POST',
   'i'
@@ -109,9 +112,23 @@ const HOSTNAME_LIKE =
 // 的直接证据，同样不能留明文。
 const YAML_LIKE = /\b[a-z][a-z0-9-]{2,}\s*:\s/
 
+// 「带 scheme 的整段 URL」：主机名 + 路径一起是强特征。
+//
+// **为什么补这一类**（真机产物核对发现）：`HOSTNAME_LIKE` 要求**整段就是一个主机名**，
+// 于是 `https://cdn.jsdelivr.net/gh/`、`https://dns.google/resolve` 这种
+// 「主机名 + 路径」的写法全部漏网，明文留在 `dataplane.js` 里 ——
+// 而「工程用哪个 DoH、从哪个仓库拉清单」比裸域名更能指认项目。
+// 允许前导空白与 YAML 列表符：订阅模板里是 `"    - https://dns.alidns.com/dns-query"`
+// 这种缩进列表项，既不以 scheme 开头、`[^\s]+` 又容不下 `- ` 前缀，严格匹配会两条都漏（实测）。
+const URL_LIKE = /^\s*(?:[-*]\s*)?https?:\/\/[^\s]+$/i
+
 /** 是否需要编码这个「解码后的值」 */
 const isSensitive = (value) =>
-  SENSITIVE.test(value) || CJK.test(value) || HOSTNAME_LIKE.test(value) || YAML_LIKE.test(value)
+  SENSITIVE.test(value) ||
+  CJK.test(value) ||
+  HOSTNAME_LIKE.test(value) ||
+  URL_LIKE.test(value) ||
+  YAML_LIKE.test(value)
 
 // 端点路径：值不变，仅隐藏明文
 const HIDE_LITERALS = new Set(['"/__edge_probe"', '"/__diag"', '"/__cfp_version"', '"/__version"'])

@@ -57,6 +57,21 @@ function collectSourceDomains() {
   return [...out]
 }
 
+// 源码里「一定不能明文进产物」的 URL 特征。
+//
+// 与 `DOMAIN_SOURCES`（裸域名）互补：这里盯的是「主机名 + 路径」和「仓库路径片段」。
+// 它们不含任何协议词，靠 SENSITIVE 枚举永远追不上 —— 所以两边都锁：
+//   ① obfuscate.mjs 的 `URL_LIKE` / SENSITIVE；② 这里的反查断言。
+const URL_FEATURES = [
+  'jsdelivr', // 动态反代清单的 CDN（relay.ts 的 RELAY_FEED_URL）
+  'xmwengxing', // 仓库路径片段
+  'relay-ips', // 清单文件名
+  'cloudflare-dns', // DoH 端点（doh.ts）
+  'dns.google',
+  'alidns',
+  'doh.pub',
+]
+
 const sourceDomains = collectSourceDomains()
 if (sourceDomains.length < 5) {
   // 抠不到说明源码结构变了，检查本身失效 —— 必须报错而不是静默通过
@@ -84,6 +99,13 @@ for (const artifact of ARTIFACTS) {
   const leakedDomains = sourceDomains.filter((d) => code.includes(d))
   if (leakedDomains.length > 0) {
     note(`${artifact.name}: 明文残留第三方域名 ${leakedDomains.join(', ')}`)
+  }
+
+  // 2b) URL 特征不能明文出现（主机名 + 路径、清单源仓库路径）
+  const leakedUrls = URL_FEATURES.filter((f) => code.includes(f))
+  if (leakedUrls.length > 0) {
+    note(`${artifact.name}: 明文残留 URL 特征 ${leakedUrls.join(', ')}（` +
+      '带 scheme 的字面量应被 obfuscate.mjs 的 URL_LIKE 命中）')
   }
 
   // 3) 数据面不允许协议关键字明文

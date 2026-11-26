@@ -87,6 +87,16 @@ func PostResultsTo(ctx context.Context, callbackURL, token string, entries []str
 		return CallbackResult{Error: err.Error()}
 	}
 
+	// 用户显式设置了代理 → 第一次就走它，不再先试直连。
+	//
+	// 为什么：显式设置通常有原因（直连不通 / 要特定出口）。先直连一次
+	// 既浪费 8 秒握手超时，也等于「配了但没用上」，真机就是这么暴露出来的。
+	// 而且失败时不偷偷回落直连 —— 否则用户永远看不出代理配错了。
+	if manualPanelProxy() != "" {
+		res, _ := postResultsOnce(ctx, callbackURL, token, body, timeout, true)
+		return res
+	}
+
 	res, netErr := postResultsOnce(ctx, callbackURL, token, body, timeout, false)
 	if netErr == nil || !shouldRetryViaProxy(ctx, netErr) {
 		return res

@@ -963,6 +963,59 @@ import { buildRelayDeployScript, parseRelayInitOutput, randomRelayToken } from '
       }
     })
 
+    // ---- 面板请求代理 ----
+    //
+    // 回填与面板登录要访问控制面域名（常是 *.pages.dev），部分网络下直连会被阻断。
+    // 这里填一次就与客户端怎么配无关；留空则按环境变量 → 系统代理 → 直连。
+    const loadPanelProxy = async (): Promise<void> => {
+      const input = document.getElementById('panelProxy') as HTMLInputElement | null
+      const hint = document.getElementById('panelProxyHint')
+      try {
+        const r = await window.cfpilot.getPanelProxy()
+        if (!r.ok) {
+          if (hint) hint.textContent = r.error ?? '读取失败'
+          return
+        }
+        if (input) input.value = r.proxy ?? ''
+        if (hint) {
+          hint.textContent = r.proxy
+            ? '当前生效：' + (r.effective ?? r.proxy)
+            : '留空 = 自动。当前实际走：' + (r.effective ?? '直连')
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        if (hint) hint.textContent = '读取失败：' + msg
+      }
+    }
+    void loadPanelProxy()
+
+    document.getElementById('btnSavePanelProxy')!.addEventListener('click', async () => {
+      const input = document.getElementById('panelProxy') as HTMLInputElement | null
+      const btn = document.getElementById('btnSavePanelProxy') as HTMLButtonElement | null
+      if (!input) return
+      if (btn) btn.disabled = true
+      try {
+        const r = await window.cfpilot.savePanelProxy(input.value)
+        if (!r.ok) {
+          log('代理保存失败：' + (r.error ?? '未知错误'), 'err')
+          return
+        }
+        input.value = r.proxy ?? ''
+        const hint = document.getElementById('panelProxyHint')
+        if (hint) {
+          hint.textContent = r.proxy
+            ? '当前生效：' + (r.effective ?? r.proxy)
+            : '留空 = 自动。当前实际走：' + (r.effective ?? '直连')
+        }
+        log('面板请求代理已保存：' + (r.proxy || '不指定（自动）'), 'ok')
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        log('代理保存失败：' + msg, 'err')
+      } finally {
+        if (btn) btn.disabled = false
+      }
+    })
+
     document.getElementById('btnSavePanelPw')!.addEventListener('click', async () => {
       if (isNewMode()) {
         log('请先添加账户（粘贴 Token 并保存）再设置面板密码', 'warn')

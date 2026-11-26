@@ -163,3 +163,42 @@ func TestParsePort(t *testing.T) {
 		}
 	}
 }
+
+// 面板请求代理：只接受 http / https / socks5，且能容忍省略协议。
+//
+// 为什么必须拒绝其它协议：写成 ss:// / vmess:// 时请求不会「走这个代理」，
+// 而是被 http.Transport 当未知协议 —— 用户看到的是「配了代理却仍然失败」。
+func TestNormalizePanelProxy(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"", "", false},
+		{"   ", "", false},
+		{"127.0.0.1:7890", "http://127.0.0.1:7890", false},
+		{"http://127.0.0.1:7890", "http://127.0.0.1:7890", false},
+		{"HTTPS://proxy.example.com:8443", "https://proxy.example.com:8443", false},
+		{"socks5://127.0.0.1:10808", "socks5://127.0.0.1:10808", false},
+		{"socks5://127.0.0.1", "", true},        // socks5 必须写端口
+		{"ss://YWVzOnB3@1.2.3.4:8388", "", true}, // 不支持的协议
+		{"vmess://abc", "", true},
+		{"http://", "", true},
+	}
+	for _, c := range cases {
+		got, err := NormalizePanelProxy(c.in)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("NormalizePanelProxy(%q) 应报错，实际得到 %q", c.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("NormalizePanelProxy(%q) 不应报错：%v", c.in, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("NormalizePanelProxy(%q) = %q，期望 %q", c.in, got, c.want)
+		}
+	}
+}

@@ -891,6 +891,25 @@ interface Window {
       panelPassword?: string
     }): Promise<{ saved: boolean }>
     wipeCredentials(): Promise<{ wiped: boolean }>
+    /**
+     * 面板请求代理（回填 / 面板登录访问控制面域名时用）。
+     *
+     * `proxy` 是用户填的值（空 = 不指定）；`effective` 是当前实际会用的来源，
+     * 界面据此显示「留空时到底走的哪一路」。
+     */
+    getPanelProxy(): Promise<{
+      ok: boolean
+      proxy?: string
+      effective?: string
+      error?: string
+    }>
+    /** 保存面板请求代理；传空串表示清除（回到自动）。 */
+    savePanelProxy(proxy: string): Promise<{
+      ok: boolean
+      proxy?: string
+      effective?: string
+      error?: string
+    }>
     credentialsState(): Promise<{ hasToken: boolean; accountId: string; kvNamespaceId: string }>
     openExternal(url: string): Promise<void>
     /**

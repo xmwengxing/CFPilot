@@ -35,6 +35,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/proxy"
@@ -65,17 +68,64 @@ const msgNoSystemProxy = "没有配置代理（HTTP_PROXY / 系统代理都未�
 // proxyResolver 是「解析明确的代理」的钩子，测试可替换。
 var proxyResolver = proxy.ResolveExplicit
 
+// manualProxy 是用户在界面上显式填写的面板代理（空 = 不指定）。
+//
+// 优先级最高：用户既然填了，就不该再被环境变量或系统代理顶掉 ——
+// 常见情形是用户同时开着别的代理，但它对 `*.pages.dev` 是分流的。
+var (
+	panelProxyMu  sync.RWMutex
+	panelProxyRaw string
+)
+
+// SetPanelProxy 设置用户显式配置的面板代理（传空串即清除）。
+//
+// 由桌面版在启动与保存设置后调用；测试也用它注入。
+func SetPanelProxy(raw string) {
+	panelProxyMu.Lock()
+	panelProxyRaw = strings.TrimSpace(raw)
+	panelProxyMu.Unlock()
+}
+
+func manualPanelProxy() string {
+	panelProxyMu.RLock()
+	defer panelProxyMu.RUnlock()
+	return panelProxyRaw
+}
+
+// PanelProxyStatus 返回「用户设置的值」与「当前实际会用的来源说明」。
+//
+// 界面用它显示「留空时到底走的哪一路」，用户排查时不用猜。
+func PanelProxyStatus() (manual, source string) {
+	manual = manualPanelProxy()
+	if manual != "" {
+		return manual, "设置里的代理 " + manual
+	}
+	return "", proxyResolver().Source
+}
+
 // proxyClient 返回走代理的客户端与来源说明（无代理可用时两个都为零值）。
 func proxyClient(timeout time.Duration) (*http.Client, string) {
+	if raw := manualPanelProxy(); raw != "" {
+		// 保存时已归一化（补协议、校验 scheme），这里只需要能解析出 host
+		if u, err := url.Parse(raw); err == nil && u.Host != "" {
+			c := proxyClientFor(u, timeout)
+			return c, "设置里的代理 " + raw
+		}
+	}
 	r := proxyResolver()
 	if r.URL == nil {
 		return nil, ""
 	}
-	c := r.Client(timeout)
+	return proxyClientFor(r.URL, timeout), r.Source
+}
+
+// proxyClientFor 用指定的代理地址构造客户端，并统一收紧 TLS 握手超时。
+func proxyClientFor(u *url.URL, timeout time.Duration) *http.Client {
+	c := (&proxy.Resolver{URL: u}).Client(timeout)
 	if t, ok := c.Transport.(*http.Transport); ok {
 		t.TLSHandshakeTimeout = 12 * time.Second
 	}
-	return c, r.Source
+	return c
 }
 
 // shouldRetryViaProxy 判断「值不值得用代理重试一次」。

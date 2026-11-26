@@ -1802,6 +1802,38 @@
             -->
           </div>
 
+          <!--
+            面板请求代理
+
+            放在账户配置下方而不是单独的「设置页」：这里已经是「本机怎么连 Cloudflare」
+            的地方，用户排查回填失败时就在这一页。
+          -->
+          <div class="card">
+            <h2><span class="dot"></span>🌐 面板请求代理</h2>
+            <p class="desc">
+              优选回填与面板登录要访问你的控制面域名。该域名常是 <code>*.pages.dev</code>，
+              部分网络下直连会被阻断（表现为回填失败、TLS 握手超时）。
+              这里填一次代理即可，与浏览器或客户端的代理设置无关。
+            </p>
+            <div class="row">
+              <div class="field">
+                <label>代理地址</label>
+                <div class="row">
+                  <input
+                    type="text"
+                    id="panelProxy"
+                    class="mono"
+                    placeholder="如 http://127.0.0.1:7890 或 socks5://127.0.0.1:10808"
+                  />
+                  <button class="btn btn-primary" id="btnSavePanelProxy" style="flex:0 0 auto">保存</button>
+                </div>
+                <p class="tip" id="panelProxyHint">
+                  留空 = 自动：先看环境变量，再看系统代理，都没有就直连。支持 http / https / socks5。
+                </p>
+              </div>
+            </div>
+          </div>
+
           <div class="card">
             <h2><span class="dot"></span>📋 需要的 Token 权限</h2>
             <div class="links">

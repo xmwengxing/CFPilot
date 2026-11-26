@@ -12,9 +12,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // DefaultPort 是服务默认监听端口。
@@ -74,6 +76,48 @@ type DesktopSettings struct {
 	PanelMode string `json:"panelMode"`
 	// Experimental 是实验性功能开关（默认全部关闭）。
 	Experimental ExperimentalSettings `json:"experimental"`
+	// PanelProxy 是**访问面板域名**（控制面）时使用的代理地址，可留空。
+	//
+	// 为什么需要它：优选结果回填与面板登录都要访问用户自己的控制面域名，
+	// 而该域名常是 `*.pages.dev` —— 在部分网络下直连会被阻断（TLS 握手超时）。
+	// Go 只认 HTTP_PROXY 环境变量、不认 Windows 系统代理，而桌面版是 GUI 启动，
+	// 继承不到用户 shell 里的环境变量。用户在这里显式填一次，就与客户端怎么配无关。
+	//
+	// 留空 = 依次使用环境变量 → Windows 系统代理 → 直连（见 internal/scan/panel_client.go）。
+	// 只支持 http / https / socks5 —— 这三种 Go 的 http.Transport 都能走，
+	// 其它协议（ss://、vmess://）走不了 HTTP 代理通道，必须明确拒绝。
+	PanelProxy string `json:"panelProxy"`
+}
+
+// NormalizePanelProxy 归一化「面板请求代理」地址。
+//
+// 允许留空（= 不指定，由环境变量 / 系统代理决定）。
+// 允许省略协议：`127.0.0.1:7890` 按 http 处理（与 internal/proxy 的解析一致）。
+//
+// 明确拒绝其它协议：写成 `ss://` / `vmess://` 时请求并不会「走这个代理」，
+// 而是会被 http.Transport 当作未知协议报错或静默直连 —— 前者至少能看见，
+// 后者最难查。所以在保存时就拦下来。
+func NormalizePanelProxy(raw string) (string, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return "", nil
+	}
+	if !strings.Contains(v, "://") {
+		v = "http://" + v
+	}
+	u, err := url.Parse(v)
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("代理地址格式不正确，应形如 http://127.0.0.1:7890")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https", "socks5":
+	default:
+		return "", fmt.Errorf("代理只支持 http / https / socks5，收到的是 %s", u.Scheme)
+	}
+	if u.Port() == "" && strings.EqualFold(u.Scheme, "socks5") {
+		return "", fmt.Errorf("socks5 代理需要写端口，应形如 socks5://127.0.0.1:10808")
+	}
+	return u.String(), nil
 }
 
 // 面板形态取值。

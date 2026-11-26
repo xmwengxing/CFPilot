@@ -33,6 +33,9 @@ const contracts = [
   // ---- 凭据与账户（最容易踩坑的一组）----
   ['saveCredentials', 'saved', '界面判 result.saved'],
   ['wipeCredentials', 'wiped', '界面判 result.wiped'],
+  // 面板请求代理：界面读 ok / proxy / effective 回填输入框与提示
+  ['getPanelProxy', 'ok', '界面判 result.ok'],
+  ['savePanelProxy', 'ok', '界面判 result.ok（失败时显示 error）'],
   ['listProfiles', 'active', '界面用 p.active 找当前账户'],
   ['updateProfile', 'ok', '界面判 saved.ok / !saved.ok'],
   ['deleteProfile', 'deleted', '界面判 result.deleted'],

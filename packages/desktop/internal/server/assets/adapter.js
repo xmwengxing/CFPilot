@@ -421,6 +421,20 @@
       })
     },
 
+    // 面板请求代理：回填 / 面板登录访问控制面域名时用。
+    // 留空 = 自动（环境变量 → 系统代理 → 直连），由后端解析并回报 effective。
+    getPanelProxy: function () {
+      return get('/api/panel-proxy').catch(function (err) {
+        return { ok: false, error: err && err.message ? err.message : String(err) }
+      })
+    },
+
+    savePanelProxy: function (proxy) {
+      return post('/api/panel-proxy', { proxy: String(proxy == null ? '' : proxy) }).catch(function (err) {
+        return { ok: false, error: err && err.message ? err.message : String(err) }
+      })
+    },
+
     wipeCredentials: function () {
       return post('/api/cred/wipe').then(function () {
         return { wiped: true }

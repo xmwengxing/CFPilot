@@ -64,6 +64,12 @@ func FetchScannerToken(ctx context.Context, baseURL, password string, timeout ti
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 
+	// 用户显式设置了代理 → 第一次就走它（理由见 callback.go 的说明）。
+	if manualPanelProxy() != "" {
+		res, _ := fetchScannerTokenOnce(ctx, baseURL, password, timeout, true)
+		return res
+	}
+
 	res, netErr := fetchScannerTokenOnce(ctx, baseURL, password, timeout, false)
 	if netErr == nil || !shouldRetryViaProxy(ctx, netErr) {
 		return res

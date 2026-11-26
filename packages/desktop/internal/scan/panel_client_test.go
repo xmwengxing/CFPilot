@@ -148,3 +148,43 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+// 用户显式填了代理 → 第一次就走它，不先试直连。
+//
+// 真机暴露过：填了 socks5 代理，回填日志里 `走：""`（直连成功），
+// 等于「配了但没用上」。显式设置通常有原因，必须先走代理；
+// 失败也不能偷偷回落直连 —— 否则用户永远看不出代理配错了。
+func TestPostResultsUsesManualProxyFirst(t *testing.T) {
+	directHits := 0
+	panel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		directHits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer panel.Close()
+
+	proxyHits := 0
+	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer proxySrv.Close()
+
+	SetPanelProxy(proxySrv.URL)
+	defer SetPanelProxy("")
+
+	res := PostResultsTo(context.Background(), panel.URL+"/api/v1/preferred-ips",
+		"tok", []string{"1.2.3.4:443"}, "replace", TargetLocal, 3*time.Second)
+	if !res.OK {
+		t.Fatalf("应经代理成功，实际 %+v", res)
+	}
+	if proxyHits != 1 {
+		t.Errorf("显式设置代理后必须直接走代理，实际代理被调用 %d 次", proxyHits)
+	}
+	if directHits != 0 {
+		t.Errorf("不应先试直连，实际直连被调用 %d 次", directHits)
+	}
+	if !contains(res.Proxy, proxySrv.URL) {
+		t.Errorf("结果应带出使用的代理，实际 %q", res.Proxy)
+	}
+}

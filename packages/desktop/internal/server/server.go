@@ -43,6 +43,7 @@ import (
 
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/config"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/safe"
+	"github.com/xmwengxing/cfpilot/packages/desktop/internal/scan"
 	"github.com/xmwengxing/cfpilot/packages/desktop/internal/store"
 )
 
@@ -120,6 +121,11 @@ func New(settings config.DesktopSettings) (*Server, error) {
 			return nil, err
 		}
 	}
+	// 面板请求代理（回填 / 面板登录用）来自本机设置，启动即生效。
+	// 必须在这里注入：回填与取令牌在 scan 包里是包级状态，
+	// 等到第一次请求再设置就来不及了。
+	scan.SetPanelProxy(settings.PanelProxy)
+
 	return &Server{
 		settings:    settings,
 		bootToken:   boot,
@@ -395,6 +401,9 @@ func (s *Server) routes() http.Handler {
 
 	// 账户与凭据 API
 	s.registerCredRoutes(mux)
+
+	// 面板请求代理（回填 / 面板登录访问控制面域名时用）
+	s.registerPanelProxyRoutes(mux)
 
 	// 账号用量与额度（只读；需要 Account Analytics Read 权限）
 	mux.HandleFunc("/api/usage", s.guard(s.handleUsage))

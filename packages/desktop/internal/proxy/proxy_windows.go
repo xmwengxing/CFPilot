@@ -44,7 +44,28 @@ const errInvalidData syscall.Errno = 13
 //  1. **系统代理注册表**（ProxyEnable=1）—— 用户显式开了系统代理；
 //  2. **常见代理端口探测** —— 见 probeLocalProxy。
 func systemProxy() (*url.URL, string, bool) {
-	// ---- 1. 系统代理已启用 ----
+	if u, source, ok := systemProxyExplicit(); ok {
+		return u, source, true
+	}
+
+	// ---- 系统代理没开，但本机有代理程序在跑 ----
+	//
+	// ⚠️ 这一条很关键：不少代理工具默认**不装**系统代理
+	//    （或用户手动关掉了那个开关），只监听本地端口。
+	//    这时注册表里 ProxyEnable=0，但代理其实**开着** ——
+	//    程序要是只看注册表，就会直连 GitHub 然后超时。
+	//
+	// ⚠️ 只用于可重试、失败可见的下载类请求；
+	//    写操作请用 ResolveExplicit（见 proxy.go 的说明）。
+	if u, port, ok := probeLocalProxy(); ok {
+		return u, "本机代理端口 " + port, true
+	}
+
+	return nil, "", false
+}
+
+// systemProxyExplicit 只读注册表里的系统代理设置，不猜端口。
+func systemProxyExplicit() (*url.URL, string, bool) {
 	if enable, _, err := readRegistryDWORD(proxyEnableValue); err == nil && enable != 0 {
 		if raw, _, err := readRegistryString(proxyServerValue); err == nil {
 			if target := pickProxyTarget(strings.TrimSpace(raw)); target != "" {
@@ -53,16 +74,6 @@ func systemProxy() (*url.URL, string, bool) {
 				}
 			}
 		}
-	}
-
-	// ---- 2. 系统代理没开，但本机有代理程序在跑 ----
-	//
-	// ⚠️ 这一条很关键：不少代理工具默认**不装**系统代理
-	//    （或用户手动关掉了那个开关），只监听本地端口。
-	//    这时注册表里 ProxyEnable=0，但代理其实**开着** ——
-	//    程序要是只看注册表，就会直连 GitHub 然后超时。
-	if u, port, ok := probeLocalProxy(); ok {
-		return u, "本机代理端口 " + port, true
 	}
 
 	return nil, "", false

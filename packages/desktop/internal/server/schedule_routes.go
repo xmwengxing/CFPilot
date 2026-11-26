@@ -586,6 +586,9 @@ func (s *Server) pushPoolToPanel(ctx context.Context, profileID string, entries 
 
 	// 现取一次性令牌（10 分钟有效，点按钮时才取不会过期）。
 	tok := scan.FetchScannerToken(ctx, host, password, 25*time.Second)
+	if tok.Proxy != "" {
+		s.logf("面板登录经代理：" + tok.Proxy)
+	}
 	if !tok.OK {
 		return 0, fmt.Errorf("%s", tok.Error)
 	}

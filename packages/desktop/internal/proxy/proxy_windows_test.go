@@ -188,3 +188,38 @@ func TestLooksLikeHTTPProxyAcceptsHTTP(t *testing.T) {
 		t.Error("回 HTTP 状态行的端口应被认成 HTTP 代理")
 	}
 }
+
+// ResolveExplicit 绝不能去猜端口 —— 只认环境变量与系统代理。
+//
+// 端口猜列表覆盖不全（用户改过端口就用不上），猜中也可能撞上别的程序。
+// 回填这类写操作只用 explicit 这一档，所以这里钉住它不会返回「本机代理端口」。
+func TestResolveExplicitNeverGuessesPort(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	port := l.Addr().(*net.TCPAddr).Port
+
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			buf := make([]byte, 256)
+			_, _ = conn.Read(buf)
+			_, _ = conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"))
+			_ = conn.Close()
+		}
+	}()
+
+	orig := commonProxyPorts
+	commonProxyPorts = []int{port}
+	defer func() { commonProxyPorts = orig }()
+
+	r := ResolveExplicit()
+	if strings.Contains(r.Source, "本机代理端口") {
+		t.Errorf("ResolveExplicit 不应猜端口，实际来源 %q", r.Source)
+	}
+}

@@ -10,3 +10,8 @@ import "net/url"
 func systemProxy() (*url.URL, string, bool) {
 	return nil, "", false
 }
+
+// systemProxyExplicit 在非 Windows 平台上同样不存在 —— 只用环境变量。
+func systemProxyExplicit() (*url.URL, string, bool) {
+	return nil, "", false
+}

@@ -36,6 +36,8 @@ type TokenResult struct {
 	Token  string
 	Error  string
 	Status int
+	// Proxy 是本次实际使用的代理来源（空 = 直连）。
+	Proxy string
 }
 
 // FetchScannerToken 用面板密码登录并获取一次性扫描令牌。
@@ -43,7 +45,7 @@ type TokenResult struct {
 // baseURL 是控制面地址（如 `https://cpmanager.pages.dev`）。
 // password 是面板密码。
 //
-// 直连在网络层失败时自动走系统代理重试一次 —— 面板域名常是 `*.pages.dev`，
+// 直连在网络层失败时自动用「已配置的代理」重试一次 —— 面板域名常是 `*.pages.dev`，
 // 它在部分网络直连会被阻断（TLS 握手超时）。见 panel_client.go。
 func FetchScannerToken(ctx context.Context, baseURL, password string, timeout time.Duration) TokenResult {
 	baseURL = strings.TrimSpace(baseURL)
@@ -78,9 +80,9 @@ func FetchScannerToken(ctx context.Context, baseURL, password string, timeout ti
 
 // fetchScannerTokenOnce 完成一次「登录 → 取令牌」。
 //
-// viaProxy 为 true 时走系统代理。第二个返回值是**网络层错误**
+// viaProxy 为 true 时走已配置的代理。第二个返回值是**网络层错误**
 // （nil 表示服务端给了答复，无论状态码如何）。
-func fetchScannerTokenOnce(ctx context.Context, baseURL, password string, timeout time.Duration, viaProxy bool) (TokenResult, error) {
+func fetchScannerTokenOnce(ctx context.Context, baseURL, password string, timeout time.Duration, viaProxy bool) (result TokenResult, netErr error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -96,10 +98,12 @@ func fetchScannerTokenOnce(ctx context.Context, baseURL, password string, timeou
 	//
 	// 手动处理最可靠：登录成功后从响应头里把 cookie 抓出来，
 	// 原样放进第二步请求的 Cookie 头。
-	client := tokenClient(timeout, viaProxy)
+	client, proxySrc := tokenClient(timeout, viaProxy)
 	if client == nil {
 		return TokenResult{Error: msgNoSystemProxy}, nil
 	}
+	// 无论成功还是失败，都把「这次走了什么通路」带回去。
+	defer func() { result.Proxy = proxySrc }()
 
 	// ---- 1. 登录 ----
 	loginBody, _ := json.Marshal(map[string]string{"password": password})

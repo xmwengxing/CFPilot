@@ -71,6 +71,37 @@ func Resolve() Resolver {
 	return Resolver{Source: "直连"}
 }
 
+// ResolveExplicit 只解析**用户明确配置过**的代理：环境变量 → Windows 系统代理。
+//
+// 不做「猜本机常见端口」那一步（见 probeLocalProxy）。
+//
+// ## 为什么分成两个入口
+//
+// 猜端口是启发式：只覆盖少数常见端口，用户改过端口、或用 socks-only
+// 客户端时就猜不到；反过来，猜中的端口也可能是别的程序占着。
+// 对「下载 GitHub 文件」这种失败可见、可重试的操作，猜一次值得；
+// 但对「回填面板配置」这种写操作，猜错只会让失败原因更难理解
+// （真机：把 v2rayN 的 SOCKS 端口当 HTTP 代理用，只得到 EOF）。
+//
+// 所以写操作一律只用 explicit 这一档。
+func ResolveExplicit() Resolver {
+	for _, key := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
+		raw := strings.TrimSpace(os.Getenv(key))
+		if raw == "" {
+			continue
+		}
+		u, err := parseProxyURL(raw)
+		if err != nil {
+			continue
+		}
+		return Resolver{URL: u, Source: "环境变量 " + key}
+	}
+	if u, source, ok := systemProxyExplicit(); ok {
+		return Resolver{URL: u, Source: source}
+	}
+	return Resolver{Source: "直连"}
+}
+
 // parseProxyURL 解析代理地址，兼容没写协议的常见写法。
 //
 // "127.0.0.1:7890" 这种写法在 Go 的 url.Parse 里会被当成

@@ -361,6 +361,9 @@ func (s *Server) runQuickScanFor(ctx context.Context, profile *store.Profile, on
 	reportQuickScanProgress(onProgress, scan.Progress{Stage: "push", Message: "正在回填面板"})
 
 	tok := scan.FetchScannerToken(scanCtx, panelHost, panelPassword, 25*time.Second)
+	if tok.Proxy != "" {
+		s.logf("面板登录经代理：" + tok.Proxy)
+	}
 	if !tok.OK {
 		return QuickScanResult{OK: false, Error: "获取面板令牌失败：" + tok.Error}
 	}

@@ -59,6 +59,10 @@ func TestPostResultsRetriesViaProxyWhenDirectFails(t *testing.T) {
 	if !res.OK {
 		t.Fatalf("代理重试应当成功，实际 %+v", res)
 	}
+	// 必须能说清「这次走了什么代理」—— 用户排查时要靠它
+	if res.Proxy != "测试代理" {
+		t.Errorf("应带出实际使用的代理来源，实际 %q", res.Proxy)
+	}
 	select {
 	case got := <-hit:
 		if got == "" {
@@ -119,8 +123,8 @@ func TestPostResultsReportsProxyRetryFailure(t *testing.T) {
 	if res.OK {
 		t.Fatal("两次都失败时不应算成功")
 	}
-	if !contains(res.Error, "系统代理") {
-		t.Errorf("错误信息应说明已尝试代理，实际 %q", res.Error)
+	if !contains(res.Error, "经代理") {
+		t.Errorf("错误信息应说明已尝试代理重试，实际 %q", res.Error)
 	}
 }
 

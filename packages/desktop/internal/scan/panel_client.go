@@ -18,17 +18,17 @@ package scan
 //
 // 与「访问 GitHub 超时」是同一个根因（见 internal/proxy 的说明）。
 //
-// ## 策略：先直连，失败再走系统代理重试一次
+// ## 策略：先直连，失败再用**用户明确配置过的**代理重试一次
 //
 // 不做「一律走代理」：绝大多数用户的直连是通的，多一次代理握手只是变慢；
 // 而代理配置坏掉时会让原本正常的回填一起失败。
 // 所以只在**直连在网络层就失败**时重试 —— HTTP 4xx/5xx（说明已经连上了）不重试。
 //
-// ## 超时预算
-//
-// 直连尝试用 8 秒的 TLS 握手上限（Go 默认 10 秒），失败后立刻改走代理。
-// 整体要落在调用方 40 秒的 ctx 里（取令牌 25s + 回填 20s 是历史口径，
-// 但那是**单次**尝试的预算，这里靠缩短直连档期保证两次都在 ctx 内完成）。
+// ⚠️ 代理来源只认「明确的」两档：环境变量、Windows 系统代理。
+// 不猜本机常见端口（那是给 GitHub 下载用的启发式，见 proxy.ResolveExplicit）。
+// 靠猜端口意味着「端口不是常见值就用不上」，猜中也可能撞上别的程序，
+// 而回填是写操作，猜错只会让失败原因更难理解。
+// 走了代理时会把来源写进结果（`Proxy` 字段），界面日志里能看到到底用的是什么。
 
 import (
 	"context"
@@ -44,8 +44,7 @@ import (
 //
 // 克隆默认 Transport 而不是新建：默认 Transport 带着连接池、HTTP/2、
 // Expect: 100-continue 处理等设定，自建会丢掉它们。
-// 只改两处：TLS 握手上限（缩短，给代理重试留时间）与禁用 HTTP/2
-// （老的 Pages 边缘对 h2 偶发 RST，回填是一次性请求，不值得赌）。
+// 只改一处：TLS 握手上限（缩短，给代理重试留时间）。
 func directClient(timeout time.Duration) *http.Client {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.Proxy = http.ProxyFromEnvironment
@@ -53,30 +52,30 @@ func directClient(timeout time.Duration) *http.Client {
 	// ⚠️ 不要设 ForceAttemptHTTP2=false
 	//
 	// 真机实测：强制 h1 后，部分 CF 边缘节点的回填请求会收到
-	// `malformed HTTP response (HTTP/2 SETTINGS frame)`（那是 HTTP/2 的 SETTINGS 帧）——
+	// `malformed HTTP response`（内容是 HTTP/2 的 SETTINGS 帧）——
 	// 服务端按 h2 回了响应，客户端却在用 h1 解析。
 	// 保持默认（交给 http2 自动协商）最稳。
 	return &http.Client{Timeout: timeout, Transport: t}
 }
 
-// msgNoSystemProxy 表示「本机没有可用的系统代理」——
+// msgNoSystemProxy 表示「本机没有明确配置过的代理」——
 // 这不是失败原因，而是「没有第二条通路可用」，调用方应保留直连的原始错误。
-const msgNoSystemProxy = "没有可用的系统代理"
+const msgNoSystemProxy = "没有配置代理（HTTP_PROXY / 系统代理都未开启）"
 
-// proxyResolver 是「解析系统代理」的钩子，测试可替换。
-var proxyResolver = proxy.Resolve
+// proxyResolver 是「解析明确的代理」的钩子，测试可替换。
+var proxyResolver = proxy.ResolveExplicit
 
-// proxyClient 返回走系统代理的客户端（无代理可用时返回 nil）。
-func proxyClient(timeout time.Duration) *http.Client {
+// proxyClient 返回走代理的客户端与来源说明（无代理可用时两个都为零值）。
+func proxyClient(timeout time.Duration) (*http.Client, string) {
 	r := proxyResolver()
 	if r.URL == nil {
-		return nil
+		return nil, ""
 	}
 	c := r.Client(timeout)
 	if t, ok := c.Transport.(*http.Transport); ok {
 		t.TLSHandshakeTimeout = 12 * time.Second
 	}
-	return c
+	return c, r.Source
 }
 
 // shouldRetryViaProxy 判断「值不值得用代理重试一次」。
@@ -97,17 +96,18 @@ func shouldRetryViaProxy(ctx context.Context, err error) bool {
 	return true
 }
 
-// tokenClient 返回「取面板令牌」用的客户端。
+// tokenClient 返回「取面板令牌」用的客户端与来源说明。
 //
-// 与 PostResults 的差别：它必须**手动管理 Cookie 且不自动跟随重定向**
+// 与回填的差别：它必须**手动管理 Cookie 且不自动跟随重定向**
 // （Pages 的某些路径会 301 到带斜杠版本，跟随会丢掉 Cookie 头），
-// 所以 CheckRedirect 在这里统一装上，两条通路（直连 / 系统代理）共用。
-func tokenClient(timeout time.Duration, viaProxy bool) *http.Client {
+// 所以 CheckRedirect 在这里统一装上，两条通路（直连 / 代理）共用。
+func tokenClient(timeout time.Duration, viaProxy bool) (*http.Client, string) {
 	var c *http.Client
+	src := ""
 	if viaProxy {
-		c = proxyClient(timeout)
+		c, src = proxyClient(timeout)
 		if c == nil {
-			return nil
+			return nil, ""
 		}
 	} else {
 		c = directClient(timeout)
@@ -125,5 +125,5 @@ func tokenClient(timeout time.Duration, viaProxy bool) *http.Client {
 		}
 		return nil
 	}
-	return c
+	return c, src
 }

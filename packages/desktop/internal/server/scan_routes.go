@@ -876,6 +876,9 @@ func (s *Server) handleScanPushResults(w http.ResponseWriter, r *http.Request) {
 	}
 	url := scan.DefaultCallbackURL(host)
 	res := scan.PostResultsTo(ctx, url, tok.Token, req.Lines, req.Mode, target, 20*time.Second)
+	if res.Proxy != "" {
+		s.logf("回填经代理：" + res.Proxy)
+	}
 	if !res.OK {
 		msg := "回填失败：" + res.Error
 		// pages.dev 在部分网络不可达（真机：TLS handshake timeout）。
@@ -1048,6 +1051,9 @@ func (s *Server) handleScanScannerToken(w http.ResponseWriter, r *http.Request) 
 
 	// ---- 登录并取令牌 ----
 	res := scan.FetchScannerToken(ctx, host, password, 25*time.Second)
+	if res.Proxy != "" {
+		s.logf("面板登录经代理：" + res.Proxy)
+	}
 	if !res.OK {
 		s.logLevel("获取扫描令牌失败："+res.Error, "warn")
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": res.Error})

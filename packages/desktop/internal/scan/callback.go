@@ -35,6 +35,11 @@ type CallbackResult struct {
 	OK     bool
 	Status int
 	Error  string
+	// Proxy 是本次实际使用的代理来源（空 = 直连）。
+	//
+	// 为什么要带出来：用户「明明开了代理」却出问题时，
+	// 只有这条信息能说明我们到底有没有用上它、用的是哪一个。
+	Proxy string
 }
 
 // PostResults 把优选结果 POST 回面板。
@@ -64,7 +69,7 @@ func PostResults(ctx context.Context, callbackURL, token string, entries []strin
 
 // PostResultsTo 回填到指定的目标池。
 //
-// 直连失败（网络层）时自动走系统代理重试一次 —— 面板域名常是 `*.pages.dev`，
+// 直连失败（网络层）时自动用「已配置的代理」重试一次 —— 面板域名常是 `*.pages.dev`，
 // 它在部分网络直连会被阻断（TLS 握手超时）。见 panel_client.go。
 func PostResultsTo(ctx context.Context, callbackURL, token string, entries []string, mode string, target PushTarget, timeout time.Duration) CallbackResult {
 	if timeout <= 0 {
@@ -86,7 +91,7 @@ func PostResultsTo(ctx context.Context, callbackURL, token string, entries []str
 	if netErr == nil || !shouldRetryViaProxy(ctx, netErr) {
 		return res
 	}
-	// 直连在网络层就失败了（典型：TLS handshake timeout）→ 换系统代理再来一次
+	// 直连在网络层就失败了（典型：TLS handshake timeout）→ 换已配置的代理再来一次
 	retry, retryErr := postResultsOnce(ctx, callbackURL, token, body, timeout, true)
 	if retry.Error == msgNoSystemProxy {
 		// 没有代理可试 —— 报直连的真实原因，别让用户以为是代理的问题
@@ -95,24 +100,27 @@ func PostResultsTo(ctx context.Context, callbackURL, token string, entries []str
 	if retryErr == nil {
 		return retry
 	}
-	return CallbackResult{Error: netErr.Error() + "（已尝试经系统代理重试，仍未成功：" + retryErr.Error() + "）"}
+	return CallbackResult{Error: netErr.Error() + "（已尝试经代理重试，仍未成功：" + retryErr.Error() + "）"}
 }
 
-// postResultsOnce 发一次回填请求。viaProxy 为 true 时走系统代理。
+// postResultsOnce 发一次回填请求。viaProxy 为 true 时走已配置的代理。
 //
 // 返回的第二个值是**网络层错误**（nil 表示拿到了服务端答复，
 // 无论状态码是多少都算答复）—— 调用方据此决定要不要换通路重试。
-func postResultsOnce(ctx context.Context, callbackURL, token string, body []byte, timeout time.Duration, viaProxy bool) (CallbackResult, error) {
+func postResultsOnce(ctx context.Context, callbackURL, token string, body []byte, timeout time.Duration, viaProxy bool) (result CallbackResult, netErr error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	client := directClient(timeout)
+	src := ""
 	if viaProxy {
-		client = proxyClient(timeout)
+		client, src = proxyClient(timeout)
 		if client == nil {
 			return CallbackResult{Error: msgNoSystemProxy}, nil
 		}
 	}
+	// 无论成功还是失败，都把「这次走了什么通路」带回去。
+	defer func() { result.Proxy = src }()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, callbackURL, bytes.NewReader(body))
 	if err != nil {

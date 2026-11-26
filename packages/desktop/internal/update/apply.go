@@ -93,9 +93,68 @@ func ApplyUpdate(newFile string) (oldPath string, err error) {
 		}
 	}
 
-	// 3. 删除缓存目录里可能残留的校验 sidecar（文件已搬走）
+	// 3. 若随更新下载了 WebView2Loader.dll，放到 exe 同目录。
+	//
+	// 这一步是**尽力而为**：放不进去（权限 / 占用）也不回滚 ——
+	// exe 已经换好了，缺 DLL 只是回到「内存加载」的老行为，功能不受影响。
+	// 但换了之后下次启动就不再产生可执行私有内存页（安全软件不再报反射加载）。
+	if err := placeBundledLoader(newFile, exe); err != nil {
+		// 不返回错误：更新本身已成功
+		_ = err
+	}
+
+	// 4. 删除缓存目录里可能残留的校验 sidecar（文件已搬走）
 	_ = os.Remove(newFile + ".sha256")
 	return oldPath, nil
+}
+
+// placeBundledLoader 把随更新下载的 WebView2Loader.dll 放到 exe 同目录。
+//
+// 约定：伴随文件是 `<新版本文件>.loader`（下载时写在这里，见
+// internal/server/update_routes.go），并且已经通过官方 SHA256SUMS 校验。
+//
+// 为什么需要「把 DLL 放在 exe 旁边」：go-webview2 内嵌该 DLL 并从内存加载，
+// 与反射加载行为一致；它的实现会先尝试 LoadLibrary 磁盘文件，
+// 命中磁盘文件就不会走内存加载。
+func placeBundledLoader(newFile, exe string) error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	src := newFile + ".loader"
+	if _, err := os.Stat(src); err != nil {
+		return err
+	}
+	dst := filepath.Join(filepath.Dir(exe), "WebView2Loader.dll")
+	if sameFileContent(src, dst) {
+		_ = os.Remove(src)
+		return nil
+	}
+	if err := copyExecutable(src, dst); err != nil {
+		return err
+	}
+	_ = os.Remove(src)
+	return nil
+}
+
+// sameFileContent 判断两个文件内容是否一致（大小 + 哈希）。
+func sameFileContent(a, b string) bool {
+	ia, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	ib, err := os.Stat(b)
+	if err != nil || ia.Size() != ib.Size() {
+		return false
+	}
+	ha, err := fileSHA256(a)
+	if err != nil {
+		return false
+	}
+	hb, err := fileSHA256(b)
+	if err != nil {
+		return false
+	}
+	return hex.EncodeToString(ha) == hex.EncodeToString(hb)
 }
 
 // WriteSidecarSHA256 计算文件的 SHA-256 并写入 <file>.sha256 sidecar。

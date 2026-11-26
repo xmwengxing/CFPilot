@@ -150,6 +150,21 @@ func (s *Server) handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// 顺带取同 Release 的 WebView2Loader.dll（Windows）。
+		//
+		// 不取它的后果：更新后的 exe 旁边没有这个 DLL，go-webview2 会退回到
+		// 「内嵌字节 + 内存加载」，安全软件会继续报「反射加载 / 可执行私有内存」。
+		// 旧 Release 没有该资产时静默跳过 —— 不能因此让更新失败。
+		if loader, lerr := update.DownloadLoader(context.Background(), req.URL, file+".loader",
+			func(msg, level string) { s.logLevel(msg, level) }); lerr != nil {
+			s.logLevel("⚠ 未能随更新获取 WebView2Loader.dll（不影响更新）："+lerr.Error(), "warn")
+		} else if loader != "" {
+			if werr := update.WriteSidecarSHA256(loader); werr != nil {
+				s.logLevel("⚠ 写 WebView2Loader.dll 校验记录失败："+werr.Error(), "warn")
+			}
+			s.logLevel("已随更新下载 WebView2Loader.dll（下次启动不再从内存加载）", "ok")
+		}
+
 		s.logLevel("新版本已下载到 "+file, "ok")
 		// 下载时已按官方 SHA256SUMS 校验；把本地哈希写进 sidecar，
 		// 「重启并更新」时会再验一次（防「下载后到点击前」被改动）。

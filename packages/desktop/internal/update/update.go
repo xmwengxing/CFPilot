@@ -324,7 +324,21 @@ func pickAssetFor(assets []Asset, wantOS, wantArch string) *Asset {
 	}
 
 	isStandard := func(name string) bool {
-		return !strings.Contains(name, "+mesh") && !strings.HasSuffix(name, ".deb") && !strings.Contains(name, "-setup.")
+		if strings.Contains(name, "+mesh") || strings.HasSuffix(name, ".deb") || strings.Contains(name, "-setup.") {
+			return false
+		}
+		// 只认可执行本体：Release 里还有便携包 zip（带 WebView2Loader.dll）、
+		// 摘要清单、内核资产等。按「名字含 windows/架构」匹配 zip 时，
+		// 更新会把一个压缩包当成新版本下载并尝试替换 exe —— 直接坏掉。
+		if wantOS == "windows" {
+			return strings.HasSuffix(name, ".exe")
+		}
+		for _, ext := range []string{".zip", ".dll", ".txt", ".md", ".json", ".sha256", ".sig"} {
+			if strings.HasSuffix(name, ext) {
+				return false
+			}
+		}
+		return true
 	}
 
 	// 1) 精确匹配：当前 OS + 架构 + 普通版
@@ -345,6 +359,55 @@ func pickAssetFor(assets []Asset, wantOS, wantArch string) *Asset {
 		}
 	}
 	return nil
+}
+
+// LoaderAssetName 返回 Windows 版随包发布的 WebView2Loader.dll 资产名。
+//
+// 为什么单独发这个文件：go-webview2 把 WebView2Loader.dll 内嵌进 exe，
+// 运行时用 go-winloader 从内存加载（行为与「DLL 反射加载」一致，
+// 会被安全软件标红）。该库的实现是「先 LoadLibrary 磁盘文件，失败才内存加载」，
+// 所以只要 exe 同目录有这个 DLL，就不会产生可执行私有内存页。
+//
+// 名字带 cfpilot- 前缀是为了进官方 SHA256SUMS —— 摘要清单只覆盖这些文件，
+// 校验不到的东西一律不许落盘（fail-closed）。
+func LoaderAssetName(goarch string) string {
+	return "cfpilot-webview2loader-windows-" + goarch + ".dll"
+}
+
+// DownloadLoader 随更新一起取 WebView2Loader.dll。
+//
+// 返回空串表示「这个 Release 没有该资产」（老版本或架构不支持）——
+// 调用方应静默跳过，不要因此让更新失败。
+func DownloadLoader(ctx context.Context, exeURL, targetPath string, onLog func(string, string)) (string, error) {
+	if runtime.GOOS != "windows" {
+		return "", nil
+	}
+	name := LoaderAssetName(runtime.GOARCH)
+	loaderURL, ok := replaceAssetInURL(exeURL, name)
+	if !ok {
+		return "", nil
+	}
+	// 先看清单里有没有这个资产：旧 Release 没有它，
+	// 直接调 Download 会得到「摘要清单里没有 …」的报错 —— 那是噪音，不是故障。
+	if sums, err := fetchDesktopChecksums(ctx, releaseTagFromURL(exeURL)); err == nil {
+		if _, exists := sums[strings.ToLower(name)]; !exists {
+			return "", nil
+		}
+	}
+	file, err := Download(ctx, loaderURL, targetPath, nil, onLog)
+	if err != nil {
+		return "", err
+	}
+	return file, nil
+}
+
+// replaceAssetInURL 把 Release 下载地址的最后一段换成另一个资产名。
+func replaceAssetInURL(raw, assetName string) (string, bool) {
+	idx := strings.LastIndex(raw, "/")
+	if idx < 0 || idx == len(raw)-1 {
+		return "", false
+	}
+	return raw[:idx+1] + assetName, true
 }
 
 // ------------------------------------------------------------------

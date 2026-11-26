@@ -184,6 +184,38 @@ jobs:
             console.log(`✅ ${file} 含 RT_GROUP_ICON（exe 有图标）`);
           ' "$EXE"
 
+      - name: 校验 Windows 便携包与 WebView2Loader.dll
+        # 面板窗口用的第三方库把 WebView2Loader.dll 内嵌进 exe 并从内存加载，
+        # 安全软件会把它判成「DLL 反射加载」。只要 exe 同目录有这个官方 DLL，
+        # 库就会先 LoadLibrary 磁盘文件 —— 所以发布物里必须有它。
+        #
+        # 这里校验三件事：
+        #   1) 官方 DLL 资产存在，且与编译所用模块里的文件**逐字节一致**；
+        #   2) 便携包 zip 里同时有 exe 与 WebView2Loader.dll；
+        #   3) 摘要清单覆盖了 DLL 资产（应用内更新靠它校验）。
+        run: |
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          DIST="packages/desktop/dist"
+          DLL="$DIST/cfpilot-webview2loader-windows-amd64.dll"
+          ZIP="$DIST/cfpilot-${V}-windows-amd64+loader.zip"
+
+          if [ ! -f "$DLL" ]; then echo "::error::缺少 $DLL"; exit 1; fi
+          if [ ! -f "$ZIP" ]; then echo "::error::缺少便携包 $ZIP"; exit 1; fi
+
+          MOD=$(cd packages/desktop && go list -m -f '{{.Dir}}' github.com/jchv/go-webview2)
+          A=$(sha256sum "$DLL" | cut -d' ' -f1)
+          B=$(sha256sum "$MOD/webviewloader/sdk/x64/WebView2Loader.dll" | cut -d' ' -f1)
+          if [ "$A" != "$B" ]; then
+            echo "::error::DLL 与编译所用模块不一致：$A != $B"
+            exit 1
+          fi
+
+          LIST=$(unzip -Z1 "$ZIP")
+          echo "$LIST"
+          grep -qx "cfpilot-${V}-windows-amd64.exe" <<<"$LIST" || { echo "::error::便携包里没有 exe"; exit 1; }
+          grep -qx "WebView2Loader.dll" <<<"$LIST" || { echo "::error::便携包里没有 WebView2Loader.dll"; exit 1; }
+
       - name: 准备内核资产（供远程获取）
         # ⚠️ 部署用的内核代码必须能**独立于应用版本**更新：
         # 用户没升级 CLI / 桌面版时，仍应能部署到最新的内核。

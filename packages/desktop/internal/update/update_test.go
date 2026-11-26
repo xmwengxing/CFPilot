@@ -675,3 +675,59 @@ func TestPickAssetForDarwinIgnoresMesh(t *testing.T) {
 		t.Fatalf("不应选 +mesh 包，实际 %#v", got)
 	}
 }
+
+// Release 里除了 exe 还有便携 zip / loader DLL / 摘要清单，
+// 更新只能挑 exe —— 否则会把压缩包当新版本下载并尝试替换自己。
+func TestPickAssetSkipsLoaderZipAndDll(t *testing.T) {
+	assets := []Asset{
+		{Name: "cfpilot-0.61.0-windows-amd64+loader.zip", URL: "https://example.com/zip"},
+		{Name: "cfpilot-webview2loader-windows-amd64.dll", URL: "https://example.com/dll"},
+		{Name: "cfpilot-desktop-SHA256SUMS", URL: "https://example.com/sums"},
+		{Name: "cfpilot-0.61.0-windows-amd64.exe", URL: "https://example.com/exe"},
+	}
+	got := pickAssetFor(assets, "windows", "amd64")
+	if got == nil || got.Name != "cfpilot-0.61.0-windows-amd64.exe" {
+		t.Fatalf("Windows 只能选 exe，实际 %+v", got)
+	}
+}
+
+// 没有 DLL 的老 Release：行为不变（仍能选到 exe）。
+func TestPickAssetWorksWithoutLoaderAsset(t *testing.T) {
+	assets := []Asset{{Name: "cfpilot-0.50.0-windows-amd64.exe", URL: "https://example.com/exe"}}
+	if got := pickAssetFor(assets, "windows", "amd64"); got == nil {
+		t.Fatal("老 Release 仍应能选到 exe")
+	}
+}
+
+// 伴随文件的约定：<新版本文件>.loader → exe 同目录的 WebView2Loader.dll。
+func TestPlaceBundledLoaderCopiesBesideExe(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("只影响 Windows")
+	}
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "cfpilot.exe")
+	if err := os.WriteFile(exe, []byte("exe"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	newFile := filepath.Join(dir, "cfpilot-new.exe")
+	if err := os.WriteFile(newFile, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loader := newFile + ".loader"
+	if err := os.WriteFile(loader, []byte("dll-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := placeBundledLoader(newFile, exe); err != nil {
+		t.Fatalf("放置 DLL 失败：%v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "WebView2Loader.dll"))
+	if err != nil {
+		t.Fatalf("应生成 WebView2Loader.dll：%v", err)
+	}
+	if string(got) != "dll-bytes" {
+		t.Errorf("内容不对：%q", got)
+	}
+	if _, err := os.Stat(loader); !os.IsNotExist(err) {
+		t.Error("临时伴随文件应被清理")
+	}
+}

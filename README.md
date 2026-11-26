@@ -141,10 +141,14 @@ cfpilot config      # 配置管理
 
 | 平台 | 普通版（代理部署 / 优选 / 盲中继与云监测台） | +mesh 组网版（额外包含异地组网节点） |
 | --- | --- | --- |
-| Windows x64 | `cfpilot-<版本>-windows-amd64.exe`（绿色单文件） | `cfpilot-<版本>+mesh-windows-amd64-setup.exe`（安装向导） |
+| Windows x64 | `cfpilot-<版本>-windows-amd64+loader.zip`（免安装，解压即用，推荐）<br>或 `cfpilot-<版本>-windows-amd64.exe`（单文件） | `cfpilot-<版本>+mesh-windows-amd64-setup.exe`（安装向导） |
 | Linux x64 | `cfpilot-<版本>-linux-amd64` | `cfpilot-<版本>+mesh-linux-amd64.deb` |
 | Linux arm64 | `cfpilot-<版本>-linux-arm64` | `cfpilot-<版本>+mesh-linux-arm64.deb` |
 | Android | `cfpilot-<版本>-android.apk`（完整管理面板） | `cfpilot-<版本>+mesh-android.apk`（独立组网客户端） |
+
+Windows 的 `+loader.zip` 里除了主程序还有官方面板加载组件 `WebView2Loader.dll`：
+解压到同一目录再运行即可。单文件 exe 也能直接跑，但它只能把该组件从内存加载，
+部分安全软件会因此把程序标成「DLL 反射加载」；装上该组件（或使用安装向导版）就不会出现该提示。
 
 运行后托盘出现图标，并直接打开 CFPilot 面板窗口；关掉窗口后服务继续在托盘里运行。
 

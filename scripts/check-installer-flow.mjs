@@ -58,6 +58,32 @@ check(
   !/node scripts\/build-installers\.mjs/.test(workflow),
   'build-desktop 已自动构建，工作流里再跑一次会拿到已被吸收的裸 exe'
 )
+// ---- Windows 安全软件误报的两道防线 ----
+//
+// 面板窗口用的第三方库把 WebView2Loader.dll 内嵌进 exe 并从内存加载，
+// 行为特征与「DLL 反射加载」一致（会产生 MEM_PRIVATE 的可执行页）。
+// 修法只有一条：让 DLL 在 exe 同目录，库就会先 LoadLibrary 磁盘文件。
+// 因此必须同时保证「安装器带上它」与「构建产出便携包」。
+check(
+  'NSIS 安装器把 WebView2Loader.dll 落到安装目录',
+  /File "WEBVIEW2LOADER_SOURCE_PLACEHOLDER"/.test(nsi) &&
+    /Delete "\$INSTDIR\\WebView2Loader\.dll"/.test(nsi),
+  '安装目录没有这个 DLL，面板窗口就会退回内存加载（安全软件报反射加载）'
+)
+check(
+  '构建脚本产出便携包与官方 Loader 资产',
+  /cfpilot-webview2loader-windows-\$\{t\.goarch\}\.dll/.test(desktop) &&
+    /\+loader\.zip/.test(desktop),
+  '新用户下载便携包（exe + WebView2Loader.dll）即可避开内存加载'
+)
+check(
+  '安装器构建会随包复制 WebView2Loader.dll',
+  /WEBVIEW2LOADER_SOURCE_PLACEHOLDER'/.test(
+    readFileSync('scripts/build-installers.mjs', 'utf8')
+  ),
+  '模板占位符必须被真正替换，否则 nsisc 会因文件缺失而失败'
+)
+
 check(
   'NSIS 安装器把 wintun.dll 落到安装目录',
   /--fetch-wintun "\$INSTDIR"/.test(nsi),

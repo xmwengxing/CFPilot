@@ -538,6 +538,79 @@ for (const t of picked) {
   }
 }
 
+// ---- Windows：官方 WebView2Loader.dll + 便携包 ----
+//
+// ## 为什么要单独发这个 DLL
+//
+// 面板窗口用的第三方库把 WebView2Loader.dll **内嵌进 exe**，运行时用
+// go-winloader 从内存加载 —— 行为特征与「DLL 反射加载」完全一致
+// （会产生 MEM_PRIVATE 的 PAGE_EXECUTE_READ 页），会被安全软件标记。
+//
+// 该库的实现是「先 LoadLibrary("WebView2Loader")，失败才内存加载」，
+// 所以只要把官方 DLL 放到 exe 同目录，就不会走内存加载。
+//
+// 因此这里做三件事：
+//   1. 把官方 DLL 作为独立 Release 资产（`cfpilot-webview2loader-windows-<arch>.dll`），
+//      名字带 cfpilot- 前缀才能进官方 SHA256SUMS —— 更新流程靠它校验；
+//   2. 打一个便携包 zip（exe + WebView2Loader.dll），新用户下载即用；
+//   3. 安装器（NSIS）单独复制这个 DLL 到安装目录（见 build-installers.mjs）。
+//
+// ⚠️ DLL 必须与本仓库编译用的模块版本一致：直接从 module cache 取，
+//    不做网络下载、不 pin 另一份副本。
+function stageWindowsLoader(windowsTargets) {
+  const sdkArch = { amd64: 'x64', arm64: 'arm64', '386': 'x86' }
+  let modDir = ''
+  try {
+    modDir = execFileSync('go', ['list', '-m', '-f', '{{.Dir}}', 'github.com/jchv/go-webview2'], {
+      cwd: desktopDir,
+      encoding: 'utf8',
+    }).trim()
+  } catch {
+    modDir = ''
+  }
+  if (!modDir || !existsSync(modDir)) {
+    console.error('[desktop] ⚠ 找不到 go-webview2 模块目录，跳过 WebView2Loader.dll（安全软件可能报反射加载）')
+    return
+  }
+  for (const t of windowsTargets) {
+    const arch = sdkArch[t.goarch]
+    if (!arch) continue
+    const src = join(modDir, 'webviewloader', 'sdk', arch, 'WebView2Loader.dll')
+    if (!existsSync(src)) {
+      console.error(`[desktop] ⚠ 模块里没有 ${arch} 的 WebView2Loader.dll（${t.out}）`)
+      continue
+    }
+    const assetName = `cfpilot-webview2loader-windows-${t.goarch}.dll`
+    copyFileSync(src, join(buildDir, assetName))
+
+    // 便携包：解压即用，exe 旁边就有 DLL
+    const stage = join(buildDir, '.win-loader-stage')
+    rmSync(stage, { recursive: true, force: true })
+    mkdirSync(stage, { recursive: true })
+    copyFileSync(join(buildDir, t.out), join(stage, t.out))
+    copyFileSync(src, join(stage, 'WebView2Loader.dll'))
+    const zipName = t.out.replace(/\.exe$/, '') + '+loader.zip'
+    const zipPath = join(buildDir, zipName)
+    rmSync(zipPath, { force: true })
+    if (process.platform === 'win32') {
+      execFileSync(
+        'powershell',
+        ['-NoProfile', '-Command', `Compress-Archive -Path '${join(stage, '*')}' -DestinationPath '${zipPath}' -Force`],
+        { stdio: 'pipe' }
+      )
+    } else {
+      execFileSync('zip', ['-j', '-q', zipPath, join(stage, t.out), join(stage, 'WebView2Loader.dll')], { stdio: 'pipe' })
+    }
+    rmSync(stage, { recursive: true, force: true })
+    const kb = (statSync(zipPath).size / 1024).toFixed(0)
+    console.log(`[desktop] ✅ ${assetName} + ${zipName} (${kb} KB)`)
+  }
+}
+
+if (picked.some((t) => t.goos === 'windows')) {
+  stageWindowsLoader(picked.filter((t) => t.goos === 'windows'))
+}
+
 // ---- macOS 应用包（.app + .dmg）----
 //
 // 只能在 macOS 上生成（iconutil / codesign / lipo / hdiutil 都是系统工具）。

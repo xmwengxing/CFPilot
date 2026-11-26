@@ -63,6 +63,13 @@ Section "主程序" Main
   File "EXE_SOURCE_PLACEHOLDER"
   File "MESHD_SOURCE_PLACEHOLDER"
 
+  ; 官方 WebView2Loader.dll（微软签名）。
+  ;
+  ; 面板窗口用的第三方库把这个 DLL 内嵌进 exe 并从内存加载，
+  ; 行为特征与「DLL 反射加载」一致，会被安全软件标红。
+  ; 该库会优先 LoadLibrary 磁盘文件，所以放到安装目录即可避开内存加载。
+  File "WEBVIEW2LOADER_SOURCE_PLACEHOLDER"
+
   ; 先准备 wintun.dll，服务启动时可能立即恢复上次的组网。
   DetailPrint "正在下载并校验 wintun.dll（官方源 + SHA256）…"
   ClearErrors
@@ -111,6 +118,7 @@ Section "Uninstall"
   Delete "$INSTDIR\${EXE_NAME}"
   Delete "$INSTDIR\${MESHD_NAME}"
   Delete "$INSTDIR\wintun.dll"
+  Delete "$INSTDIR\WebView2Loader.dll"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
   Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"

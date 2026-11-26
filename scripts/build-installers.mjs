@@ -115,6 +115,29 @@ if (requestedTargets.includes('windows') && existsSync(winExe) && makensis) {
       throw new Error('缺少 cfpilot-meshd.exe')
     }
     copyFileSync(meshdSrc, join(stage, meshdName))
+
+    // 官方 WebView2Loader.dll（与编译用的模块版本一致，不做网络下载）。
+    //
+    // 缺了它，安装后的 exe 会退回到「内嵌字节 + 内存加载」，
+    // 安全软件就会把安装包标记成「反射加载 DLL」。
+    let loaderSrc = join(meshBuildDir, 'cfpilot-webview2loader-windows-amd64.dll')
+    if (!existsSync(loaderSrc)) {
+      try {
+        const modDir = execFileSync(
+          'go',
+          ['list', '-m', '-f', '{{.Dir}}', 'github.com/jchv/go-webview2'],
+          { cwd: join(repoRoot, 'packages', 'desktop'), encoding: 'utf8' }
+        ).trim()
+        loaderSrc = join(modDir, 'webviewloader', 'sdk', 'x64', 'WebView2Loader.dll')
+      } catch {
+        loaderSrc = ''
+      }
+    }
+    if (!loaderSrc || !existsSync(loaderSrc)) {
+      throw new Error('[installers] 缺少 WebView2Loader.dll（安全软件会报反射加载），请重跑 build-desktop.mjs --mesh')
+    }
+    copyFileSync(loaderSrc, join(stage, 'WebView2Loader.dll'))
+
     const tpl = readFileSync(join(here, 'install-mesh.nsi.template'), 'utf8')
     const setupName = `cfpilot-${version}+mesh-windows-amd64-setup.exe`
     const setupOut = join(dist, setupName)
@@ -123,6 +146,7 @@ if (requestedTargets.includes('windows') && existsSync(winExe) && makensis) {
       .replace('EXE_NAME_PLACEHOLDER', winExeName)
       .replace('EXE_SOURCE_PLACEHOLDER', join(stage, winExeName))
       .replace('MESHD_SOURCE_PLACEHOLDER', join(stage, meshdName))
+      .replace('WEBVIEW2LOADER_SOURCE_PLACEHOLDER', join(stage, 'WebView2Loader.dll'))
       .replace('MESHD_NAME_PLACEHOLDER', meshdName)
       .replace('SETUP_OUT_PLACEHOLDER', setupOut)
     const langSrc = join(here, 'nsis-lang')

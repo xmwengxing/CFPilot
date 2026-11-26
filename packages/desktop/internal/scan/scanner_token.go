@@ -42,6 +42,9 @@ type TokenResult struct {
 //
 // baseURL 是控制面地址（如 `https://cpmanager.pages.dev`）。
 // password 是面板密码。
+//
+// 直连在网络层失败时自动走系统代理重试一次 —— 面板域名常是 `*.pages.dev`，
+// 它在部分网络直连会被阻断（TLS 握手超时）。见 panel_client.go。
 func FetchScannerToken(ctx context.Context, baseURL, password string, timeout time.Duration) TokenResult {
 	baseURL = strings.TrimSpace(baseURL)
 	password = strings.TrimSpace(password)
@@ -54,13 +57,32 @@ func FetchScannerToken(ctx context.Context, baseURL, password string, timeout ti
 	if timeout <= 0 {
 		timeout = 20 * time.Second
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
 	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
 		baseURL = "https://" + baseURL
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
+
+	res, netErr := fetchScannerTokenOnce(ctx, baseURL, password, timeout, false)
+	if netErr == nil || !shouldRetryViaProxy(ctx, netErr) {
+		return res
+	}
+	retry, retryErr := fetchScannerTokenOnce(ctx, baseURL, password, timeout, true)
+	if retry.Error == msgNoSystemProxy {
+		return res
+	}
+	if retryErr == nil {
+		return retry
+	}
+	return retry
+}
+
+// fetchScannerTokenOnce 完成一次「登录 → 取令牌」。
+//
+// viaProxy 为 true 时走系统代理。第二个返回值是**网络层错误**
+// （nil 表示服务端给了答复，无论状态码如何）。
+func fetchScannerTokenOnce(ctx context.Context, baseURL, password string, timeout time.Duration, viaProxy bool) (TokenResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	// ⚠️ 不用 cookiejar，改为**手动提取并回传** Cookie
 	//
@@ -74,31 +96,9 @@ func FetchScannerToken(ctx context.Context, baseURL, password string, timeout ti
 	//
 	// 手动处理最可靠：登录成功后从响应头里把 cookie 抓出来，
 	// 原样放进第二步请求的 Cookie 头。
-	client := &http.Client{
-		Timeout: timeout,
-		Transport: &http.Transport{
-			Proxy:               http.ProxyFromEnvironment,
-			MaxIdleConnsPerHost: 4,
-			IdleConnTimeout:     30 * time.Second,
-			TLSHandshakeTimeout: 15 * time.Second,
-			ForceAttemptHTTP2:   false,
-			// 不自动跟随重定向：Pages 的某些路径会 301 到带斜杠的版本，
-			// 跟随会丢掉我们手动设置的 Cookie 头
-			DisableKeepAlives: false,
-		},
-		// 关键：不自动跟随重定向，否则 Cookie 头会被重置
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 3 {
-				return fmt.Errorf("重定向次数过多")
-			}
-			// 保持原请求的 Cookie 头
-			if len(via) > 0 {
-				if c := via[0].Header.Get("Cookie"); c != "" {
-					req.Header.Set("Cookie", c)
-				}
-			}
-			return nil
-		},
+	client := tokenClient(timeout, viaProxy)
+	if client == nil {
+		return TokenResult{Error: msgNoSystemProxy}, nil
 	}
 
 	// ---- 1. 登录 ----
@@ -106,13 +106,13 @@ func FetchScannerToken(ctx context.Context, baseURL, password string, timeout ti
 	loginReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		baseURL+"/api/v1/login", bytes.NewReader(loginBody))
 	if err != nil {
-		return TokenResult{Error: err.Error()}
+		return TokenResult{Error: err.Error()}, nil
 	}
 	loginReq.Header.Set("Content-Type", "application/json")
 
 	loginRes, err := client.Do(loginReq)
 	if err != nil {
-		return TokenResult{Error: "登录请求失败：" + err.Error()}
+		return TokenResult{Error: "登录请求失败：" + err.Error()}, err
 	}
 	loginRaw, _ := io.ReadAll(io.LimitReader(loginRes.Body, 4096))
 	_ = loginRes.Body.Close()
@@ -125,7 +125,7 @@ func FetchScannerToken(ctx context.Context, baseURL, password string, timeout ti
 	// 报的是「登录成功但服务端没有下发会话 Cookie」——
 	// 完全误导用户：明明是密码不对，却说登录成功了。
 	if loginRes.StatusCode == http.StatusUnauthorized {
-		return TokenResult{Status: 401, Error: "面板密码不正确，请先在部署页确认密码"}
+		return TokenResult{Status: 401, Error: "面板密码不正确，请先在部署页确认密码"}, nil
 	}
 	// 登录响应必须是 JSON（HTML 说明请求打到了非面板路由）
 	if t := bytes.TrimSpace(loginRaw); len(t) > 0 && t[0] == '<' {
@@ -134,13 +134,13 @@ func FetchScannerToken(ctx context.Context, baseURL, password string, timeout ti
 			Error: "登录接口返回了网页而不是 JSON。\n" +
 				"  请确认「自动识别域名」填的是**控制面**地址（如 cpmanager.pages.dev），\n" +
 				"  而不是数据面（cpdata）或自定义域名。",
-		}
+		}, nil
 	}
 	if loginRes.StatusCode < 200 || loginRes.StatusCode >= 300 {
 		return TokenResult{
 			Status: loginRes.StatusCode,
 			Error:  fmt.Sprintf("登录失败 HTTP %d %s", loginRes.StatusCode, brief(loginRaw)),
-		}
+		}, nil
 	}
 
 	// ---- 提取会话 Cookie ----
@@ -155,19 +155,19 @@ func FetchScannerToken(ctx context.Context, baseURL, password string, timeout ti
 		return TokenResult{
 			Status: loginRes.StatusCode,
 			Error:  "登录成功但服务端没有下发会话 Cookie（面板版本可能不匹配）",
-		}
+		}, nil
 	}
 
 	// ---- 2. 取令牌 ----
 	tokenReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		baseURL+"/api/v1/scanner-token", nil)
 	if err != nil {
-		return TokenResult{Error: err.Error()}
+		return TokenResult{Error: err.Error()}, nil
 	}
 	tokenReq.Header.Set("Cookie", cookieHeader)
 	tokenRes, err := client.Do(tokenReq)
 	if err != nil {
-		return TokenResult{Error: "获取令牌请求失败：" + err.Error()}
+		return TokenResult{Error: "获取令牌请求失败：" + err.Error()}, err
 	}
 	tokenRaw, _ := io.ReadAll(io.LimitReader(tokenRes.Body, 4096))
 	_ = tokenRes.Body.Close()
@@ -176,7 +176,7 @@ func FetchScannerToken(ctx context.Context, baseURL, password string, timeout ti
 		return TokenResult{
 			Status: tokenRes.StatusCode,
 			Error:  fmt.Sprintf("获取令牌失败 HTTP %d %s", tokenRes.StatusCode, brief(tokenRaw)),
-		}
+		}, nil
 	}
 
 	// ⚠️ 响应必须是 JSON。若拿到 HTML（典型是 Pages 的 Welcome 页），
@@ -188,7 +188,7 @@ func FetchScannerToken(ctx context.Context, baseURL, password string, timeout ti
 			Error: "面板返回了网页而不是接口数据（会话未生效）。\n" +
 				"  常见原因：面板密码不对，或该域名指向的不是本项目的控制面。\n" +
 				"  请确认「自动识别域名」填的是控制面地址（cpmanager 那一个）。",
-		}
+		}, nil
 	}
 
 	var parsed struct {
@@ -196,12 +196,12 @@ func FetchScannerToken(ctx context.Context, baseURL, password string, timeout ti
 		Token string `json:"token"`
 	}
 	if err := json.Unmarshal(trimmed, &parsed); err != nil {
-		return TokenResult{Error: "令牌响应解析失败：" + brief(tokenRaw)}
+		return TokenResult{Error: "令牌响应解析失败：" + brief(tokenRaw)}, nil
 	}
 	if parsed.Token == "" {
-		return TokenResult{Error: "面板没有返回令牌：" + brief(tokenRaw)}
+		return TokenResult{Error: "面板没有返回令牌：" + brief(tokenRaw)}, nil
 	}
-	return TokenResult{OK: true, Token: parsed.Token, Status: tokenRes.StatusCode}
+	return TokenResult{OK: true, Token: parsed.Token, Status: tokenRes.StatusCode}, nil
 }
 
 // brief 把响应体压成一行简短文本（用于错误信息）。

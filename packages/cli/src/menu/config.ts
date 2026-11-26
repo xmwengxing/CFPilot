@@ -8,7 +8,7 @@ import { ask, confirm, select, pause } from './prompt'
 import { configPath, loadConfig, saveConfig, saveToken, clearConfig, resolveToken } from './store'
 import type { Config } from './store'
 import { CloudflareClient } from '../deploy/cf-api'
-import { listCfPilotNamespaces } from '../deploy/pages-deploy'
+import { listCfPilotNamespaces, readPagesCustomDomain } from '../deploy/pages-deploy'
 
 /** 从 Cloudflare 同步账号 / KV / 控制面信息（写回本地配置）。 */
 async function syncFromCloud(token: string): Promise<boolean> {
@@ -114,16 +114,24 @@ async function syncFromCloud(token: string): Promise<boolean> {
       // ⚠️ `wsPath` 之前**从不更新** —— 它是上一个账户的残留值。
       // WS 路径是**每实例**的（写在内核的 CONFIG 里），
       // 不跟着实例走就一定会错。
+      // 控制面域名：项目实际绑定的自定义域名优先。
+      //
+      // 清单里的 `controlSubdomain` 永远是 `*.pages.dev`，而该域名在部分网络下
+      // TLS 握手会超时 —— 回填（写优选 IP）与面板登录都只能打控制面，
+      // 用 pages.dev 就必然失败。与桌面版 `resolveControlHost` 同口径。
+      const controlHost =
+        (await readPagesCustomDomain(client, account.id, chosen.manifest.controlProject)) ||
+        chosen.manifest.controlSubdomain
       saveConfig({
         accountId: account.id,
         accountName: account.name,
         kvNamespaceId: chosen.id,
-        panelHost: chosen.manifest.controlSubdomain,
+        panelHost: controlHost,
         dataHost: chosen.manifest.dataSubdomain,
         wsPath: chosen.manifest.credentials?.wsPath ?? '',
       })
       status('ok', `实例：${chosen.manifest.controlProject} / ${chosen.manifest.dataProject}`)
-      status('info', `控制面：${chosen.manifest.controlSubdomain}`)
+      status('info', `控制面：${controlHost}`)
       status('info', `数据面：${chosen.manifest.dataSubdomain}`)
       return true
     }

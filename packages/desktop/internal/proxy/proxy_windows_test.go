@@ -133,3 +133,58 @@ func TestProbeIsFast(t *testing.T) {
 	}
 	_ = os.Getenv("PATH")
 }
+
+// SOCKS5 端口不能被误认成 HTTP 代理。
+//
+// 真机：v2rayN 的 10808 是 SOCKS，被当成 HTTP 代理后请求直接断开（EOF），
+// 表现为「代理配了但下载/回填还是失败」。
+func TestLooksLikeHTTPProxyRejectsSocks(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			// 模拟 SOCKS5：读完请求后按 VER 不匹配直接断开，不回数据
+			buf := make([]byte, 32)
+			_, _ = conn.Read(buf)
+			_ = conn.Close()
+		}
+	}()
+
+	if looksLikeHTTPProxy(l.Addr().String()) {
+		t.Error("只断开不回数据的端口不该被当成 HTTP 代理")
+	}
+}
+
+// 真正的 HTTP 代理（回状态行）要认出来。
+func TestLooksLikeHTTPProxyAcceptsHTTP(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			buf := make([]byte, 256)
+			_, _ = conn.Read(buf)
+			_, _ = conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"))
+			_ = conn.Close()
+		}
+	}()
+
+	if !looksLikeHTTPProxy(l.Addr().String()) {
+		t.Error("回 HTTP 状态行的端口应被认成 HTTP 代理")
+	}
+}

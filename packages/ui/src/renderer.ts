@@ -4016,6 +4016,11 @@ import { buildRelayDeployScript, parseRelayInitOutput, randomRelayToken } from '
           log('识别域名异常：' + msg, 'err')
         } else if (hostRes.value.ok && hostRes.value.host) {
           $('optHost').value = hostRes.value.host
+          // 后端带上来的说明（例如「数据面项目没绑自定义域名」）——
+          // 没有它，用户绑了控制面域名却看到 pages.dev 会以为识别坏了。
+          const warn = String((hostRes.value as { warning?: string }).warning || '').trim()
+          // warning 可能带换行（原因 + 建议），hint 只有一行位置，合并成一句
+          if (warn) problems.push(warn.split('\n').map((x) => x.trim()).filter(Boolean).join('；'))
           const source = hostRes.value.source ?? ''
           if (source === 'custom' || source.includes('自定义域名')) {
             notes.push('域名 ' + hostRes.value.host)

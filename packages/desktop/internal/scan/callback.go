@@ -63,6 +63,9 @@ func PostResults(ctx context.Context, callbackURL, token string, entries []strin
 }
 
 // PostResultsTo 回填到指定的目标池。
+//
+// 直连失败（网络层）时自动走系统代理重试一次 —— 面板域名常是 `*.pages.dev`，
+// 它在部分网络直连会被阻断（TLS 握手超时）。见 panel_client.go。
 func PostResultsTo(ctx context.Context, callbackURL, token string, entries []string, mode string, target PushTarget, timeout time.Duration) CallbackResult {
 	if timeout <= 0 {
 		timeout = 15 * time.Second
@@ -73,25 +76,55 @@ func PostResultsTo(ctx context.Context, callbackURL, token string, entries []str
 	if target != TargetRelay {
 		target = TargetLocal
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 
 	body, err := json.Marshal(map[string]any{"ips": entries, "mode": mode, "target": string(target)})
 	if err != nil {
 		return CallbackResult{Error: err.Error()}
 	}
 
+	res, netErr := postResultsOnce(ctx, callbackURL, token, body, timeout, false)
+	if netErr == nil || !shouldRetryViaProxy(ctx, netErr) {
+		return res
+	}
+	// 直连在网络层就失败了（典型：TLS handshake timeout）→ 换系统代理再来一次
+	retry, retryErr := postResultsOnce(ctx, callbackURL, token, body, timeout, true)
+	if retry.Error == msgNoSystemProxy {
+		// 没有代理可试 —— 报直连的真实原因，别让用户以为是代理的问题
+		return res
+	}
+	if retryErr == nil {
+		return retry
+	}
+	return CallbackResult{Error: netErr.Error() + "（已尝试经系统代理重试，仍未成功：" + retryErr.Error() + "）"}
+}
+
+// postResultsOnce 发一次回填请求。viaProxy 为 true 时走系统代理。
+//
+// 返回的第二个值是**网络层错误**（nil 表示拿到了服务端答复，
+// 无论状态码是多少都算答复）—— 调用方据此决定要不要换通路重试。
+func postResultsOnce(ctx context.Context, callbackURL, token string, body []byte, timeout time.Duration, viaProxy bool) (CallbackResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	client := directClient(timeout)
+	if viaProxy {
+		client = proxyClient(timeout)
+		if client == nil {
+			return CallbackResult{Error: msgNoSystemProxy}, nil
+		}
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, callbackURL, bytes.NewReader(body))
 	if err != nil {
-		return CallbackResult{Error: err.Error()}
+		return CallbackResult{Error: err.Error()}, nil
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("User-Agent", "CFPilot-Desktop/1.0")
 
-	res, err := http.DefaultClient.Do(req)
+	res, err := client.Do(req)
 	if err != nil {
-		return CallbackResult{Error: err.Error()}
+		return CallbackResult{Error: err.Error()}, err
 	}
 	defer func() { _ = res.Body.Close() }()
 
@@ -103,9 +136,9 @@ func PostResultsTo(ctx context.Context, callbackURL, token string, entries []str
 		} else {
 			msg = fmt.Sprintf("HTTP %d %s", res.StatusCode, msg)
 		}
-		return CallbackResult{Status: res.StatusCode, Error: msg}
+		return CallbackResult{Status: res.StatusCode, Error: msg}, nil
 	}
-	return CallbackResult{OK: true, Status: res.StatusCode}
+	return CallbackResult{OK: true, Status: res.StatusCode}, nil
 }
 
 // DefaultCallbackURL 由数据面/控制面域名推导回填地址。

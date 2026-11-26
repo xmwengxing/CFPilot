@@ -879,7 +879,7 @@ async function waitForDeployment(
  * 换形态（Pages → Workers）时这一步是**唯一**能发现「用户手工在控制台绑的域名」
  * 的途径 —— 清单里的 `dataCustomDomain` 只记部署时见过的那一个。
  */
-async function readPagesCustomDomain(
+export async function readPagesCustomDomain(
   client: CloudflareClient,
   accountId: string,
   project: string

@@ -704,10 +704,38 @@ func (s *Server) handleScanDetectHost(w http.ResponseWriter, r *http.Request) {
 	if nodeHost.Stale {
 		s.logf("⚠ 部署清单里记的数据面域名（" + nodeHost.ManifestValue + "）与平台实际绑定的不一致，已按平台实际值为准")
 	}
+	// warning 一并返回：项目读不到 / 确实没绑自定义域名时，界面要能说明原因，
+	// 否则用户「明明绑了域名却识别成 pages.dev」时完全无从判断。
+	warning := nodeHost.Warning
+
+	// 数据面有自定义域名、控制面却还是 pages.dev → 几乎一定是「只绑了一个项目」。
+	//
+	// 这是最容易踩的坑：两个 Pages 项目要**各自**绑域名，
+	// 而面板登录与回填只能打控制面。用户在数据面上绑好域名后，
+	// 会以为回填也会走它 —— 结果打到 pages.dev，在部分网络下直接 TLS 握手超时。
+	if strings.Contains(nodeHost.Source, "自定义") {
+		ctrlCtx, cancelCtrl := nodeHostContext(ctx)
+		ctrl := s.resolveControlHost(ctrlCtx, client, profile.AccountID, &m)
+		cancelCtrl()
+		if strings.HasSuffix(strings.ToLower(ctrl.Host), ".pages.dev") {
+			extra := "回填与面板登录走的是控制面（" + ctrl.Host + "），那边的自定义域名还没绑。" +
+				"两个 Pages 项目需要各自绑定域名。"
+			if warning == "" {
+				warning = extra
+			} else {
+				warning += "\n" + extra
+			}
+		}
+	}
+
+	if warning != "" {
+		s.logLevel(warning, "warn")
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"host":   nodeHost.Host,
-		"source": nodeHost.Source,
-		"stale":  nodeHost.Stale,
+		"host":    nodeHost.Host,
+		"source":  nodeHost.Source,
+		"stale":   nodeHost.Stale,
+		"warning": warning,
 	})
 }
 
@@ -849,9 +877,15 @@ func (s *Server) handleScanPushResults(w http.ResponseWriter, r *http.Request) {
 	url := scan.DefaultCallbackURL(host)
 	res := scan.PostResultsTo(ctx, url, tok.Token, req.Lines, req.Mode, target, 20*time.Second)
 	if !res.OK {
+		msg := "回填失败：" + res.Error
+		// pages.dev 在部分网络不可达（真机：TLS handshake timeout）。
+		// 这种情况下唯一的解法是给控制面绑自定义域名，所以直接说出来。
+		if strings.Contains(host, ".pages.dev") {
+			msg += "（回填目标是控制面的 pages.dev 生产域名，部分网络会被阻断；请给控制面项目绑定自定义域名后重试，数据面域名不能用于面板接口）"
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":    false,
-			"error": "回填失败：" + res.Error,
+			"error": msg,
 		})
 		return
 	}
@@ -881,7 +915,18 @@ func (s *Server) resolvePanelAccess(ctx context.Context, profile *store.Profile)
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		return nil, "", ""
 	}
-	host := normalizePagesHost(m.ControlSubdomain)
+	// 控制面域名：平台绑定优先（自定义域名），清单里的 pages.dev 只作兜底。
+	// pages.dev 在部分网络下 TLS 握手超时，绑了自定义域名却回填到 pages.dev 必然失败。
+	hostCtx, cancelHost := nodeHostContext(ctx)
+	controlHost := s.resolveControlHost(hostCtx, client, profile.AccountID, &m)
+	cancelHost()
+	if controlHost.Warning != "" {
+		s.logLevel(controlHost.Warning, "warn")
+	}
+	if controlHost.Host != "" {
+		s.logf(fmt.Sprintf("回填目标（控制面）：%s（来源：%s）", controlHost.Host, controlHost.Source))
+	}
+	host := controlHost.Host
 	pw := strings.TrimSpace(m.Credentials.PanelPassword)
 	return &m, host, pw
 }
@@ -939,9 +984,9 @@ func (s *Server) handleScanScannerToken(w http.ResponseWriter, r *http.Request) 
 	//
 	// 早期实现直接用了 req.Host（数据面），于是拿数据面去登录，
 	// 拿到 Welcome 页，报「令牌响应解析失败：<!DOCTYPE html>...」。
+	client := cfapi.New(cfapi.Options{Token: profile.CfToken, APIBase: s.cfBase})
 	var manifest *deploy.Manifest
 	if strings.TrimSpace(profile.KVNamespaceID) != "" {
-		client := cfapi.New(cfapi.Options{Token: profile.CfToken, APIBase: s.cfBase})
 		if raw, ok := client.GetKVValue(ctx, profile.AccountID, profile.KVNamespaceID, deploy.ManifestKey); ok && strings.TrimSpace(raw) != "" {
 			var m deploy.Manifest
 			if json.Unmarshal([]byte(raw), &m) == nil {
@@ -957,7 +1002,14 @@ func (s *Server) handleScanScannerToken(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	host := normalizePagesHost(manifest.ControlSubdomain)
+	// 控制面域名同样「平台绑定优先」：绑了自定义域名的用户不该被 TLS 握手超时挡住。
+	hostCtx, cancelHost := nodeHostContext(ctx)
+	controlHost := s.resolveControlHost(hostCtx, client, profile.AccountID, manifest)
+	cancelHost()
+	if controlHost.Warning != "" {
+		s.logLevel(controlHost.Warning, "warn")
+	}
+	host := controlHost.Host
 	// 兼容：如果清单里控制面空着但用户传了个看起来像控制面的域名
 	if host == "" {
 		candidate := strings.TrimSpace(req.Host)

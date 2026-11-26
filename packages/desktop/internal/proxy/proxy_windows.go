@@ -83,11 +83,12 @@ var commonProxyPorts = []int{10808, 7890, 7897, 7891, 1080, 10809, 8080, 8888, 2
 func probeLocalProxy() (*url.URL, string, bool) {
 	for _, port := range commonProxyPorts {
 		addr := net.JoinHostPort("127.0.0.1", itoa(port))
-		conn, err := net.DialTimeout("tcp", addr, 250*time.Millisecond)
-		if err != nil {
+		// ⚠️ 光「TCP 能连」不够：SOCKS5 端口也能连，但拿它当 HTTP 代理用
+		// 只会得到 EOF（真机：v2rayN 的 10808 是 SOCKS，被当成 HTTP 代理后
+		// 请求直接断开）。必须再验一次协议。
+		if !looksLikeHTTPProxy(addr) {
 			continue
 		}
-		_ = conn.Close()
 		u, err := parseProxyURL("http://" + addr)
 		if err != nil {
 			continue
@@ -95,6 +96,31 @@ func probeLocalProxy() (*url.URL, string, bool) {
 		return u, addr, true
 	}
 	return nil, "", false
+}
+
+// looksLikeHTTPProxy 判断该端口是不是**HTTP 代理**（而不是 SOCKS）。
+//
+// 判据：发一个合法但必失败的代理请求（目标是本机不可达的 1 号端口），
+// 看它是否回 HTTP 状态行。
+//
+//   - HTTP 代理：会回 `HTTP/1.1 502 ...`（连不上目标）或 `400 ...`；
+//   - SOCKS5 服务器：把 "GET ..." 当成握手字节，VER 不匹配后直接断开，不回任何数据。
+//
+// 探测本身不依赖外网（目标固定为 127.0.0.1:1），所以没网也能判定。
+func looksLikeHTTPProxy(addr string) bool {
+	conn, err := net.DialTimeout("tcp", addr, 250*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(600 * time.Millisecond))
+	req := "GET http://127.0.0.1:1/ HTTP/1.1\r\nHost: 127.0.0.1:1\r\nProxy-Connection: close\r\n\r\n"
+	if _, err := conn.Write([]byte(req)); err != nil {
+		return false
+	}
+	buf := make([]byte, 64)
+	n, _ := conn.Read(buf)
+	return n >= 5 && strings.HasPrefix(string(buf[:n]), "HTTP/")
 }
 
 // itoa 是 strconv.Itoa 的本地副本（避免为一个函数引入 strconv）。

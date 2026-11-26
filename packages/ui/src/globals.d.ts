@@ -445,6 +445,8 @@ interface Window {
       ok: boolean
       host?: string
       source?: 'custom' | 'pages'
+      /** 识别到的不是最优域名时的说明（项目没绑自定义域名 / 读不到项目绑定） */
+      warning?: string
       error?: string
     }>
     /** 自动识别数据面 WS/XHTTP 路径（读 KV 的 CONFIG） */

@@ -11,6 +11,7 @@ import { CloudflareClient } from '../deploy/cf-api'
 import type { CloudflareAccount } from '../deploy/cf-api'
 import { findAccountByKv } from '../deploy/account-resolve'
 import { checkTokenPermissions, renderTokenCheck } from '../deploy/token-check'
+import { readPagesCustomDomain } from '../deploy/pages-deploy'
 
 /** 构造子命令参数对象（避免拼接字符串再解析）。 */
 function makeArgs(flags: Record<string, string | boolean>): ParsedArgs {
@@ -172,7 +173,12 @@ export async function menuChangePassword(): Promise<void> {
       controlSubdomain?: string
       credentials?: { panelPassword?: string; panelPath?: string }
     }
-    const host = (manifest.controlSubdomain ?? '').trim()
+    // 面板地址优先用控制面项目实际绑定的自定义域名：pages.dev 在部分网络
+    // 会被阻断，显示 pages.dev 会误导用户（与桌面版同口径）。
+    const customHost = manifest.controlProject
+      ? await readPagesCustomDomain(client, cfg.accountId, manifest.controlProject)
+      : ''
+    const host = customHost || (manifest.controlSubdomain ?? '').trim()
 
     process.stdout.write('\n')
     box('当前面板', [

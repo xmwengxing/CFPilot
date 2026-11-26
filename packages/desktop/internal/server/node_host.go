@@ -18,13 +18,14 @@ package server
 //  3. 账号连 workers.dev 子域都没注册 → 空串 + 提示（让用户手填）
 //
 // Pages 形态：
-//  1. 清单里的自定义域名
-//  2. 没有 → pages.dev 子域名
+//  1. 项目的**实际绑定**里的自定义域名（GET /pages/projects/<name> 的 domains）
+//  2. 没有 → 清单里的 pages.dev 子域名
 //  3. 都没有 → 空串 + 提示
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -96,24 +97,110 @@ func (s *Server) resolveNodeHost(
 	// Pages 形态：先查项目**实际绑定**的自定义域名，再回落 pages.dev 子域名。
 	//
 	// 同样不盲信清单：清单里的域名可能早已随项目迁移/改名而过期。
-	if p, err := client.GetPagesProject(ctx, accountID, strings.TrimSpace(m.DataProject)); err == nil && p != nil {
-		for _, dm := range p.Domains {
-			host := strings.TrimSpace(dm)
-			if host == "" || strings.HasSuffix(host, ".pages.dev") {
-				continue
+	projectName := strings.TrimSpace(m.DataProject)
+	projectRead := false
+	if projectName != "" {
+		p, err := client.GetPagesProject(ctx, accountID, projectName)
+		switch {
+		case err != nil:
+			// 不再静默：用户「明明绑了域名却识别成 pages.dev」时，
+			// 只有这条信息能说明是「读不到项目绑定」而不是「没绑」。
+			res.Warning = fmt.Sprintf(
+				"读不到数据面项目 %s 的域名绑定（%v），已回落到清单里的 pages.dev。\n"+
+					"  若已在 Cloudflare 控制台为该项目绑定自定义域名，请检查 Token 是否有 Pages 读权限。",
+				projectName, err)
+		case p == nil:
+			res.Warning = fmt.Sprintf("数据面项目 %s 不存在（可能已改名或删除），已回落到清单里的 pages.dev", projectName)
+		default:
+			projectRead = true
+			if host := firstCustomPagesDomain(p.Domains); host != "" {
+				res.Host = host
+				res.Source = "Pages 自定义域名"
+				res.Stale = res.ManifestValue != "" && !strings.EqualFold(res.ManifestValue, host)
+				return res
 			}
-			res.Host = host
-			res.Source = "Pages 自定义域名"
-			res.Stale = res.ManifestValue != "" && !strings.EqualFold(res.ManifestValue, host)
-			return res
 		}
 	}
 	if host := strings.TrimSpace(m.DataSubdomain); host != "" {
 		res.Host = host
 		res.Source = "pages.dev 子域名"
+		if projectRead && res.ManifestValue == "" {
+			// 项目能读到、确实没有自定义域名 —— 这是「没绑」而不是「读不到」，
+			// 说清楚，免得用户以为自动识别坏了。
+			res.Warning = "数据面项目没有绑定自定义域名，回落到 pages.dev 生产域名。" +
+				"（控制面绑定的域名不能用于优选/订阅 —— 两者是不同的项目）"
+		}
 		return res
 	}
 	res.Warning = "清单里没有可用的数据面域名，请手动填写"
+	return res
+}
+
+// firstCustomPagesDomain 从 Pages 项目的 domains 里挑出第一个自定义域名（跳过 pages.dev）。
+func firstCustomPagesDomain(domains []string) string {
+	for _, dm := range domains {
+		host := strings.TrimSpace(dm)
+		if host == "" || strings.HasSuffix(strings.ToLower(host), ".pages.dev") {
+			continue
+		}
+		return host
+	}
+	return ""
+}
+
+// controlHostResolution 是控制面域名（面板 API 所在）的解析结果。
+type controlHostResolution struct {
+	Host    string `json:"host"`
+	Source  string `json:"source"`
+	Warning string `json:"warning,omitempty"`
+}
+
+// resolveControlHost 解析控制面域名。
+//
+// ## 为什么必须查平台绑定（2026-11-25 真机）
+//
+// 回填（`POST /api/v1/preferred-ips`）与取令牌（`/api/v1/scanner-token`）
+// 都只能打**控制面**。早前这里直接用清单里的 `controlSubdomain`（pages.dev），
+// 于是「用户给控制面绑了自定义域名、pages.dev 在本机网络下 TLS 握手超时」时：
+//
+//	覆盖回填失败：Post "https://xxxx.pages.dev/api/v1/preferred-ips":
+//	  net/http: TLS handshake timeout
+//
+// 与 resolveNodeHost 同一条纪律：**以平台真实绑定为准，清单只做兜底**。
+// 控制面固定是 Pages（数据面才可能是 Worker）。
+func (s *Server) resolveControlHost(
+	ctx context.Context,
+	client *cfapi.Client,
+	accountID string,
+	m *deploy.Manifest,
+) controlHostResolution {
+	res := controlHostResolution{}
+	if m == nil {
+		res.Warning = "没有部署清单，无法确定控制面域名"
+		return res
+	}
+	projectName := strings.TrimSpace(m.ControlProject)
+	if projectName != "" {
+		p, err := client.GetPagesProject(ctx, accountID, projectName)
+		switch {
+		case err != nil:
+			res.Warning = fmt.Sprintf("读不到控制面项目 %s 的域名绑定（%v），已回落到清单里的 pages.dev", projectName, err)
+		case p == nil:
+			res.Warning = fmt.Sprintf("控制面项目 %s 不存在（可能已改名或删除），已回落到清单里的 pages.dev", projectName)
+		default:
+			if host := firstCustomPagesDomain(p.Domains); host != "" {
+				res.Host = host
+				res.Source = "控制面自定义域名"
+				return res
+			}
+		}
+	}
+	if host := normalizePagesHost(m.ControlSubdomain); host != "" {
+		res.Host = host
+		res.Source = "控制面 pages.dev"
+		return res
+	}
+	res.Warning = "清单里没有可用的控制面域名，请先完成一次部署"
 	return res
 }
 

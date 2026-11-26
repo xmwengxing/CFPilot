@@ -648,6 +648,9 @@
               // 后端给的是中文 source（"自定义域名" / "pages.dev 子域名"），
               // 界面比的是 'custom' / 'pages'
               source: String(r.source || '').indexOf('自定义') >= 0 ? 'custom' : 'pages',
+              // warning：识别到的不是最优域名时的说明（项目没绑自定义域名 /
+              // 读不到项目绑定）。带它界面才能解释「我明明绑了域名」。
+              warning: (r && r.warning) || '',
             }
           }
           return { ok: false, error: (r && r.error) || '未能识别数据面域名' }

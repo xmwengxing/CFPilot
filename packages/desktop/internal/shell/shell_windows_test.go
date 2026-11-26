@@ -10,11 +10,11 @@ import "testing"
 // 重点覆盖多显示器负坐标与任务栏在顶部两种边界。
 func TestMaximizedBounds(t *testing.T) {
 	cases := []struct {
-		name       string
-		monitor    winRect
-		work       winRect
-		wantPos    winPoint
-		wantSize   winPoint
+		name     string
+		monitor  winRect
+		work     winRect
+		wantPos  winPoint
+		wantSize winPoint
 	}{
 		{
 			name:     "主屏 1920x1080，任务栏在底部 40px",

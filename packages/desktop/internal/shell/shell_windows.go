@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"time"
@@ -20,10 +21,10 @@ import (
 // 数值取自 WinUser.h；这里只列本包真正用到的部分，
 // 常量名与头文件一致，便于对照。
 const (
-	wmClose          = 0x0010
-	wmGetMinMaxInfo  = 0x0024
-	wmNCLButtonDown  = 0x00A1
-	wmAppActivate    = 0x8000 + 1 // 自定义：另一个实例请求唤醒窗口
+	wmClose         = 0x0010
+	wmGetMinMaxInfo = 0x0024
+	wmNCLButtonDown = 0x00A1
+	wmAppActivate   = 0x8000 + 1 // 自定义：另一个实例请求唤醒窗口
 
 	// MONITOR_DEFAULTTONEAREST：取离窗口最近的显示器（多显示器 + 负坐标场景必需）。
 	monitorDefaultToNearest = 0x00000002
@@ -221,6 +222,13 @@ func (p *panel) loop(ready chan<- error) {
 	dataPath := p.opts.DataDir
 	if dataPath != "" {
 		_ = os.MkdirAll(dataPath, 0o700)
+
+		// 必须在下方的 NewWithOptions 之前：它会去 LoadLibrary WebView2Loader.dll，
+		// 找不到就用内存里的内嵌副本做反射加载 —— 那会被安全软件判成木马
+		// （实测 Trojan:Win32/Sonbokli.A*）。
+		// 落盘目录放数据目录旁边，不放 WebView2 的用户数据目录里。
+		// 失败不阻断启动：依赖库会退回反射加载，功能不受影响。
+		_, _ = PrepareWebView2Loader(filepath.Join(filepath.Dir(dataPath), "bin"))
 	}
 
 	wv := webview2.NewWithOptions(webview2.WebViewOptions{

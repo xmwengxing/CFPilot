@@ -31,7 +31,7 @@
 // 因此这里在拷贝 index.html 时**动态插入** adapter 的 script 标签。
 // Electron 版的 index.html 保持原样，两个版本各取所需。
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -581,7 +581,15 @@ function stageWindowsLoader(windowsTargets) {
       continue
     }
     const assetName = `cfpilot-webview2loader-windows-${t.goarch}.dll`
-    copyFileSync(src, join(buildDir, assetName))
+    const assetDst = join(buildDir, assetName)
+    // 模块缓存里的文件是只读的，copyFileSync 会把只读属性带过来；
+    // 下次构建原地覆盖就会 EPERM（Windows 不允许覆盖只读文件）。
+    if (existsSync(assetDst)) {
+      try {
+        chmodSync(assetDst, 0o644)
+      } catch {}
+    }
+    copyFileSync(src, assetDst)
 
     // 便携包：解压即用，exe 旁边就有 DLL
     const stage = join(buildDir, '.win-loader-stage')

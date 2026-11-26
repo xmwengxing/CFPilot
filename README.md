@@ -146,9 +146,9 @@ cfpilot config      # 配置管理
 | Linux arm64 | `cfpilot-<版本>-linux-arm64` | `cfpilot-<版本>+mesh-linux-arm64.deb` |
 | Android | `cfpilot-<版本>-android.apk`（完整管理面板） | `cfpilot-<版本>+mesh-android.apk`（独立组网客户端） |
 
-Windows 的 `+loader.zip` 里除了主程序还有官方面板加载组件 `WebView2Loader.dll`：
-解压到同一目录再运行即可。单文件 exe 也能直接跑，但它只能把该组件从内存加载，
-部分安全软件会因此把程序标成「DLL 反射加载」；装上该组件（或使用安装向导版）就不会出现该提示。
+面板窗口依赖官方面板加载组件 `WebView2Loader.dll`。`+loader.zip` 里已经带上它，
+解压到同一目录即可；单文件 exe 与安装向导版也一样能用 —— 它们会在首次打开面板窗口时
+把同一份官方组件释放到 `~/.cfpilot-gui/bin/` 再从磁盘加载。三种方式都不会把组件读进内存执行。
 
 运行后托盘出现图标，并直接打开 CFPilot 面板窗口；关掉窗口后服务继续在托盘里运行。
 

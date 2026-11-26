@@ -49,16 +49,16 @@ jobs:
       #      浅克隆下 tag 退化成轻量引用，%(contents) 返回的是**提交说明**，
       #      于是 Release 正文变成了最近一次 commit 的正文（2026-10-30 实际发生）；
       #   2. 自动变更列表用 `git log PREV..HEAD`，浅克隆只有 1 个提交。
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.27'
           cache-dependency-path: packages/desktop/go.sum
@@ -276,7 +276,7 @@ jobs:
           cat cfpilot-desktop-SHA256SUMS
 
       - name: 上传构建产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: CFPilot-desktop-${{ steps.ver.outputs.version }}
           path: packages/desktop/dist/*
@@ -320,11 +320,11 @@ jobs:
           fi
           echo "镜像：${IMG}"
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: 诊断 ghcr 权限
         # ⚠️ 推送失败最常见的原因是**包没关联到本仓库**：
@@ -357,7 +357,7 @@ jobs:
       # 所以先试仓库令牌；失败了再换个人令牌兜底。
       # 理想的终态是「包由仓库令牌创建」—— 那样个人令牌这个 secret 就不需要了。
       - name: 登录 ghcr（个人令牌）
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         # ⚠️ 登录失败不阻断 —— 下面的重试会用仓库令牌再试一次。
         continue-on-error: true
         with:
@@ -367,7 +367,7 @@ jobs:
 
       - name: 构建并推送镜像（amd64 + arm64）
         id: push-image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         # ⚠️ 推送失败**不阻断**发布。
         #
         # 推送失败最常见的原因是**账号层面的**：ghcr.io 上的包没有关联到本仓库
@@ -397,7 +397,7 @@ jobs:
       #    `outcome` 才是 continue-on-error **之前**的原始结果。
       - name: 换仓库令牌重试推送
         if: steps.push-image.outcome == 'failure' && startsWith(github.ref, 'refs/tags/desktop-v')
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -405,7 +405,7 @@ jobs:
 
       - name: 重试构建并推送镜像
         if: steps.push-image.outcome == 'failure' && startsWith(github.ref, 'refs/tags/desktop-v')
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         continue-on-error: true
         with:
           context: ./docker
@@ -553,7 +553,7 @@ jobs:
 
       - name: 发布到 Release
         if: startsWith(github.ref, 'refs/tags/desktop-v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           # ⚠️ 关键：**所有版本共用同一个 Release**（`v<版本号>`）。
           #
@@ -598,14 +598,14 @@ jobs:
     needs: build
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.27'
           cache-dependency-path: packages/desktop/go.sum
@@ -649,7 +649,7 @@ jobs:
           lipo -archs packages/desktop/dist/CFPilot.app/Contents/MacOS/CFPilot
 
       - name: 上传 dmg（构建产物）
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: CFPilot-macos-${{ steps.ver.outputs.version }}
           path: packages/desktop/dist/*.dmg
@@ -697,16 +697,16 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.27'
           cache-dependency-path: packages/desktop/go.sum
@@ -715,7 +715,7 @@ jobs:
       # major 69），生成 Gradle 8.9 wrapper 用的系统 Gradle 9.x 不支持 ——
       # 「编译 APK」直接挂在 semantic analysis。Gradle 8.9 / AGP 8.7 的
       # 兼容 JDK 是 17，显式固定住，不跟随 runner 漂移。
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -910,7 +910,7 @@ jobs:
           ls -la
 
       - name: 上传 APK（构建产物）
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: CFPilot-android-${{ steps.ver.outputs.version }}
           path: packages/android/app/build/outputs/apk/release/*.apk
@@ -920,7 +920,7 @@ jobs:
         # 不给 body —— Release 已经由 build job 创建并写好正文，
         # 这里只追加资产。正文为空时 softprops 不会覆盖已有正文 ✓
         if: startsWith(github.ref, 'refs/tags/desktop-v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.ver.outputs.version }}
           files: packages/android/app/build/outputs/apk/release/*.apk
@@ -934,22 +934,22 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.27'
           cache-dependency-path: packages/desktop/go.sum
 
       # AGP 8.5 / Gradle 8.9 需要 JDK 17（runner 自带 JDK 25 不兼容）
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -998,7 +998,7 @@ jobs:
           ls -la
 
       - name: 上传 mesh APK（构建产物）
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: CFPilot-mesh-android-${{ env.version }}
           path: packages/android-mesh/app/build/outputs/apk/release/*.apk
@@ -1006,7 +1006,7 @@ jobs:
 
       - name: 把 mesh APK 追加到 Release
         if: startsWith(github.ref, 'refs/tags/desktop-v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ env.version }}
           files: packages/android-mesh/app/build/outputs/apk/release/*.apk

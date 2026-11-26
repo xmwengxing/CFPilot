@@ -10,8 +10,8 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
@@ -25,7 +25,7 @@ jobs:
         #
         #    踩过的坑：step 级的 `if:` 里用了 `secrets` 上下文
         #    （GitHub 不允许），整个发布工作流连挂三次。
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.27'
       - run: go install github.com/rhysd/actionlint/cmd/actionlint@latest
@@ -56,7 +56,7 @@ jobs:
 
       - name: 上传测试日志
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ci-test-log
           path: ci-test.log
@@ -118,7 +118,7 @@ jobs:
             exit 1
           done
       - name: 上传内核产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cfpilot-worker
           path: packages/worker-core/dist/worker.js
@@ -126,9 +126,9 @@ jobs:
   gui:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
@@ -140,7 +140,7 @@ jobs:
         run: npm run build -w @cfpilot/ui
 
       - name: 上传 GUI 产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cfpilot-ui-dist
           path: packages/ui/dist
@@ -157,12 +157,12 @@ jobs:
   desktop-darwin:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.27'
           cache-dependency-path: packages/desktop/go.sum
@@ -186,7 +186,7 @@ jobs:
         working-directory: packages/desktop
         run: go test ./internal/update/ ./internal/shell/ ./internal/tray/
       - name: 上传 dmg
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cfpilot-macos-dmg
           path: packages/desktop/dist/*.dmg

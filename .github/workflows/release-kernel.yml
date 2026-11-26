@@ -46,12 +46,12 @@ jobs:
   kernel:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # BUILD_VERSION 由构建脚本从 git 计算内容哈希，完整检出保证一致
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm

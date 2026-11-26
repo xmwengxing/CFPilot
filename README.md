@@ -146,6 +146,7 @@ cfpilot config      # 配置管理
 | Linux arm64 | `cfpilot-<版本>-linux-arm64` | `cfpilot-<版本>+mesh-linux-arm64.deb` |
 | Android | `cfpilot-<版本>-android.apk`（完整管理面板） | `cfpilot-<版本>+mesh-android.apk`（独立组网客户端） |
 
+Windows 产物带代码签名（右键属性 →「数字签名」可看到发布者）。
 面板窗口依赖官方面板加载组件 `WebView2Loader.dll`。`+loader.zip` 里已经带上它，
 解压到同一目录即可；单文件 exe 与安装向导版也一样能用 —— 它们会在首次打开面板窗口时
 把同一份官方组件释放到 `~/.cfpilot-gui/bin/` 再从磁盘加载。三种方式都不会把组件读进内存执行。

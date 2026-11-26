@@ -260,6 +260,29 @@ jobs:
           echo '== +mesh 产物 =='
           ls -la packages/desktop/dist/*+mesh* || true
 
+      - name: Windows 产物代码签名
+        # 未签名的 exe 会显示「未知发布者」，SmartScreen 与部分安全软件更激进
+        # （本项目被云启发判过 Trojan:Win32/Sonbokli）。签名后信誉按证书主体累积，
+        # 不再按每个新文件的哈希从零开始。
+        #
+        # ⚠️ 顺序不能动：签名改的是 exe 字节，必须
+        #   ① 在「生成摘要清单」之前（否则清单记的是签名前的哈希，应用内更新全部校验失败）；
+        #   ② 便携包 zip 在签名之后重打（脚本自己完成，否则 zip 里是未签名的 exe）。
+        #
+        # 证书没配置时脚本跳过并提示，不阻断发布。PFX 只经 secrets 传入，
+        # 不落仓库、不进日志。
+        env:
+          CFPILOT_WIN_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          CFPILOT_WIN_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          set -e
+          if [ -z "${CFPILOT_WIN_CERT_PFX_BASE64:-}" ]; then
+            echo "::warning::未配置 WINDOWS_CERT_PFX_BASE64，本次产物未签名（用户会看到「未知发布者」）"
+            exit 0
+          fi
+          sudo apt-get install -y -qq osslsigncode >/dev/null
+          node scripts/sign-windows.mjs
+
       - name: 生成桌面版摘要清单
         # 应用内更新会从**官方地址**取这份清单，逐个校验下载到的安装包。
         # 镜像只用于搬运文件，清单不经镜像 —— 否则镜像可以同时替换两者。

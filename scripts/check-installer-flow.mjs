@@ -84,6 +84,22 @@ check(
   '模板占位符必须被真正替换，否则 nsisc 会因文件缺失而失败'
 )
 
+// ---- 代码签名与摘要清单的顺序 ----
+//
+// 签名改的是 exe 字节。签在清单之后 → 清单记的是签名前的哈希，
+// 应用内更新一律校验失败（用户会看到「文件被改动过」）。
+check(
+  '代码签名排在生成摘要清单之前',
+  workflow.indexOf('Windows 产物代码签名') > 0 &&
+    workflow.indexOf('Windows 产物代码签名') < workflow.indexOf('生成桌面版摘要清单'),
+  '签名必须在清单之前；便携包 zip 由签名脚本重打，顺序错了 zip 里就是未签名 exe'
+)
+check(
+  '签名证书只经 secrets 传入',
+  /CFPILOT_WIN_CERT_PFX_BASE64: \$\{\{ secrets\.WINDOWS_CERT_PFX_BASE64 \}\}/.test(workflow),
+  'PFX 不能落仓库、不能进日志'
+)
+
 check(
   'NSIS 安装器把 wintun.dll 落到安装目录',
   /--fetch-wintun "\$INSTDIR"/.test(nsi),

@@ -856,7 +856,7 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
       <div class="switch-box">
         <div class="sw-info">
           <label class="sw-title" for="cfgEchOn">下发客户端 ECH（Encrypted Client Hello）配置</label>
-          <div class="sw-desc">在订阅中注入 ECH 参数以加密 TLS 握手中的真实 SNI 域名（需 Mihomo / Sing-box 1.13+ / v2rayN 等客户端内核支持）。</div>
+          <div class="sw-desc">在 <b>Clash 订阅</b>与<b>分享链接</b>里注入 ECH 参数，加密 TLS 握手中的真实 SNI 域名。两条内核限制：<b>① 开启后 Clash 订阅不再下发 client-fingerprint</b>（uTLS 指纹与 ECH 不能共存，同时开启会让所有节点握手失败）；<b>② sing-box 订阅不下发 ECH</b>（该字段 1.13 才有，旧内核会对整份配置报未知字段，导入后一个节点都没有）。</div>
         </div>
         <input type="checkbox" id="cfgEchOn" />
       </div>
@@ -887,9 +887,9 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
         </div>
         <div class="field">
           <label>ECH 公共引导域名（留空默认 cloudflare-ech.com）</label>
-          <input id="cfgEchHost" class="mono" placeholder="cloudflare-ech.com" /><p class="tip">留空使用默认域名。</p>
+          <input id="cfgEchHost" class="mono" placeholder="cloudflare-ech.com" /><p class="tip">留空使用默认域名。客户端从这个域名的 HTTPS 记录里取 ECH 配置。</p>
         </div>
-        <div class="field"><label>ECH DoH 查询地址（留空使用客户端默认）</label><input id="cfgEchDns" class="mono" placeholder="https://223.5.5.5/dns-query" /><p class="tip">留空使用客户端默认。</p></div>
+        <div class="field"><label>ECH DoH 查询地址（留空使用客户端默认）</label><input id="cfgEchDns" class="mono" placeholder="https://223.5.5.5/dns-query" /><p class="tip">留空最稳。填了但该 DoH 连不上时，mihomo 会因查不到 ECH 配置而拒绝连接（表现为所有节点失效），不确定就不要填。</p></div>
       </div>
 
       <!--

@@ -660,10 +660,20 @@ npx -y cfpilot@latest scan
 ### ECH（Encrypted Client Hello）
 
 ECH 把 TLS ClientHello 里的真实 SNI 加密，隐藏你访问的是哪个域名。
-**这是客户端侧的能力** —— 内核只负责把参数写进订阅，由支持 ECH 的客户端
-（mihomo / Clash Verge、sing-box 1.13+、v2rayN）实际执行；客户端不支持时参数被忽略，不影响连接。
+**这是客户端侧的能力** —— 内核只负责把参数写进订阅：
 
-**默认关闭**，在面板「出站与抗封锁」页勾选「启用 ECH 加密」后保存即可。
+- **Clash / mihomo 订阅**：下发 `ech-opts`。此时**不再下发 `client-fingerprint`**，
+  因为 uTLS 指纹与 ECH 同时开启会让所有节点的 TLS 握手失败（mihomo 1.19.33
+  实测报 `invalid signature by the server certificate`）。
+- **sing-box 订阅**：不下发 ECH。`tls.ech.query_server_name` 是 1.13 才有的字段，
+  旧内核严格解码，会直接拒绝整份配置（一个节点都导不进来）。
+- **分享链接**：带 `ech=<域名>+<DoH>`，v2rayN 会识别，其它客户端忽略该参数。
+
+ECH 还依赖 DNS：客户端要用 DoH 查 `cloudflare-ech.com` 的 HTTPS 记录才能拿到配置，
+而国内大部分 DoH 会剥离该记录 —— 这时客户端退回普通 TLS（不会断连）；
+自行填了一个连不上的 DoH 反而会让所有节点失效，不确定就留空。
+
+**默认关闭**，在面板「出站与抗封锁」页勾选「下发客户端 ECH 配置」后保存即可。
 没有自定义域名时客户端连的是 `*.pages.dev`，ECH 的实际收益有限。
 
 ***

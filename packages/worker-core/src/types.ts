@@ -313,11 +313,14 @@ export interface UserConfig {
   /** 客户端指纹 */
   clientFingerprint: string
   /**
-   * 是否在订阅节点里启用 ECH（Encrypted Client Hello）。
+   * 是否下发 ECH（Encrypted Client Hello）参数。
    *
    * ECH 让客户端把 TLS ClientHello 里的 SNI 加密，隐藏真实访问的域名。
-   * 这是**客户端侧**的能力：内核只负责把 ECH 参数写进订阅，
-   * 由支持 ECH 的客户端（mihomo / sing-box / v2rayN 等）实际执行。
+   * 这是**客户端侧**的能力，内核只负责把参数写进订阅：
+   *   - Clash / mihomo：写 `ech-opts`，并**停发 `client-fingerprint`**
+   *     （uTLS 指纹与 ECH 同时开启会让所有节点握手失败）；
+   *   - sing-box：不写（`query_server_name` 是 1.13 字段，旧内核严格解码会拒整份配置）；
+   *   - 分享链接：写 `ech=<域名>+<DoH>`，v2rayN 识别，其它客户端忽略。
    *
    * 默认关闭。
    */

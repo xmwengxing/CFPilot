@@ -188,6 +188,34 @@ describe('ECH（Encrypted Client Hello）', () => {
     expect(count).toBe(4) // 2 个节点 × (vless + trojan)
   })
 
+  /**
+   * 回归：ECH 与客户端指纹（uTLS）**必须互斥**。
+   *
+   * 真机实测（mihomo 1.19.33）：两者同时下发时每一次 TLS 握手都失败
+   * （`tls: invalid signature by the server certificate: ECDSA verification failure`），
+   * 用户视角是「勾了 ECH 所有节点全挂」。所以开 ECH 就停发 client-fingerprint。
+   */
+  it('开启后：不再下发 client-fingerprint（uTLS 与 ECH 不能共存）', () => {
+    const yaml = renderClash(makeCtx({ ech: true, subVariants: 'vless-ws,vless-xhttp,trojan' }))
+    expect(yaml).not.toContain('client-fingerprint')
+    // proxies 段里的每个节点都必须带 ech-opts（分组段在 proxy-groups，不参与）
+    const proxies = yaml.slice(yaml.indexOf('proxies:'), yaml.indexOf('proxy-groups:'))
+    const nodes = proxies.split('  - name: ').slice(1)
+    expect(nodes.length).toBeGreaterThan(0)
+    for (const node of nodes) expect(node).toContain('ech-opts:')
+  })
+
+  it('关闭时：照常下发 client-fingerprint', () => {
+    const yaml = renderClash(makeCtx({ subVariants: 'vless-ws,trojan' }))
+    expect(yaml.match(/client-fingerprint: chrome/g)?.length).toBe(4)
+    expect(yaml).not.toContain('ech-opts')
+  })
+
+  it('指纹留空时不写成空字符串（mihomo 会当成未知指纹）', () => {
+    const yaml = renderClash(makeCtx({ clientFingerprint: '' }))
+    expect(yaml).not.toContain('client-fingerprint')
+  })
+
   it('开启后：dns 段给出 ECH 服务器名的 nameserver-policy', () => {
     const yaml = renderClash(makeCtx({ ech: true }))
     expect(yaml).toContain('nameserver-policy:')
@@ -200,6 +228,21 @@ describe('ECH（Encrypted Client Hello）', () => {
     expect(yaml).toContain('"my.ech.example": "https://dns.example/dns-query"')
   })
 
+  /**
+   * 回归：ECH 的两个自由文本输入写坏时**不能拖垮整份配置**。
+   *
+   * - 非法 DoH 会被写进 `nameserver-policy`，mihomo 直接加载失败；
+   * - 非法 hostname 会让 ECH 记录解析失败，mihomo 对解析错误是**拒连**（不是静默退回）。
+   * 两种情况都退回安全默认值。
+   */
+  it('ECH 主机名 / DoH 写坏时退回安全默认（不会拖垮整份配置）', () => {
+    const yaml = renderClash(makeCtx({ ech: true, echHost: 'not a host!', echDns: '223.5.5.5' }))
+    expect(yaml).toContain('query-server-name: "cloudflare-ech.com"')
+    expect(yaml).not.toContain('not a host')
+    // 非法 DoH 被丢弃 → nameserver-policy 回退到默认 DoH
+    expect(yaml).toContain('"cloudflare-ech.com": https://223.5.5.5/dns-query')
+  })
+
   it('开启后：分享链接注入 ech 参数（社区的 ech=<SNI>+<DoH> 约定）', () => {
     const ctx = makeCtx({ ech: true })
     const links = base64Decode(renderBase64Local(ctx)).split('\n')
@@ -210,16 +253,52 @@ describe('ECH（Encrypted Client Hello）', () => {
     }
   })
 
-  it('开启后：Sing-box 的 tls 里注入 ech 字段', () => {
-    const json = JSON.parse(renderSingboxLocal(makeCtx({ ech: true })))
-    const vless = json.outbounds.find((o: { type?: string }) => o.type === 'vless')
-    expect(vless.tls.ech).toEqual({ enabled: true, query_server_name: 'cloudflare-ech.com' })
+  /**
+   * 回归：sing-box 订阅**永远不下发 ECH**。
+   *
+   * `tls.ech.query_server_name` 是 1.13 才加的字段，而 sing-box 是严格解码：
+   * 1.10.7 实测 `json: unknown field "query_server_name"` —— 整份配置被拒绝，
+   * 用户看到的是「导入订阅后一个节点都没有」。不写 query_server_name 又会在
+   * 连接时 `no ECH config found in DNS records` 硬失败，所以只能完全不下发。
+   */
+  it('开启后：Sing-box 仍不下发 ech（旧内核会对整份配置报未知字段）', () => {
+    const raw = renderSingboxLocal(makeCtx({ ech: true }))
+    expect(raw).not.toContain('"ech"')
+    expect(raw).not.toContain('query_server_name')
+    const json = JSON.parse(raw)
+    for (const ob of json.outbounds) {
+      if (ob.tls) expect(ob.tls.ech).toBeUndefined()
+    }
   })
 
   it('关闭时 Sing-box 不含 ech 字段', () => {
     const json = JSON.parse(renderSingboxLocal(makeCtx()))
     const vless = json.outbounds.find((o: { type?: string }) => o.type === 'vless')
     expect(vless.tls.ech).toBeUndefined()
+  })
+
+  /**
+   * 跨版本护栏：sing-box 出站 TLS 只准用 1.10 就存在的键 + 已知安全的枚举值。
+   * 新增版本相关字段前先想清楚「旧内核会不会整份拒绝」。
+   */
+  it('Sing-box 的 tls / utls 字段都在旧内核认识的范围内', () => {
+    const json = JSON.parse(renderSingboxLocal(makeCtx({ ech: true, subVariants: 'vless-ws,trojan' })))
+    const allowedTls = new Set(['enabled', 'server_name', 'insecure', 'utls'])
+    const allowedUtls = new Set(['enabled', 'fingerprint'])
+    let seen = 0
+    for (const ob of json.outbounds) {
+      if (!ob.tls) continue
+      seen++
+      for (const key of Object.keys(ob.tls)) {
+        expect(allowedTls.has(key), `tls 里出现了旧内核不认识的字段 ${key}`).toBe(true)
+      }
+      if (ob.tls.utls) {
+        for (const key of Object.keys(ob.tls.utls)) {
+          expect(allowedUtls.has(key), `utls 里出现了旧内核不认识的字段 ${key}`).toBe(true)
+        }
+      }
+    }
+    expect(seen).toBeGreaterThan(0)
   })
 })
 

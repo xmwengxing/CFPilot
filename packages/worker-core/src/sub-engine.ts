@@ -1501,25 +1501,51 @@ function portsForEntry(entry: NodeEntry, ctx: RenderContext): number[] {
   return ctx.ports.length > 0 ? ctx.ports : [DEFAULT_NODE_PORT]
 }
 
-/** 生成 VLESS 分享链接 */
 /**
- * ECH 查询参数。
+ * ECH 引导域名归一化：只接受 hostname 形态，非法值退回默认。
  *
- * 社区通用约定：`&ech=<SNI>+<DoH 地址>`。
- * 客户端解析出这两个值后，用 DoH 查询目标域名的 ECH 配置，
- * 并把 ClientHello 里的真实 SNI 加密。
+ * 面板是自由文本，写错（空格、斜杠、中文）会让客户端去查一个根本不存在的名字。
+ * 实测 mihomo 在 ECH 记录**解析失败**时是**直接拒连**（不是静默退回普通 TLS），
+ * 一个笔误就能让所有节点失效 —— 所以非法值宁可不生效。
+ */
+function echHostName(raw: string): string {
+  const host = raw.trim()
+  const label = '[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?'
+  return new RegExp(`^(?:${label}\\.)+${label}$`).test(host) ? host : 'cloudflare-ech.com'
+}
+
+/**
+ * ECH 的 DoH 地址：只接受 http(s) URL，其它一律当没填。
  *
- * 默认关闭（`ech: false`），关闭时不注入任何参数。
+ * 这个值会被写进 Clash 的 `nameserver-policy`，写坏了是**整份配置**加载失败
+ * （不是只影响 ECH），所以这里做一次硬校验，非法值退回客户端默认。
+ */
+function echDohUrl(raw: string): string {
+  const url = raw.trim()
+  return /^https?:\/\/[^\s"'\\]+$/i.test(url) ? url : ''
+}
+
+/**
+ * ECH 查询参数（分享链接用）。
+ *
+ * 形式：`&ech=<ECH 查询域名>[+<DoH 地址>]`。这一约定来自 v2rayN 的
+ * `EchConfigList` 扩展 —— 它按 `+` 切出 DoH 地址，把前面的域名加进 DNS 保护列表。
+ * 实测：v2rayN 会读这个参数；mihomo / sing-box 的**分享链接**解析器不读它
+ * （它们只认自己的字段），多一个参数会被忽略，不会影响节点导入。
+ *
+ * ECH 真正生效的路径是 Clash 订阅里的 `ech-opts`；sing-box 订阅刻意不下发
+ * （原因见 renderSingbox 顶部注释）。默认关闭（`ech: false`）。
  */
 function echParam(ctx: RenderContext): string {
   if (!ctx.config.ech) return ''
-  const host = ctx.config.echHost.trim() || 'cloudflare-ech.com'
-  const dns = ctx.config.echDns.trim()
+  const host = echHostName(ctx.config.echHost)
+  const dns = echDohUrl(ctx.config.echDns)
   // DoH 地址为空时用客户端默认，只带 SNI
   const value = dns ? `${host}+${dns}` : host
   return `&ech=${encodeURIComponent(value)}`
 }
 
+/** 生成 VLESS 分享链接 */
 export function vlessUri(
   entry: NodeEntry,
   ctx: RenderContext,
@@ -1617,6 +1643,8 @@ function yamlFingerprint(value: string): string {
  *   分开写的 `port`/`socks-port` 是老 Clash 的字段，新内核已不再使用。
  * - **带 `dns` 段**：ECH 需要 DoH 解析 ECH 配置；没有 dns 段时
  *   客户端只能用系统 DNS，部分环境解析不出 ECH 记录。
+ * - **ECH 与 `client-fingerprint` 互斥**：同时下发会让所有节点握手失败
+ *   （见 `fingerprintLines` 的实测记录）。
  * - **`rules` 用 `MATCH` 收尾**：保证未被前面规则命中的流量一定走代理组。
  */
 export function renderClash(ctx: RenderContext): string {
@@ -1637,15 +1665,34 @@ export function renderClash(ctx: RenderContext): string {
   const wantXhttp = variants.includes('vless-xhttp') && ctx.config.enableXhttp !== false
   const wantTrojan = variants.includes('trojan')
   const useEch = ctx.config.ech
-  const echHost = ctx.config.echHost.trim() || 'cloudflare-ech.com'
-  const echDns = ctx.config.echDns.trim()
+  const echHost = echHostName(ctx.config.echHost)
+  const echDns = echDohUrl(ctx.config.echDns)
 
-  /** ECH 节点块（mihomo 的 ech-opts 语法） */
+  /** ECH 节点块（mihomo 的 `ech-opts` 语法）。 */
   const echLines = (): string[] => {
     if (!useEch) return []
-    const out = ['    ech-opts:', '      enable: true']
-    out.push(`      query-server-name: ${yamlQuote(echHost)}`)
-    return out
+    return ['    ech-opts:', '      enable: true', `      query-server-name: ${yamlQuote(echHost)}`]
+  }
+
+  /**
+   * 客户端 TLS 指纹（uTLS）。
+   *
+   * ⚠️ **ECH 开启时不下发**。真机实测（mihomo 1.19.33 / sing-box 1.14.4 同样症状）：
+   * 指纹与 ECH 同时开启时，每一次 TLS 握手都在 CertificateVerify 阶段失败，报
+   * `tls: invalid signature by the server certificate: ECDSA verification failure`
+   * —— 不是个别节点不可用，而是**全部节点 100% 连不上**（用户报的
+   * 「勾了 ECH 所有节点失效」就是这个）。
+   * 根因在 uTLS：它按预捕获的 ClientHello 规格重放，不参与 ECH 的内层
+   * transcript，握手哈希与服务器算出的对不上；客户端侧没有开关能绕开。
+   *
+   * 所以勾了 ECH 就只保留 ECH：少一层指纹伪装，换节点可用。
+   * 想要指纹就先关掉 ECH —— 面板上 ECH 开关的说明里写明了这条互斥关系。
+   * 空指纹本来就不该写 `client-fingerprint: ""`（mihomo 会当成未知指纹）。
+   */
+  const fingerprintLines = (): string[] => {
+    if (useEch) return []
+    const fp = String(ctx.config.clientFingerprint ?? '').trim()
+    return fp ? [`    client-fingerprint: ${yamlFingerprint(fp)}`] : []
   }
 
   for (const group of resolveGroups(ctx)) {
@@ -1670,7 +1717,7 @@ export function renderClash(ctx: RenderContext): string {
               `    network: ws`,
               `    tls: true`,
               `    servername: ${ctx.domain}`,
-              `    client-fingerprint: ${yamlFingerprint(ctx.config.clientFingerprint)}`,
+              ...fingerprintLines(),
               ...echLines(),
               `    ws-opts:`,
               `      path: ${yamlQuote(ctx.config.wsPath)}`,
@@ -1696,7 +1743,7 @@ export function renderClash(ctx: RenderContext): string {
               `    tls: true`,
               `    servername: ${ctx.domain}`,
               `    alpn: [h2]`,
-              `    client-fingerprint: ${yamlFingerprint(ctx.config.clientFingerprint)}`,
+              ...fingerprintLines(),
               ...echLines(),
               `    xhttp-opts:`,
               `      path: ${yamlQuote(ctx.config.xhttpPath)}`,
@@ -1720,7 +1767,7 @@ export function renderClash(ctx: RenderContext): string {
               `    network: ws`,
               `    tls: true`,
               `    sni: ${ctx.domain}`,
-              `    client-fingerprint: ${yamlFingerprint(ctx.config.clientFingerprint)}`,
+              ...fingerprintLines(),
               ...echLines(),
               `    ws-opts:`,
               `      path: ${yamlQuote(ctx.config.trojanPath)}`,
@@ -1884,19 +1931,24 @@ export function renderSingbox(ctx: RenderContext): string {
   const variants = resolveSubVariants(ctx.config.subVariants, ctx.config, WS_ONLY_VARIANTS)
   const wantVless = variants.some((v) => v === 'vless-ws')
   const wantTrojan = variants.includes('trojan')
-  const useEch = ctx.config.ech
-  const echHost = ctx.config.echHost.trim() || 'cloudflare-ech.com'
-
   /**
-   * sing-box 的 ECH 配置。
+   * ⚠️ **sing-box 订阅刻意不下发 ECH**（2026-11-27 实测，三个理由都要成立才敢发）：
    *
-   * 社区通用约定：`tls.ech = { enabled: true, query_server_name: <SNI> }`。
-   * sing-box 1.13+ 才支持该字段，旧版会忽略（不会导致解析失败）。
+   * 1. `tls.ech.query_server_name` 是 sing-box **1.13** 才加的字段，而 sing-box 是
+   *    **严格解码**：1.10.7 实测直接
+   *    `decode config ...: outbounds[0].tls.ech.query_server_name: json: unknown field`，
+   *    整份配置拒绝加载 —— 用户视角就是「导入订阅后一个节点都没有」。
+   *    （原注释写的「旧版会忽略、不会解析失败」是错的，已按实测改正。）
+   * 2. 不写 `query_server_name` 也不行：sing-box 会去查**节点域名自身**的 HTTPS
+   *    记录，而 Cloudflare 不给业务域名发布 ECH 配置，实测直接
+   *    `no ECH config found in DNS records` 拒连（同样不是「无害忽略」）。
+   * 3. 即便 1.13+ 解析通过，ECH 与下面 `utls` 指纹同时开启时握手必败
+   *    （`tls: invalid signature by the server certificate`，与 mihomo 同一个
+   *    uTLS transcript 缺陷）。
+   *
+   * 结论：ECH 只通过 **Clash 订阅**与**分享链接**下发；sing-box 客户端需要在
+   * 1.13+ 上自行开启（面板与文档都写明了这一点）。
    */
-  const echField = (): Record<string, unknown> => {
-    if (!useEch) return {}
-    return { ech: { enabled: true, query_server_name: echHost } }
-  }
 
   /**
    * sing-box 的 TLS 出站字段。
@@ -1916,7 +1968,6 @@ export function renderSingbox(ctx: RenderContext): string {
     server_name: ctx.domain,
     insecure: false,
     ...utlsField(),
-    ...echField(),
   })
 
   for (const group of resolveGroups(ctx)) {

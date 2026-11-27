@@ -33,6 +33,16 @@ const iconSource = join(desktopDir, 'build', 'AppIcon.iconset')
 const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'))
 const version = pkg.version
 
+// macOS 最低系统版本，必须与 build-desktop.mjs 的 macosMin 同源：
+// 一处写进 Mach-O 的 LC_BUILD_VERSION（dyld 判这个），一处写进 Info.plist 的
+// LSMinimumSystemVersion（LaunchServices 判这个）—— 两者不一致会得到
+// 「系统版本够、但双击没反应」这种最难查的状态。
+const macosMin = (process.env.CFPILOT_MACOS_MIN || '12.0').trim()
+const newerThan = (got, want) => {
+  const [a, b] = [got, want].map((v) => v.split('.').map(Number))
+  return (a[0] || 0) > (b[0] || 0) || ((a[0] || 0) === (b[0] || 0) && (a[1] || 0) > (b[1] || 0))
+}
+
 // bundle id 与安卓 applicationId 同源（com.xmwengxing.cfpilot）。
 // 它同时决定 WKWebView 的网站数据目录 ~/Library/WebKit/<bundle id>，
 // **改了它等于让所有用户的 Cookie 全部失效**，不要随手改。
@@ -106,6 +116,20 @@ const archs = capture('lipo', ['-archs', execPath])
 const archLabel = binaries.size > 1 ? 'universal' : [...binaries.keys()][0]
 console.log(`[macos] 可执行文件：${archLabel}（${archs}）`)
 
+// 部署版本必须就是我们声明的那个：dist 里可能残留上一轮构建的产物，
+// 而 Info.plist 是这轮生成的 —— 只信 otool 读出来的值。
+const builtMinOS = (capture('otool', ['-l', execPath]).match(/LC_BUILD_VERSION[\s\S]*?minos\s+([0-9.]+)/) || [])[1] || ''
+if (!builtMinOS) {
+  console.error('[macos] 读不到可执行文件的 macOS 最低版本（otool 输出异常）')
+  process.exit(1)
+}
+if (newerThan(builtMinOS, macosMin)) {
+  console.error(`[macos] 可执行文件要求 macOS ${builtMinOS}，高于声明的 ${macosMin}`)
+  console.error('[macos] dist 里是不是上一次构建的旧产物？先重跑 node scripts/build-desktop.mjs --only darwin')
+  process.exit(1)
+}
+console.log(`[macos] 最低系统版本：${builtMinOS}`)
+
 // ---- 3. 图标 ----
 // iconset 由 scripts/gen-desktop-icons.mjs 生成；缺了不致命，
 // 只是 Finder 里显示成空白文档图标，因此降级为警告。
@@ -150,7 +174,7 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.utilities</string>
   <key>LSMinimumSystemVersion</key>
-  <string>11.0</string>
+  <string>${macosMin}</string>
   <key>NSAppTransportSecurity</key>
   <dict>
     <key>NSAllowsLocalNetworking</key>

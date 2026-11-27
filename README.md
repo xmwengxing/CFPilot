@@ -144,6 +144,7 @@ cfpilot config      # 配置管理
 | Windows x64 | `cfpilot-<版本>-windows-amd64+loader.zip`（免安装，解压即用，推荐）<br>或 `cfpilot-<版本>-windows-amd64.exe`（单文件） | `cfpilot-<版本>+mesh-windows-amd64-setup.exe`（安装向导） |
 | Linux x64 | `cfpilot-<版本>-linux-amd64` | `cfpilot-<版本>+mesh-linux-amd64.deb` |
 | Linux arm64 | `cfpilot-<版本>-linux-arm64` | `cfpilot-<版本>+mesh-linux-arm64.deb` |
+| macOS（Intel / Apple Silicon 通用） | `cfpilot-<版本>-macos-universal.dmg`（需 macOS 12 Monterey 及以上） | — |
 | Android | `cfpilot-<版本>-android.apk`（完整管理面板） | `cfpilot-<版本>+mesh-android.apk`（独立组网客户端） |
 
 面板窗口依赖官方面板加载组件 `WebView2Loader.dll`。`+loader.zip` 里已经带上它，

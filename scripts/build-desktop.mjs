@@ -230,6 +230,63 @@ if (existsSync(builtinRelaySrc)) {
 const meshVariant = process.argv.includes('--mesh')
 const meshSuffix = meshVariant ? '+mesh' : ''
 //
+// ---- macOS 最低部署版本 ----
+//
+// 用户侧约束：macOS 12（Monterey）及以上的 Mac 都要能装能跑。
+//
+// 为什么必须显式写死，而不是靠工具链默认值（2026-11-27 实测）：
+//   - Go 1.27 起，Go 链接器的默认最低版本是 13.0（go.dev/doc/go1.27 的
+//     Linker 一节：「currently 13.0.0」）；
+//   - 而带 cgo 的 darwin 产物（托盘与窗口只能 cgo）走的是**系统 clang
+//     链接器**，它的部署版本取自 MACOSX_DEPLOYMENT_TARGET；两者都不设时
+//     minos 会打成**构建机 SDK 的版本**（实测 macOS 26 上编出来是 26.0）。
+// minos 高于用户系统时 dyld 直接拒绝加载，用户看到的是「需要 macOS 13 或更高版本」，
+// 连托盘窗口都起不来。
+//
+// 两个开关缺一不可：
+//   MACOSX_DEPLOYMENT_TARGET → clang 编 ObjC / cgo 与链接时的部署版本；
+//   -ldflags=-macos=<ver>    → Go 自有链接器写 LC_BUILD_VERSION
+//                              （非 cgo 的 darwin 产物走这条路径）。
+// 取 12.0：Go 1.26 支持到 12，1.27 才把 12 及以下标为不支持；
+// 再往下（11 / 10.15）没有任何工具链依据，不承诺。
+const macosMin = (process.env.CFPILOT_MACOS_MIN || '12.0').trim()
+if (!/^\d+\.\d+$/.test(macosMin)) {
+  console.error(`[desktop] CFPILOT_MACOS_MIN 格式应为 <major>.<minor>，收到：${macosMin}`)
+  process.exit(1)
+}
+
+/** 读 Mach-O 的 LC_BUILD_VERSION（更老的系统是 LC_VERSION_MIN_MACOSX）里的 minos。 */
+function macosMinOS(bin) {
+  const text = execFileSync('otool', ['-l', bin], { encoding: 'utf8' })
+  const build = text.match(/LC_BUILD_VERSION[\s\S]*?minos\s+([0-9.]+)/)
+  if (build) return build[1]
+  const legacy = text.match(/LC_VERSION_MIN_MACOSX[\s\S]*?version\s+([0-9.]+)/)
+  return legacy ? legacy[1] : ''
+}
+
+/**
+ * macOS 产物必须带上我们声明的部署版本。
+ *
+ * 这条断言挡的就是这一轮修的故障：不设 MACOSX_DEPLOYMENT_TARGET 时，
+ * minos 会静默变成构建机 SDK 版本（26.0），产物在 macOS 12 / 13 上直接打不开，
+ * 而构建日志「一切正常」。
+ */
+function assertMacosMin(bin) {
+  const got = macosMinOS(bin)
+  if (!got) {
+    console.error(`[desktop] ${bin} 读不到 macOS 最低版本（otool 输出异常）`)
+    process.exit(1)
+  }
+  const [want, g] = [macosMin, got].map((v) => v.split('.').map(Number))
+  const newer = (a, b) => a[0] > b[0] || (a[0] === b[0] && (a[1] || 0) > (b[1] || 0))
+  if (newer(g, want)) {
+    console.error(`[desktop] ${bin} 的 macOS 最低版本是 ${got}，高于声明的 ${macosMin}`)
+    console.error('[desktop] 检查 MACOSX_DEPLOYMENT_TARGET 与 -ldflags=-macos=… 是否都带上了')
+    process.exit(1)
+  }
+  console.log(`[desktop] ✅ macOS 最低版本 ${got}（声明 ${macosMin}）`)
+}
+
 // Linux 的 `cfp_gui` 标签：启用系统 WebKitGTK 窗口（purego 运行时 dlopen）。
 // ⚠️ 带这个标签的产物会因 purego 而链接 glibc（libc / libdl / libpthread），
 //    不能放进 Alpine 容器 —— 容器用的静态产物在下面单独编，见 stageDocker。
@@ -492,9 +549,14 @@ for (const t of picked) {
   console.log(`[desktop] 编译 ${t.goos}/${t.goarch} …`)
   const tags = [...(meshVariant ? ['mesh'] : []), ...(t.tags || [])]
   const tagArgs = tags.length ? [`-tags=${tags.join(',')}`] : []
+  // macOS：最低版本必须同时交给 Go 链接器（写 LC_BUILD_VERSION）与 clang
+  // （cgo 产物由系统链接器落盘，它只认 MACOSX_DEPLOYMENT_TARGET）——
+  // 少任一处的后果见 macosMin 的注释。
+  const extra = [...t.extra]
+  if (t.goos === 'darwin') extra.push(`-macos=${macosMin}`)
   execFileSync(
     'go',
-    ['build', '-trimpath', ...tagArgs, `-ldflags=${ldflags(t.extra)}`, '-o', outPath, './cmd/cfpilot'],
+    ['build', '-trimpath', ...tagArgs, `-ldflags=${ldflags(extra)}`, '-o', outPath, './cmd/cfpilot'],
     {
       cwd: desktopDir,
       stdio: 'inherit',
@@ -510,11 +572,15 @@ for (const t of picked) {
         CGO_ENABLED: t.cgo ? '1' : '0',
         GOOS: t.goos,
         GOARCH: t.goarch,
+        ...(t.goos === 'darwin' ? { MACOSX_DEPLOYMENT_TARGET: macosMin } : {}),
       },
     }
   )
   const mb = (statSync(outPath).size / 1024 / 1024).toFixed(2)
   console.log(`[desktop] ✅ ${t.out} (${mb} MB)`)
+
+  // macOS 的部署版本必须真的是我们声明的那个（构建机 SDK 版本会偷偷顶上来）
+  if (t.goos === 'darwin') assertMacosMin(outPath)
 
   // 图形壳产物的校验：不得链接 WebKitGTK / GTK。
   //

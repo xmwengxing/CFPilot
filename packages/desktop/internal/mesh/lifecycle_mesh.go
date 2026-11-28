@@ -76,6 +76,11 @@ type meshLifecycle struct {
 	// 只从能成功解码的入站帧学习，未知对端按 v2。
 	wireVersions *PeerWireVersions
 
+	// portMap 是路由器端口映射管理器（W4）；EnablePortMap 关闭时为 nil。
+	// 自己一把锁，绝不阻塞 Start/Stop 之外的路径。
+	portMapMu sync.Mutex
+	portMap   *portMapManager
+
 	// 转发表（W2）：LSDB 版本变化时惰性重建；forwardTo 只读快照。
 	routeMu       sync.Mutex
 	routes        *RouteTable
@@ -335,6 +340,22 @@ func (m *meshLifecycle) start(ctx context.Context, dialRoom func(context.Context
 	m.udpLinks = make(map[NodeID]PeerLink, len(m.links))
 	for id, link := range m.links {
 		m.udpLinks[id] = link
+	}
+
+	// 5a. 路由器端口映射（可选，W4）：把 UDP 监听端口映射到公网。
+	// 失败只记计数，绝不阻断组网 —— 打洞与中继仍是主通路。
+	if m.cfg.EnablePortMap {
+		if port := m.hub.LocalAddr().Port; port > 0 && port <= 65535 {
+			pm := newPortMapManager(portMapConfig{
+				InternalPort: uint16(port),
+				InternalIP:   localIPv4For(nil),
+				Gateway:      m.cfg.PortMapGateway,
+			})
+			pm.Start()
+			m.portMapMu.Lock()
+			m.portMap = pm
+			m.portMapMu.Unlock()
+		}
 	}
 
 	// 5b. UDP 探针：**始终开启**（不只降级时）。
@@ -1130,6 +1151,14 @@ func (m *meshLifecycle) Stop() error {
 	m.cancel()
 	m.mu.Unlock()
 
+	m.portMapMu.Lock()
+	pm := m.portMap
+	m.portMap = nil
+	m.portMapMu.Unlock()
+	if pm != nil {
+		pm.Stop()
+	}
+
 	// 关闭传输以唤醒尚在读写的任务，再等待退出，期间不持状态锁。
 	if room != nil {
 		_ = room.Close()
@@ -1191,6 +1220,12 @@ func (m *meshLifecycle) Status() Status {
 	}
 	drops := m.drops.snapshot()
 	st.Drops = &drops
+	m.portMapMu.Lock()
+	if m.portMap != nil {
+		pmSt := m.portMap.Status()
+		st.PortMap = &pmSt
+	}
+	m.portMapMu.Unlock()
 	if m.gossip != nil {
 		st.LSDB = m.gossip.DescriptorCount()
 		st.Routes = len(m.routeTable().Routes)

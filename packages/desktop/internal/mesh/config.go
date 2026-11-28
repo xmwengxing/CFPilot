@@ -86,6 +86,16 @@ type Config struct {
 	StunServers []string
 	// StunProbeTimeoutMS 单轮探测超时（毫秒，默认 1500，范围 100..30000）。
 	StunProbeTimeoutMS int64
+
+	// ---- 跨 NAT：路由器端口映射（UPnP IGD / NAT-PMP / PCP，W4）----
+	//
+	// EnablePortMap 打开「把本机 UDP 监听端口映射到公网」，让 NAT 后的对端能直连。
+	// 默认关闭：会主动向路由器发 SSDP / SOAP / NAT-PMP 请求，部分网关会告警；
+	// 映射失败只记计数，不影响打洞与中继（它们才是主通路）。
+	EnablePortMap bool
+	// PortMapGateway 手工指定网关（NAT-PMP / PCP 用），如 "192.168.1.1"。
+	// 留空 = 由 NAT-PMP 探测各本机网段的 .1 / .254 自动发现。
+	PortMapGateway string
 }
 
 // PeerConfig 是静态对端（seed）配置。

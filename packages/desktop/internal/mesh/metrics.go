@@ -77,6 +77,16 @@ func MetricsText(st Status) string {
 	writeMetric(&b, "cfpilot_mesh_probe_stale_total", "counter", "迟到/重复的探针回包数（不计入 RTT）", "", st.ProbeStale)
 	writeMetric(&b, "cfpilot_mesh_handshake_key_confirmed_total", "counter", "Reply2 密钥确认通过次数", "", st.HandshakeKeyConfirmed)
 	writeMetric(&b, "cfpilot_mesh_handshake_key_mismatch_total", "counter", "Reply2 密钥确认不匹配/无对应握手的次数", "", st.HandshakeKeyMismatch)
+	if st.PortMap != nil {
+		up := 0
+		if st.PortMap.Protocol != "" {
+			up = 1
+		}
+		writeMetric(&b, "cfpilot_mesh_portmap_up", "gauge", "路由器端口映射是否生效", "", float64(up))
+		writeMetric(&b, "cfpilot_mesh_portmap_success_total", "counter", "端口映射成功轮次（含续约）", "", float64(st.PortMap.Successes))
+		writeMetric(&b, "cfpilot_mesh_portmap_failure_total", "counter", "端口映射失败轮次", "", float64(st.PortMap.Failures))
+		writeMetric(&b, "cfpilot_mesh_portmap_external_port", "gauge", "映射到的外部端口（0=无）", "", float64(st.PortMap.ExternalPort))
+	}
 	writeMetric(&b, "cfpilot_mesh_lsdb_descriptors", "gauge", "描述符库条目数", "", st.LSDB)
 	writeMetric(&b, "cfpilot_mesh_routes", "gauge", "转发表可达目的数", "", st.Routes)
 	writeMetric(&b, "cfpilot_mesh_peers_total", "gauge", "对端条目数（含仅配置未连接）", "", len(st.Peers))

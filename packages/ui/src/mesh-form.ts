@@ -20,6 +20,7 @@ export function meshProfileFormValues(saved: Record<string, unknown>): Record<st
     meshRelayConnectIp: text(saved.relayConnectIp),
     meshEnableDegrade: saved.enableDegrade !== false,
     meshEnablePunch: saved.disablePunch !== true,
+    meshEnablePortMap: saved.enablePortMap === true,
     meshMonitorEndpoint: text(saved.monitorEndpoint ?? saved.monitoringEndpoint),
     meshMonitorToken: text(saved.monitorToken ?? saved.monitoringToken),
     meshMonitorInterval: text(saved.monitorInterval ?? monitorSeconds(saved.monitoringIntervalMs)),

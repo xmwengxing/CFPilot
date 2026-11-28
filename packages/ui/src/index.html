@@ -2373,6 +2373,14 @@
                     <input type="checkbox" id="meshEnablePunch" checked />
                     <span class="switch"></span>
                   </label>
+                  <label class="switch-box">
+                    <span class="sw-info">
+                      <span class="sw-title has-tip" data-tip="【可选】启动时向路由器申请把本机 UDP 监听端口映射到公网，依次尝试 NAT-PMP、PCP、UPnP IGD，续约由后台自动完成。&#10;默认关闭：会主动向网关发请求，部分路由器会告警；映射失败只记状态，不影响打洞与中继。">路由器端口映射（NAT-PMP / PCP / UPnP）ⓘ</span>
+                      <span class="sw-desc">把监听端口映射到公网，便于 NAT 后的对端直连；失败不影响组网</span>
+                    </span>
+                    <input type="checkbox" id="meshEnablePortMap" />
+                    <span class="switch"></span>
+                  </label>
 
                   <div class="dim" style="margin:14px 0 8px;font-weight:600">服务器中继（兜底）</div>
                   <p class="hint" style="line-height:1.8;margin-bottom:8px">

@@ -113,6 +113,8 @@ type Status struct {
 	HubRX *HubRxStats `json:"hubRx,omitempty"`
 	// Drops 是丢弃原因分类（W3）：不同原因对应完全不同的处置方式。
 	Drops *DropStats `json:"drops,omitempty"`
+	// PortMap 是路由器端口映射状态（W4）；未启用 EnablePortMap 时为 nil。
+	PortMap *PortMapStatus `json:"portMap,omitempty"`
 
 	Note string `json:"note,omitempty"`
 }

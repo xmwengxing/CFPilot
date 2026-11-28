@@ -6594,6 +6594,8 @@ import { buildRelayDeployScript, parseRelayInitOutput, randomRelayToken } from '
       relayConnectIp: ($('meshRelayConnectIp')?.value || '').trim(),
       enableDegrade: ($('meshEnableDegrade') as HTMLInputElement | null)?.checked !== false,
       disablePunch: ($('meshEnablePunch') as HTMLInputElement | null)?.checked === false,
+      // 路由器端口映射：默认关闭（会向网关发请求），只在用户显式打开时启用。
+      enablePortMap: ($('meshEnablePortMap') as HTMLInputElement | null)?.checked === true,
       // 云监测台上报：*monitor* 键与输入框 id 对应（本地保存后能按命名约定恢复）；
       // *monitoring* 是交给 Go mesh.Config 的字段名（默认关闭，留空即不上报）。
       monitorEndpoint: ($('meshMonitorEndpoint')?.value || '').trim(),

@@ -55,13 +55,16 @@ func TestUdpHubDemux(t *testing.T) {
 	// 每个 peer 的链路应只收到自己的帧（LinkTo 返回 demux 已建的链路）
 	la := hub.LinkTo(connA.LocalAddr().(*net.UDPAddr))
 	lb := hub.LinkTo(connB.LocalAddr().(*net.UDPAddr))
-	gotA, err := la.Recv(context.Background())
+	// 带超时：demux 出问题时要快速失败，而不是把整个包挂到 10 分钟超时。
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	gotA, err := la.Recv(ctx)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("链路 A 未收到帧: %v", err)
 	}
-	gotB, err := lb.Recv(context.Background())
+	gotB, err := lb.Recv(ctx)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("链路 B 未收到帧: %v", err)
 	}
 	da, _ := Decode(gotA)
 	db, _ := Decode(gotB)

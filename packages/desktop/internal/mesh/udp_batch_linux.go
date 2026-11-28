@@ -101,7 +101,14 @@ func (r *recvmmsgReader) readBatch(bufs [][]byte, remotes []*net.UDPAddr) (int, 
 	)
 	// rc.Read 会在 EAGAIN 时把 goroutine park 到 netpoll 上（Go 的 UDP socket 是
 	// 非阻塞的），回调返回 true 表示这一轮已经拿到结果或遇到真错误。
+	//
+	// ⚠️ errno 必须在**每次回调开头**复位：回调会被调用两次以上
+	// （先 EAGAIN 返回 false 挂起，有数据后再进来一次），若不清零，
+	// 第二次成功时仍会带着上一轮的 EAGAIN 返回错误 —— 已经读到的数据报
+	// 被整批丢掉。Linux 上表现为「首帧必丢」，STUN 响应收不到、
+	// demux 测试永久阻塞（Windows 走单包读，没有这个坑）。
 	err := r.rc.Read(func(fd uintptr) bool {
+		errno = 0
 		v, _, e := unix.Syscall6(unix.SYS_RECVMMSG,
 			fd, uintptr(unsafe.Pointer(&r.msgs[0])), uintptr(n), 0, 0, 0)
 		if e != 0 {

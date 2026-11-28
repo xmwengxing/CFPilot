@@ -784,13 +784,13 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
         <div class="field">
           <label>自定义反代入口池</label>
           <textarea id="cfgRelayPool" class="mono" rows="3" placeholder="1.2.3.4:443&#10;relay.example.com:443"></textarea>
-          <p class="tip">自配第三方反代入口，优先于内置反代；直连/优选失败、Cloudflare 网段目标时启用。此处留空时内核自带一批实测可用的出厂入口（与你写的条目按行合并），所以删空保存也不会失去兜底。</p>
+          <p class="tip">自配第三方反代入口，优先于内置反代；内置入口每日体检更新（无需重新部署）。目标落在 Cloudflare 网段、直连全部失败或直连假活（连上收不到数据）时启用。</p>
         </div>
         <div class="field">
           <label>固定落地 IP / 固定反代入口</label>
           <textarea id="cfgPinnedHosts" class="mono" rows="3" placeholder="example.com=203.0.113.10&#10;cloudflare.com=r:198.51.100.7"></textarea>
-          <p class="tip">按域名写死落地地址，<code>r:</code> 前缀 = 固定反代入口（只能把 TLS 按 SNI 转给 Cloudflare 承载的域名）。<b>默认不固定任何域名</b>：留空时完全走 DoH 优选与内置反代池。固定入口是单点，失效 IP 现在会熔断（连续失败 2 次进冷却、直接走池，冷却到期自动重试），但每次请求仍可能多等一次短超时，所以只建议在确有实测收益时填。</p>
-          <button class="ghost" type="button" id="btnPinnedSuggest">填入建议值</button>
+          <p class="tip">按域名固定落地 IP，<code>r:</code> 前缀 = 固定反代入口（按 SNI 转发，只对 Cloudflare 承载的域名有效）。<b>默认不固定任何域名</b>：留空时按常规选路（DoH 优选 + 内置反代池）。建议先用反代优选确认可用再填写。</p>
+          <button class="ghost" type="button" id="btnPinnedSuggest">预设参考值</button>
         </div>
       </div>
 
@@ -812,8 +812,7 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
         <p class="tip">
           「仅代理」保证出口 IP 与配置一致（直连会暴露 Cloudflare 原生出口）。
           代理全部失败时会尝试<b>反代入口池</b>（同样是第三方出口），仍失败则报错。
-          四种模式改变的是<b>候选优先级与回退顺序</b>，不是简单开关：代理与直连不会混进同一竞速池，
-          因此不会出现「直连先成功、出口 IP 与预期不符」。
+          四种模式改变的是<b>候选优先级与回退顺序</b>，不是简单开关：代理与直连不会混进同一竞速池。
         </p>
         <p class="tip">
           IPv6 支持边界：入站可解析 IPv6 目标，SOCKS5 与 HTTP CONNECT 上游也可写 IPv6 地址；
@@ -866,30 +865,25 @@ cfpilot scan --host &lt;数据面域名&gt; --panel &lt;控制面域名&gt;</pre
           <label>单连接流量上限（MB，0 = 不限制）</label>
           <input id="cfgDataBudget" type="number" min="0" max="102400" step="1" placeholder="512" />
           <p class="tip">
-            <b>默认 512</b>。单条连接累计传输超过这个值就断开，客户端重连后
-            内核 CPU 从头重新计算。
-            正常浏览网页、看视频基本不受影响（播放器按分片请求，单连接的数据量很小）；
-            <b>下载大文件</b>时单条连接超过上限会断开一次，支持断点续传的客户端
-            （浏览器 / IDM / aria2 等）会自动续上，不确定是否支持续传就调大。
-            多连接下载器（如 aria2 8 线程）是<b>每条连接各自计算</b>，不是整次下载合计。
-            填 0 = 不限制，此时慢速客户端的数据会一直堆积，极端情况下触发内存上限（1101）。
+            <b>默认 512</b>。单连接累计传输超过该值即断开；
+            <b>下载大文件</b>超上限会断开一次，不支持断点续传的客户端可调高。
+            填 0 = 不限制，慢速客户端的数据会一直堆积，极端情况下触发内存上限（1101）。
           </p>
         </div>
         <div class="field">
           <label>无响应换入口上限（1-8，默认 2）</label>
           <input id="cfgRelayRedial" type="number" min="1" max="8" step="1" placeholder="2" />
           <p class="tip">
-            直连「能连上但一个字节都收不到」时，最多换几次反代入口重试。
-            每次重试都是一次完整拨号（解析 + 建连竞速），会叠加延迟与 CPU。
-            调大能提高极少数难连目标的成功率，但更慢更费资源；调小更省资源。
-            <b>正常访问不受影响</b>，只在直连假活（连上无数据）时才会用到。
+            直连能连上、但收不到数据时，切换到反代入口重试的次数上限。
+            每次重试 = 解析 + 建连竞速，会叠加延迟与 CPU。
+            调大可提高极少数难连目标的成功率；调小更省资源。
           </p>
         </div>
         <div class="field">
-          <label>ECH 公共引导域名（留空默认 cloudflare-ech.com）</label>
+          <label>ECH 公共引导域名</label>
           <input id="cfgEchHost" class="mono" placeholder="cloudflare-ech.com" /><p class="tip">留空使用默认域名。客户端从这个域名的 HTTPS 记录里取 ECH 配置。</p>
         </div>
-        <div class="field"><label>ECH DoH 查询地址（留空使用客户端默认）</label><input id="cfgEchDns" class="mono" placeholder="https://223.5.5.5/dns-query" /><p class="tip">留空最稳。填了但该 DoH 连不上时，mihomo 会因查不到 ECH 配置而拒绝连接（表现为所有节点失效），不确定就不要填。</p></div>
+        <div class="field"><label>ECH DoH 查询地址</label><input id="cfgEchDns" class="mono" placeholder="https://223.5.5.5/dns-query" /><p class="tip">留空最稳。填了但该 DoH 连不上时，mihomo 会因查不到 ECH 配置而拒绝连接（表现为所有节点失效），不确定请勿填写。</p></div>
       </div>
 
       <!--

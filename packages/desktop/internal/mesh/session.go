@@ -36,6 +36,9 @@ type Session struct {
 	recvWindow    *ReplayWindow
 	establishedAt time.Time
 	role          Role
+	// confirm 是本端由 data_key 算出的密钥确认标签（H2-2）。
+	// 发起方发 Reply2 用它；响应方拿对端的 Reply2 与它比对。
+	confirm [32]byte
 }
 
 // NewSessionFromDataKey 由 data_key + epoch + 角色构造会话（session.rs:181-196）。
@@ -63,8 +66,12 @@ func NewSessionFromDataKey(dataKey [32]byte, epochID uint32, role Role) (*Sessio
 		recvWindow:    NewReplayWindow(),
 		establishedAt: time.Now(),
 		role:          role,
+		confirm:       KeyConfirmation(dataKey),
 	}, nil
 }
+
+// KeyConfirmation 返回本会话的密钥确认标签（H2-2）。
+func (s *Session) KeyConfirmation() [32]byte { return s.confirm }
 
 // InitiatorKeyMaterial 生成发起方 KeyMaterial wire（session.rs:240-253）。
 // wire = Noise传输态.Encrypt(data_key || epoch_be)

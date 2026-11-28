@@ -75,6 +75,8 @@ func MetricsText(st Status) string {
 
 	writeMetric(&b, "cfpilot_mesh_handshake_ok_total", "counter", "完成握手的累计次数", "", st.HandshakeOK)
 	writeMetric(&b, "cfpilot_mesh_probe_stale_total", "counter", "迟到/重复的探针回包数（不计入 RTT）", "", st.ProbeStale)
+	writeMetric(&b, "cfpilot_mesh_handshake_key_confirmed_total", "counter", "Reply2 密钥确认通过次数", "", st.HandshakeKeyConfirmed)
+	writeMetric(&b, "cfpilot_mesh_handshake_key_mismatch_total", "counter", "Reply2 密钥确认不匹配/无对应握手的次数", "", st.HandshakeKeyMismatch)
 	writeMetric(&b, "cfpilot_mesh_lsdb_descriptors", "gauge", "描述符库条目数", "", st.LSDB)
 	writeMetric(&b, "cfpilot_mesh_routes", "gauge", "转发表可达目的数", "", st.Routes)
 	writeMetric(&b, "cfpilot_mesh_peers_total", "gauge", "对端条目数（含仅配置未连接）", "", len(st.Peers))

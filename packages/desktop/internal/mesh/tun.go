@@ -86,6 +86,11 @@ type Status struct {
 	TXDropped   uint64 `json:"txDropped"`
 	RXDropped   uint64 `json:"rxDropped"`
 	HandshakeOK uint64 `json:"handshakeOk"`
+	// HandshakeKeyConfirmed / HandshakeKeyMismatch 是 H2-2 密钥确认结果（W4）：
+	// 两端由同一 data_key 算出的标签是否一致。Mismatch > 0 说明派生不一致或
+	// 有人换入了密钥材料 —— 症状是此后数据帧全部解不开，这里是那之前的信号。
+	HandshakeKeyConfirmed uint64 `json:"handshakeKeyConfirmed,omitempty"`
+	HandshakeKeyMismatch  uint64 `json:"handshakeKeyMismatch,omitempty"`
 
 	// 分账（K24 §6.1）：direct = 物理直连链路；relayed = 经中继（WSS 房间 / 盲中继腿）。
 	// 判「到底有没有走直连」只能看出口侧分账 + Peer.Via，**不要**用帧头 src 推断 ——

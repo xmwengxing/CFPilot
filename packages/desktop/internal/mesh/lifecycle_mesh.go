@@ -1198,6 +1198,9 @@ func (m *meshLifecycle) Status() Status {
 	if m.probes != nil {
 		st.ProbeStale = m.probes.StaleReplies()
 	}
+	if m.fsm != nil {
+		st.HandshakeKeyConfirmed, st.HandshakeKeyMismatch = m.fsm.KeyConfirmCounters()
+	}
 	if m.running {
 		st.UptimeSec = int64(time.Since(m.startedAt).Seconds())
 	} else {

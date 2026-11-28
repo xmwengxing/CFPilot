@@ -3,6 +3,7 @@ package mesh
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/flynn/noise"
@@ -82,7 +83,25 @@ type HandshakeFSM struct {
 
 	sendFn        func(dst NodeID, frame []byte) error
 	onEstablished func(peer NodeID, sess *Session)
+
+	// framing 记录每个对端的握手载荷封装形态（W4）。默认 MessagePack（与
+	// MobiHop 一致），收到旧版 CFPilot 的裸 Noise 载荷后降到 raw —— 之后
+	// 回帧也用 raw，否则旧对端解不开。见 handshake_msg.go。
+	framing map[NodeID]hsFraming
+	// confirm 是「响应方已建会话、等 Reply2 校验」的期望标签（H2-2）。
+	confirm map[NodeID][32]byte
+	// 密钥确认结果（对外暴露给 Status / metrics；不参与握手流程控制）。
+	keyConfirmed atomic.Uint64
+	keyMismatch  atomic.Uint64
 }
+
+// hsFraming 是对端握手载荷的封装形态。
+type hsFraming int
+
+const (
+	hsFramingMsgpack hsFraming = iota // MessagePack（MobiHop / 新版本 CFPilot）
+	hsFramingRaw                      // 裸 Noise 字节（<= 0.60.0-beta.2 的 CFPilot）
+)
 
 func NewHandshakeFSM(selfID NodeID, network, psk [32]byte, static noise.DHKey) *HandshakeFSM {
 	return &HandshakeFSM{
@@ -92,6 +111,8 @@ func NewHandshakeFSM(selfID NodeID, network, psk [32]byte, static noise.DHKey) *
 		static:       static,
 		pending:      make(map[NodeID]*pending),
 		sessions:     make(map[NodeID]*peerSession),
+		framing:      make(map[NodeID]hsFraming),
+		confirm:      make(map[NodeID][32]byte),
 		wireVersions: NewPeerWireVersions(),
 	}
 }
@@ -177,22 +198,15 @@ func (f *HandshakeFSM) startOutbound(peer NodeID, peerStatic []byte, force bool)
 	if err != nil {
 		return fmt.Errorf("handshake fsm: 生成 msg1 失败: %w", err)
 	}
-	version := f.wireVersions.VersionFor(peer)
-	frame, err := EncodeHandshakeFrame(f.selfID, peer, msg1, version)
-	if err != nil {
-		return err
-	}
-	// 记录载荷与时刻：ADR-0016 的 5s 降级兜底要用**同一份** msg1 以 v1 重发。
+	// 记录**裸 Noise 字节**与时刻：ADR-0016 的 5s 降级兜底要用同一份 msg1 重发，
+	// 而封装形态（msgpack / raw）按对端当前的 framing 现算，见 buildPayload。
 	f.mu.Lock()
 	if p, ok := f.pending[peer]; ok {
 		p.lastMsg = append([]byte(nil), msg1...)
 		p.sentAt = f.clock()
 	}
 	f.mu.Unlock()
-	if f.sendFn == nil {
-		return fmt.Errorf("handshake fsm: sendFn 未设置")
-	}
-	return f.sendFn(peer, frame)
+	return f.sendFrame(peer, hsMessage{Kind: hsKindInit, Body: msg1})
 }
 
 // RetryPending 处理「发出 Init 后一直没收到该对端任何帧」的降级兜底。
@@ -239,7 +253,8 @@ func (f *HandshakeFSM) RetryPending(now time.Time, after time.Duration) int {
 	f.mu.Unlock()
 
 	for _, r := range todo {
-		frame, err := EncodeHandshakeFrame(f.selfID, r.peer, r.msg, r.version)
+		payload := f.buildPayload(r.peer, hsMessage{Kind: hsKindInit, Body: r.msg})
+		frame, err := EncodeHandshakeFrame(f.selfID, r.peer, payload, r.version)
 		if err != nil || f.sendFn == nil {
 			continue
 		}
@@ -262,12 +277,51 @@ func (f *HandshakeFSM) OnFrame(frame []byte) (bool, error) {
 		return false, nil
 	}
 
-	f.mu.Lock()
-	p, hasPending := f.pending[parsed.Src]
-	f.mu.Unlock()
+	// 先试 MessagePack（MobiHop / 新版本对端），失败再按裸 Noise 兼容旧版。
+	// 学到哪种形态就之后回哪种，见 buildPayload。
+	if msg, ok := decodeHandshakeMsg(parsed.Payload); ok {
+		f.setFraming(parsed.Src, hsFramingMsgpack)
+		return true, f.onHandshakeMsg(parsed.Src, msg)
+	}
+	f.setFraming(parsed.Src, hsFramingRaw)
+	return true, f.onRawHandshake(parsed)
+}
 
-	if !hasPending {
-		return true, f.onInit(parsed)
+// onHandshakeMsg 按载荷里自带的变体名分派（有显式类型，不再靠 pending 状态猜）。
+func (f *HandshakeFSM) onHandshakeMsg(src NodeID, msg hsMessage) error {
+	switch msg.Kind {
+	case hsKindInit:
+		return f.onInit(src, msg.Body)
+	case hsKindReply:
+		p := f.pendingFor(src)
+		if p == nil || p.state != HSWaitMsg2 {
+			return nil // 迟到 / 重放的 msg2：本端没有对应的发起，忽略
+		}
+		if !f.IsInitiator(src) {
+			// 双向同时发起时的破对称：大的一侧放弃自己的 pending（对端会重发 Init）。
+			f.dropPending(src)
+			return nil
+		}
+		return f.onMsg2(src, p, msg.Body)
+	case hsKindKeyMaterial:
+		p := f.pendingFor(src)
+		if p == nil || p.state != HSWaitKeyMaterial {
+			return nil // 没有对应的响应方握手：旧会话 / 重放，忽略
+		}
+		return f.onKeyMaterial(src, p, msg.Body)
+	case hsKindReply2:
+		f.onReply2(src, msg.Confirm)
+		return nil
+	}
+	return nil
+}
+
+// onRawHandshake 是旧版（裸 Noise）对端的兼容路径：载荷没有类型信息，
+// 只能按 pending 状态判断这是 msg1 / msg2 / KeyMaterial。
+func (f *HandshakeFSM) onRawHandshake(parsed *Frame) error {
+	p := f.pendingFor(parsed.Src)
+	if p == nil {
+		return f.onInit(parsed.Src, parsed.Payload)
 	}
 	switch p.state {
 	case HSWaitMsg2:
@@ -277,29 +331,24 @@ func (f *HandshakeFSM) OnFrame(frame []byte) (bool, error) {
 		// 双方永远卡在握手中。破对称规则：**小 NodeId 保持发起方**，大的一侧放弃
 		// 自己的 pending 改当响应方（与 onInit 里忽略对端 Init 的规则对称）。
 		if !f.IsInitiator(parsed.Src) {
-			f.mu.Lock()
-			delete(f.pending, parsed.Src)
-			f.mu.Unlock()
-			return true, f.onInit(parsed)
+			f.dropPending(parsed.Src)
+			return f.onInit(parsed.Src, parsed.Payload)
 		}
-		return true, f.onMsg2(parsed, p)
+		return f.onMsg2(parsed.Src, p, parsed.Payload)
 	case HSWaitKeyMaterial:
-		return true, f.onKeyMaterial(parsed, p)
+		return f.onKeyMaterial(parsed.Src, p, parsed.Payload)
 	default:
-		return true, fmt.Errorf("handshake fsm: 来自 %x 的握手帧状态异常 %s", parsed.Src[:4], p.state)
+		return fmt.Errorf("handshake fsm: 来自 %x 的握手帧状态异常 %s", parsed.Src[:4], p.state)
 	}
 }
 
 // onInit 响应方收 msg1 → 发 msg2 → 等 KeyMaterial（session.rs:925-958）。
-func (f *HandshakeFSM) onInit(parsed *Frame) error {
+func (f *HandshakeFSM) onInit(src NodeID, noiseMsg []byte) error {
 	// 破对称：本端更小、且已有该对端的 pending ⇒ 忽略对端 Init（避免双向同时发起）。
 	// 但**没有 pending 时仍接受**：对端可能刚重启（会话失效），它主动发 Init 是唯一
 	// 的恢复通路；旧会话保持到 KeyMaterial 装好为止，伪造 Init 无法直接打掉它。
-	if f.IsInitiator(parsed.Src) {
-		f.mu.Lock()
-		_, hasPending := f.pending[parsed.Src]
-		f.mu.Unlock()
-		if hasPending {
+	if f.IsInitiator(src) {
+		if f.pendingFor(src) != nil {
 			return nil
 		}
 	}
@@ -307,7 +356,7 @@ func (f *HandshakeFSM) onInit(parsed *Frame) error {
 	// 每收到一次就重建 responder 握手，会让后续 KeyMaterial 对不上刚生成的那份
 	// msg2 —— 真机症状：`恢复 KeyMaterial 失败` 每 5s 刷一次，永远握不上。
 	f.mu.Lock()
-	if cur, ok := f.pending[parsed.Src]; ok && cur.state == HSWaitKeyMaterial &&
+	if cur, ok := f.pending[src]; ok && cur.state == HSWaitKeyMaterial &&
 		time.Since(cur.started) < 5*time.Second {
 		f.mu.Unlock()
 		return nil
@@ -318,22 +367,22 @@ func (f *HandshakeFSM) onInit(parsed *Frame) error {
 	if err != nil {
 		return fmt.Errorf("handshake fsm: 构造响应方失败: %w", err)
 	}
-	if _, err := hs.ReadMessage(parsed.Payload); err != nil {
+	if _, err := hs.ReadMessage(noiseMsg); err != nil {
 		return fmt.Errorf("handshake fsm: 读 msg1 失败: %w", err)
 	}
 	f.mu.Lock()
-	f.pending[parsed.Src] = &pending{state: HSWaitKeyMaterial, hs: hs, started: time.Now()}
+	f.pending[src] = &pending{state: HSWaitKeyMaterial, hs: hs, started: time.Now()}
 	f.mu.Unlock()
 	msg2, err := hs.WriteMessage(nil)
 	if err != nil {
 		return fmt.Errorf("handshake fsm: 生成 msg2 失败: %w", err)
 	}
-	return f.sendFrame(parsed.Src, msg2)
+	return f.sendFrame(src, hsMessage{Kind: hsKindReply, Body: msg2})
 }
 
 // onMsg2 发起方收 msg2 → 完成握手 → 生成 KeyMaterial 并发送（session.rs:970-1002）。
-func (f *HandshakeFSM) onMsg2(parsed *Frame, p *pending) error {
-	payload, err := p.hs.Complete(parsed.Payload)
+func (f *HandshakeFSM) onMsg2(src NodeID, p *pending, msg2 []byte) error {
+	payload, err := p.hs.Complete(msg2)
 	if err != nil {
 		return fmt.Errorf("handshake fsm: 读 msg2 失败: %w", err)
 	}
@@ -344,27 +393,59 @@ func (f *HandshakeFSM) onMsg2(parsed *Frame, p *pending) error {
 		return fmt.Errorf("handshake fsm: 生成 KeyMaterial 失败: %w", err)
 	}
 	f.mu.Lock()
-	f.installSessionLocked(parsed.Src, sess)
+	f.installSessionLocked(src, sess)
 	f.mu.Unlock()
-	return f.sendFrame(parsed.Src, wire)
+	if err := f.sendFrame(src, hsMessage{Kind: hsKindKeyMaterial, Body: wire}); err != nil {
+		return err
+	}
+	// H2-2（ADR-0016）：KeyMaterial 之后紧跟一条密钥确认。旧版（raw 封装）
+	// 对端没有这个变体，只对 MessagePack 对端发 —— 否则它会把一坨 msgpack
+	// 当成 Noise 字节读进握手，反而把已经建好的会话搞坏。
+	if f.framingFor(src) == hsFramingMsgpack {
+		return f.sendFrame(src, hsMessage{Kind: hsKindReply2, Confirm: sess.KeyConfirmation()})
+	}
+	return nil
 }
 
 // onKeyMaterial 响应方收 KeyMaterial → 建立 session（session.rs:1005-1041）。
-func (f *HandshakeFSM) onKeyMaterial(parsed *Frame, p *pending) error {
-	sess, err := ResponderFromKeyMaterial(p.hs.RecvState(), parsed.Payload)
+func (f *HandshakeFSM) onKeyMaterial(src NodeID, p *pending, wire []byte) error {
+	sess, err := ResponderFromKeyMaterial(p.hs.RecvState(), wire)
 	if err != nil {
 		return fmt.Errorf("handshake fsm: 恢复 KeyMaterial 失败: %w", err)
 	}
 	f.mu.Lock()
-	f.installSessionLocked(parsed.Src, sess)
+	f.installSessionLocked(src, sess)
+	// 记下本端算出的期望标签，等对端的 Reply2 到来时比对（H2-2）。
+	f.confirm[src] = sess.KeyConfirmation()
 	f.mu.Unlock()
 	return nil
 }
 
-func (f *HandshakeFSM) sendFrame(dst NodeID, msg []byte) error {
+// onReply2 校验对端的密钥确认标签（session.rs:1449-1462）。
+//
+// 不匹配**不改会话**：会话已由 KeyMaterial 建好，标签只回答「两端派生是否
+// 一致」。真出问题时表现为数据帧全部解不开，这里给出的是那之前的信号。
+func (f *HandshakeFSM) onReply2(src NodeID, confirm [32]byte) {
+	f.mu.Lock()
+	expected, ok := f.confirm[src]
+	delete(f.confirm, src)
+	f.mu.Unlock()
+	if !ok {
+		// 没有待确认的握手：重放 / 迟到 / 对端重复发。只计数。
+		f.keyMismatch.Add(1)
+		return
+	}
+	if expected != confirm {
+		f.keyMismatch.Add(1)
+		return
+	}
+	f.keyConfirmed.Add(1)
+}
+
+func (f *HandshakeFSM) sendFrame(dst NodeID, m hsMessage) error {
 	// 回帧版本跟随该对端：已学到 v1 就必须用 v1，否则旧节点丢帧。
 	version := f.wireVersions.VersionFor(dst)
-	frame, err := EncodeHandshakeFrame(f.selfID, dst, msg, version)
+	frame, err := EncodeHandshakeFrame(f.selfID, dst, f.buildPayload(dst, m), version)
 	if err != nil {
 		return err
 	}
@@ -372,6 +453,54 @@ func (f *HandshakeFSM) sendFrame(dst NodeID, msg []byte) error {
 		return fmt.Errorf("handshake fsm: sendFn 未设置")
 	}
 	return f.sendFn(dst, frame)
+}
+
+// buildPayload 按对端已学到的封装形态生成载荷。
+//
+// 默认 MessagePack（MobiHop 的形态）；一旦收到过该对端的裸 Noise 握手，
+// 就锁定 raw —— 混发两种形态会让对端把 msgpack 当 Noise 读，握手直接坏掉。
+func (f *HandshakeFSM) buildPayload(peer NodeID, m hsMessage) []byte {
+	if f.framingFor(peer) == hsFramingRaw {
+		return append([]byte(nil), m.Body...)
+	}
+	return encodeHandshakeMsg(m)
+}
+
+// framingFor 返回对端的封装形态（未学过时按 MessagePack）。
+func (f *HandshakeFSM) framingFor(peer NodeID) hsFraming {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if fr, ok := f.framing[peer]; ok {
+		return fr
+	}
+	return hsFramingMsgpack
+}
+
+// setFraming 记录对端的封装形态。
+func (f *HandshakeFSM) setFraming(peer NodeID, fr hsFraming) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.framing == nil {
+		f.framing = make(map[NodeID]hsFraming)
+	}
+	f.framing[peer] = fr
+}
+
+func (f *HandshakeFSM) pendingFor(peer NodeID) *pending {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pending[peer]
+}
+
+func (f *HandshakeFSM) dropPending(peer NodeID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.pending, peer)
+}
+
+// KeyConfirmCounters 返回 (密钥确认通过, 不匹配) 累计次数（H2-2 可观测信号）。
+func (f *HandshakeFSM) KeyConfirmCounters() (uint64, uint64) {
+	return f.keyConfirmed.Load(), f.keyMismatch.Load()
 }
 
 // Reset 丢弃某对端的会话与进行中的握手，允许重新握手。
@@ -383,6 +512,7 @@ func (f *HandshakeFSM) Reset(peer NodeID) {
 	f.mu.Lock()
 	delete(f.sessions, peer)
 	delete(f.pending, peer)
+	delete(f.confirm, peer)
 	f.mu.Unlock()
 }
 
@@ -434,4 +564,3 @@ func lessNodeID(a, b NodeID) bool {
 	}
 	return false
 }
-

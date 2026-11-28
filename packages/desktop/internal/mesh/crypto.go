@@ -64,6 +64,24 @@ func DeriveEpochID(dataKey [32]byte) uint32 {
 	return binary.BigEndian.Uint32(h[:4])
 }
 
+// KeyConfirmLabel 是密钥确认标签的域分隔串（H2-2，MobiHop crypto/session.rs:350）。
+const KeyConfirmLabel = "mobihop/key-confirm/v2"
+
+// KeyConfirmation 计算密钥确认标签（H2-2 / ADR-0016）：
+//
+//	tag = BLAKE3(data_key ‖ "mobihop/key-confirm/v2")
+//
+// 双方对同一 data_key 必得同一标签。标签是单向哈希：它能证明「两端派生一致」，
+// 但不泄露 data_key，也无法从标签反推密钥。
+func KeyConfirmation(dataKey [32]byte) [32]byte {
+	h := blake3.New()
+	_, _ = h.Write(dataKey[:])
+	_, _ = h.Write([]byte(KeyConfirmLabel))
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out
+}
+
 // DeriveDirectionalKey 计算方向密钥（契约 §3.2，session.rs:181-190）：
 //
 //	i2r = BLAKE3_keyed(data_key, "mobihop/i2r")  // 发起方 → 响应方

@@ -16,11 +16,13 @@ import (
 func (m *meshLifecycle) forwardTo(parsed *Frame, from PeerLink) bool {
 	hops := m.forwardHops(parsed.Dst, from)
 	if len(hops) == 0 {
+		m.drops.noRoute.Add(1)
 		return false
 	}
 	if parsed.TTL == 0 {
 		m.txDropped.Add(1)
 		m.forwardDropped.Add(1)
+		m.drops.ttl.Add(1)
 		return true
 	}
 	f := *parsed
@@ -30,6 +32,7 @@ func (m *meshLifecycle) forwardTo(parsed *Frame, from PeerLink) bool {
 	if err != nil {
 		m.txDropped.Add(1)
 		m.forwardDropped.Add(1)
+		m.drops.encode.Add(1)
 		return true
 	}
 	for _, hop := range hops {
@@ -46,6 +49,7 @@ func (m *meshLifecycle) forwardTo(parsed *Frame, from PeerLink) bool {
 		}
 	}
 	m.forwardDropped.Add(1)
+	m.drops.sendFail.Add(1)
 	return true
 }
 
@@ -85,6 +89,7 @@ func broadcastNodeID() NodeID {
 func (m *meshLifecycle) forwardBroadcast(parsed *Frame, from PeerLink) {
 	if parsed.TTL == 0 {
 		m.forwardDropped.Add(1)
+		m.drops.ttl.Add(1)
 		return
 	}
 	f := *parsed
@@ -93,6 +98,7 @@ func (m *meshLifecycle) forwardBroadcast(parsed *Frame, from PeerLink) {
 	raw, err := f.Encode()
 	if err != nil {
 		m.forwardDropped.Add(1)
+		m.drops.encode.Add(1)
 		return
 	}
 	m.mu.Lock()

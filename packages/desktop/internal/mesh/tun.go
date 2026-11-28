@@ -102,6 +102,12 @@ type Status struct {
 	// 两者差得多通常意味着「拓扑还没收敛」（Gossip 每 5s 一次），不是故障。
 	LSDB   int `json:"lsdb"`
 	Routes int `json:"routes"`
+	// Health 是所有对端里最差的一档（green/yellow/red/unknown，W3 见 health.go）。
+	Health string `json:"health,omitempty"`
+	// HubRX 是 hub 入站七类分账（W3）：total 恒等于七类之和，残差应恒为 0。
+	HubRX *HubRxStats `json:"hubRx,omitempty"`
+	// Drops 是丢弃原因分类（W3）：不同原因对应完全不同的处置方式。
+	Drops *DropStats `json:"drops,omitempty"`
 
 	Note string `json:"note,omitempty"`
 }
@@ -126,6 +132,9 @@ type Peer struct {
 	PunchKind  string `json:"punchKind,omitempty"`
 	// LossRate 只在样本足够（≥5）时才有意义，否则为 0。
 	LossRate float64 `json:"lossRate"`
+	// Health 是链路健康档位（W3）：green / yellow / red / unknown。
+	// unknown 表示「还没有探针样本」—— 不是故障，不要当 red 处理。
+	Health string `json:"health,omitempty"`
 }
 
 // ErrStub 表示调用到了 Phase 3b 才实现的方法（骨架阶段显式报错，不静默成功）。

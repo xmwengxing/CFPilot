@@ -77,6 +77,8 @@ func resolveMeshUDPAddr(ctx context.Context, family int, endpoint string) (*net.
 type UdpHub struct {
 	conn      *net.UDPConn
 	localAddr *net.UDPAddr
+	// rx 是入站分账（W3，见 hub_rx.go）：demux 每读到一个数据报记一次分母。
+	rx hubRxCounters
 	// socketIsV6 表示底层 socket 是 AF_INET6（可能是双栈）；出站要按它映射地址。
 	socketIsV6 bool
 
@@ -251,12 +253,51 @@ func (h *UdpHub) isRelayAddr(addr *net.UDPAddr) bool {
 	return ok
 }
 
+// hubReadBatch 是一次批读最多取回的数据报数（Linux recvmmsg 用）。
+// 取值折中：太小起不到减系统调用的作用，太大让单个 peer 的积压延迟变差。
+const hubReadBatch = 8
+
+// hubPacketReader 抽象「一次取回 N 个数据报」，让 recvmmsg 只影响 Linux。
+//
+// 读出的帧必须按 bufs[i][:length(i)] 切片：批读实现会复用缓冲区，
+// 调用方要在下一次 readBatch 之前把帧拷贝走。
+type hubPacketReader interface {
+	// readBatch 阻塞直到至少取回 1 个数据报（或出错），返回条数。
+	// remotes[i] 是第 i 条数据报的源地址（已规范化前的原始地址）。
+	readBatch(bufs [][]byte, remotes []*net.UDPAddr) (int, error)
+	// length 返回第 i 条数据报的实际长度（仅在 readBatch 之后有效）。
+	length(i int) int
+}
+
+// singleReader 是逐包读实现（非 Linux 与批读不可用时的回退）。
+type singleReader struct {
+	conn *net.UDPConn
+	last int
+}
+
+func (s *singleReader) readBatch(bufs [][]byte, remotes []*net.UDPAddr) (int, error) {
+	n, remote, err := s.conn.ReadFromUDP(bufs[0])
+	if err != nil {
+		return 0, err
+	}
+	s.last = n
+	remotes[0] = remote
+	return 1, nil
+}
+
+func (s *singleReader) length(int) int { return s.last }
+
 // demuxLoop 读 socket，按源地址分解帧（hub.rs:304-470）。
 func (h *UdpHub) demuxLoop() {
 	defer h.wg.Done()
-	buf := make([]byte, MaxFrame)
+	reader := newHubPacketReader(h.conn)
+	bufs := make([][]byte, hubReadBatch)
+	for i := range bufs {
+		bufs[i] = make([]byte, MaxFrame)
+	}
+	remotes := make([]*net.UDPAddr, hubReadBatch)
 	for {
-		n, remote, err := h.conn.ReadFromUDP(buf)
+		n, err := reader.readBatch(bufs, remotes)
 		if err != nil {
 			h.mu.RLock()
 			closing := h.closing
@@ -269,8 +310,14 @@ func (h *UdpHub) demuxLoop() {
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
-		frame := append([]byte(nil), buf[:n]...)
-		h.dispatch(canonicalAddr(remote), frame)
+		for i := 0; i < n; i++ {
+			length := reader.length(i)
+			if length <= 0 {
+				continue
+			}
+			frame := append([]byte(nil), bufs[i][:length]...)
+			h.observeDatagram(canonicalAddr(remotes[i]), frame)
+		}
 	}
 }
 
@@ -303,7 +350,15 @@ func (h *UdpHub) SetControlHandler(fn func(*net.UDPAddr, []byte)) {
 }
 
 // dispatch 把帧按源地址投进对应队列；新地址则建链路并上报。
-func (h *UdpHub) dispatch(remote *net.UDPAddr, frame []byte) {
+//
+// 返回该数据报的**入口分类**（W3 分账）：每条 return 路径都必须给出一个分类，
+// 由 observeDatagram 记进唯一一个桶。新增分支时务必照做 —— 少给一个就会让
+// HubRxStats.Unexplained 变成非 0。
+func (h *UdpHub) dispatch(remote *net.UDPAddr, frame []byte) rxClass {
+	// 源地址解析失败（sockaddr 族不可识别）：不能拿 nil 去查表，按损坏帧记。
+	if remote == nil {
+		return rxClassMalformed
+	}
 	// 不是 MobiHop 帧（首字节不是 magic）⇒ 交给原始回调（STUN 等）。
 	if len(frame) < 3 || frame[0] != MagicByte {
 		h.mu.RLock()
@@ -312,39 +367,41 @@ func (h *UdpHub) dispatch(remote *net.UDPAddr, frame []byte) {
 		if raw != nil {
 			raw(frame)
 		}
-		return
+		return rxClassRaw
 	}
+	// class 默认按直连入口；控制帧会覆盖成 control（RelayMgmt 仍要继续投递）。
+	class := rxClassDirect
 	// 控制帧（HolePunch 0x05 / RelayMgmt 0x06）：**分流之前**无条件交观察通道，
 	// 与「该地址有没有链路、活跃链路是不是 WSS」无关（MobiHop hub.rs:386-393）。
 	// 这样切 WSS 后，来自 UDP 候选地址的打洞探测/中继应答仍能被处理。
-	if len(frame) >= 3 && frame[0] == MagicByte &&
-		(frame[2] == byte(MsgHolePunch) || frame[2] == byte(MsgRelayMgmt)) {
+	if typ := frame[2]; typ == byte(MsgHolePunch) || typ == byte(MsgRelayMgmt) {
+		class = rxClassControl
 		h.mu.RLock()
 		ctrl := h.onControl
 		h.mu.RUnlock()
 		if ctrl != nil {
 			ctrl(remote, frame)
-			if frame[2] == byte(MsgHolePunch) {
-				return
+			if typ == byte(MsgHolePunch) {
+				return class
 			}
 		}
 	}
 	// 0x08 UdpProbe 直接交探针跟踪器（对齐 UdpHub.observe_probes），不进 peer 队列，
 	// 这样降级后 active link 为 WSS 时 UDP 探针仍能被接收。
-	if len(frame) >= 3 && frame[0] == MagicByte && frame[2] == byte(MsgUdpProbe) {
+	if frame[2] == byte(MsgUdpProbe) {
 		h.mu.RLock()
 		fn := h.onProbe
 		h.mu.RUnlock()
 		if fn != nil {
 			fn(frame)
-			return
+			return rxClassProbe
 		}
 	}
 	// 中继转发来的帧：源地址是中继，必须按帧头 Src 找对端链路。
 	if h.isRelayAddr(remote) {
 		parsed, err := Decode(frame)
 		if err != nil {
-			return
+			return rxClassMalformed
 		}
 		h.mu.Lock()
 		link := h.byNode[parsed.Src]
@@ -360,11 +417,11 @@ func (h *UdpHub) dispatch(remote *net.UDPAddr, frame []byte) {
 			h.byNode[parsed.Src] = link
 		}
 		h.mu.Unlock()
-		select {
-		case link.rx <- frame:
-		default:
+		h.enqueue(link, frame)
+		if class == rxClassControl {
+			return class
 		}
-		return
+		return rxClassRelay
 	}
 	key := remote.String()
 	h.mu.RLock()
@@ -372,21 +429,17 @@ func (h *UdpHub) dispatch(remote *net.UDPAddr, frame []byte) {
 	h.mu.RUnlock()
 
 	if exists {
-		select {
-		case link.rx <- frame:
-		default:
-			// 队列满：丢弃（不阻塞 demux 循环，hub.rs:405-428 同理）
-		}
-		return
+		h.enqueue(link, frame)
+		return class
 	}
 
 	// 新对端：从帧头解析 NodeId（hub.rs:432）
 	if len(frame) < HeaderLen {
-		return
+		return rxClassMalformed
 	}
 	parsed, err := Decode(frame)
 	if err != nil {
-		return
+		return rxClassMalformed
 	}
 	h.mu.Lock()
 	// 双重检查（并发首包）
@@ -408,9 +461,19 @@ func (h *UdpHub) dispatch(remote *net.UDPAddr, frame []byte) {
 	if !exists && onIncoming != nil {
 		onIncoming(parsed.Src, remote)
 	}
+	h.enqueue(link, frame)
+	if class == rxClassControl {
+		return class
+	}
+	return rxClassDiscovered
+}
+
+// enqueue 非阻塞投递；队列满计入 QueueDrop（不阻塞 demux 循环，hub.rs:405-428 同理）。
+func (h *UdpHub) enqueue(link *hubLink, frame []byte) {
 	select {
 	case link.rx <- frame:
 	default:
+		h.rx.queueDrop.Add(1)
 	}
 }
 

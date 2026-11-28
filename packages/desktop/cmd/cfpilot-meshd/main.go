@@ -104,6 +104,13 @@ func (control *meshControl) handler(profiles *mesh.ProfileStore) http.Handler {
 	mux.HandleFunc("/api/mesh/version", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"version": version})
 	})
+	// 指标（W3）：Prometheus 文本格式。与 /status 同源（都从 control.status() 渲染），
+	// 不另立计数器，避免面板与监控两份数据漂移。
+	mux.HandleFunc(mesh.APIMeshMetrics, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write([]byte(mesh.MetricsText(control.status())))
+	})
 	// 命名网络档案：面板负责编辑与选择，meshd 负责持久化和服务重启后的自动恢复。
 	mux.HandleFunc("/api/mesh/profiles", func(w http.ResponseWriter, r *http.Request) {
 		if profiles == nil {

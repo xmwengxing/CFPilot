@@ -35,6 +35,8 @@ func (s *Server) registerMeshControlRoutes(mux *http.ServeMux) {
 		"/api/mesh/status", "/api/mesh/start", "/api/mesh/stop", "/api/mesh/peers", "/api/mesh/profiles",
 		// 版本自报：排查「装了新包但服务还是旧二进制」时对照用
 		"/api/mesh/version",
+		// Prometheus 指标（W3）：面板/监控可直接抓取
+		"/api/mesh/metrics",
 	} {
 		mux.HandleFunc(p, s.guard(s.handleMeshProxy))
 	}

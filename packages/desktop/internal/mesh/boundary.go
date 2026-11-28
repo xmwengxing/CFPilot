@@ -25,6 +25,9 @@ const (
 	APIMeshStart  = "/api/mesh/start"
 	APIMeshStop   = "/api/mesh/stop"
 	APIMeshPeers  = "/api/mesh/peers"
+	// APIMeshMetrics 返回 Prometheus 文本格式指标（W3）：面板/监控可直接抓取，
+	// 也可作为「面板显示正常但底层已经丢帧」时的旁路核对手段。
+	APIMeshMetrics = "/api/mesh/metrics"
 )
 
 const DaemonActionTimeout = 30 * time.Second

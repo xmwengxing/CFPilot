@@ -99,7 +99,9 @@ type meshLifecycle struct {
 	// 转发分账：替别人转发的帧与本地业务流量分开计。
 	txForwarded    atomic.Uint64
 	forwardDropped atomic.Uint64
-	statsStop      chan struct{}
+	// 丢弃原因分类（W3，见 drops.go）：五种原因分开记，避免「有丢包」无法行动。
+	drops     dropCounters
+	statsStop chan struct{}
 
 	// 阶段 2：降级控制器与 UDP 探针
 	degrade   *DegradeController
@@ -838,6 +840,7 @@ func (m *meshLifecycle) tunToPeersLoop(ctx context.Context) {
 		dst, err := ParseDstAddr(packet)
 		if err != nil {
 			m.txDropped.Add(1)
+			m.drops.badPacket.Add(1)
 			continue
 		}
 		peerID, isBroadcast, ok := m.vipTable.Lookup(dst)
@@ -849,6 +852,7 @@ func (m *meshLifecycle) tunToPeersLoop(ctx context.Context) {
 		}
 		if !ok {
 			m.txDropped.Add(1)
+			m.drops.unknownVIP.Add(1)
 			if m.cfg.Verbose && m.txDropped.Load()%20 == 1 {
 				log.Printf("[mesh] 丢弃出站包：目的 %s 不在虚拟 IP 表", dst)
 			}
@@ -859,15 +863,18 @@ func (m *meshLifecycle) tunToPeersLoop(ctx context.Context) {
 		if !hasSession {
 			// 多跳：peerID 只要在转发表里可达（不必直连）就先发起握手。
 			if len(m.forwardHops(peerID, nil)) == 0 {
+				m.drops.noRoute.Add(1)
 				continue
 			}
 			peerStatic := m.peerStaticKey(peerID)
 			if len(peerStatic) != 32 {
+				m.drops.noRoute.Add(1)
 				continue
 			}
 			// 需要发数据但还没有会话 ⇒ 强制发起（忽略破对称角色）：
 			// 对端可能持有我们重启前的旧会话，它不会主动重来，只能由我们发 Init 触发重建。
 			if err := m.fsm.StartOutboundForce(peerID, peerStatic); err != nil {
+				m.drops.noRoute.Add(1)
 				continue
 			}
 			// 握手异步进行；首个包丢弃（对齐 MobiHop：queued 可缓存，最小集简化为丢弃）
@@ -875,11 +882,13 @@ func (m *meshLifecycle) tunToPeersLoop(ctx context.Context) {
 		}
 		frameBytes, err := Encapsulate(packet, m.cfg.NodeID, peerID, sess, m.wireVersionFor(peerID))
 		if err != nil {
+			m.drops.encode.Add(1)
 			continue
 		}
 		link, sendErr := m.sendToPeer(ctx, peerID, frameBytes)
 		if sendErr != nil {
 			m.txDropped.Add(1)
+			m.drops.sendFail.Add(1)
 			continue
 		}
 		m.txFrames.Add(1)
@@ -1176,6 +1185,12 @@ func (m *meshLifecycle) Status() Status {
 		TXForwarded: m.txForwarded.Load(),
 		ForwardDrop: m.forwardDropped.Load(),
 	}
+	if m.hub != nil {
+		rx := m.hub.RXStats()
+		st.HubRX = &rx
+	}
+	drops := m.drops.snapshot()
+	st.Drops = &drops
 	if m.gossip != nil {
 		st.LSDB = m.gossip.DescriptorCount()
 		st.Routes = len(m.routeTable().Routes)
@@ -1268,14 +1283,16 @@ func (m *meshLifecycle) Status() Status {
 		}
 		// 探针实测 RTT / 丢包（样本不足时 Measurement 返回 0，不误报）
 		if m.probes != nil {
-			loss, _, rtt := m.probes.Measurement(id)
+			loss, samples, rtt := m.probes.Measurement(id)
 			p.LossRate = loss
 			p.RTTMs = int64(rtt)
+			p.Health = probeHealth(m.probes.LastPongAge(id), loss, samples)
 		}
 		st.Peers = append(st.Peers, *p)
 	}
 	// 输出顺序固定（NodeID 升序），便于界面与日志对比
 	sort.Slice(st.Peers, func(i, j int) bool { return st.Peers[i].NodeID < st.Peers[j].NodeID })
+	st.Health = aggregateHealth(st.Peers)
 
 	if st.HandshakeOK == 0 {
 		st.Note = "尚无任何对端完成握手：确认两端网络名/PSK 一致、对端 UDP 地址可达、防火墙放行"

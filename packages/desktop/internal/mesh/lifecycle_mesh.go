@@ -84,7 +84,16 @@ type meshLifecycle struct {
 	txDropped atomic.Uint64
 	rxDropped atomic.Uint64
 	hsOK      atomic.Uint64
-	statsStop chan struct{}
+
+	// 收发分账（K24 §6.1）：按链路类别分直连/中继，不看帧头 src。
+	txDirect  atomic.Uint64
+	txRelayed atomic.Uint64
+	rxDirect  atomic.Uint64
+	rxRelayed atomic.Uint64
+	// 转发分账：替别人转发的帧与本地业务流量分开计。
+	txForwarded    atomic.Uint64
+	forwardDropped atomic.Uint64
+	statsStop      chan struct{}
 
 	// 阶段 2：降级控制器与 UDP 探针
 	degrade   *DegradeController
@@ -866,6 +875,7 @@ func (m *meshLifecycle) tunToPeersLoop(ctx context.Context) {
 		}
 		if err := link.Send(ctx, frameBytes); err == nil {
 			m.txFrames.Add(1)
+			m.countTX(link)
 		} else {
 			m.txDropped.Add(1)
 		}
@@ -1018,6 +1028,8 @@ func (m *meshLifecycle) recvFromPeer(loopCtx context.Context, id NodeID, link Pe
 			continue
 		}
 		m.rxFrames.Add(1)
+		// 按**链路**分账（K24 §6.1）：中继投递的帧绝不记进直连收。
+		m.countRX(link)
 		// 任何从该 peer 链路成功解出的帧都是「链路活着」的证据 —— 不能只在
 		// Decapsulate 成功后才 markOKRx：经中继的链路在没有业务数据时只有周期
 		// Gossip，面板会一直显示「已断开（无响应）」而实际 ping 全通（真机）。
@@ -1143,6 +1155,16 @@ func (m *meshLifecycle) Status() Status {
 		TXDropped:   m.txDropped.Load(),
 		RXDropped:   m.rxDropped.Load(),
 		HandshakeOK: m.hsOK.Load(),
+
+		TXDirect:    m.txDirect.Load(),
+		TXRelayed:   m.txRelayed.Load(),
+		RXDirect:    m.rxDirect.Load(),
+		RXRelayed:   m.rxRelayed.Load(),
+		TXForwarded: m.txForwarded.Load(),
+		ForwardDrop: m.forwardDropped.Load(),
+	}
+	if m.probes != nil {
+		st.ProbeStale = m.probes.StaleReplies()
 	}
 	if m.running {
 		st.UptimeSec = int64(time.Since(m.startedAt).Seconds())

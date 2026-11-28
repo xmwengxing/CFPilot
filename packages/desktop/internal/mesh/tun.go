@@ -87,6 +87,18 @@ type Status struct {
 	RXDropped   uint64 `json:"rxDropped"`
 	HandshakeOK uint64 `json:"handshakeOk"`
 
+	// 分账（K24 §6.1）：direct = 物理直连链路；relayed = 经中继（WSS 房间 / 盲中继腿）。
+	// 判「到底有没有走直连」只能看出口侧分账 + Peer.Via，**不要**用帧头 src 推断 ——
+	// 中继转发时 src 仍是原始发送方。
+	TXDirect    uint64 `json:"txDirect"`
+	TXRelayed   uint64 `json:"txRelayed"`
+	RXDirect    uint64 `json:"rxDirect"`
+	RXRelayed   uint64 `json:"rxRelayed"`
+	TXForwarded uint64 `json:"txForwarded"`
+	ForwardDrop uint64 `json:"forwardDropped"`
+	// ProbeStale 是迟到 / 重复的 UdpProbe 回包（K24 §5），不计入 RTT 与丢包。
+	ProbeStale uint64 `json:"probeStale"`
+
 	Note string `json:"note,omitempty"`
 }
 

@@ -38,6 +38,7 @@ func (m *meshLifecycle) forwardTo(parsed *Frame, from PeerLink) bool {
 	}
 	if parsed.TTL == 0 {
 		m.txDropped.Add(1)
+		m.forwardDropped.Add(1)
 		return true
 	}
 	f := *parsed
@@ -46,12 +47,15 @@ func (m *meshLifecycle) forwardTo(parsed *Frame, from PeerLink) bool {
 	raw, err := f.Encode()
 	if err != nil {
 		m.txDropped.Add(1)
+		m.forwardDropped.Add(1)
 		return true
 	}
 	// 不要原路回发给来源链路（避免 ping-pong）
 	if dstLink != from {
 		if err := dstLink.Send(context.Background(), raw); err == nil {
 			m.txFrames.Add(1)
+			m.countTX(dstLink)
+			m.txForwarded.Add(1)
 		}
 	}
 	return true
@@ -78,7 +82,10 @@ func (m *meshLifecycle) forwardBroadcast(parsed *Frame, from PeerLink) {
 	}
 	m.mu.Unlock()
 	for _, l := range links {
-		if err := l.Send(context.Background(), raw); err != nil && m.cfg.Verbose {
+		if err := l.Send(context.Background(), raw); err == nil {
+			m.countTX(l)
+			m.txForwarded.Add(1)
+		} else if m.cfg.Verbose {
 			log.Printf("[mesh] 广播转发失败: %v", err)
 		}
 	}

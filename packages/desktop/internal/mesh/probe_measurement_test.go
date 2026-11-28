@@ -67,3 +67,59 @@ func TestProbePongEchoesTimestamp(t *testing.T) {
 	}
 }
 
+// K24 §5：迟到 / 重复回包不得改 RTT，也不能点亮**别的 peer** 的探针。
+func TestProbeStaleRepliesIgnored(t *testing.T) {
+	tr := NewProbeTracker(nil, nodeID(1))
+	a, b := nodeID(2), nodeID(3)
+	tr.SetPeer(a, &net.UDPAddr{IP: net.IPv4(1, 2, 3, 4), Port: 1000})
+	tr.SetPeer(b, &net.UDPAddr{IP: net.IPv4(1, 2, 3, 5), Port: 2000})
+	tr.peers[a].probeNonces = []uint64{7}
+	tr.peers[a].probeResults = []bool{false}
+
+	pong := func(src NodeID, nonce uint64) []byte {
+		payload, err := EncodePing(&PingMsg{TimestampMS: MonotonicMS(), Nonce: nonce})
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := (&Frame{Type: MsgUdpProbe, Flags: 0, TTL: DefaultTTL,
+			Payload: payload, Src: src, Dst: nodeID(1), Counter: nonce}).Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+
+	// 1) 来自 b 的同 nonce 回包：不得点亮 a 的探针，计 stale。
+	if _, err := tr.OnProbeFrame(nil, pong(b, 7)); err != nil {
+		t.Fatal(err)
+	}
+	if tr.peers[a].probeResults[0] {
+		t.Fatal("别的 peer 的回包点亮了 a 的探针")
+	}
+	if got := tr.StaleReplies(); got != 1 {
+		t.Fatalf("stale = %d, 期望 1", got)
+	}
+
+	// 2) a 的真实回包：点亮并计 RTT。
+	if _, err := tr.OnProbeFrame(nil, pong(a, 7)); err != nil {
+		t.Fatal(err)
+	}
+	if !tr.peers[a].probeResults[0] {
+		t.Fatal("a 的真实回包未点亮探针")
+	}
+	if tr.StaleReplies() != 1 {
+		t.Fatalf("真实回包不应计 stale，当前 %d", tr.StaleReplies())
+	}
+
+	// 3) 重复回包：不重复计 pong，只计 stale。
+	before := tr.peers[a].pongTotal
+	if _, err := tr.OnProbeFrame(nil, pong(a, 7)); err != nil {
+		t.Fatal(err)
+	}
+	if tr.peers[a].pongTotal != before {
+		t.Fatalf("重复回包被重复计入 pongTotal: %d → %d", before, tr.peers[a].pongTotal)
+	}
+	if got := tr.StaleReplies(); got != 2 {
+		t.Fatalf("重复回包后 stale = %d, 期望 2", got)
+	}
+}

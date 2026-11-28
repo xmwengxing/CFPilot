@@ -55,18 +55,20 @@ type ProbeTracker struct {
 	peers  map[NodeID]*peerProbe
 	hub    *UdpHub
 	selfID NodeID
+	// staleReplies 是迟到 / 重复的 Pong 数（K24 §5）：它们不参与 RTT 与丢包统计。
+	staleReplies uint64
 	// wireVersion 返回发给某对端的线速版本（nil 时用默认 v2）。
 	// 由生命周期注入，保证 v1 对端能收到探针。
 	wireVersion func(NodeID) byte
 }
 
 type peerProbe struct {
-	addr      *net.UDPAddr
-	sentTotal uint64
-	pongTotal uint64
-	lastRTTMS   uint32
-	lastNonce   uint64
-	lastPongAt  time.Time // 最近一次收到 Pong 的时刻（会话活性/离线判定）
+	addr       *net.UDPAddr
+	sentTotal  uint64
+	pongTotal  uint64
+	lastRTTMS  uint32
+	lastNonce  uint64
+	lastPongAt time.Time // 最近一次收到 Pong 的时刻（会话活性/离线判定）
 	// 探针结果（与发送一一对应）：下标=发送序号，值=是否收到应答。
 	// SendProbe append(false)，收到 Pong 时按 nonce 找到位置改 true。
 	probeNonces  []uint64
@@ -169,29 +171,38 @@ func (t *ProbeTracker) OnProbeFrame(ctx context.Context, frameBytes []byte) (boo
 		return true, err
 	}
 	if !isPing {
-		// Pong：按 nonce 找到对应探针位置标记 answered → 计 RTT
+		// Pong（K24 §5）：只在该帧**来源 peer** 的待应答窗口里按 nonce 匹配。
+		//
+		// 旧实现遍历所有 peer：任何 peer 的回包都能点亮别人的探针。链路上一旦出现
+		// 迟到 / 重复回包，它会被配给「最新未完成」的请求 —— 该请求得到 ~0ms 的假样本
+		// （拉低 min、制造双峰），真实回包又因「已配对」被丢弃、记成一次假丢包。
 		t.mu.Lock()
-		for _, p := range t.peers {
-			for i, n := range p.probeNonces {
-				if n == msg.Nonce && msg.Nonce != 0 {
-					p.probeResults[i] = true
-					p.pongTotal++
-					p.lastPongAt = time.Now()
-					// RTT 只在发送侧算：单调当前 - 对端原样回显的单调值。
-					// 用有符号判断，避免校时/时钟重置后下溢成巨大值。
-					if now := MonotonicMS(); now >= msg.TimestampMS {
-						rtt := now - msg.TimestampMS
-						if rtt < 1<<32 {
-							p.lastRTTMS = uint32(rtt)
-						}
-					}
-					t.mu.Unlock()
-					return true, nil
+		p := t.peers[f.Src]
+		for i, n := range p.probeNonces {
+			if n == 0 || n != msg.Nonce {
+				continue
+			}
+			if p.probeResults[i] {
+				// 重复回包：已应答过的那条不再改 RTT，只计 stale。
+				break
+			}
+			p.probeResults[i] = true
+			p.pongTotal++
+			p.lastPongAt = time.Now()
+			// RTT 只在发送侧算：单调当前 - 对端原样回显的单调值。
+			// 用有符号判断，避免校时/时钟重置后下溢成巨大值。
+			if now := MonotonicMS(); now >= msg.TimestampMS {
+				rtt := now - msg.TimestampMS
+				if rtt < 1<<32 {
+					p.lastRTTMS = uint32(rtt)
 				}
 			}
+			t.mu.Unlock()
+			return true, nil
 		}
+		t.staleReplies++
 		t.mu.Unlock()
-		return true, nil // 不匹配的 Pong 忽略
+		return true, nil
 	}
 	// Ping：回 Pong（不带 ACK_REQ）
 	ping := msg
@@ -215,6 +226,13 @@ func (t *ProbeTracker) OnProbeFrame(ctx context.Context, frameBytes []byte) (boo
 		}
 	}
 	return true, nil
+}
+
+// StaleReplies 返回迟到 / 重复的 Pong 数（K24 §5 口径，诊断用）。
+func (t *ProbeTracker) StaleReplies() uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.staleReplies
 }
 
 // Measurement 返回某 peer 的 (loss, samples, rtt_ms)（供 DegradePolicy.observe）。
@@ -268,4 +286,3 @@ func (t *ProbeTracker) Counters(id NodeID) (sent, pong uint64, rtt uint32) {
 	}
 	return 0, 0, 0
 }
-

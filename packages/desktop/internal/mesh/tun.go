@@ -98,6 +98,10 @@ type Status struct {
 	ForwardDrop uint64 `json:"forwardDropped"`
 	// ProbeStale 是迟到 / 重复的 UdpProbe 回包（K24 §5），不计入 RTT 与丢包。
 	ProbeStale uint64 `json:"probeStale"`
+	// LSDB 是描述符库条目数，Routes 是转发表里可达的目的数（W2）。
+	// 两者差得多通常意味着「拓扑还没收敛」（Gossip 每 5s 一次），不是故障。
+	LSDB   int `json:"lsdb"`
+	Routes int `json:"routes"`
 
 	Note string `json:"note,omitempty"`
 }

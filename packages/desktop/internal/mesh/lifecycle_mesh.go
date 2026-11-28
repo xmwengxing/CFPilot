@@ -76,6 +76,12 @@ type meshLifecycle struct {
 	// 只从能成功解码的入站帧学习，未知对端按 v2。
 	wireVersions *PeerWireVersions
 
+	// 转发表（W2）：LSDB 版本变化时惰性重建；forwardTo 只读快照。
+	routeMu       sync.Mutex
+	routes        *RouteTable
+	routesVersion uint64
+	routeRebuilds atomic.Uint64
+
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
@@ -312,11 +318,10 @@ func (m *meshLifecycle) start(ctx context.Context, dialRoom func(context.Context
 		}()
 	})
 	m.fsm.SetSendFn(func(dst NodeID, frame []byte) error {
-		link := m.linkForPeer(dst)
-		if link == nil {
-			return fmt.Errorf("mesh: 到 %x 无链路", dst[:4])
-		}
-		return link.Send(runCtx, frame)
+		// 多跳：dst 不是直连邻居时交给转发表的下一跳 —— 握手帧同样要能翻山，
+		// 否则 A 与 C 不直连时永远建不起会话，多跳数据面依旧不通。
+		_, err := m.sendToPeer(runCtx, dst, frame)
+		return err
 	})
 
 	// 5. 为每个静态 peer 建 link + 记录虚拟 IP（用 peer NodeID 派生的占位 IP 不便，留空由实际发现填）
@@ -419,7 +424,8 @@ func (m *meshLifecycle) start(ctx context.Context, dialRoom func(context.Context
 		// 新链路建立后立即发一次本地描述符（不等 5s tick），加速双向发现
 		if isNew && m.gossip != nil {
 			go func() {
-				payload, err := m.gossip.GossipMessageBytes()
+				m.refreshNeighbors()
+				payload, err := m.gossip.SnapshotBytes(0)
 				if err != nil {
 					return
 				}
@@ -582,7 +588,9 @@ func (m *meshLifecycle) start(ctx context.Context, dialRoom func(context.Context
 				case <-runCtx.Done():
 					return
 				case <-ticker.C:
-					payload, err := m.gossip.GossipMessageBytes()
+					// 反熵：先刷新本机邻居质量，再带全量 LSDB 广播（MobiHop gossip.rs 语义）。
+					m.refreshNeighbors()
+					payload, err := m.gossip.SnapshotBytes(0)
 					if err != nil {
 						continue
 					}
@@ -797,7 +805,8 @@ func (m *meshLifecycle) sendRoomGossip(ctx context.Context, room *WssRoom) {
 	if room == nil || m.gossip == nil {
 		return
 	}
-	payload, err := m.gossip.GossipMessageBytes()
+	m.refreshNeighbors()
+	payload, err := m.gossip.SnapshotBytes(0)
 	if err != nil {
 		return
 	}
@@ -848,8 +857,8 @@ func (m *meshLifecycle) tunToPeersLoop(ctx context.Context) {
 		// 确保会话（无则触发握手）
 		sess, hasSession := m.fsm.Session(peerID)
 		if !hasSession {
-			link := m.linkForPeer(peerID)
-			if link == nil {
+			// 多跳：peerID 只要在转发表里可达（不必直连）就先发起握手。
+			if len(m.forwardHops(peerID, nil)) == 0 {
 				continue
 			}
 			peerStatic := m.peerStaticKey(peerID)
@@ -868,17 +877,13 @@ func (m *meshLifecycle) tunToPeersLoop(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		link := m.linkForPeer(peerID)
-		if link == nil {
+		link, sendErr := m.sendToPeer(ctx, peerID, frameBytes)
+		if sendErr != nil {
 			m.txDropped.Add(1)
 			continue
 		}
-		if err := link.Send(ctx, frameBytes); err == nil {
-			m.txFrames.Add(1)
-			m.countTX(link)
-		} else {
-			m.txDropped.Add(1)
-		}
+		m.txFrames.Add(1)
+		m.countTX(link)
 	}
 }
 
@@ -1037,6 +1042,14 @@ func (m *meshLifecycle) recvFromPeer(loopCtx context.Context, id NodeID, link Pe
 		m.markOKRx(id)
 		// 解码成功才学习版本（v1 已过 buf[5]==0 校验）；伪造帧最多让本机降级。
 		m.learnWireVersion(parsed.Src, parsed.Version)
+		// 节点转发（W2）：目标既不是本机也不是广播的**单播**帧，按转发表转发；
+		// 转发不成就丢弃，绝不落进下面的握手/数据面分支（那些分支都假设帧是发给本机的）。
+		// 广播帧只本地处理：Gossip 走「全量 LSDB 反熵」，每个节点自己向直连对端交换，
+		// 不需要泛洪（泛洪会让每轮 5s 的 Gossip 变成 O(n²) 消息 + 去重难题）。
+		if parsed.Dst != m.cfg.NodeID && parsed.Dst != broadcastNodeID() {
+			m.forwardTo(parsed, link)
+			continue
+		}
 		// HolePunch 在 UDP 上由 UdpHub 的独立观察通道处理；但在 WSS 房间里
 		// 没有 UDP 源地址，必须在链路 recv 循环里处理 PunchReq/PunchReply，
 		// 否则「经 WSS 的中继会话」永远无法发起打洞（真机症状：一直中继）。
@@ -1162,6 +1175,10 @@ func (m *meshLifecycle) Status() Status {
 		RXRelayed:   m.rxRelayed.Load(),
 		TXForwarded: m.txForwarded.Load(),
 		ForwardDrop: m.forwardDropped.Load(),
+	}
+	if m.gossip != nil {
+		st.LSDB = m.gossip.DescriptorCount()
+		st.Routes = len(m.routeTable().Routes)
 	}
 	if m.probes != nil {
 		st.ProbeStale = m.probes.StaleReplies()

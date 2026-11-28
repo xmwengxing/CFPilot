@@ -31,6 +31,10 @@ type Config struct {
 	// 具体行为：`Listen` 是未指定地址（0.0.0.0 / :: / 空）时优先绑 `[::]:port`
 	// 并显式关闭 IPV6_V6ONLY，一个 socket 同时收 IPv4 与 IPv6；
 	// 绑失败则回退到配置地址。`Listen` 写具体 IP 时本项无效。
+	//
+	// 置 true 且 `Listen` 是 IPv4 通配（0.0.0.0 / 空）时**显式绑 udp4** —— 不能只
+	// 跳过双栈监听就交给 "udp"：Go 对通配地址一律给 AF_INET6 双栈 socket，
+	// 那样开关等于没写（真机实测 `Listen=0.0.0.0:51820` 仍绑 `[::]:51820`）。
 	DisableListenDual bool
 	// PublicAddr 是手工声明的外网地址（`ip:port`），用于路由器端口映射 / DMZ /
 	// 公网 IPv6 这类「STUN 看不准但确实可达」的场景。填了就按**固定端口**

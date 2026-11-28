@@ -161,13 +161,22 @@ func (m *meshLifecycle) publicAddrCandidate() *Candidate {
 func (m *meshLifecycle) localCandidates() []Candidate {
 	port := listenPort(m.cfg.Listen)
 	m.mu.Lock()
-	if m.hub != nil {
-		port = m.hub.LocalAddr().Port
+	hub := m.hub
+	if hub != nil {
+		port = hub.LocalAddr().Port
 	}
 	m.mu.Unlock()
+	// 按 socket 地址族过滤：谁能发，才给谁候选（见 UdpHub.acceptsFamily）。
+	allow4, allow6 := hub.acceptsFamily(true), hub.acceptsFamily(false)
 	out := make([]Candidate, 0, 8)
 	seen := make(map[string]bool, 8)
 	add := func(c Candidate) {
+		if a := candidateUDP(c); a != nil {
+			v4 := a.IP.To4() != nil
+			if (v4 && !allow4) || (!v4 && !allow6) {
+				return
+			}
+		}
 		if k := candidateKey(c); k != "" && !seen[k] {
 			seen[k] = true
 			out = append(out, c)
@@ -611,7 +620,10 @@ func (m *meshLifecycle) beginProbe(peer NodeID, cands []Candidate, nonce uint64)
 		if a := candidateUDP(c); a != nil {
 			// 虚拟 IP 候选一律不打：探针会被本机 TUN 送回对端隧道口，
 			// 制造出「已直连」的假象（见 isVirtualMeshIP）。
-			if a.Port != 0 && !a.IP.IsUnspecified() && !a.IP.IsMulticast() && !m.isVirtualMeshIP(a.IP) {
+			// 地址族收不进来的候选同样跳过：对端候选可能带本端 socket 发不到的一族，
+			// 打过去只会静默丢包，还会把 punch 标签记成那一族。
+			if a.Port != 0 && !a.IP.IsUnspecified() && !a.IP.IsMulticast() && !m.isVirtualMeshIP(a.IP) &&
+				m.hubAcceptsFamily(a.IP.To4() != nil) {
 				usable = append(usable, c)
 				targets = append(targets, a)
 			}
@@ -667,6 +679,13 @@ func (m *meshLifecycle) beginProbe(peer NodeID, cands []Candidate, nonce uint64)
 			}
 		}
 	}()
+}
+
+// hubAcceptsFamily 报告当前 hub 的 socket 能否向该地址族发包（未建 hub 时视为可以）。
+func (m *meshLifecycle) hubAcceptsFamily(v4 bool) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.hub.acceptsFamily(v4)
 }
 
 func hasIPv4Reflexive(cands []Candidate) bool {

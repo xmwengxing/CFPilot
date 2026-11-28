@@ -25,6 +25,10 @@ import (
 //   - 出站时 v4 目的地在 v6 socket 上映射回 v4-mapped（`wireAddr`）。
 //
 // 这样 IPv6 侧可以免端口映射直连（运营商 CGNAT 下的唯一出路），IPv4 侧仍走原路径。
+//
+// 关掉双栈（`DisableListenDual`）时必须**显式绑 udp4**：Go 的 `net.ListenUDP("udp",
+// 通配地址)` 在支持 v4-mapped 的平台上总是返回 AF_INET6 双栈 socket，
+// 「跳过双栈监听」这句话本身不足以得到单栈 socket（真机踩过，见 newUdpHub）。
 
 const hubQueueSize = 4096 // hub.rs:445
 
@@ -81,6 +85,9 @@ type UdpHub struct {
 	rx hubRxCounters
 	// socketIsV6 表示底层 socket 是 AF_INET6（可能是双栈）；出站要按它映射地址。
 	socketIsV6 bool
+	// dualStack 表示 AF_INET6 socket 已关闭 IPV6_V6ONLY（v4-mapped 收发都可用）。
+	// 打洞候选要按 (socketIsV6, dualStack) 过滤地址族，见 acceptsFamily。
+	dualStack bool
 
 	mu      sync.RWMutex
 	peers   map[string]*hubLink // canonical addr.String() -> HubLink（直连）
@@ -153,13 +160,29 @@ func newUdpHub(bindAddr string, dualStack bool, onIncoming func(NodeID, *net.UDP
 	}
 	var conn *net.UDPConn
 	unspecified := addr.IP == nil || addr.IP.IsUnspecified()
+	dualBound := false
 	if dualStack && unspecified {
 		if c, derr := listenDualStack(addr.Port); derr == nil {
-			conn = c
+			conn, dualBound = c, true
 		}
 	}
 	if conn == nil {
-		conn, err = net.ListenUDP("udp", addr)
+		// 必须显式选地址族（udp4 / udp6）：net.ListenUDP("udp", 通配地址) 在支持
+		// v4-mapped 的平台上**总是**返回 AF_INET6 双栈 socket —— Go 的
+		// favoriteAddrFamily 对「listen + 通配地址」一律给 AF_INET6。
+		// 真机实测：Listen=0.0.0.0:51820 + DisableListenDual=true 仍绑 [::]，
+		// 配置项形同虚设，所以这里不能把地址族交给 "udp" 让它自己猜。
+		network := "udp"
+		switch {
+		case addr.IP != nil && addr.IP.To4() != nil:
+			network = "udp4"
+		case addr.IP != nil:
+			network = "udp6"
+		case !dualStack:
+			// 空主机名（":51820"）语义同配置默认的 IPv4 通配；关双栈就按 v4 绑。
+			network = "udp4"
+		}
+		conn, err = net.ListenUDP(network, addr)
 		if err != nil {
 			return nil, fmt.Errorf("mesh udp: 绑定 %s 失败: %w", bindAddr, err)
 		}
@@ -169,6 +192,7 @@ func newUdpHub(bindAddr string, dualStack bool, onIncoming func(NodeID, *net.UDP
 		conn:       conn,
 		localAddr:  local,
 		socketIsV6: local.IP.To4() == nil,
+		dualStack:  dualBound,
 		peers:      make(map[string]*hubLink),
 		byNode:     make(map[NodeID]*hubLink),
 		relays:     make(map[string]bool),
@@ -181,6 +205,22 @@ func newUdpHub(bindAddr string, dualStack bool, onIncoming func(NodeID, *net.UDP
 
 // LocalAddr 返回实际绑定地址（双栈时为 `[::]:port`）。
 func (h *UdpHub) LocalAddr() *net.UDPAddr { return h.localAddr }
+
+// acceptsFamily 报告该 socket 能否向指定地址族发包。
+//
+// v6 单栈 socket 发不了 v4；v6 双栈（已关 IPV6_V6ONLY）可以发 v4-mapped。
+// 打洞候选必须按它过滤：IPv4-only socket 若仍带上 IPv6 候选，那些探针根本发不出去，
+// 还会把状态里的 punch 标签顶成 "ipv6"（真机：listen=192.168.1.6:51820，
+// 却显示 punch=retrying/ipv6，让人以为正在打 IPv6）。
+func (h *UdpHub) acceptsFamily(v4 bool) bool {
+	if h == nil {
+		return true
+	}
+	if v4 {
+		return !h.socketIsV6 || h.dualStack
+	}
+	return h.socketIsV6
+}
 
 // listenActual 返回给面板/日志看的实际监听地址。
 //
